@@ -235,6 +235,7 @@ mod __SUPERCOV_MODULE__ {
         // SAFETY: the bitmap covers every body page.
         let byte = unsafe { &*base.add(HEADER + page / 8).cast::<AtomicU8>() };
         byte.fetch_or(1 << (page % 8), Ordering::Relaxed);
+        channel::persist(base, offset);
     }
 
     // ------------------------------------------------------------ hit probes
@@ -748,6 +749,10 @@ mod __SUPERCOV_MODULE__ {
             platform::thread_id()
         }
 
+        /// The region is the file: every store is in it already.
+        #[inline(always)]
+        pub fn persist(_: *mut u8, _: usize) {}
+
         static OVERFLOW: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
         static OPENING: AtomicU8 = AtomicU8::new(0);
 
@@ -894,7 +899,7 @@ mod __SUPERCOV_MODULE__ {
         }
     }
 
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(unix, windows, target_os = "wasi")))]
     mod channel {
         extern crate std;
         use super::*;
@@ -919,6 +924,108 @@ mod __SUPERCOV_MODULE__ {
         pub fn append_overflow(_: &[u8]) {
             // Nowhere to write: the header's overflow count says how many
             // combinations were not kept.
+        }
+
+        /// A host reads the memory itself.
+        #[inline(always)]
+        pub fn persist(_: *mut u8, _: usize) {}
+    }
+
+    // WASI: a process with a filesystem but no mapping of it. The region is
+    // static memory, and each first sighting is written through to a file in
+    // the evidence directory the runner opens to the module (`wasmtime
+    // --dir`): one write per probe per process, as it happens, so a module
+    // that traps keeps what it ran.
+    #[cfg(target_os = "wasi")]
+    mod channel {
+        extern crate std;
+        use super::*;
+        use std::fs::OpenOptions;
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        use std::sync::{Mutex, OnceLock};
+
+        #[repr(C, align(4096))]
+        struct Static([u8; REGION_BYTES]);
+        static mut REGION_MEMORY: Static = Static([0; REGION_BYTES]);
+        static REGION_FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+        static OVERFLOW_FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+        static STEM: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+
+        /// `<token>-w<clock>`: WASI has no process id, and the clock tells
+        /// one process's files from another's.
+        fn stem() -> Option<&'static std::path::PathBuf> {
+            STEM.get_or_init(|| {
+                let directory = std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR")?;
+                let token = std::str::from_utf8(TOKEN).ok()?;
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos();
+                Some(std::path::PathBuf::from(directory).join(std::format!("{}-w{:x}", token, stamp)))
+            })
+            .as_ref()
+        }
+
+        fn file(extension: &str, append: bool) -> Option<Mutex<std::fs::File>> {
+            let mut path = stem()?.clone();
+            path.set_extension(extension);
+            let mut options = OpenOptions::new();
+            if append {
+                options.create(true).append(true);
+            } else {
+                options.create(true).read(true).write(true).truncate(true);
+            }
+            options.open(path).ok().map(Mutex::new)
+        }
+
+        pub fn open() -> Option<*mut u8> {
+            let region = REGION_FILE.get_or_init(|| {
+                let file = file("region", false)?;
+                file.lock().ok()?.set_len(REGION_BYTES as u64).ok()?;
+                Some(file)
+            });
+            region.as_ref()?;
+            // SAFETY: the only access is through the atomics the probes use.
+            Some(unsafe { std::ptr::addr_of_mut!(REGION_MEMORY.0) as *mut u8 })
+        }
+
+        fn write_at(base: *mut u8, offset: usize, length: usize) {
+            let Some(Some(file)) = REGION_FILE.get() else {
+                return;
+            };
+            let end = if offset + length < REGION_BYTES { offset + length } else { REGION_BYTES };
+            // SAFETY: inside the region.
+            let bytes = unsafe { std::slice::from_raw_parts(base.add(offset), end - offset) };
+            if let Ok(mut file) = file.lock() {
+                if file.seek(SeekFrom::Start(offset as u64)).is_ok() {
+                    let _ = file.write_all(bytes);
+                }
+            }
+        }
+
+        /// The header, once it is written.
+        pub fn started(base: *mut u8) {
+            write_at(base, 0, BODY_AT);
+        }
+
+        pub fn thread_id() -> u32 {
+            1
+        }
+
+        /// What a first sighting stored -- a slot, or a decision's whole
+        /// entry -- and the bitmap byte that says its page was touched.
+        pub fn persist(base: *mut u8, offset: usize) {
+            write_at(base, offset, ENTRY);
+            write_at(base, HEADER + (offset - BODY_AT) / PAGE / 8, 1);
+        }
+
+        pub fn append_overflow(record: &[u8]) {
+            let writer = OVERFLOW_FILE.get_or_init(|| file("overflow", true));
+            if let Some(writer) = writer {
+                if let Ok(mut file) = writer.lock() {
+                    let _ = file.write_all(record);
+                }
+            }
         }
     }
 

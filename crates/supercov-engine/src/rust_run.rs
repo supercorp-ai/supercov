@@ -67,6 +67,14 @@ const ROOT_INPUT_EXCLUSIONS: &[&str] = &[
     "test-results",
 ];
 
+/// An LLVM profile, written to the working directory by default: what a
+/// binary built for coverage leaves, never what a build reads. Counted as
+/// configuration, writing one -- to import its lines -- made every run stale.
+fn is_coverage_output(name: &str) -> bool {
+    let extension = Path::new(name).extension().and_then(|value| value.to_str());
+    matches!(extension, Some("profraw" | "profdata"))
+}
+
 fn collect_project_inputs(
     root: &Path,
     directory: &Path,
@@ -86,12 +94,21 @@ fn collect_project_inputs(
             .into_string()
             .map_err(|_| format!("Rust project contains a non-UTF-8 path: {}", path.display()))?;
         if (root_level && ROOT_INPUT_EXCLUSIONS.contains(&name.as_str()))
-            || matches!(name.as_str(), ".supercov" | ".mcdc-pool")
+            // wrangler's local state (`.wrangler/`), which `wrangler dev`
+            // writes beside a Worker: what it served, never what Cargo reads.
+            || matches!(name.as_str(), ".supercov" | ".mcdc-pool" | ".wrangler")
+            || is_coverage_output(&name)
         {
             continue;
         }
         let file_type = entry.file_type().map_err(|error| error.to_string())?;
         if file_type.is_dir() {
+            // What a build wrote, wherever it lies: a Cargo target directory
+            // of a crate in a subdirectory, the wasm wasm-bindgen generated.
+            // Rebuilding is not a change to the project.
+            if build_output_directory(&path) {
+                continue;
+            }
             collect_project_inputs(root, &path, false, regular, links)?;
         } else if file_type.is_file() {
             let relative = path
@@ -118,6 +135,52 @@ fn collect_project_inputs(
     Ok(())
 }
 
+/// A Cargo target directory, told by what Cargo keeps in it, or the output
+/// of wasm-bindgen, told by its `<name>_bg.wasm`.
+fn build_output_directory(path: &Path) -> bool {
+    if path.join(".rustc_info.json").is_file()
+        || path.join(".cargo-lock").is_file()
+        || fs::read(path.join("CACHEDIR.TAG"))
+            .is_ok_and(|tag| tag.windows(5).any(|window| window == b"cargo"))
+    {
+        return true;
+    }
+    fs::read_dir(path).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with("_bg.wasm"))
+        })
+    })
+}
+
+/// The files the project's `.gitignore` files leave in, relative to `root`;
+/// None outside a git repository, where nothing is ignored.
+fn kept_by_gitignore(root: &Path) -> Option<BTreeSet<PathBuf>> {
+    if !root
+        .ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
+    {
+        return None;
+    }
+    let walker = ignore::WalkBuilder::new(root)
+        .standard_filters(false)
+        .git_ignore(true)
+        .parents(!crate::source_discovery::ignored_by_enclosing_repository(
+            root,
+        ))
+        .require_git(true)
+        .follow_links(false)
+        .build();
+    Some(
+        walker
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_owned))
+            .collect(),
+    )
+}
+
 pub(crate) fn collect_integrity_inputs(
     root: &Path,
     command: &[String],
@@ -125,6 +188,13 @@ pub(crate) fn collect_integrity_inputs(
     let mut files = Vec::new();
     let mut links = Vec::new();
     collect_project_inputs(root, root, true, &mut files, &mut links)?;
+    // What the project's own `.gitignore` excludes is no input a checkout
+    // carries: a `.zig-cache/` cargo-zigbuild leaves, a local `.env`. Counted
+    // as configuration, it made a run copied to CI read as stale. Only the
+    // project's `.gitignore` files decide, inside a git repository, as for
+    // source discovery: global excludes differ between machines.
+    let tracked = kept_by_gitignore(root);
+    files.retain(|file| tracked.as_ref().is_none_or(|kept| kept.contains(file)));
     files.sort();
     files.dedup();
     links.sort();
@@ -222,6 +292,24 @@ pub fn run_direct_rust(
             .map_err(|error| error.to_string())?;
         }
 
+        // `wasm-pack test` is learned once and then run as the `cargo test` it
+        // stands for; the run keeps the command it was given.
+        let learned = if crate::rust_wasm_pack::is_wasm_pack_test(&request.command) {
+            Some(crate::rust_wasm_pack::learn(
+                &root,
+                &request.command,
+                &root.join(".supercov/work").join(&request.run_id),
+            )?)
+        } else {
+            None
+        };
+        let command: &[String] = learned
+            .as_ref()
+            .map_or(&request.command, |learned| &learned.command);
+        let runner_environment = learned
+            .as_ref()
+            .map(|learned| learned.runner_environment.clone())
+            .unwrap_or_default();
         let adapter_started = Instant::now();
         let source_roots = crate::source_discovery::configured_source_roots(
             &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
@@ -292,7 +380,7 @@ pub fn run_direct_rust(
             .map_err(|error| error.to_string())?;
             // The target the command builds for decides which `#[cfg]` items
             // exist; when it cannot be read, every item is measured.
-            let cfg = crate::rust_test_runner::cargo_invocation(&workspace, &request.command)
+            let cfg = crate::rust_test_runner::cargo_invocation(&workspace, command)
                 .ok()
                 .and_then(|invocation| {
                     crate::rust_cargo_configuration::active_target_cfg(&workspace, &invocation)
@@ -334,13 +422,26 @@ pub fn run_direct_rust(
         .map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
+        // A test that starts a Rust Worker with `wrangler dev` finds
+        // Supercov's `wrangler` first, which reads what the Worker ran into
+        // that test's evidence. Prepared before the copy is taken stock of:
+        // the configurations it points at Supercov's entry are Supercov's.
+        let rust_workers = crate::rust_worker::CargoTestWorkers::prepare(
+            &workspace,
+            &workspace
+                .join(".supercov/rust-evidence")
+                .join(&request.run_id)
+                .join("wrangler"),
+        )?;
         let before = crate::workspace::workspace_output_baseline(&workspace)
             .map_err(|error| error.to_string())?;
         let run = run_prepared_rust_tests(
             &project,
-            &request.command,
+            command,
             &request.run_id,
             &request.started_at,
+            rust_workers.as_ref(),
+            &runner_environment,
             diagnostics,
         )
         .map_err(|error| error.to_string())?;
@@ -470,5 +571,70 @@ pub fn run_direct_rust(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(name: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-inputs-{}-{}-{name}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".zig-cache/o")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("rust-toolchain.toml"), "").unwrap();
+        fs::write(root.join(".zig-cache/o/build.o"), "x").unwrap();
+        fs::write(root.join(".gitignore"), ".zig-cache/\n").unwrap();
+        root
+    }
+
+    /// A build cache the project's `.gitignore` excludes is no configuration:
+    /// a run copied to CI, where it is absent, read as stale. Outside a git
+    /// repository nothing is ignored.
+    #[test]
+    fn what_the_project_ignores_in_git_is_no_input() {
+        let inside = project("git");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&inside)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let inputs = collect_integrity_inputs(&inside, &["cargo".into(), "test".into()]).unwrap();
+        let configuration = inputs
+            .configuration_files
+            .iter()
+            .map(|file| file.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+        assert!(
+            configuration.contains(&"rust-toolchain.toml".to_owned()),
+            "{configuration:?}"
+        );
+        assert!(
+            !configuration
+                .iter()
+                .any(|file| file.starts_with(".zig-cache")),
+            "{configuration:?}"
+        );
+        let outside = project("plain");
+        let inputs = collect_integrity_inputs(&outside, &["cargo".into(), "test".into()]).unwrap();
+        assert!(
+            inputs
+                .configuration_files
+                .iter()
+                .any(|file| file.starts_with(".zig-cache")),
+            "outside git nothing is ignored"
+        );
+        fs::remove_dir_all(&inside).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
     }
 }

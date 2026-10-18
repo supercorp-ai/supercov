@@ -250,6 +250,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         assertion_sites: Vec::new(),
     };
     let result = RawTestResult {
+        span: None,
         test_id: Some("test".into()),
         scope: None,
         test: "test".into(),

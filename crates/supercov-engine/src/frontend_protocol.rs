@@ -412,6 +412,7 @@ mod tests {
                 assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
+                span: None,
                 test_id: Some("test".into()),
                 scope: Some(ExecutionScope {
                     version: 1,

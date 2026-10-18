@@ -75,7 +75,9 @@ Reading the saved result goes from the run down, a page at a time:
               about the statements they ran, saves its result apart from the
               run's whole assessment, and keeps its answers for a later
               `assess`. Reading with a filter shows what those tests assert:
-              a statement only other tests catch is not asserted there.
+              a statement they were asked about and none catches is not
+              asserted there; one only other tests were asked about is
+              counted apart, with the `assess` that asks these tests.
 "#;
 
 const CACHE_VERSION: u32 = 1;
@@ -416,7 +418,6 @@ impl Cache {
 struct Pass<'p> {
     population: &'p Population,
     model: &'static str,
-    salt: String,
     /// Per statement: (test, answer) in the order asked.
     answers: Vec<Vec<(usize, f64)>>,
     orders: Vec<Vec<usize>>,
@@ -434,9 +435,7 @@ impl Pass<'_> {
         if let Some(k) = self.keys.get(&(statement, test)) {
             return k.clone();
         }
-        let k = self
-            .population
-            .pair_key(statement, test, self.model, &self.salt);
+        let k = self.population.pair_key(statement, test, self.model);
         self.keys.insert((statement, test), k.clone());
         k
     }
@@ -648,17 +647,6 @@ fn run_pass(
     Ok(sent)
 }
 
-/// What changes every answer at once: the run's dependencies and test/build
-/// configuration. (The `execution` fingerprint also folds in the source, so it
-/// moves with every edit and would re-ask everything.)
-fn salt(run: &StoredRun) -> String {
-    let f = &run.metadata.integrity.fingerprint;
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{}\n{}", f.dependencies, f.configuration))
-    )
-}
-
 fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, String> {
     if options.changed {
         // The checkout has changed since the run: its code is the snapshot
@@ -711,7 +699,6 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     let mut pass = Pass {
         population: &population,
         model: quality::model(),
-        salt: salt(run),
         answers: vec![Vec::new(); n],
         orders: (0..n).map(|s| population.order(s, FIRST_TESTS)).collect(),
         round: 0,
@@ -883,7 +870,6 @@ fn assess_changed(
         }
     }
     let model = quality::model();
-    let salt = salt(run);
     let mut cache = Cache::load(root);
     let mut answers = BTreeMap::<usize, Vec<(usize, f64)>>::new();
     let mut wanted = BTreeMap::<usize, Vec<usize>>::new(); // test -> statements
@@ -891,7 +877,7 @@ fn assess_changed(
     let mut reused = 0;
     for &s in &changed {
         for t in population.order(s, IMPACT_TESTS) {
-            let key = population.pair_key(s, t, model, &salt);
+            let key = population.pair_key(s, t, model);
             match cache.answers.get(&key).filter(|_| !options.refresh) {
                 Some(&p) => {
                     answers.entry(s).or_default().push((t, p));
@@ -1230,6 +1216,7 @@ fn narrow_result(
             ((point.file.as_str(), point.line as u64), tests)
         })
         .collect::<BTreeMap<_, _>>();
+    let mut unasked = Vec::<String>::new();
     let statements = result["statements"]
         .as_array()
         .cloned()
@@ -1239,7 +1226,7 @@ fn narrow_result(
             let file = statement["file"].as_str()?.to_owned();
             let line = statement["line"].as_u64()?;
             let tests = running.get(&(file.as_str(), line)).filter(|t| !t.is_empty())?;
-            let answers = statement["answers"]
+            let answers: Vec<Value> = statement["answers"]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -1251,7 +1238,13 @@ fn narrow_result(
                     )
                 })
                 .cloned()
-                .collect::<Vec<_>>();
+                .collect();
+            // None of these tests was asked about it: other tests answered
+            // for the statement first. Not asserted would be a guess.
+            if answers.is_empty() {
+                unasked.push(file.clone());
+                return None;
+            }
             let best = answers.iter().max_by(|a, b| {
                 let p = |v: &Value| v["p"].as_f64().unwrap_or(0.0);
                 p(a).total_cmp(&p(b))
@@ -1292,6 +1285,19 @@ fn narrow_result(
         Value::Null
     } else {
         json!((asserted as f64 * 1000.0 / total as f64).round() / 10.0)
+    };
+    // What reading these tests out of the whole assessment cannot say, and
+    // the pass that asks them.
+    result["summary"]["unasked"] = json!(unasked.len());
+    result["summary"]["askUnasked"] = if unasked.is_empty() {
+        Value::Null
+    } else {
+        json!(format!(
+            "{} runs {} assertions assess{}",
+            crate::launcher_command(),
+            quote(result["run"].as_str().unwrap_or_default()),
+            flags(&json!({"filterArgs": filter_args(filter)}))
+        ))
     };
     result["statements"] = json!(statements);
     result["filter"] = json!(filter.describe());
@@ -1870,6 +1876,17 @@ fn page_footer(data: &Value, command: &str) -> String {
 
 fn render_files(run: &str, data: &Value) -> String {
     let s = &data["summary"];
+    if s["statements"].as_u64() == Some(0)
+        && let (Some(unasked), Some(ask), Some(filter)) = (
+            s["unasked"].as_u64().filter(|n| *n > 0),
+            s["askUnasked"].as_str(),
+            data["filter"].as_str(),
+        )
+    {
+        return format!(
+            "Run {run}: not assessed for the tests {filter} picks: the {unasked} statement(s) they run were asked of other tests, which answered first. `{ask}` asks these tests.\n"
+        );
+    }
     let mut out = format!(
         "Run {run}: {} asserted ({} of {} executed statements){}\n",
         share(&s["percentage"]),
@@ -1880,6 +1897,14 @@ fn render_files(run: &str, data: &Value) -> String {
             .map(|filter| format!(", by the tests {filter} picks"))
             .unwrap_or_default()
     );
+    if let (Some(unasked), Some(ask)) = (
+        s["unasked"].as_u64().filter(|n| *n > 0),
+        s["askUnasked"].as_str(),
+    ) {
+        out.push_str(&format!(
+            "{unasked} other statement(s) these tests run were not asked of them, because other tests answered for them first; `{ask}` asks these tests.\n"
+        ));
+    }
     out.push_str(&weak_line(
         &s["weaklyAsserted"],
         &format!(

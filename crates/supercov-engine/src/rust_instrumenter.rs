@@ -69,6 +69,12 @@ pub struct RustProbeLayout {
     /// region, so the compiler that built the code decides.
     #[serde(default)]
     pub cfgs: Vec<RustCfgGate>,
+    /// The files each crate compiles, by the key its region is exported
+    /// under. A crate a test's Worker returned a region for was built --
+    /// by `wrangler dev`, for wasm -- though the run's own build never
+    /// compiled it, and its files count.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub crates: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Code a `#[cfg]` predicate keeps or leaves out, and the obligations in it.

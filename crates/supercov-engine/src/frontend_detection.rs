@@ -73,7 +73,8 @@ fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'s
     let rust_command = has_sequence(command_tokens, &["cargo", "test"])
         || has_sequence(command_tokens, &["cargo", "nextest"])
         || has_sequence(command_tokens, &["cargo-nextest", "run"])
-        || has_sequence(command_tokens, &["cross", "test"]);
+        || has_sequence(command_tokens, &["cross", "test"])
+        || has_sequence(command_tokens, &["wasm-pack", "test"]);
     if rust_command {
         launched.push((
             FrontendLanguage::Rust,

@@ -73,7 +73,7 @@ fn runtime(runner: &str) -> &'static str {
             "node:test; a test past its timeout fails; after hooks still run. The tests spawn the program as child processes; an unhandled promise rejection ends a Node process."
         }
         "jest" => {
-            "Jest; a test past its timeout (default 5000 ms) fails; an unhandled error during the run fails it; jest.fn() returns undefined unless given an implementation."
+            "Jest; a test past its timeout (default 5000 ms) fails; an unhandled error during the run fails it; jest.fn() returns undefined unless given an implementation. toBeNull() passes only for null and toBeUndefined() only for undefined; toBe(null), toEqual(null) and toStrictEqual(null) fail on undefined, and not.toBeUndefined() fails on it; toBeFalsy(), toBeNil-style checks, `== null` and `??` treat null and undefined alike."
         }
         "ava" => {
             "AVA; a failed t assertion, an uncaught error or a rejected promise the test returns fails it; a test past its timeout (default 10 s) fails; a test with no assertion fails unless failWithoutAssertions is off; a file's tests run concurrently unless declared with test.serial."
@@ -118,7 +118,7 @@ fn runtime(runner: &str) -> &'static str {
             "unittest; a failing assert* method or an uncaught exception fails the test; there is no timeout; setUp runs before each test; a Mock or MagicMock returns another mock unless given a return value."
         }
         _ => {
-            "Vitest; a test past its timeout (default 5000 ms) fails; an unhandled error during the run fails it; vi.fn() returns undefined unless given an implementation."
+            "Vitest; a test past its timeout (default 5000 ms) fails; an unhandled error during the run fails it; vi.fn() returns undefined unless given an implementation. toBeNull() passes only for null and toBeUndefined() only for undefined; toBe(null), toEqual(null) and toStrictEqual(null) fail on undefined, and not.toBeUndefined() fails on it; toBeFalsy(), toBeNil-style checks, `== null` and `??` treat null and undefined alike."
         }
     }
 }
@@ -2013,13 +2013,13 @@ impl Population {
 
     /// What Jev sees for one statement asked of one test, line numbers aside:
     /// the same code renumbered is the same question. Equal keys, equal question.
-    /// `salt` carries what changes every answer at once: the run's dependency
-    /// and configuration fingerprints.
-    pub fn pair_key(&self, statement: usize, test: usize, model: &str, salt: &str) -> String {
+    /// Nothing Jev does not see is in it: a key that also held the run's
+    /// dependency and configuration fingerprints threw every answer away when
+    /// a lockfile or a config file changed, though each question was the same.
+    pub fn pair_key(&self, statement: usize, test: usize, model: &str) -> String {
         let t = &self.tests[test];
         let parts = json!([
             model,
-            salt,
             INSTRUCTIONS,
             runtime(&t.runner),
             true,

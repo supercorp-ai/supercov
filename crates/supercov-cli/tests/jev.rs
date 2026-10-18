@@ -544,6 +544,31 @@ fn an_assessment_is_saved_reused_and_drives_tests_affected() {
     assert!(reused.contains("100% asserted"), "{reused}");
     assert_eq!(seen.lock().unwrap().len(), asked, "every answer was reused");
 
+    // Nor does a run after a dependency or configuration change: no question
+    // shows either, so each is the same question. 4.17 keyed every answer on
+    // both fingerprints and asked the whole suite again.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test", "lint": "true" }, "devDependencies": { "left-pad": "1.3.0" } }"#,
+    );
+    project.write(
+        "package-lock.json",
+        "{\"lockfileVersion\":3,\"packages\":{}}\n",
+    );
+    let reconfigured = project.measure(&[]);
+    let carried = project
+        .supercov_with(&["runs", &reconfigured, "assertions", "assess"], &jev)
+        .succeeds();
+    assert!(carried.contains("100% asserted"), "{carried}");
+    assert_eq!(seen.lock().unwrap().len(), asked, "{carried}");
+    // Back as it was: what follows asks which tests a change affects, and a
+    // configuration change affects them all.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" } }"#,
+    );
+    std::fs::remove_file(project.root.join("package-lock.json")).unwrap();
+
     // `--refresh` asks every question again instead, for an answer shown to
     // be wrong, and keeps what it gets.
     let refreshed = project
@@ -2335,4 +2360,89 @@ fn assessing_checks_only_the_files_its_questions_quote() {
         )
         .exits(2);
     assert!(refused.contains("src/cart.js"), "{refused}");
+}
+
+#[test]
+fn a_test_file_whose_tests_were_never_asked_is_not_read_as_asserting_nothing() {
+    // Two files run the same statements. The assessment asks one test per
+    // statement first, and stops at a catch: the other file's tests were
+    // never asked, and reading them out of it said 0% asserted.
+    let project = Project::empty("assertions-unasked");
+    project.write(
+        "package.json",
+        r#"{ "name": "f", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/cart.js",
+        "export function total(prices) {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n\nexport function label(sum) {\n  if (sum > 100) {\n    return \"big\";\n  }\n  return \"small\";\n}\n",
+    );
+    project.write(
+        "test/total.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\ntest(\"total adds\", () => {\n  assert.equal(total([1, 2]), 3);\n});\n",
+    );
+    project.write(
+        "test/label.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { label, total } from \"../src/cart.js\";\ntest(\"label says big for a big total\", () => {\n  assert.equal(label(total([150, 50])), \"big\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let (base, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["runs", "latest", "assertions", "assess"], &through(&base))
+        .succeeds();
+    let reading = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "assertions",
+            "--test-file",
+            "test/total.test.js",
+        ])
+        .succeeds();
+    assert!(!reading.contains("0% asserted"), "{reading}");
+    contains_all(
+        &reading,
+        &[
+            "not assessed for the tests --test-file test/total.test.js picks",
+            "assertions assess --test-file 'test/total.test.js'",
+        ],
+    );
+    let json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "assertions",
+            "--test-file",
+            "test/total.test.js",
+            "--json",
+        ])
+        .json();
+    assert_eq!(json["data"]["summary"]["unasked"], 4, "{json}");
+    // Asked, they are what they assert.
+    project
+        .supercov_with(
+            &[
+                "runs",
+                "latest",
+                "assertions",
+                "assess",
+                "--test-file",
+                "test/total.test.js",
+            ],
+            &through(&base),
+        )
+        .succeeds();
+    let asked = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "assertions",
+            "--test-file",
+            "test/total.test.js",
+        ])
+        .succeeds();
+    assert!(
+        asked.contains("100% asserted (4 of 4 executed statements)"),
+        "{asked}"
+    );
 }

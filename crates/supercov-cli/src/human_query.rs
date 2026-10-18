@@ -1447,7 +1447,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     }
                 ),
             ];
-            if page.total == 0 {
+            if page.total == 0 && data.total_obligations == 0 {
+                // A file the build never compiled, or one with nothing to
+                // run: nothing in it was measured, so nothing is covered.
+                lines.truncate(lines.len() - 1);
+                lines.push(format!(
+                    "  Nothing measured: the run counts no obligation in this file. `{} runs {} scope` says why a file is left out.",
+                    crate::launcher_command(),
+                    data.run
+                ));
+            } else if page.total == 0 {
                 lines.truncate(lines.len() - 1);
                 lines.push("  No gap lines: every line is covered and measured.".into());
             } else {

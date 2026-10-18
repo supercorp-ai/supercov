@@ -122,8 +122,11 @@ The file query explained the gap:
 ```text
  LINE  STATUS        SOURCE
     2  PARTIAL       signedIn && !expired
-       Unobserved: `!expired` was never false; needs `signedIn` true, `!expired` false, decision false
+       Unobserved: no witness pair shows `!expired` independently changing the decision result
 ```
+
+Current releases name the missing value in that line: `` `!expired` was never
+false; needs `signedIn` true, `!expired` false, decision false ``.
 
 Both return paths had run, but neither test checked an expired session. MC/DC
 checks whether each condition has been shown to affect the decision
