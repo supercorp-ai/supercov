@@ -1953,6 +1953,50 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A run whose process still lives is left to finish; a run directory
+    /// with no state is passed over; and a link where a run's directory
+    /// belongs is refused, while a file there is not a run.
+    #[test]
+    fn a_live_run_is_left_alone_and_a_link_among_runs_is_refused() {
+        let root = project();
+        let live = "2026-01-03T00-00-00-000Z";
+        let stateless = "2026-01-04T00-00-00-000Z";
+        for id in [live, stateless] {
+            fs::create_dir_all(root.join(".supercov/work").join(id)).unwrap();
+        }
+        write_run_state(
+            &root,
+            &state(&root, live, RunStateStatus::Testing, std::process::id()),
+        )
+        .unwrap();
+        fs::write(root.join(".supercov/work/notes.txt"), "not a run").unwrap();
+        assert!(
+            recover_abandoned_runs(&root, "recovered")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(root.join(".supercov/work").join(live).exists());
+        assert!(root.join(".supercov/work").join(stateless).exists());
+        let mut names = child_directories(&root.join(".supercov/work")).unwrap();
+        names.sort();
+        assert_eq!(names, [live, stateless]);
+        assert!(
+            child_directories(&root.join(".supercov/absent"))
+                .unwrap()
+                .is_empty()
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("src"), root.join(".supercov/work/linked"))
+                .unwrap();
+            assert!(matches!(
+                child_directories(&root.join(".supercov/work")),
+                Err(LifecycleError::UnsafePath(path)) if path.ends_with("linked")
+            ));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Evidence goes with its run: an orphan's always, a kept run's never.
     /// A full clean takes kept evidence and the build cache only once no
     /// run is active.
