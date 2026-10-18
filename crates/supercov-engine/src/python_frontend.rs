@@ -507,7 +507,6 @@ fn snapshot_for_context(
             vector: None,
             timestamp_ms: index as i64 + 1,
             phase_id: Some(phase.into()),
-            statement_id: None,
             environment: "python".into(),
         })
         .collect();
@@ -1161,13 +1160,6 @@ mod tests {
                 .filter(|test| test.role == "test")
                 .count(),
             2
-        );
-        assert!(
-            report
-                .view
-                .lines
-                .iter()
-                .all(|line| !line.confidence.asserted)
         );
         assert!(
             report

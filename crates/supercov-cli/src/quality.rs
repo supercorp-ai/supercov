@@ -1402,14 +1402,8 @@ fn resolve(
     hash: &str,
 ) -> Result<(CacheEntry, bool, Option<String>), String> {
     let cache_path = store::responses(project_root, lane).join(format!("{hash}.json"));
-    if !refresh {
-        // The flat directory is where responses were cached before snapshots
-        // existed. An answer saved there still answers this exact request.
-        for path in [&cache_path, &store::legacy_response(project_root, hash)] {
-            if let Some(entry) = cached(path, hash, request)? {
-                return Ok((entry, true, None));
-            }
-        }
+    if !refresh && let Some(entry) = cached(&cache_path, hash, request)? {
+        return Ok((entry, true, None));
     }
     let key = key
         .filter(|s| !s.trim().is_empty())

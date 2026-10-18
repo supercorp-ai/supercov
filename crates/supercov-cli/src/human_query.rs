@@ -784,7 +784,6 @@ fn state_label(state: &str) -> &'static str {
 
 fn confidence_label(level: &str) -> &str {
     match level {
-        "asserted" => "linked to a passing assertion",
         "action" => "linked to a test action",
         "executed" => "execution only",
         "unexecuted" => "not executed",

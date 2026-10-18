@@ -481,14 +481,12 @@ pub struct IndexedConfidenceLines {
     pub unexecuted: usize,
     pub executed: usize,
     pub action: usize,
-    pub asserted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedSummaryConfidence {
     pub lines: IndexedConfidenceLines,
-    pub assertion_covered_mcdc_conditions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1158,7 +1156,9 @@ fn projection_record(
         put_u64(&mut record, 248 + index * 8, usize_u64(value)?);
     }
 
-    let confidence_levels = ["unexecuted", "executed", "action", "asserted"];
+    // 304 and 312 held the lines and MC/DC conditions an assertion map
+    // credited; reserved.
+    let confidence_levels = ["unexecuted", "executed", "action"];
     for (index, level) in confidence_levels.into_iter().enumerate() {
         put_u64(
             &mut record,
@@ -1171,17 +1171,6 @@ fn projection_record(
             )?,
         );
     }
-    put_u64(
-        &mut record,
-        312,
-        usize_u64(
-            view.decisions
-                .iter()
-                .flat_map(|decision| &decision.conditions)
-                .filter(|condition| condition.assertion_covered)
-                .count(),
-        )?,
-    );
 
     let gaps = file_gaps(view, selected)?;
     put_u64(
@@ -1453,21 +1442,16 @@ fn confidence_record(
         "unexecuted" => 0,
         "executed" => 1,
         "action" => 2,
-        "asserted" => 3,
         _ => return Err(CoverageIndexError::InvalidRecord("confidence level")),
     };
+    // Bit 2 and the second relation (24..40) held an assertion map's
+    // credit; reserved.
     record[1] = u8::from(confidence.setup_only)
         | (u8::from(confidence.background_only) << 1)
-        | (u8::from(confidence.asserted) << 2)
         | (u8::from(confidence.e2e) << 3);
-    for (index, values) in [&confidence.tests, &confidence.asserted_tests]
-        .into_iter()
-        .enumerate()
-    {
-        let (offset, count) = relations.push_ids(values, strings)?;
-        put_u64(&mut record, 8 + index * 16, offset);
-        put_u64(&mut record, 16 + index * 16, count);
-    }
+    let (offset, count) = relations.push_ids(&confidence.tests, strings)?;
+    put_u64(&mut record, 8, offset);
+    put_u64(&mut record, 16, count);
     for (index, values) in [&confidence.runners, &confidence.kinds]
         .into_iter()
         .enumerate()
@@ -1863,9 +1847,8 @@ fn decision_condition_record(
     relations: &mut StringRelations,
 ) -> Result<[u8; DECISION_CONDITION_RECORD_SIZE], CoverageIndexError> {
     let mut record = [0_u8; DECISION_CONDITION_RECORD_SIZE];
-    record[0] = u8::from(condition.covered)
-        | (u8::from(condition.assertion_covered) << 1)
-        | (u8::from(condition.witness.is_some()) << 2);
+    // Bit 1 held an assertion map's credit; reserved.
+    record[0] = u8::from(condition.covered) | (u8::from(condition.witness.is_some()) << 2);
     put_u32(&mut record, 4, strings.intern(&condition.source)?);
     put_u64(&mut record, 8, usize_u64(condition.index)?);
     if let Some((first, second)) = witness_vectors {
@@ -2908,8 +2891,14 @@ impl<'a> CoverageIndex<'a> {
                 1 => true,
                 _ => return Err(CoverageIndexError::InvalidRecord("coverage scope kind")),
             };
-            // Where a compiler scope kept its unit and completeness: reserved.
-            if get_u32(record, 512) != NO_STRING || record[516] != 0 || record[517] != 0 {
+            // Where a compiler scope kept its unit and completeness, and an
+            // assertion map its credited lines and conditions: reserved.
+            if get_u32(record, 512) != NO_STRING
+                || record[516] != 0
+                || record[517] != 0
+                || number(304)? != 0
+                || number(312)? != 0
+            {
                 return Err(CoverageIndexError::InvalidRecord(
                     "projection reserved bytes",
                 ));
@@ -2990,9 +2979,7 @@ impl<'a> CoverageIndex<'a> {
                         unexecuted: number(280)?,
                         executed: number(288)?,
                         action: number(296)?,
-                        asserted: number(304)?,
                     },
-                    assertion_covered_mcdc_conditions: number(312)?,
                 },
                 files_with_gaps: number(320)?,
                 files_with_coverage_gaps: number(328)?,
@@ -3192,12 +3179,14 @@ impl<'a> CoverageIndex<'a> {
     ) -> Result<crate::coverage_report::CoverageConfidence, CoverageIndexError> {
         let record = self.index.record(SECTION_CONFIDENCE, index)?;
         if record[2..8].iter().any(|byte| *byte != 0)
+            || record[24..40].iter().any(|byte| *byte != 0)
             || record[72..].iter().any(|byte| *byte != 0)
-            || record[1] & !15 != 0
+            || record[1] & !11 != 0
         {
             return Err(CoverageIndexError::InvalidRecord("confidence record"));
         }
-        let values = (0..4)
+        let values = [0, 2, 3]
+            .into_iter()
             .map(|index| {
                 self.relation_strings(
                     get_u64(record, 8 + index * 16),
@@ -3210,18 +3199,15 @@ impl<'a> CoverageIndex<'a> {
                 0 => "unexecuted",
                 1 => "executed",
                 2 => "action",
-                3 => "asserted",
                 _ => return Err(CoverageIndexError::InvalidRecord("confidence level")),
             }
             .into(),
             setup_only: record[1] & 1 != 0,
             background_only: record[1] & 2 != 0,
-            asserted: record[1] & 4 != 0,
             e2e: record[1] & 8 != 0,
             tests: values[0].iter().map(Id::from).collect(),
-            asserted_tests: values[1].iter().map(Id::from).collect(),
-            runners: values[2].clone(),
-            kinds: values[3].clone(),
+            runners: values[1].clone(),
+            kinds: values[2].clone(),
         })
     }
 
@@ -3712,7 +3698,7 @@ impl<'a> CoverageIndex<'a> {
         index: u64,
     ) -> Result<crate::coverage_report::ConditionResult, CoverageIndexError> {
         let record = self.index.record(SECTION_DECISION_CONDITIONS, index)?;
-        if record[0] & !7 != 0 || record[1..4].iter().any(|byte| *byte != 0) {
+        if record[0] & !5 != 0 || record[1..4].iter().any(|byte| *byte != 0) {
             return Err(CoverageIndexError::InvalidRecord(
                 "decision condition record",
             ));
@@ -3738,7 +3724,6 @@ impl<'a> CoverageIndex<'a> {
                 .map_err(|_| CoverageIndexError::SizeOverflow)?,
             source: self.string(get_u32(record, 4))?,
             covered: record[0] & 1 != 0,
-            assertion_covered: record[0] & 2 != 0,
             witness,
             witness_tests: has_witness.then_some([
                 first_tests.into_iter().map(Id::from).collect(),

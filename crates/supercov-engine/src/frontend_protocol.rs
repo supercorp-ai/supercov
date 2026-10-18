@@ -459,7 +459,6 @@ mod tests {
                         vector: None,
                         timestamp_ms: 1,
                         phase_id: Some("assertion".into()),
-                        statement_id: None,
                         environment: "fixture".into(),
                     }],
                     logicals: vec![],

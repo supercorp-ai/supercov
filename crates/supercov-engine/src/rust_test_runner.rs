@@ -1403,7 +1403,6 @@ pub(crate) fn snapshot_regions(
                             vector: record.vector,
                             timestamp_ms: record.sequence,
                             phase_id: Some(phase_id.clone()),
-                            statement_id: None,
                             environment: "server".into(),
                         });
                     }

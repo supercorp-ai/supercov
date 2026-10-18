@@ -386,7 +386,6 @@ fn compact_line(mut data: CoverageCoversData) -> CoverageCoversData {
     if let CoverageCoversData::Line(line) = &mut data {
         line.phases.clear();
         line.confidence.tests.clear();
-        line.confidence.asserted_tests.clear();
     }
     data
 }

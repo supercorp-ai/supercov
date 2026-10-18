@@ -1479,8 +1479,6 @@ pub struct CoverageDecisionCondition {
     pub source: String,
     pub covered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assertion_covered: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub witness: Option<[crate::coverage_analysis::McdcVector; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness_tests: Option<[Vec<Id>; 2]>,
@@ -1602,7 +1600,6 @@ fn selected_decision(
                 index,
                 source: source.clone(),
                 covered: witness.is_some(),
-                assertion_covered: false,
                 witness,
                 witness_tests,
             }
@@ -1717,7 +1714,6 @@ pub fn coverage_decision_query(
             index: condition.index,
             source: condition.source.clone(),
             covered: condition.covered,
-            assertion_covered: selected.is_none().then_some(condition.assertion_covered),
             witness: condition.witness.clone(),
             witness_tests: condition.witness_tests.clone(),
             missing_outcomes: (!condition.covered)

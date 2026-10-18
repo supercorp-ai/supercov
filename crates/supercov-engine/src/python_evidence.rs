@@ -3249,7 +3249,6 @@ mod tests {
                     vector,
                     timestamp_ms: clock,
                     phase_id: Some(phase.clone()),
-                    statement_id: None,
                     environment: "python".into(),
                 }
             };

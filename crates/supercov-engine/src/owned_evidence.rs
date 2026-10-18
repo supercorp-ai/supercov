@@ -509,7 +509,6 @@ fn snapshot(
             vector: None,
             timestamp_ms: clock,
             phase_id: Some(phase.to_owned()),
-            statement_id: None,
             environment: environment.into(),
         });
         clock += 1;
@@ -538,7 +537,6 @@ fn snapshot(
                 vector: Some(vector.clone()),
                 timestamp_ms: clock,
                 phase_id: Some(phase.to_owned()),
-                statement_id: None,
                 environment: environment.into(),
             });
             clock += 1;

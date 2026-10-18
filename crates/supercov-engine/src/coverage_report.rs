@@ -104,10 +104,6 @@ pub struct RuntimeEvent {
     pub timestamp_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
-    /// Legacy test-statement location retained for reading historical archives.
-    /// The assertion-map workflow does not emit test-statement markers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub statement_id: Option<String>,
     pub environment: String,
 }
 
@@ -177,9 +173,6 @@ pub struct ServerRecord {
     pub timestamp_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
-    /// The producing test statement, under this record's exact execution scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub statement_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ExecutionScope>,
     /// Made while the server handled a request that named no test -- a
@@ -458,9 +451,7 @@ pub struct CoverageConfidence {
     pub level: String,
     pub setup_only: bool,
     pub background_only: bool,
-    pub asserted: bool,
     pub tests: Vec<Id>,
-    pub asserted_tests: Vec<Id>,
     pub runners: Vec<String>,
     pub kinds: Vec<String>,
     pub e2e: bool,
@@ -484,7 +475,6 @@ pub struct ConditionResult {
     pub index: usize,
     pub source: String,
     pub covered: bool,
-    pub assertion_covered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness: Option<[McdcVector; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1834,9 +1824,7 @@ fn confidence_from(
         } else {
             has_test && background_roles
         },
-        asserted: false,
         tests: tests.names.clone(),
-        asserted_tests: vec![],
         runners: runners.into_iter().map(str::to_owned).collect(),
         e2e: kinds.contains("e2e"),
         kinds: kinds.into_iter().map(str::to_owned).collect(),
@@ -2201,7 +2189,6 @@ fn create_coverage_view_with_model(
                 id: record_id,
                 vector: decision,
                 timestamp_ms,
-                statement_id: record.statement_id.clone(),
                 phase_id: record.phase_id.clone(),
                 environment: "server".into(),
             };
@@ -2252,10 +2239,6 @@ fn create_coverage_view_with_model(
             }
         }
     }
-
-    // Legacy confidence fields remain readable for archive compatibility.
-    // Execution inside/before a passing assertion does not establish that
-    // an assertion checks a statement. Only the agent-authored map awards it.
 
     decision_metadata.sort_by(|left, right| {
         left.file
@@ -2415,12 +2398,10 @@ fn create_coverage_view_with_model(
                     observations[witness.second].tests.clone(),
                 ]
             });
-            let assertion_covered = false;
             conditions.push(ConditionResult {
                 index,
                 source: source.clone(),
                 covered: witness.is_some(),
-                assertion_covered,
                 witness,
                 witness_tests,
             });
@@ -3787,7 +3768,6 @@ mod tests {
             id: Some(format!("hit-{timestamp}")),
             timestamp_ms: Some(timestamp),
             phase_id: None,
-            statement_id: None,
             scope: None,
             request: Some(timestamp as u64),
         };
@@ -3865,7 +3845,6 @@ mod tests {
             id: Some(id.into()),
             timestamp_ms: Some(at),
             phase_id: None,
-            statement_id: None,
             scope: None,
             request,
         };
@@ -4059,7 +4038,6 @@ mod tests {
             id: None,
             timestamp_ms: None,
             phase_id: None,
-            statement_id: None,
             scope: None,
             request: None,
         };
@@ -4276,17 +4254,14 @@ mod tests {
             vector: None,
             timestamp_ms: 110,
             phase_id: None,
-            statement_id: None,
             environment: "server".into(),
         });
         let inferred = create_coverage_view(&manifest, &[attempt.clone()], "time").unwrap();
         assert_eq!(inferred.points[0].confidence.level, "executed");
-        assert!(!inferred.points[0].confidence.asserted);
 
         attempt.runtime[0].events[0].phase_id = Some(phase.id);
         let explicit = create_coverage_view(&manifest, &[attempt], "time").unwrap();
         assert_eq!(explicit.points[0].confidence.level, "executed");
-        assert!(!explicit.points[0].confidence.asserted);
     }
 
     #[test]

@@ -12,7 +12,6 @@
 //!
 //! ```text
 //! .supercov/<lane>/
-//!   <request-sha256>.json          legacy response cache, still read
 //!   requests/<request-sha256>.json response cache
 //!   snapshots/latest               the id of the most recent completed scan
 //!   snapshots/<id>/manifest.json   what was scanned, with which rubric and model
@@ -32,15 +31,9 @@ pub fn root(project_root: &Path, lane: &str) -> PathBuf {
     project_root.join(".supercov").join(lane)
 }
 
-/// Where a response is cached now. The flat directory above it is the earlier
-/// location; [`legacy_response`] still reads from there.
+/// Where responses are cached, by request hash.
 pub fn responses(project_root: &Path, lane: &str) -> PathBuf {
     root(project_root, lane).join("requests")
-}
-
-/// Only the quality lane ever had the flat layout.
-pub fn legacy_response(project_root: &Path, hash: &str) -> PathBuf {
-    root(project_root, "quality").join(format!("{hash}.json"))
 }
 
 pub fn snapshots(project_root: &Path, lane: &str) -> PathBuf {
