@@ -7198,3 +7198,20 @@ fn a_command_that_cannot_start_exits_as_a_shell_would() {
         assert!(denied.contains("could not spawn"), "{denied}");
     }
 }
+
+#[test]
+fn a_page_past_the_end_says_so() {
+    let project = Project::cart("page-past-end");
+    project.measure(&[]);
+    let gaps = project
+        .supercov(&["runs", "latest", "gaps", "--offset", "999999"])
+        .succeeds();
+    contains_all(
+        &gaps,
+        &["showing none of 1: --offset 999999 is past the end"],
+    );
+    contains_all(
+        &project.supercov(&["runs", "latest", "gaps"]).succeeds(),
+        &["showing 1-1 of 1"],
+    );
+}

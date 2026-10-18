@@ -175,11 +175,13 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn page_label(page: &AgentPagination) -> String {
-    let start = if page.total == 0 || page.returned == 0 {
-        0
-    } else {
-        page.offset + 1
-    };
+    if page.returned == 0 && page.total > 0 {
+        return format!(
+            "showing none of {}: --offset {} is past the end",
+            page.total, page.offset
+        );
+    }
+    let start = if page.total == 0 { 0 } else { page.offset + 1 };
     let end = (page.offset + page.returned).min(page.total);
     format!("showing {start}-{end} of {}", page.total)
 }
