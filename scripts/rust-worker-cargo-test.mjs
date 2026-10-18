@@ -89,9 +89,12 @@ struct Dev {
 }
 
 impl Drop for Dev {
-    // wrangler starts Cloudflare's runtime as processes of its own, in its group.
+    // wrangler starts Cloudflare's runtime as processes of its own, in its
+    // group. The \`--\` matters: Linux's procps \`kill\` read a bare
+    // \`-<pgid>\` as \`kill(-1)\`, every process the user owns, and took the CI
+    // runner down with it.
     fn drop(&mut self) {
-        let _ = Command::new("kill").args(["-TERM", &format!("-{}", self.child.id())]).status();
+        let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", self.child.id())]).status();
         let _ = self.child.wait();
     }
 }
