@@ -2608,4 +2608,81 @@ mod tests {
         );
         assert_eq!(branch_need("odd"), "branch outcome not observed: odd");
     }
+
+    /// The summary's diagnostics, outcomes and scope table as people read them.
+    #[test]
+    fn diagnostics_outcomes_and_scope_groups_read_as_tables_and_sentences() {
+        let diagnostic = |code: &str, message: &str| CoverageDiagnostic {
+            code: code.into(),
+            severity: "warning".into(),
+            message: message.into(),
+        };
+        let many = diagnostic_lines(
+            &diagnostic(
+                "TEST_EVIDENCE_MISSING",
+                "63 test(s) recorded assertion phases ... First: adds",
+            ),
+            Some("supercov runs r tests without-evidence"),
+        );
+        assert_eq!(
+            many[0],
+            "  63 tests made assertions, but Supercov received no source-coverage evidence:"
+        );
+        assert_eq!(many[1], "    Example: adds");
+        assert_eq!(
+            many[2],
+            "    All of them: supercov runs r tests without-evidence"
+        );
+        let one = diagnostic_lines(
+            &diagnostic(
+                "TEST_EVIDENCE_MISSING",
+                "1 test(s) recorded ... First: adds",
+            ),
+            Some("ignored for one"),
+        );
+        assert!(one[0].starts_with("  1 test made"));
+        assert!(!one.iter().any(|line| line.contains("All of them")));
+        // A message that does not read as expected is shown as it is.
+        assert_eq!(
+            diagnostic_lines(&diagnostic("TEST_EVIDENCE_MISSING", "odd message"), None),
+            ["  odd message"]
+        );
+        assert_eq!(
+            diagnostic_lines(&diagnostic("OTHER", "plain"), None),
+            ["  plain"]
+        );
+        let outcomes = IndexedOutcomeCounts {
+            passed: 1_200,
+            failed: 0,
+            flaky: 2,
+            skipped: 0,
+            timed_out: 1,
+            interrupted: 0,
+            unknown: 0,
+            unstarted: 0,
+            todo: 3,
+        };
+        assert_eq!(
+            outcome_lines(&outcomes),
+            [
+                "  Passed      1,200",
+                "  Flaky       2",
+                "  Todo        3",
+                "  Timed out   1"
+            ]
+        );
+        let groups = [supercov_engine::coverage_query::ScopeGroup {
+            status: "included".into(),
+            directory: "src/very/deep".into(),
+            reason: "discovered package source root".into(),
+            files: 12_345,
+        }];
+        assert_eq!(
+            scope_group_lines(&groups),
+            [
+                " Files  Status     Directory      Reason",
+                "12,345  INCLUDED   src/very/deep  discovered package source root",
+            ]
+        );
+    }
 }
