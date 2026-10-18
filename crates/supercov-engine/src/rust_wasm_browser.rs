@@ -16,7 +16,7 @@
 //! DevTools protocol. A test run in another browser is said to be unmeasured.
 
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -257,11 +257,17 @@ fn read_request(stream: &mut impl BufRead) -> Option<Request> {
     let body = if chunked {
         read_chunked(stream)?
     } else {
-        let mut body = vec![0; length];
-        stream.read_exact(&mut body).ok()?;
-        body
+        read_length(stream, length)?
     };
     Some(Request { method, path, body })
+}
+
+/// A body of a declared length, read as its bytes arrive: a length no
+/// sender meant is never allocated up front.
+fn read_length(reader: &mut impl BufRead, length: usize) -> Option<Vec<u8>> {
+    let mut body = Vec::with_capacity(length.min(1 << 20));
+    reader.take(length as u64).read_to_end(&mut body).ok()?;
+    (body.len() == length).then_some(body)
 }
 
 /// A chunked body, decoded: chunk extensions (`5;name=v`) are ignored, and
@@ -334,9 +340,7 @@ fn read_response(reader: &mut impl BufRead) -> Option<(u16, Vec<u8>)> {
     let payload = if chunked {
         read_chunked(reader)?
     } else if let Some(length) = length {
-        let mut payload = vec![0; length];
-        reader.read_exact(&mut payload).ok()?;
-        payload
+        read_length(reader, length)?
     } else {
         let mut payload = Vec::new();
         reader.read_to_end(&mut payload).ok()?;
@@ -546,5 +550,18 @@ mod tests {
             Some((200, b"x".to_vec()))
         );
         assert!(read_response(&mut bytes("garbage\r\n\r\n")).is_none());
+        // A length no sender meant is a body cut short, not an allocation.
+        assert!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nContent-Length: 999999999999999\r\n\r\n{}"
+            ))
+            .is_none()
+        );
+        assert!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nContent-Length: 999999999999999\r\n\r\n{}"
+            ))
+            .is_none()
+        );
     }
 }

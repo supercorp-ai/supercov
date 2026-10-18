@@ -101,8 +101,17 @@ struct Cursor<'a> {
 }
 
 impl Cursor<'_> {
+    /// A capacity for `count` items, none of which is smaller than a byte:
+    /// never more than the bytes left, whatever a damaged count says.
+    fn capacity(&self, count: usize) -> usize {
+        count.min(self.bytes.len().saturating_sub(self.offset))
+    }
+
     fn u64(&mut self, part: &'static str) -> Result<u64, OwnedEvidenceError> {
-        let end = self.offset + 8;
+        let end = self
+            .offset
+            .checked_add(8)
+            .ok_or(OwnedEvidenceError::Truncated(part))?;
         let slice = self
             .bytes
             .get(self.offset..end)
@@ -112,7 +121,10 @@ impl Cursor<'_> {
     }
 
     fn text(&mut self, length: usize, part: &'static str) -> Result<String, OwnedEvidenceError> {
-        let end = self.offset + length;
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(OwnedEvidenceError::Truncated(part))?;
         let slice = self
             .bytes
             .get(self.offset..end)
@@ -128,12 +140,12 @@ impl Cursor<'_> {
 pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> {
     let mut cursor = Cursor { bytes, offset: 0 };
     let probe_count = cursor.u64("probe totals")? as usize;
-    let mut global = Vec::with_capacity(probe_count);
+    let mut global = Vec::with_capacity(cursor.capacity(probe_count));
     for _ in 0..probe_count {
         global.push(cursor.u64("probe totals")? as u32);
     }
     let test_count = cursor.u64("test count")? as usize;
-    let mut tests = Vec::with_capacity(test_count);
+    let mut tests = Vec::with_capacity(cursor.capacity(test_count));
     for _ in 0..test_count {
         let length = cursor.u64("test name")? as usize;
         let name = cursor.text(length, "test name")?;
@@ -161,7 +173,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
             probes.insert(index, cursor.u64("test probes")? as u32);
         }
         let vector_count = cursor.u64("test vectors")? as usize;
-        let mut vectors = Vec::with_capacity(vector_count);
+        let mut vectors = Vec::with_capacity(cursor.capacity(vector_count));
         for _ in 0..vector_count {
             let decision = cursor.u64("test vectors")? as u32;
             vectors.push(PackedVector {
@@ -180,12 +192,12 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
         });
     }
     let decision_count = cursor.u64("decision table")? as usize;
-    let mut widths = Vec::with_capacity(decision_count);
-    let mut decision_vectors = Vec::with_capacity(decision_count);
+    let mut widths = Vec::with_capacity(cursor.capacity(decision_count));
+    let mut decision_vectors = Vec::with_capacity(cursor.capacity(decision_count));
     for _ in 0..decision_count {
         widths.push(cursor.u64("decision table")? as u8);
         let keys = cursor.u64("decision table")? as usize;
-        let mut seen = Vec::with_capacity(keys);
+        let mut seen = Vec::with_capacity(cursor.capacity(keys));
         for _ in 0..keys {
             seen.push(cursor.u64("decision table")?);
         }
@@ -1347,5 +1359,44 @@ mod tests {
         );
         // And a vector seen in both packages is one vector, not two.
         assert_eq!(merged.decision_vectors, [vec![0b01, 0b11]]);
+    }
+
+    /// Whatever one byte or one count of a transport says, reading it returns
+    /// evidence or an error: never a panic, an overflow or a huge allocation.
+    #[test]
+    fn no_damaged_byte_or_count_makes_the_reader_panic() {
+        let mut valid = Vec::new();
+        let mut put = |value: u64| valid.extend_from_slice(&value.to_le_bytes());
+        put(0);
+        put(1);
+        let text = |bytes: &mut Vec<u8>, value: &str| {
+            bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        };
+        text(&mut valid, "ShopTest.discounts()");
+        text(&mut valid, "passed");
+        valid.extend_from_slice(&0_u64.to_le_bytes());
+        text(&mut valid, "junit-platform");
+        valid.extend_from_slice(&1_u64.to_le_bytes());
+        text(&mut valid, "api");
+        for value in [0_u64, 0, 0] {
+            valid.extend_from_slice(&value.to_le_bytes());
+        }
+        read_evidence(&valid).unwrap();
+        let started = std::time::Instant::now();
+        for offset in 0..valid.len() {
+            for value in [0xff_u8, 0x01] {
+                let mut damaged = valid.clone();
+                damaged[offset] = if damaged[offset] == value { 0 } else { value };
+                let _ = read_evidence(&damaged);
+            }
+        }
+        for word in (0..valid.len()).step_by(8) {
+            let mut damaged = valid.clone();
+            let end = (word + 8).min(damaged.len());
+            damaged[word..end].fill(0xff);
+            let _ = read_evidence(&damaged);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

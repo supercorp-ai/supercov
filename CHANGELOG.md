@@ -4,6 +4,8 @@
 
 **Fixed**
 
+- A damaged run evidence file whose count or length was enormous made Supercov overflow or try to allocate it and abort; it is reported as truncated.
+- A browser driver reply or request claiming an enormous `Content-Length` was allocated up front; the body is read as it arrives and a short one is refused.
 - A damaged evidence archive entry claiming an enormous size made Supercov try to allocate it and abort; the entry is read as its bytes arrive and reported as truncated.
 - A damaged Rust region file whose header named billions of entries per decision made reading it run for a very long time; only the slots the file holds are read.
 - The assertion assessment showed a JUnit or Kotlin test whose annotation spans lines (`@Tag(` ... `)`) with only its closing `)`; the whole annotation is shown.
