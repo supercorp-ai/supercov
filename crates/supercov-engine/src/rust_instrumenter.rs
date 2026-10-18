@@ -3551,6 +3551,53 @@ fn checked(value: bool) -> bool {
         }));
     }
 
+    /// The macro limitation names four macros and counts the rest, in the
+    /// singular where there is one, and quotes a long first line cut short.
+    #[test]
+    fn the_macro_limitation_names_four_and_counts_the_rest() {
+        let reason = |count: usize, long: bool| {
+            let mut source = String::new();
+            for at in 0..count {
+                source.push_str(&format!("macro_rules! m{at} {{ ($($t:tt)*) => {{}}; }}\n"));
+            }
+            source.push_str("pub fn f() {\n");
+            for at in 0..count {
+                if long && at == 0 {
+                    source.push_str(&format!("    m0!({});\n", "x ".repeat(80)));
+                } else {
+                    source.push_str(&format!("    m{at}!();\n"));
+                }
+            }
+            source.push_str("}\n");
+            let manifest = build_rust_manifest("src/lib.rs", &source).unwrap();
+            manifest
+                .limitations
+                .iter()
+                .find(|limitation| {
+                    limitation_kind_of(limitation) == Some("rust-macro-expansion-not-instrumented")
+                })
+                .map(|limitation| limitation.to_string())
+                .unwrap()
+        };
+        assert!(
+            reason(5, false).contains("and 1 other macro expand"),
+            "{}",
+            reason(5, false)
+        );
+        assert!(
+            reason(6, false).contains("and 2 other macros expand"),
+            "{}",
+            reason(6, false)
+        );
+        assert!(
+            reason(4, false).contains("`m3!` expand"),
+            "{}",
+            reason(4, false)
+        );
+        let long = reason(1, true);
+        assert!(long.contains("x x...\""), "{long}");
+    }
+
     #[test]
     fn a_vec_macro_that_starts_a_larger_expression_keeps_its_probe_outside() {
         // smallvec's `vec![elem; n].into()`: blanking `vec!` to read the
@@ -4051,6 +4098,8 @@ fn main() {
             ("src/tests.rs", true),
             ("src/parser_tests.rs", true),
             ("src/parser-tests.rs", true),
+            ("src/my_parser-tests.rs", true),
+            ("src/my-parser_tests.rs", true),
             ("src/_tests.rs", false),
             ("src/a.b_tests.rs", false),
             ("src/contests.rs", false),
