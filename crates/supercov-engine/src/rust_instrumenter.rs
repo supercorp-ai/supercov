@@ -4132,6 +4132,10 @@ fn main() {
             "const fn n(mut i: u8) -> u8 {\n    while i < 3 && i != 9 {\n        i += 1;\n    }\n    loop {\n        if i > 1 {\n            break;\n        }\n    }\n    match i {\n        0 => 1,\n        _ if i > 2 => 2,\n        _ => {\n            3\n        }\n    }\n}\n",
             "fn o(n: std::convert::Infallible) -> u8 {\n    match n {}\n}\n",
             "fn p(a: bool) -> u8 {\n    let f = || -> u8 {\n        if a { 1 } else { 2 }\n    };\n    let v = vec![f(), 2];\n    let w = [f(); 2];\n    println!(\"{:?} {:?}\", v, w);\n    #[rustfmt::skip]\n    println!(\"{}\", a);\n    f()\n}\n",
+            // A loop's own breaks, past breaks of loops and closures inside it.
+            "fn r(c: bool) -> u8 {\n    loop {\n        while c {\n            break;\n        }\n        for _ in 0..1 {\n            break;\n        }\n        let _g = || loop {\n            break;\n        };\n        'inner: loop {\n            break 'inner;\n        }\n        break 1;\n    }\n}\n",
+            // A let chain whose first operand holds no `let`.
+            "fn s(a: bool, b: Option<u8>) -> u8 {\n    if a && let Some(x) = b && x > 1 { x } else { 0 }\n}\n",
             "fn q(a: Option<u8>) -> Option<u8> {\n    let b = a?;\n    let c = if let Some(x) = a { x } else { b };\n    while let Some(y) = a {\n        if y > c { break; }\n    }\n    Some(c)\n}\n",
         ];
         for shape in shapes {
@@ -4150,6 +4154,41 @@ fn main() {
             super::instrument_rust_source("src/lib.rs", "fn a() {}\n", "self::rt"),
             Err(super::RustInstrumenterError::InvalidRuntimePath)
         ));
+    }
+
+    /// Test code is what `cfg(test)` gates, alone or first in an `all(..)`,
+    /// and what a test or bench attribute marks, by its last path segment.
+    #[test]
+    fn test_items_are_known_by_their_attributes() {
+        let source = "#[cfg(test)]\nfn a() {}\n#[cfg(all(test))]\nfn b() {}\n#[cfg(all(test, unix))]\nfn c() {}\n#[bench]\nfn d() {}\n#[tokio::test]\nasync fn e() {}\n#[cfg(not(test))]\nfn f() {}\n#[test_case]\nfn g() {}\n#[derive(Debug)]\nstruct H;\n#[cfg(all(unix, test))]\nfn i() {}\n";
+        let tree =
+            ra_ap_syntax::SourceFile::parse(source, ra_ap_syntax::Edition::Edition2024).tree();
+        use ra_ap_syntax::{AstNode, ast::HasName};
+        let marked = tree
+            .syntax()
+            .descendants()
+            .filter_map(ra_ap_syntax::ast::Fn::cast)
+            .map(|function| {
+                (
+                    function.name().unwrap().text().to_string(),
+                    super::test_item(function.syntax()),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            marked,
+            [
+                ("a", true),
+                ("b", true),
+                ("c", true),
+                ("d", true),
+                ("e", true),
+                ("f", false),
+                ("g", false),
+                ("i", false),
+            ]
+            .map(|(name, test)| (name.to_owned(), test))
+        );
     }
 
     #[test]
