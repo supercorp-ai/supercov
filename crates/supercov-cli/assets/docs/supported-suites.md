@@ -249,6 +249,7 @@ Cloudflare's own runtime -- measure the Worker too:
 
 ```sh
 npx supercov -- cargo test
+npx supercov -- cargo nextest run
 ```
 
 The Worker crate is instrumented with the rest of the workspace, and `wrangler
@@ -259,7 +260,10 @@ the test's own arguments, process and signals. What the Worker ran is
 credited to the test that started it, exactly, as its own coverage. The
 Worker crate counts though `cargo test` never compiles it, once a test has
 run it. This needs a `wrangler` on `PATH` when the run starts; without one,
-nothing is put in front of it.
+nothing is put in front of it. A run whose tests start no Worker still compiles the crate under
+`cargo test --workspace`; its files then say they are a Rust Worker no test
+started, in `gaps` and the file view, rather than reading as code the tests
+missed.
 
 The Worker built with probes stays in the copy: its `build/` output is never
 returned to the project, and neither is the copy's configuration, which
