@@ -8524,3 +8524,42 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     assert_eq!(json["data"]["summary"]["tests"], 3);
     assert_eq!(json["data"]["summary"]["unaffected"], 2);
 }
+
+/// Output sent to one file for both streams (`> log 2>&1`) arrives through
+/// one relay and names the project rather than Supercov's copy.
+#[test]
+fn both_streams_into_one_file_name_the_project() {
+    let project = Project::empty("one-file");
+    project.write("go.mod", "module example.com/onefile\n\ngo 1.21\n");
+    project.write(
+        "x.go",
+        "package x\n\nfunc F(a bool) int {\n\tif a {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+    );
+    project.write(
+        "x_test.go",
+        "package x\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) {\n\tdir, _ := os.Getwd()\n\tfmt.Println(\"out \" + dir)\n\tfmt.Fprintln(os.Stderr, \"err \"+dir)\n\tF(true)\n}\n",
+    );
+    let log = project.root.join("both.log");
+    let file = std::fs::File::create(&log).unwrap();
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args(["--", "go", "test", "-v", "./..."])
+        .current_dir(&project.root)
+        .env_remove("SUPERCOV_SOURCE_ROOTS")
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .status()
+        .unwrap();
+    let written = std::fs::read_to_string(&log).unwrap();
+    assert!(status.success(), "{written}");
+    let root = project.root.display().to_string();
+    assert!(written.contains(&format!("out {root}\n")), "{written}");
+    assert!(written.contains(&format!("err {root}\n")), "{written}");
+    // Supercov's own lines name the copy; the command's do not.
+    assert!(
+        written
+            .lines()
+            .filter(|line| !line.starts_with("[supercov]"))
+            .all(|line| !line.contains("workspaces/workspace/")),
+        "{written}"
+    );
+}
