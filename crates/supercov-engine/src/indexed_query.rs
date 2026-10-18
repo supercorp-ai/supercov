@@ -331,6 +331,15 @@ impl IndexedQueryError {
                     format!("Source file not found: {selector}"),
                     Some(json!({ "selector": selector })),
                 ),
+                QueryError::OutOfScope {
+                    file,
+                    status,
+                    reason,
+                } => (
+                    ErrorCode::SourceNotFound,
+                    format!("{file} is outside the run's scope: {reason}"),
+                    Some(json!({ "selector": file, "status": status, "reason": reason })),
+                ),
                 QueryError::AmbiguousSelector { selector, matches } => (
                     ErrorCode::AmbiguousSelector,
                     format!("Ambiguous file selector: {}", matches.join(", ")),
@@ -387,8 +396,34 @@ fn compact_line(mut data: CoverageCoversData) -> CoverageCoversData {
 fn location_failure(error: &QueryError) -> bool {
     matches!(
         error,
-        QueryError::SourceNotFound(_) | QueryError::AmbiguousSelector { .. }
+        QueryError::SourceNotFound(_)
+            | QueryError::OutOfScope { .. }
+            | QueryError::AmbiguousSelector { .. }
     )
+}
+
+/// A file the query did not find that the run's scope left out says why.
+fn with_scope_reason(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+    error: QueryError,
+) -> QueryError {
+    let QueryError::SourceNotFound(selector) = &error else {
+        return error;
+    };
+    index
+        .scope_entries(view)
+        .ok()
+        .and_then(|entries| {
+            entries.into_iter().find(|entry| {
+                entry.file == *selector && !entry.status.eq_ignore_ascii_case("included")
+            })
+        })
+        .map_or(error, |entry| QueryError::OutOfScope {
+            file: entry.file,
+            status: entry.status,
+            reason: entry.reason,
+        })
 }
 
 /// A location of a several-line query that could not be answered.
@@ -648,7 +683,8 @@ pub fn query_indexed(
                     limit: request.limit.min(BATCH_LINE_TESTS),
                 },
                 &mut cache,
-            );
+            )
+            .map_err(|error| with_scope_reason(index, view, error));
             match answer {
                 Ok((data, page)) => {
                     lines.push(compact_line(data));
@@ -715,7 +751,8 @@ pub fn query_indexed(
                 offset: request.offset,
                 limit: request.limit,
             },
-        )?;
+        )
+        .map_err(|error| with_scope_reason(index, view, error))?;
         return Ok(IndexedQueryOutput {
             command: "coverage.line",
             data: IndexedQueryData::Line(Box::new(data)),
@@ -788,7 +825,8 @@ pub fn query_indexed(
                 offset: request.offset,
                 limit: request.limit,
             },
-        )?;
+        )
+        .map_err(|error| with_scope_reason(index, view, error))?;
         return Ok(IndexedQueryOutput {
             command: "coverage.file",
             data: IndexedQueryData::FileDetail(Box::new(data)),

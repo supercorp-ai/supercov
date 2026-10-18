@@ -7215,3 +7215,37 @@ fn a_page_past_the_end_says_so() {
         &["showing 1-1 of 1"],
     );
 }
+
+#[test]
+fn a_file_the_scope_left_out_says_why_rather_than_not_found() {
+    let project = Project::cart("scope-reason");
+    project.measure(&[]);
+    for args in [
+        &["runs", "latest", "file", "test/cart.test.js"][..],
+        &["runs", "latest", "line", "test/cart.test.js:3"][..],
+    ] {
+        let said = project.supercov(args).exits(2);
+        assert!(
+            said.contains("test/cart.test.js is outside the run's scope: test or fixture source"),
+            "{args:?}: {said}"
+        );
+    }
+    // Among several lines, that location says why and the others answer.
+    let several = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:1",
+            "test/cart.test.js:3",
+        ])
+        .succeeds();
+    assert!(several.contains("outside the run's scope"), "{several}");
+    let missing = project
+        .supercov(&["runs", "latest", "file", "src/none.js"])
+        .exits(2);
+    assert!(
+        missing.contains("Source file not found: src/none.js"),
+        "{missing}"
+    );
+}

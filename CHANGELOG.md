@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- `file` and `line` on a file the run's scope left out, such as a test file, said "Source file not found"; they give the scope's reason.
 - A page past the last entry (`--offset` beyond the total) read "showing 0-1 of 1"; it says the offset is past the end.
 - A test command that could not start (no such program) exited `1`, which reads as a failed policy; it exits `127`, or `126` for a file that may not be run, as a shell does.
 - `diff` with a third run id ignored it; it is refused now.

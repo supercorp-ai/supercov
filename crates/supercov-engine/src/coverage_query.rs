@@ -206,6 +206,12 @@ pub enum QueryError {
     TestNotFound(String),
     DecisionNotFound(String),
     SourceNotFound(String),
+    /// A file the run's scope left out, with the scope's reason.
+    OutOfScope {
+        file: String,
+        status: String,
+        reason: String,
+    },
     AmbiguousSelector {
         selector: String,
         matches: Vec<String>,
