@@ -3529,4 +3529,34 @@ mod tests {
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Paths are normalized, compared and related by their components alone.
+    #[cfg(unix)]
+    #[test]
+    fn paths_are_normalized_and_related_by_their_components() {
+        let path = |text: &str| PathBuf::from(text);
+        assert_eq!(lexical_normalize(&path("/a/./b/../c")), Some(path("/a/c")));
+        assert_eq!(lexical_normalize(&path("a/../..")), None);
+        assert_eq!(lexical_normalize(&path("")), Some(path("")));
+        assert!(inside(&path("/r"), &path("/r")));
+        assert!(inside(&path("/r"), &path("/r/a/b")));
+        assert!(!inside(&path("/r"), &path("/r/../x")));
+        assert!(!inside(&path("/r"), &path("/rx")));
+        assert_eq!(
+            pathdiff(&path("/r/a/link"), &path("/r/b/target")).unwrap(),
+            path("../b/target")
+        );
+        assert_eq!(
+            pathdiff(&path("/r/link"), &path("/r/target")).unwrap(),
+            path("target")
+        );
+        assert!(matches!(
+            pathdiff(&path("a/link"), &path("b/target")),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            pathdiff(&path("/"), &path("/x")),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+    }
 }
