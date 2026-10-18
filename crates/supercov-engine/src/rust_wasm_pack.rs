@@ -214,7 +214,7 @@ mod tests {
         );
         let learned = parse_record(&root, &record).unwrap();
         // The manifest path in the platform's own separators.
-        let manifest = Path::new("crates/web").join("Cargo.toml");
+        let manifest = Path::new("crates").join("web").join("Cargo.toml");
         assert_eq!(
             learned.command,
             [
