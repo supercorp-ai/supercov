@@ -84,6 +84,11 @@ pub struct NextestOutcome {
     pub results: Vec<RawTestResult>,
     pub artifact_files: Vec<PathBuf>,
     pub exit_code: i32,
+    /// The crates a test's Worker returned a region for: `wrangler dev`
+    /// built them, though the run's own build did not.
+    pub built_crates: BTreeSet<String>,
+    /// A test started a Worker with `wrangler dev --remote`.
+    pub remote_workers: bool,
 }
 
 // -------------------------------------------------------------- the engine
@@ -95,6 +100,7 @@ pub(crate) fn run_nextest(
     invocation: &CargoTestInvocation,
     root: &Path,
     run_id: &str,
+    rust_workers: Option<&crate::rust_worker::CargoTestWorkers>,
     diagnostics: &mut dyn Write,
 ) -> Result<NextestOutcome, RustTestRunnerError> {
     fs::create_dir_all(root.join(ATTEMPTS_DIRECTORY)).map_err(io_error)?;
@@ -107,7 +113,15 @@ pub(crate) fn run_nextest(
             .args(arguments)
             .current_dir(&project.workspace_root)
             .env("CARGO_TARGET_DIR", &project.target_directory)
-            .env("RUSTFLAGS", capped_rustflags(project, invocation));
+            .env("RUSTFLAGS", capped_rustflags(project, invocation))
+            // Every test process descends from this one, through this
+            // program as nextest's runner: a test that starts `wrangler dev`
+            // finds Supercov's first, as under `cargo test`.
+            .envs(
+                rust_workers
+                    .iter()
+                    .flat_map(|workers| workers.environment()),
+            );
         command
     };
 
@@ -225,6 +239,8 @@ pub(crate) fn run_nextest(
     });
     let mut seen = BTreeSet::new();
     let mut ran = BTreeSet::new();
+    let mut built_crates = BTreeSet::new();
+    let mut remote_workers = false;
     let mut results = Vec::with_capacity(records.len());
     for record in records {
         let key = (record.binary_id.clone(), record.test_name.clone());
@@ -258,6 +274,16 @@ pub(crate) fn run_nextest(
             .map_err(io_error)?;
         }
         let attempt_id = format!("{run_id}:{}:{}", record.runner_attempt_id, record.attempt);
+        if rust_workers.is_some() {
+            remote_workers |= crate::rust_worker::started_remote(&record.evidence);
+            built_crates.extend(
+                crate::rust_worker::materialize_worker_windows(
+                    &record.evidence,
+                    &project.probes.token,
+                )
+                .map_err(RustTestRunnerError::Io)?,
+            );
+        }
         let evidence = snapshot(
             &project.manifest,
             &project.probes,
@@ -315,6 +341,8 @@ pub(crate) fn run_nextest(
     }
     Ok(NextestOutcome {
         results,
+        built_crates,
+        remote_workers,
         artifact_files: artifacts
             .into_values()
             .map(|artifact| artifact.executable)
@@ -361,6 +389,19 @@ fn runner_configuration_arguments(
     Ok(arguments)
 }
 
+/// Whether a test binary nextest calls `nextest_kind` is built from a Cargo
+/// target of `cargo_kind`. nextest names a library's test binary `lib`
+/// whatever crate types the library declares: a `cdylib`-only crate (a
+/// Worker, a wasm library) is `lib` to nextest and `cdylib` to Cargo.
+fn built_as(nextest_kind: &str, cargo_kind: &str) -> bool {
+    nextest_kind == cargo_kind
+        || nextest_kind == "lib"
+            && matches!(
+                cargo_kind,
+                "lib" | "rlib" | "dylib" | "cdylib" | "staticlib"
+            )
+}
+
 /// Join nextest's listing to Cargo's metadata: each binary to the target it
 /// was built from, and so to the source file its tests are attributed to.
 fn nextest_artifacts(
@@ -400,7 +441,7 @@ fn nextest_artifacts(
                 && target
                     .kind
                     .iter()
-                    .any(|kind| kind == suite.binary.kind.as_str())
+                    .any(|kind| built_as(suite.binary.kind.as_str(), kind))
         });
         let target = targets.next().ok_or_else(|| {
             RustTestRunnerError::CargoJson(format!(

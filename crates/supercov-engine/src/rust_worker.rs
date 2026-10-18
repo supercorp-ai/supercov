@@ -906,6 +906,35 @@ fn starts_dev(arguments: &[std::ffi::OsString]) -> bool {
     false
 }
 
+/// `wrangler dev --remote` (or `-r`): the Worker runs on Cloudflare's edge,
+/// and wrangler opens no inspector into it there, so nothing can read what
+/// it runs.
+fn runs_remote(arguments: &[std::ffi::OsString]) -> bool {
+    arguments.iter().any(|argument| {
+        matches!(
+            argument.to_string_lossy().as_ref(),
+            "--remote" | "-r" | "--remote=true"
+        )
+    })
+}
+
+/// The name of the note a test's `wrangler dev --remote` leaves in its
+/// evidence.
+const REMOTE_NOTE: &str = "worker-remote-";
+
+/// Whether a test, by its evidence, started a Worker with `wrangler dev
+/// --remote`.
+pub fn started_remote(directory: &Path) -> bool {
+    fs::read_dir(directory).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(REMOTE_NOTE))
+        })
+    })
+}
+
 /// The inspector port the arguments name, as `--inspector-port N` or
 /// `--inspector-port=N`.
 fn named_inspector_port(arguments: &[std::ffi::OsString]) -> Option<u16> {
@@ -935,6 +964,15 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
     if starts_dev(&arguments)
         && let Some(evidence) = evidence
     {
+        if runs_remote(&arguments) {
+            // No poller: the run says why the Worker has no coverage.
+            let _ = fs::create_dir_all(&evidence);
+            let _ = fs::write(
+                evidence.join(format!("{REMOTE_NOTE}{}", std::process::id())),
+                "",
+            );
+            return exec_wrangler(&real, &arguments);
+        }
         let port = match named_inspector_port(&arguments) {
             Some(port) => Some(port),
             None => free_port().ok().inspect(|port| {
@@ -955,13 +993,15 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
                 .spawn();
         }
     }
-    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-    if !rustflags.is_empty() {
-        rustflags.push(' ');
-    }
-    rustflags.push_str("--cap-lints=warn -A unused_parens");
-    let mut command = std::process::Command::new(&real);
-    command.args(&arguments).env("RUSTFLAGS", rustflags);
+    exec_wrangler(&real, &arguments)
+}
+
+/// Becomes the real `wrangler`, so the test keeps the process and the
+/// signals it expects; where it cannot (Windows), runs it to its end.
+fn exec_wrangler(real: &std::ffi::OsStr, arguments: &[std::ffi::OsString]) -> i32 {
+    let rustflags = worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default());
+    let mut command = std::process::Command::new(real);
+    command.args(arguments).env("RUSTFLAGS", rustflags);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -985,6 +1025,25 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
             }
         }
     }
+}
+
+/// The flags the Worker's wasm build gets: the test's own, with lints capped
+/// at `warn`. A cap the test inherited is dropped first: under nextest the
+/// tests inherit Supercov's `--cap-lints=allow`, and with it Cargo cannot
+/// learn wasm32's crate types ("output of --print=file-names missing"), even
+/// with a `warn` after it.
+fn worker_rustflags(inherited: &str) -> String {
+    let mut kept = Vec::new();
+    let mut words = inherited.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "--cap-lints" {
+            words.next();
+        } else if !word.starts_with("--cap-lints=") {
+            kept.push(word);
+        }
+    }
+    kept.extend(["--cap-lints=warn", "-A", "unused_parens"]);
+    kept.join(" ")
 }
 
 /// The poller of one `wrangler dev` a test started: takes through `port`
@@ -1115,6 +1174,16 @@ fn region_token(bytes: &[u8]) -> Option<&str> {
 }
 
 /// The root of the Cargo workspace `directory`'s crate belongs to.
+/// The directories, relative to `workspace` and `/`-separated, of the Rust
+/// Workers in it: each wrangler configuration that builds with worker-build.
+pub(crate) fn worker_crate_directories(workspace: &Path) -> Vec<String> {
+    worker_configs(workspace)
+        .iter()
+        .filter_map(|config| config.parent()?.strip_prefix(workspace).ok())
+        .map(|directory| directory.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
 pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
@@ -1151,6 +1220,19 @@ mod tests {
     }
 
     #[test]
+    fn the_worker_build_caps_lints_at_warn_whatever_it_inherited() {
+        assert_eq!(worker_rustflags(""), "--cap-lints=warn -A unused_parens");
+        assert_eq!(
+            worker_rustflags("-C debuginfo=1 --cap-lints=allow"),
+            "-C debuginfo=1 --cap-lints=warn -A unused_parens"
+        );
+        assert_eq!(
+            worker_rustflags("--cap-lints allow -Dwarnings"),
+            "-Dwarnings --cap-lints=warn -A unused_parens"
+        );
+    }
+
+    #[test]
     fn the_stand_in_reads_dev_and_an_inspector_port_wherever_they_stand() {
         let os = |arguments: &[&str]| {
             arguments
@@ -1158,6 +1240,10 @@ mod tests {
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
         };
+        assert!(runs_remote(&os(&["dev", "--remote"])));
+        assert!(runs_remote(&os(&["dev", "-r", "--port", "8787"])));
+        assert!(!runs_remote(&os(&["dev", "--remote=false"])));
+        assert!(!runs_remote(&os(&["dev", "--local"])));
         assert!(starts_dev(&os(&["dev", "--local"])));
         assert!(starts_dev(&os(&["--cwd", "worker", "dev"])));
         assert!(starts_dev(&os(&[

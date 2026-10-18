@@ -164,6 +164,37 @@ fn a_low_score_fails() {
 fn a_test_that_starts_no_worker() {
     assert_eq!(1 + 1, 2);
 }
+
+/// \`wrangler dev --remote\` against an API that is not there: the stand-in
+/// sees \`--remote\` before wrangler asks Cloudflare for anything, and no
+/// account is ever reached.
+#[test]
+fn a_test_that_starts_a_remote_worker() {
+    if std::env::var_os("GATE_REMOTE").is_none() {
+        return;
+    }
+    let _one = exclusive();
+    let mut child = Command::new("wrangler")
+        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../worker"))
+        .args(["dev", "--remote", "--show-interactive-dev-session=false"])
+        .env("CLOUDFLARE_API_TOKEN", "gate-no-account")
+        .env("CLOUDFLARE_ACCOUNT_ID", "0")
+        .env("CLOUDFLARE_API_BASE_URL", "http://127.0.0.1:9/client/v4")
+        .env("WRANGLER_SEND_METRICS", "false")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("wrangler on PATH");
+    for _ in 0..600 {
+        if child.try_wait().unwrap().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    drop(Dev { child, port: 0 });
+}
 `,
 };
 
@@ -179,39 +210,69 @@ try {
   assert.equal(run(root, 'git', ['add', '-A']).status, 0);
   assert.equal(run(root, 'git', ['-c', 'user.name=gate', '-c', 'user.email=gate@example.com', 'commit', '-qm', 'fixture']).status, 0);
 
-  // The suite finds wrangler on PATH, as a project's does.
+  // The suite finds wrangler on PATH, as a project's does; under `cargo
+  // test` and, where it is installed, under `cargo nextest run`, whose tests
+  // reach Supercov's `wrangler` through Supercov as nextest's runner.
   const path = `${resolve(root, 'node_modules/.bin')}${delimiter}${process.env.PATH}`;
-  const measured = run(root, binary, ['--', 'cargo', 'test'], { PATH: path });
-  assert.equal(measured.status, 0, `${measured.stdout}${measured.stderr}`);
-  assert.match(measured.stderr, /Rust coverage: 3 test\(s\)/u, measured.stderr);
-  assert.doesNotMatch(measured.stderr, /did not compile[^\n]*worker\/src\/lib\.rs/u, measured.stderr);
+  const nextest = run(root, 'cargo', ['nextest', '--version']).status === 0;
+  if (!nextest && process.env.SUPERCOV_REQUIRE_RUST_WORKER === '1') {
+    assert.fail('cargo-nextest is missing where the job installed it');
+  }
+  const commands = [['cargo', 'test'], ...(nextest ? [['cargo', 'nextest', 'run']] : [])];
+  if (!nextest) console.log('[rust-worker-cargo-test] cargo nextest run: skipped, cargo-nextest is not installed');
+  for (const command of commands) {
+    const label = command.join(' ');
+    const measured = run(root, binary, ['--', ...command], { PATH: path });
+    assert.equal(measured.status, 0, `${label}\n${measured.stdout}${measured.stderr}`);
+    assert.match(measured.stderr, /Rust coverage: 4 test\(s\)/u, `${label}\n${measured.stderr}`);
+    assert.doesNotMatch(measured.stderr, /did not compile[^\n]*worker\/src\/lib\.rs/u, `${label}\n${measured.stderr}`);
 
-  const id = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
-  const summary = run(root, binary, ['runs', id]);
-  assert.doesNotMatch(summary.stdout + summary.stderr, /stale/iu, summary.stdout + summary.stderr);
-  const lines = (name) => [...new Set(run(root, binary, ['runs', id, 'test', name, '--limit', '0']).stdout.match(/worker\/src\/lib\.rs:\d+/gu) ?? [])].sort();
-  const curved = lines('a_curved_score_is_an_a');
-  const low = lines('a_low_score_fails');
-  // Each test is credited its own path through `grade`, exactly.
-  assert.ok(curved.includes('worker/src/lib.rs:4') && curved.includes('worker/src/lib.rs:5'), curved.join(' '));
-  assert.ok(!curved.includes('worker/src/lib.rs:9'), curved.join(' '));
-  assert.ok(low.includes('worker/src/lib.rs:9'), low.join(' '));
-  assert.ok(!low.includes('worker/src/lib.rs:5'), low.join(' '));
-  assert.deepEqual(lines('a_test_that_starts_no_worker'), []);
-  const pass = run(root, binary, ['runs', id, 'line', 'worker/src/lib.rs:7']).stdout;
-  assert.match(pass, /NOT COVERED/u, pass);
-  const decision = run(root, binary, ['runs', id, 'decision', 'worker/src/lib.rs:4']).stdout;
-  assert.match(decision, /FF- -> F +tests=1/u, decision);
-  assert.match(decision, /FTT -> T +tests=1/u, decision);
-  const scope = JSON.parse(run(root, binary, ['runs', id, 'scope', '--json', '--limit', '0']).stdout).data.entries;
-  assert.equal(scope.find((entry) => entry.file === 'worker/src/lib.rs')?.status, 'included', JSON.stringify(scope));
+    const id = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
+    const summary = run(root, binary, ['runs', id]);
+    assert.doesNotMatch(summary.stdout + summary.stderr, /stale/iu, `${label}\n${summary.stdout}${summary.stderr}`);
+    const lines = (name) => [...new Set(run(root, binary, ['runs', id, 'test', name, '--limit', '0']).stdout.match(/worker\/src\/lib\.rs:\d+/gu) ?? [])].sort();
+    const curved = lines('a_curved_score_is_an_a');
+    const low = lines('a_low_score_fails');
+    // Each test is credited its own path through `grade`, exactly.
+    assert.ok(curved.includes('worker/src/lib.rs:4') && curved.includes('worker/src/lib.rs:5'), `${label}: ${curved.join(' ')}`);
+    assert.ok(!curved.includes('worker/src/lib.rs:9'), `${label}: ${curved.join(' ')}`);
+    assert.ok(low.includes('worker/src/lib.rs:9'), `${label}: ${low.join(' ')}`);
+    assert.ok(!low.includes('worker/src/lib.rs:5'), `${label}: ${low.join(' ')}`);
+    assert.deepEqual(lines('a_test_that_starts_no_worker'), [], label);
+    const pass = run(root, binary, ['runs', id, 'line', 'worker/src/lib.rs:7']).stdout;
+    assert.match(pass, /NOT COVERED/u, `${label}\n${pass}`);
+    const decision = run(root, binary, ['runs', id, 'decision', 'worker/src/lib.rs:4']).stdout;
+    assert.match(decision, /FF- -> F +tests=1/u, `${label}\n${decision}`);
+    assert.match(decision, /FTT -> T +tests=1/u, `${label}\n${decision}`);
+    const scope = JSON.parse(run(root, binary, ['runs', id, 'scope', '--json', '--limit', '0']).stdout).data.entries;
+    assert.equal(scope.find((entry) => entry.file === 'worker/src/lib.rs')?.status, 'included', `${label}: ${JSON.stringify(scope)}`);
+  }
+
+  // A run whose tests start no Worker compiles the Worker crate and never
+  // runs it as one: its file says why it is not covered, and how to cover it.
+  const unrun = run(root, binary, ['--', 'cargo', 'test', '--workspace', '--', 'a_test_that_starts_no_worker'], { PATH: path });
+  assert.equal(unrun.status, 0, `${unrun.stdout}${unrun.stderr}`);
+  const unrunId = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
+  const workerFile = run(root, binary, ['runs', unrunId, 'file', 'worker/src/lib.rs']).stdout;
+  assert.match(workerFile, /A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`/u, workerFile);
+  const gaps = run(root, binary, ['runs', unrunId, 'gaps']).stdout;
+  assert.match(gaps, /worker\/src\/lib\.rs/u, gaps);
+
+  // A test that starts the Worker with \`wrangler dev --remote\`: it runs on
+  // Cloudflare's edge, where wrangler opens no inspector, and the file says
+  // so rather than that no test started it.
+  const remote = run(root, binary, ['--', 'cargo', 'test', '--workspace', '--', 'a_test_that_starts_a_remote_worker'], { PATH: path, GATE_REMOTE: '1' });
+  assert.equal(remote.status, 0, `${remote.stdout}${remote.stderr}`);
+  const remoteId = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
+  const remoteFile = run(root, binary, ['runs', remoteId, 'file', 'worker/src/lib.rs']).stdout;
+  assert.match(remoteFile, /started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector/u, remoteFile);
 
   // The project is as it was: the copy alone was pointed at Supercov's
   // entry, and the Worker built with probes stayed there.
   const status = run(root, 'git', ['status', '--porcelain', '--untracked-files=all']).stdout;
   assert.equal(status.trim(), '', status);
   assert.ok(!existsSync(resolve(root, 'worker/build')), 'a Worker built in the copy was returned to the project');
-  console.log('[rust-worker-cargo-test] a Rust Worker a cargo test suite starts with wrangler dev is measured, each test credited its own work exactly');
+  console.log(`[rust-worker-cargo-test] a Rust Worker a test starts with wrangler dev is measured under ${commands.map((command) => command.join(' ')).join(' and ')}, each test credited its own work exactly`);
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'rust-worker-cargo-test-')))
     rmSync(root, { recursive: true, force: true });
