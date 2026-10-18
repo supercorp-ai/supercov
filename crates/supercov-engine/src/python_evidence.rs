@@ -2749,6 +2749,21 @@ mod tests {
             (set(24, &3_u64.to_le_bytes()), "3"),
             (set(32, &0_u64.to_le_bytes()), "process id is missing"),
             (set(64, &[2]), "commit marker or reserved bytes are invalid"),
+            (set(65, &[1]), "commit marker or reserved bytes are invalid"),
+            (set(76, &[1]), "commit marker or reserved bytes are invalid"),
+            (valid[..32].to_vec(), "header or version does not match"),
+            (
+                set(12, &1_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(16, &u64::MAX.to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (
+                set(68, &u32::MAX.to_le_bytes()),
+                "payload length is outside the transport bound",
+            ),
             (
                 set(68, &0_u32.to_le_bytes()),
                 "payload length is outside the transport bound",
