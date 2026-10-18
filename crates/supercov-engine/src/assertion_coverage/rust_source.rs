@@ -1906,6 +1906,143 @@ mod replacement_tests {
         assert_eq!(r[&8][0].1, "1.0");
     }
 
+    /// Tuples, arrays, comparisons and characters, each changed by its
+    /// shape: an element of a tuple in place, a computed tuple through a
+    /// copy, an order reversed.
+    #[test]
+    fn a_compound_value_is_changed_in_one_of_its_parts() {
+        let source = r#"fn f(name: String, foo: Foo, n: u8, t: &str, total: usize) -> u8 {
+    let t1: (String, u8) = (name, 1);
+    let t2: (Foo, u8) = (foo, n);
+    let t3: (_, Foo) = pair();
+    let t4: (String, u8) = pair2();
+    let e: [Foo; 0] = [];
+    let i = &t[1];
+    let c: char = t.chars().next().unwrap();
+    let d: char = t.chars().next_back().unwrap();
+    let k: usize = total;
+    let r4 = &t;
+    let s2 = name.as_str().trim();
+    let o = a.cmp(&b);
+    let o2 = Ord::cmp(&a, &b);
+    let nested = (foo, (n, foo));
+    0
+}
+"#;
+        let signatures = signatures([("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        for (line, expected) in [
+            (2, "(String::new(), 1)"),
+            (3, "(foo, 0)"),
+            // No element of a type it can change: no part to change.
+            (4, "Default::default()"),
+            (5, "{ let mut v = pair2(); v.0 = String::new(); v }"),
+            (6, "Default::default()"),
+            // An index is no slice.
+            (7, "Default::default()"),
+            (8, "'\\0'"),
+            (9, "'\\0'"),
+            (10, "0"),
+            (11, "Default::default()"),
+            (12, "\"\""),
+            (13, "(a.cmp(&b)).reverse()"),
+            (14, "(Ord::cmp(&a, &b)).reverse()"),
+            (15, "(foo, (0, foo))"),
+        ] {
+            assert_eq!(r[&line][0].1, expected, "line {line}");
+        }
+    }
+
+    /// A value made for a type: from its shape, its fields where every one
+    /// can be set from here, or not at all -- three structs deep, a maker
+    /// private to another module, a field private to another module.
+    #[test]
+    fn a_made_value_stops_where_this_module_cannot_make_one() {
+        let lib = "pub struct Deep1 { pub a: Deep2 }\npub struct Deep2 { pub b: Deep3 }\npub struct Deep3 { pub c: Deep4 }\npub struct Deep4 { pub d: u8 }\npub struct Two { pub a: u8, pub b: bool }\npub struct NonZeroFoo;\npub struct Made;\nimpl Made {\n    fn hidden_new() -> Self { Made }\n}\npub struct Closed { x: u8 }\n";
+        let source = r#"fn f() -> u8 {
+    let a: Option<NonZeroFoo> = None;
+    let b: Option<[u8; 2]> = None;
+    let c: Option<[u8]> = None;
+    let d: Option<Deep1> = None;
+    let e: Option<Deep3> = None;
+    let g: Option<Made> = None;
+    let h: Option<Closed> = None;
+    let i: Option<Two> = None;
+    let j: Option<std::num::NonZeroU32> = None;
+    let k: Option<(u8, bool)> = None;
+    let l: Option<Result<u8, Two>> = None;
+    let m: Option<*const u8> = None;
+    let n: Option<Foo<u8>> = None;
+    0
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        for (line, expected) in [
+            // Named for a non-zero type, and no integer's.
+            (2, "Some(Default::default())"),
+            (3, "Some([0; 2])"),
+            // A slice has no length to repeat.
+            (4, "Some(Default::default())"),
+            (5, "Some(Default::default())"),
+            (6, "Some(Deep3 { c: crate::Deep4 { d: 0 } })"),
+            (7, "Some(Default::default())"),
+            (8, "Some(Default::default())"),
+            (9, "Some(Two { a: 0, b: false })"),
+            (10, "Some(std::num::NonZeroU32::MAX)"),
+            (11, "Some((0, false))"),
+            (12, "Some(Ok(0))"),
+            (13, "Some(std::ptr::null())"),
+            (14, "Some(Default::default())"),
+        ] {
+            assert_eq!(r[&line][0].1, expected, "line {line}");
+        }
+    }
+
+    /// A block's value takes the function's type through `match` arms,
+    /// nested blocks and `else if`, and not where the block is a `break`'s
+    /// value or a `let`'s.
+    #[test]
+    fn a_block_is_typed_by_the_function_only_along_its_returned_path() {
+        let source = r#"fn g(a: u8) -> String {
+    match a {
+        0 => { make() }
+        _ => {
+            make()
+        }
+    }
+}
+fn h() -> String {
+    { { make() } }
+}
+fn i() -> String {
+    loop {
+        break { make() };
+    }
+}
+fn j(a: bool) -> String {
+    let s = if a { make() } else { make() };
+    s
+}
+fn k(a: bool) -> String {
+    if a { make() } else if !a { make() } else { make() }
+}
+"#;
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        let at = |line: usize| r[&line].iter().map(|c| c.1.as_str()).collect::<Vec<_>>();
+        let typed = "String::new()";
+        let untyped = "Default::default()";
+        assert_eq!(at(2), [typed]);
+        assert_eq!(at(3), [typed]);
+        assert_eq!(at(5), [typed]);
+        assert_eq!(at(10), [typed; 3]);
+        assert_eq!(at(13), [typed]);
+        assert_eq!(at(14), [untyped]);
+        assert_eq!(at(18), [untyped; 3]);
+        assert_eq!(at(19), [typed]);
+        assert_eq!(at(22), [typed; 3]);
+    }
+
     /// dtolnay/semver's shapes that used to fall back to
     /// `Default::default()`, for types that have none: the crate's own
     /// signatures, tuples, enums, `let`-`else` and integer arithmetic.
