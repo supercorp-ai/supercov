@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: read
+  # The stop-on-failure step cancels this commit's runs.
+  actions: write
 
 # A push to a pull request replaces the run of the commit before it. A run started by hand is left
 # to finish.
@@ -24,7 +26,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [22, 24]
+        # Every supported Node, here only: the Compatibility workflow's Node
+        # jobs ran the same check again on 22 and 24.
+        node: [22, 24, 25]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -36,6 +40,9 @@ jobs:
           components: clippy, rustfmt
       - run: npm ci
       - run: npm run check
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
 
   # The twelve integration scripts that drive the public wrapper, process
   # supervision and every JavaScript runner. They lived only in `test:engine`,
@@ -71,6 +78,9 @@ jobs:
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps
       - run: npm run test:engine-integrations
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
 
   # The rest of the release check: the steps no other job ran, so a pull
   # request's green tick covers everything a release checks and a release
@@ -105,6 +115,9 @@ jobs:
       - run: node scripts/native-release-set-integration.mjs
       - run: npm run test:packed-npx
       - run: npm run benchmark:check
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
 
   # clang's own MC/DC as the oracle for Supercov's: the golden file was made
   # with Apple's toolchain, which the script finds through `xcrun`.
@@ -119,3 +132,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:clang-mcdc
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
