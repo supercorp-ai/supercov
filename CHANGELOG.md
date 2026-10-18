@@ -20,6 +20,7 @@
 - `runs <run> tests -x` (any unknown flag where the action goes) printed the help and exited `0`; it is refused like an unknown action word.
 - `tests affected` and merges could not follow a package.json subpath import (`import x from '#lib/x'`): the specifier was cut at its `#` and read as empty, so every test importing one counted as reaching anything. Subpath imports, with or without `*`, now resolve to their file.
 - `assertions --test <name>` that matched no assessed test pointed at `runs <run> tests`, which lists no tests; it names the assessed tests instead.
+- A Playwright run whose mock server loaded a file URL with a `%` before a non-ASCII character (`%a` then `é`) crashed while reading which tests the server reached; such a `%` is kept as written.
 - `assertions` and `assertions --weak` with an `--offset` past the last file printed the summary and no table; they say the offset is past the end.
 - A Rust file with an attributed `let` whose value is a boolean decision (`#[allow(unused)] let kept = a && b;`) was not instrumented at all: the probe around the value and the decision's crossed and the result did not parse. They nest now.
 - `assert.strict.equal(...)` (and every other method under `assert.strict`) on an imported or required `node:assert` was not counted as an assertion, so the test's assertion coverage left it out; it is read as the strict module's assertion.

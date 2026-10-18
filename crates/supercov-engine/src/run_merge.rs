@@ -479,11 +479,18 @@ pub fn merge_coverage_runs(
         // Tests and their configuration may differ; what that takes is
         // looked at file by file.
         // So may the source, where what changed is outside what is measured.
+        // A different number of source files is a different source, even
+        // where the digest says otherwise.
+        let mut dimensions = dimensions;
+        if input.metadata.integrity.fingerprint.source_files
+            != first.metadata.integrity.fingerprint.source_files
+            && !dimensions.contains(&"source")
+        {
+            dimensions.push("source files");
+        }
         if dimensions
             .iter()
             .any(|dimension| !matches!(*dimension, "tests" | "configuration" | "source"))
-            || input.metadata.integrity.fingerprint.source_files
-                != first.metadata.integrity.fingerprint.source_files
         {
             return Err(format!(
                 "Cannot merge incompatible run {}: differing domains: {}",
@@ -848,6 +855,233 @@ mod tests {
             "Cannot merge incompatible run run-b: differing domains: source, tests, configuration"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Rewrites one entry of a stored run's evidence (None removes it) and
+    /// keeps its metadata in step with the archive.
+    fn rewrite_entry(root: &Path, id: &str, path: &str, contents: Option<Vec<u8>>) {
+        let directory = root.join(".supercov/runs").join(id);
+        let mut entries = read_archive(&directory.join("evidence.raw.gz")).unwrap();
+        entries.retain(|entry| entry.path != path);
+        if let Some(contents) = contents {
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: path.into(),
+                contents,
+            });
+        }
+        let archive =
+            crate::evidence_archive::write_archive(entries, &directory.join("evidence.raw.gz"))
+                .unwrap();
+        edit_metadata(root, id, |metadata| {
+            metadata.raw_evidence.files = archive.files;
+            metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+            metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        });
+    }
+
+    fn edit_metadata(root: &Path, id: &str, edit: impl FnOnce(&mut RunMetadata)) {
+        let path = root.join(".supercov/runs").join(id).join("run.json");
+        let mut metadata: RunMetadata = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        edit(&mut metadata);
+        fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    }
+
+    fn declaration_with(edit: impl FnOnce(&mut Value)) -> Option<Vec<u8>> {
+        let root = temporary();
+        create_analyzable_test_run(&root, "source");
+        let entries = read_archive(&root.join(".supercov/runs/source/evidence.raw.gz")).unwrap();
+        let mut value: Value = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|entry| entry.path == "frontend.json")
+                .unwrap()
+                .contents,
+        )
+        .unwrap();
+        edit(&mut value);
+        Some(serde_json::to_vec(&value).unwrap())
+    }
+
+    /// Every way two runs can fail to merge is said by name, and a second
+    /// runner, unlike a changed one, is simply added.
+    #[test]
+    fn each_refusal_to_merge_says_why() {
+        type Setup = Box<dyn Fn(&Path)>;
+        let version = env!("CARGO_PKG_VERSION");
+        let cases: Vec<(&str, Setup, String)> = vec![
+            (
+                "another instrumenter, release unknown",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.instrumenter_version = "x".into())
+                }),
+                format!(
+                    "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0, which instruments differently from Supercov {version}. Measure it again to merge it."
+                ),
+            ),
+            (
+                "another build of this release",
+                Box::new(move |root| {
+                    for id in ["run-a", "run-b"] {
+                        edit_metadata(root, id, |m| m.recorded_by = Some(version.into()));
+                    }
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.instrumenter = "9".repeat(64)
+                    });
+                }),
+                format!(
+                    "Cannot merge run run-b: it was recorded by another build of Supercov {version}, which instruments differently from this one. Measure it again to merge it."
+                ),
+            ),
+            (
+                "another release",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.recorded_by = Some("0.0.1".into());
+                        m.integrity.fingerprint.instrumenter = "9".repeat(64);
+                    })
+                }),
+                "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0".into(),
+            ),
+            (
+                "another language",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.instrumenter_version = "x".into());
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["language"] = "python".into()),
+                    );
+                }),
+                "Cannot merge run run-b: it measured python, and run run-a measured javascript; runs of different languages are not merged".into(),
+            ),
+            (
+                "dependencies",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.dependencies = "9".repeat(64)
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: dependencies".into(),
+            ),
+            (
+                "source file count",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.fingerprint.source_files = 2)
+                }),
+                "Cannot merge incompatible run run-b: differing domains: source files".into(),
+            ),
+            (
+                "denominator",
+                Box::new(|root| {
+                    rewrite_entry(root, "run-b", "manifest.json", Some(b"{}".to_vec()))
+                }),
+                "Cannot merge runs with different coverage denominators".into(),
+            ),
+            (
+                "model",
+                Box::new(|root| {
+                    rewrite_entry(root, "run-b", "coverage-model.json", Some(b"{}".to_vec()))
+                }),
+                "Cannot merge runs with different coverage models".into(),
+            ),
+            (
+                "invalid declaration",
+                Box::new(|root| {
+                    rewrite_entry(root, "run-b", "frontend.json", Some(b"[]".to_vec()))
+                }),
+                "Cannot merge invalid frontend declaration".into(),
+            ),
+            (
+                "frontend version",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["frontendVersion"] = "fixture-v2".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "runner",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| {
+                            v["runners"][0]["executionModel"] = "process-per-test".into()
+                        }),
+                    )
+                }),
+                "Cannot merge incompatible declarations for runner node:test".into(),
+            ),
+        ];
+        for (label, setup, expected) in cases {
+            let root = temporary();
+            create_analyzable_test_run(&root, "run-a");
+            create_analyzable_test_run(&root, "run-b");
+            setup(&root);
+            let error = merge_coverage_runs(
+                &root,
+                &["run-a".into(), "run-b".into()],
+                "merged",
+                "2026-01-01T00:00:00.000Z",
+                false,
+            )
+            .unwrap_err();
+            assert!(error.starts_with(&expected), "{label}: {error}");
+        }
+
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        let merge = |ids: &[&str]| {
+            merge_coverage_runs(
+                &root,
+                &ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+                "merged",
+                "2026-01-01T00:00:00.000Z",
+                false,
+            )
+        };
+        assert_eq!(
+            merge(&["run-a"]).unwrap_err(),
+            "Usage: supercov merge <run-id> <run-id> [...]"
+        );
+        assert_eq!(
+            merge(&["run-a", "absent"]).unwrap_err(),
+            "Cannot merge coverage run absent: no such local run"
+        );
+        create_analyzable_test_run(&root, "run-b");
+        rewrite_entry(
+            &root,
+            "run-b",
+            "frontend.json",
+            declaration_with(|v| {
+                let mut second = v["runners"][0].clone();
+                second["runner"] = "vitest".into();
+                v["runners"].as_array_mut().unwrap().push(second);
+            }),
+        );
+        merge(&["run-a", "run-b"]).unwrap();
+        let entries = read_archive(&root.join(".supercov/runs/merged/evidence.raw.gz")).unwrap();
+        let declaration: Value = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|entry| entry.path == "frontend.json")
+                .unwrap()
+                .contents,
+        )
+        .unwrap();
+        let runners = declaration["runners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|runner| runner["runner"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(runners, ["node:test", "vitest"]);
     }
 
     #[test]

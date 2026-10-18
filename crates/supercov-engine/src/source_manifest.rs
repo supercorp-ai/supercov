@@ -1237,7 +1237,8 @@ fn split_words(text: &str) -> Vec<String> {
             previous_lower = false;
             continue;
         }
-        if c.is_uppercase() && previous_lower && !current.is_empty() {
+        // A lowercase letter or digit before is in `current`.
+        if c.is_uppercase() && previous_lower {
             words.push(std::mem::take(&mut current));
         }
         previous_lower = c.is_lowercase() || c.is_ascii_digit();
