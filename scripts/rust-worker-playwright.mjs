@@ -87,8 +87,10 @@ async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Response> {
   'tests/grades.spec.js': `import { expect, test } from '@playwright/test';
 
 // Worker work is credited by the window it falls in; a pause on each side
-// keeps it from sharing one with the test before or after.
-const pause = () => new Promise((resolve) => setTimeout(resolve, 60));
+// keeps it from sharing one with the test before or after. A window runs from
+// one read of the Worker to the next, and a read on a busy CI runner can
+// stall: at 60 ms one window spanned two tests (4.19.0's release run).
+const pause = () => new Promise((resolve) => setTimeout(resolve, 300));
 
 test('a high score is an A', async ({ request }) => {
   await pause();
