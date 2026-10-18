@@ -3774,6 +3774,38 @@ mod tests {
 
     use super::*;
 
+    /// A run that measured nothing exits as what stopped it: 2 for a store
+    /// being cleaned, the command's own status when it ended before any test,
+    /// a shell's 127 and 126 for a program missing or not allowed to run,
+    /// and 1 otherwise.
+    #[test]
+    fn a_run_that_measured_nothing_exits_as_what_stopped_it() {
+        for (error, code) in [
+            ("the project's storage is being cleaned; try again", 2),
+            (
+                "the test command exited 3 before any test reported an outcome; its own output above says why",
+                3,
+            ),
+            (
+                "the test command exited x before any test reported an outcome",
+                1,
+            ),
+            ("the test command exited 3 after a while", 1),
+            (
+                "could not spawn nope: No such file or directory (os error 2)",
+                127,
+            ),
+            (
+                "could not spawn ./t.sh: Permission denied (os error 13)",
+                126,
+            ),
+            ("could not spawn x: other (os error 5)", 1),
+            ("something else", 1),
+        ] {
+            assert_eq!(could_not_measure(error), ExitCode::from(code), "{error}");
+        }
+    }
+
     #[test]
     fn the_timings_line_reports_publication_and_the_whole_command() {
         let timings = supercov_engine::run_store::RunTimings {
