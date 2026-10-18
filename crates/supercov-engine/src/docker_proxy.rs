@@ -1043,17 +1043,20 @@ mod tests {
     use std::sync::mpsc;
 
     fn temporary(name: &str) -> PathBuf {
-        // Short: a socket address has room for about a hundred bytes.
+        // Short: a socket address has room for about a hundred bytes. The
+        // counter keeps two tests that read the same clock tick apart.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = PathBuf::from("/tmp").join(format!(
-            "scv-dp-{}-{}-{name}",
+            "scv-dp-{}-{}-{}-{name}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
                 % 1_000_000_000
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir(&path).unwrap();
         path
     }
 
@@ -1070,9 +1073,32 @@ mod tests {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut writer = stream;
                     while let Ok(Some(head)) = read_head(&mut reader) {
-                        let body = read_body(&head, &mut reader).unwrap_or_default();
                         let (method, path) = endpoint(&head);
                         let path = path.to_owned();
+                        if head.header("expect").is_some() {
+                            // Refused before the body is sent, or let go on.
+                            if path == "/refuse" {
+                                writer
+                                    .write_all(b"HTTP/1.1 417 Expectation Failed\r\nContent-Length: 4\r\n\r\nnope")
+                                    .unwrap();
+                                continue;
+                            }
+                            writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+                        }
+                        let body = read_body(&head, &mut reader).unwrap_or_default();
+                        if method == "HEAD" {
+                            writer
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                                .unwrap();
+                            continue;
+                        }
+                        if path == "/logs-close" {
+                            // No length, no chunks: the close ends it.
+                            writer
+                                .write_all(b"HTTP/1.1 200 OK\r\n\r\nall of it")
+                                .unwrap();
+                            return;
+                        }
                         let respond = |writer: &mut UnixStream, status: &str, body: &str| {
                             write!(
                                 writer,
@@ -1350,6 +1376,211 @@ mod tests {
         assert_eq!(
             endpoint(&head("GET /volumes/v1/x HTTP/1.1")),
             ("GET", "/volumes/v1/x")
+        );
+    }
+
+    #[test]
+    fn continue_refusal_head_and_close_delimited_answers_cross_the_relay() {
+        let directory = temporary("frames");
+        let daemon = directory.join("d.sock");
+        let _created = fake_daemon(&daemon);
+        let proxy =
+            DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)).unwrap();
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        // A body that waits for `100 Continue` is sent only after it.
+        stream
+            .write_all(b"POST /build HTTP/1.1\r\nHost: docker\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n")
+            .unwrap();
+        let interim = read_head(&mut reader).unwrap().unwrap();
+        assert!(interim.start.contains(" 100"), "{interim:?}");
+        stream.write_all(b"body").unwrap();
+        let head = read_head(&mut reader).unwrap().unwrap();
+        assert!(head.start.contains(" 200"), "{head:?}");
+        assert_eq!(read_body(&head, &mut reader).unwrap(), b"OK");
+        // A refusal carries its own body, and the connection goes on.
+        stream
+            .write_all(b"POST /refuse HTTP/1.1\r\nHost: docker\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n")
+            .unwrap();
+        let refused = read_head(&mut reader).unwrap().unwrap();
+        assert!(refused.start.contains(" 417"), "{refused:?}");
+        assert_eq!(read_body(&refused, &mut reader).unwrap(), b"nope");
+        // A HEAD answer names a length it does not send.
+        stream
+            .write_all(b"HEAD /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+        let head = read_head(&mut reader).unwrap().unwrap();
+        assert!(head.start.contains(" 200"), "{head:?}");
+        let (after, body) = exchange(
+            &mut stream,
+            &mut reader,
+            "GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n",
+        );
+        assert!(after.start.contains(" 200"), "{after:?}");
+        assert_eq!(body, b"OK");
+        // No length and no chunks: everything until the daemon closes.
+        stream
+            .write_all(b"GET /logs-close HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+        let closing = read_head(&mut reader).unwrap().unwrap();
+        assert!(closing.start.contains(" 200"), "{closing:?}");
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"all of it");
+        drop(stream);
+        proxy.finish();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn head(start: &str, headers: &[(&str, &str)]) -> Head {
+        Head {
+            start: start.into(),
+            headers: headers
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).into()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_head_skips_blank_lines_before_it_and_refuses_a_cut_or_malformed_one() {
+        let read = |text: &str| read_head(&mut io::Cursor::new(text.as_bytes().to_vec()));
+        let parsed = read("\r\n\r\nGET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.start, "GET /_ping HTTP/1.1");
+        assert_eq!(parsed.header("host"), Some("docker"));
+        assert!(read("").unwrap().is_none());
+        assert!(read("\r\n").unwrap().is_none());
+        assert_eq!(
+            read("GET / HTTP/1.1\r\nHost: docker\r\n")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            read("GET / HTTP/1.1\r\nno colon here\r\n\r\n")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn a_body_is_relayed_by_its_framing_and_a_cut_one_is_an_error() {
+        let relay = |head: &Head, body: &str| {
+            let mut out = Vec::new();
+            relay_body(
+                head,
+                &mut io::Cursor::new(body.as_bytes().to_vec()),
+                &mut out,
+            )
+            .map(|()| String::from_utf8(out).unwrap())
+        };
+        let chunked = head("HTTP/1.1 200 OK", &[("Transfer-Encoding", "chunked")]);
+        // Trailers are passed on, through the blank line that ends them.
+        assert_eq!(
+            relay(&chunked, "3;ext=1\r\nabc\r\n0\r\nX-Trailer: 1\r\n\r\nNEXT").unwrap(),
+            "3;ext=1\r\nabc\r\n0\r\nX-Trailer: 1\r\n\r\n"
+        );
+        // A stream that ends inside the trailers ends the body there.
+        assert_eq!(
+            relay(&chunked, "0\r\nX-Trailer: 1\r\n").unwrap(),
+            "0\r\nX-Trailer: 1\r\n"
+        );
+        assert_eq!(
+            relay(&chunked, "").unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            relay(&chunked, "zz\r\n").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let sized = head("HTTP/1.1 200 OK", &[("Content-Length", "5")]);
+        assert_eq!(relay(&sized, "hello, more").unwrap(), "hello");
+        assert_eq!(
+            relay(&sized, "hel").unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        // Neither framing: the caller decides (a request has no body).
+        assert_eq!(relay(&head("GET / HTTP/1.1", &[]), "ignored").unwrap(), "");
+    }
+
+    #[test]
+    fn a_chunked_body_is_decoded_whole() {
+        let chunked = head("HTTP/1.1 201 Created", &[("Transfer-Encoding", "Chunked")]);
+        let body = read_body(
+            &chunked,
+            &mut io::Cursor::new(b"4\r\n{\"Id\r\n6;x\r\n\":\"c\"}\r\n0\r\n\r\n".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(body, br#"{"Id":"c"}"#);
+    }
+
+    #[test]
+    fn a_stream_is_handed_over_only_when_both_sides_agreed_to_it() {
+        let get = head("POST /containers/c/attach HTTP/1.1", &[]);
+        let upgrade = head("POST /exec/e/start HTTP/1.1", &[("Upgrade", "tcp")]);
+        let connection = head("POST /session HTTP/1.1", &[("Connection", "Upgrade")]);
+        let switching = head("HTTP/1.1 101 UPGRADED", &[]);
+        assert!(hijacked(&upgrade, &switching));
+        assert!(hijacked(&connection, &switching));
+        // A 101 nobody asked for is not a hand-over.
+        assert!(!hijacked(&get, &switching));
+        let raw = |status: &str, extra: &[(&str, &str)]| {
+            let mut headers = vec![("Content-Type", "application/vnd.docker.raw-stream")];
+            headers.extend_from_slice(extra);
+            head(&format!("HTTP/1.1 {status}"), &headers)
+        };
+        assert!(hijacked(&get, &raw("200 OK", &[])));
+        assert!(hijacked(
+            &get,
+            &head(
+                "HTTP/1.1 200 OK",
+                &[("Content-Type", "application/vnd.docker.multiplexed-stream")]
+            )
+        ));
+        assert!(!hijacked(&get, &raw("404 Not Found", &[])));
+        assert!(!hijacked(
+            &get,
+            &raw("200 OK", &[("Transfer-Encoding", "chunked")])
+        ));
+        assert!(!hijacked(&get, &raw("200 OK", &[("Content-Length", "2")])));
+        assert!(!hijacked(
+            &get,
+            &head("HTTP/1.1 200 OK", &[("Content-Type", "application/json")])
+        ));
+    }
+
+    #[test]
+    fn a_response_to_head_or_a_1xx_204_or_304_carries_no_body() {
+        let get = head("GET /images/json HTTP/1.1", &[]);
+        let ok = head("HTTP/1.1 200 OK", &[("Content-Length", "2")]);
+        assert!(bodiless(&head("HEAD /_ping HTTP/1.1", &[]), &ok));
+        assert!(bodiless(&get, &head("HTTP/1.1 100 Continue", &[])));
+        assert!(bodiless(&get, &head("HTTP/1.1 204 No Content", &[])));
+        assert!(bodiless(&get, &head("HTTP/1.1 304 Not Modified", &[])));
+        assert!(!bodiless(&get, &ok));
+    }
+
+    #[test]
+    fn an_image_name_keeps_its_slashes_and_tag_and_escapes_the_rest() {
+        assert_eq!(
+            url_path_segment("ghcr.io/org/app:1.2@sha256"),
+            "ghcr.io/org/app:1.2@sha256"
+        );
+        assert_eq!(url_path_segment("a b?c#d"), "a%20b%3Fc%23d");
+    }
+
+    #[test]
+    fn a_time_west_of_utc_is_moved_east() {
+        assert_eq!(
+            parse_rfc3339_ms("2026-10-17T16:05:37.497-05:00"),
+            Some(1_792_271_137_497)
+        );
+        assert_eq!(
+            parse_rfc3339_ms("2026-10-17T22:05:37+01"),
+            Some(1_792_271_137_000)
         );
     }
 }
