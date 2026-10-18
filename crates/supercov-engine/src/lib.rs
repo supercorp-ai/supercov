@@ -12,7 +12,8 @@ pub mod coverage_index;
 pub mod coverage_query;
 pub mod coverage_report;
 pub mod decision_shape;
-pub mod docker_servers;
+#[cfg(unix)]
+pub mod docker_proxy;
 pub mod evidence_archive;
 pub mod frontend_detection;
 pub mod frontend_protocol;

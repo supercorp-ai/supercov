@@ -1406,6 +1406,7 @@ fn build_from_evidence(
             .and_then(|path| relative(root, path))
             .or_else(|| test.split("::").next().map(str::to_owned));
         raw_results.push(RawTestResult {
+            span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
             test: test.clone(),
@@ -1489,6 +1490,7 @@ fn build_from_evidence(
             .and_then(|path| relative(root, path))
             .or_else(|| test.split("::").next().map(str::to_owned));
         raw_results.push(RawTestResult {
+            span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
             test: test.clone(),
@@ -1543,6 +1545,7 @@ fn build_from_evidence(
         };
         let phase = phase_id(run_id, &identity);
         raw_results.push(RawTestResult {
+            span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, worker, &test, 0)),
             test: "Ruby load and background execution".into(),

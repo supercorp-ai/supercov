@@ -461,28 +461,40 @@ is not the one Supercov instruments.
 npx supercov -- npx playwright test
 ```
 
-### A server Docker Compose builds
+### A server in a container
 
-A Playwright suite whose server `docker compose up` builds (`build:` in the
-compose file) measures it in any of these languages: Node, Python, Ruby, Go,
-Java or Kotlin. The image is built from Supercov's copy, so it holds the
-copy's code. Supercov's `docker` on the suite's PATH gives each service
-built from the copy the run's settings, and mounts the project's `.supercov`
-into it at the same path, so the server writes its coverage where the run
-reads it. Each request or window is credited to its test as for a server
-started directly. Supercov builds those services before starting them, so
-an image left over from an earlier run is never used. When the command ends
-it stops the containers it started; it never removes them.
+A Playwright suite whose server runs in a container it builds measures it in
+any of these languages: Node, Python, Ruby, Go, Java or Kotlin, whichever
+client starts it: `docker compose up` with `build:` in the compose file,
+`docker build` and `docker run` in `webServer`, testcontainers building from
+a Dockerfile in a test, or a Docker SDK. The suite's `DOCKER_HOST` points at
+a relay of Supercov's that passes every request to your Docker daemon and
+gives each container whose image holds the copy's code the run's settings,
+with the project's `.supercov` mounted at the same path, so the server
+writes its coverage where the run reads it. Each request or window is
+credited to its test as for a server started directly. When the command
+ends, the run stops the containers it measured and the rest of their compose
+projects; it never removes them.
 
-- Services that pull an image (`image:` with no `build:`) run code nobody
-  instrumented, and are left as they are.
+An image holds the copy's code when it was built during the run, when an
+earlier run recorded it as built from the same source (a build that finds
+every layer cached returns it unchanged), or when it is a compose service
+whose build context is in the copy: Supercov builds that service from the
+copy before its container starts, so an image left over from an earlier run
+is never used. An image built from an earlier copy, by a command outside the
+run, is left as it is, and the run says to build it in the test command.
+
+- Images pulled from a registry (`image:` with no `build:`, `postgres:16`)
+  run code nobody instrumented, and are left as they are.
+- testcontainers' reaper, Ryuk, is pointed at the daemon's own socket
+  (`TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`) unless you set one.
 - A Python or Ruby image may keep the code at a path of its own
   (`COPY backend/ /srv/`): the runtime matches the image's files to the
   copy's by their paths' common ending, and only when several of them match.
 - A Go image needs Supercov's runtime package, `_supercov_runtime/` at the
   module root: copy the whole module (`COPY . .`), not chosen directories.
-- `docker run` and a `docker build` the command makes itself are not
-  covered; neither is Windows.
+- A daemon reached over TCP or SSH (`DOCKER_HOST=tcp://...`), and Windows,
+  are not covered: there the containers run as written.
 
 ```sh
 npx supercov -- npx playwright test
