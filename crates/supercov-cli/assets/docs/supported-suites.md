@@ -144,6 +144,12 @@ signal exactly as it would unmeasured, and one with its own handler keeps
 it. `SIGKILL` cannot be caught by anything and is the one stop that loses
 whatever was still buffered.
 
+A program that hands its process over to another with `exec` keeps what it
+ran: a cache front end that restores a key and then `process.execve`s the
+runner's Node, or a Ruby script that calls `exec`, writes its evidence before
+the new program starts. Python and Rust write as they run, so an `exec`
+loses nothing there either.
+
 ## Rust
 
 | Runner | Attribution | Current requirement |

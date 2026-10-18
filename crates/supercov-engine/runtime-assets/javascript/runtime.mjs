@@ -727,6 +727,19 @@ function flushOnTermination(flush) {
     process.on("exit", drain);
   } catch (e) {
   }
+  // `process.execve` replaces the process with another program: no "exit"
+  // runs, and what this one buffered would go with it. A cache front end
+  // that hands itself over to the runner's Node lost every line it ran.
+  try {
+    const execve = process.execve;
+    if (typeof execve === "function") {
+      process.execve = function supercovExecve() {
+        drain();
+        return execve.apply(this, arguments);
+      };
+    }
+  } catch (e) {
+  }
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK"]) {
     try {
       process.on(signal, () => {
