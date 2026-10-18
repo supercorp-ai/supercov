@@ -8652,3 +8652,91 @@ fn a_runner_alone_narrows_every_view_or_is_refused() {
         ],
     );
 }
+
+/// Nothing changed is nothing affected; a changed test file affects each of
+/// its tests and `--files`/`--names` list them alone; a dependency change
+/// affects every test; and a narrowing option without a list to narrow is
+/// refused on standard error, leaving standard output empty for a script.
+#[test]
+fn tests_affected_reads_each_kind_of_change_and_refuses_on_stderr() {
+    let project = Project::cart("affected-shapes");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let clean = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &clean,
+        &[
+            "0 of 3 tests affected",
+            "No captured file has changed.",
+            "Working tree: matches the run.",
+        ],
+    );
+    let refused = project.supercov(&["runs", "latest", "tests", "affected", "--ran-changed"]);
+    assert_eq!(refused.code(), 2);
+    assert_eq!(refused.stdout(), "");
+    assert!(
+        refused.stderr().starts_with(
+            "[supercov] --asserting and --ran-changed narrow --names or --files\n\nUsage:"
+        ),
+        "{}",
+        refused.stderr()
+    );
+    let unassessed = project.supercov(&[
+        "runs",
+        "latest",
+        "tests",
+        "affected",
+        "--files",
+        "--ran-changed",
+    ]);
+    assert_eq!(unassessed.code(), 0);
+    assert!(
+        unassessed
+            .stderr()
+            .contains("this run has no assertion assessment")
+    );
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total adds up prices",
+    );
+    let own = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &own,
+        &["3 of 3 tests affected", "test file changed: top level"],
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--files"])
+            .succeeds(),
+        "test/cart.test.js\n"
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--names"])
+            .succeeds(),
+        "shipping is free over fifty\ntotal adds prices\ntotal applies a coupon\n"
+    );
+    project.edit(
+        "test/cart.test.js",
+        "total adds up prices",
+        "total adds prices",
+    );
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" }, "dependencies": { "x": "1" } }"#,
+    );
+    let dependency = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &dependency,
+        &[
+            "3 of 3 tests affected",
+            "dependencies or lockfile changed (every test)",
+        ],
+    );
+}

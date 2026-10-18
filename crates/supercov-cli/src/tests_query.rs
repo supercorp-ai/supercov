@@ -639,9 +639,11 @@ fn runner_filter_name(file: &str, name: &str) -> String {
     }
 }
 
+/// A mistake and the guide to put it right, both on standard error: a
+/// script reading `--names` from standard output must not take the guide for
+/// test names.
 fn usage(message: String) -> ExitCode {
-    eprintln!("[supercov] {message}");
-    print!("{HELP}");
+    eprint!("[supercov] {message}\n\n{HELP}");
     ExitCode::from(2)
 }
 
