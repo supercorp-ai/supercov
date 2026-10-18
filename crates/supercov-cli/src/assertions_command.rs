@@ -207,9 +207,9 @@ pub fn command(args: &[String]) -> ExitCode {
     }
     let options = match parse(&args[2..]) {
         Ok(o) => o,
+        // On standard error with the mistake: standard output is the answer.
         Err(message) => {
-            eprintln!("[supercov] {message}");
-            print!("{HELP}");
+            eprint!("[supercov] {message}\n\n{HELP}");
             return ExitCode::from(2);
         }
     };
