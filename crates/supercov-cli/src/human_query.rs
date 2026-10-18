@@ -869,6 +869,29 @@ fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
     }
 }
 
+/// What a line is, from what is anchored on it, what is left of it, the
+/// tests that reached it, how much of the anchored is complete, and its
+/// limitations.
+fn line_state(
+    anchored: usize,
+    remaining: usize,
+    tests: usize,
+    complete: usize,
+    limitations: usize,
+) -> &'static str {
+    if anchored == 0 && remaining == 0 {
+        "NOT MEASURED"
+    } else if tests == 0 && complete == 0 && anchored > 0 && limitations == 0 {
+        // Nothing anchored on the line was observed, by a test or in the
+        // background: it never ran.
+        "NOT COVERED"
+    } else if complete == anchored && limitations == 0 && remaining == 0 {
+        "COVERED"
+    } else {
+        "PARTIAL"
+    }
+}
+
 /// `1 line, 2 branches, 0 MC/DC conditions`.
 fn diff_counts(lines: usize, branches: usize, conditions: usize) -> String {
     let counted = |value: usize, one: &str, many: &str| {
@@ -1639,24 +1662,13 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     let complete = data.covered_anchored;
                     // A line nothing measured is not measured, whatever
                     // limitation says why.
-                    let state = if data.total_anchored == 0 && data.total_remaining == 0 {
-                        "NOT MEASURED"
-                    } else if data.total_tests == 0
-                        && complete == 0
-                        && data.total_anchored > 0
-                        && data.total_limitations == 0
-                    {
-                        // Nothing anchored on the line was observed, by a test
-                        // or in the background: it never ran.
-                        "NOT COVERED"
-                    } else if complete == data.total_anchored
-                        && data.total_limitations == 0
-                        && data.total_remaining == 0
-                    {
-                        "COVERED"
-                    } else {
-                        "PARTIAL"
-                    };
+                    let state = line_state(
+                        data.total_anchored,
+                        data.total_remaining,
+                        data.total_tests,
+                        complete,
+                        data.total_limitations,
+                    );
                     let mut lines = vec![
                         format!("{}:{}", data.location.file, data.location.line),
                         String::new(),
@@ -2321,6 +2333,31 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line with nothing on it is not measured; one nothing ran is not
+    /// covered; one whose every anchored obligation is complete, with no
+    /// limitation and nothing left, is covered; anything between is partial.
+    #[test]
+    fn a_line_s_state_follows_what_is_on_it() {
+        for ((anchored, remaining, tests, complete, limitations), state) in [
+            ((0, 0, 0, 0, 0), "NOT MEASURED"),
+            ((0, 2, 0, 0, 0), "PARTIAL"),
+            ((2, 0, 0, 0, 0), "NOT COVERED"),
+            ((2, 0, 0, 0, 1), "PARTIAL"),
+            ((2, 0, 0, 2, 0), "COVERED"),
+            ((2, 0, 1, 0, 0), "PARTIAL"),
+            ((2, 0, 1, 2, 0), "COVERED"),
+            ((2, 0, 1, 1, 0), "PARTIAL"),
+            ((2, 0, 1, 2, 1), "PARTIAL"),
+            ((2, 1, 1, 2, 0), "PARTIAL"),
+        ] {
+            assert_eq!(
+                line_state(anchored, remaining, tests, complete, limitations),
+                state,
+                "{anchored} {remaining} {tests} {complete} {limitations}"
+            );
+        }
+    }
 
     #[test]
     fn numbers_and_times_read_the_way_people_write_them() {
