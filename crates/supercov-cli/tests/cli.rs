@@ -7978,3 +7978,24 @@ fn a_patch_counts_changed_and_untracked_lines_against_its_base() {
         &["the run no longer matches the current checkout"],
     );
 }
+
+#[test]
+fn runs_that_ran_no_tests_keep_the_command_status_and_say_so() {
+    let project = Project::cart("odd-js-runs");
+    project
+        .supercov(&["--", "node", "-e", "process.exit(3)"])
+        .exits(3);
+    project.supercov(&["--", "node", "-e", ""]).succeeds();
+    project
+        .supercov(&["--", "node", "--test", "test/none.test.js"])
+        .exits(1);
+    let listed = project.supercov(&["runs"]).succeeds();
+    contains_all(
+        &listed,
+        &[
+            "FAILED (exit 3); NO TESTS RAN",
+            "FAILED (exit 1); NO TESTS RAN",
+            "  NO TESTS RAN",
+        ],
+    );
+}
