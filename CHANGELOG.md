@@ -22,6 +22,7 @@
 - `assertions --test <name>` that matched no assessed test pointed at `runs <run> tests`, which lists no tests; it names the assessed tests instead.
 - `files`, `gaps`, `kinds` and `runners` past their last page printed blank lines (or, for `kinds` and `runners`, one before the footer), and `tests without-evidence` printed no footer at all; each says the offset is past the end under its heading.
 - `test <name>` counted `1 phases` and `diff` counted `1 lines, 1 branches, 1 MC/DC conditions`; a count of one is singular. A `diff` of two runs that differ in nothing printed an empty line; it says nothing was gained or lost.
+- A run query ignored words and single-dash flags it does not take: `runs latest files src/cart.js` listed every file, `file a b` read only `a`, and `-q` passed silently. They are refused by name, as `--bogus` already was; a test name may still begin with a dash. `merge --tag x` read `--tag` as a run id; it names the unknown option.
 - `report` wrote its progress line, and the spaces that erase it, to standard error when that is a file or a pipe, so a CI log of a failed report began with 96 spaces; progress is drawn only on a terminal.
 - A Playwright run whose mock server loaded a file URL with a `%` before a non-ASCII character (`%a` then `é`) crashed while reading which tests the server reached; such a `%` is kept as written.
 - `assertions` and `assertions --weak` with an `--offset` past the last file printed the summary and no table; they say the offset is past the end.

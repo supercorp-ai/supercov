@@ -8340,3 +8340,46 @@ fn comparisons_and_their_mistakes_read_as_what_they_are() {
         ],
     );
 }
+
+/// A word or a flag a command does not take is refused by name instead of
+/// being read as a run id or a filter that is not one.
+#[test]
+fn words_and_flags_a_command_does_not_take_are_refused() {
+    let project = Project::cart("refused-words");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    for (args, expected) in [
+        (vec!["runs", "latest", "files", "-q"], "Unknown option: -q"),
+        (
+            vec!["runs", "latest", "files", "src/cart.js"],
+            "Unexpected argument: src/cart.js",
+        ),
+        (
+            vec!["runs", "latest", "gaps", "x"],
+            "Unexpected argument: x",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js", "extra"],
+            "Unexpected argument: extra",
+        ),
+        (
+            vec!["runs", "latest", "decision", "a", "b"],
+            "Unexpected argument: b",
+        ),
+        (
+            vec!["runs", "latest", "decision"],
+            "Usage: supercov runs <run-id> decision",
+        ),
+        (
+            vec!["runs", "abcdefghijklmnopqrst"],
+            "Coverage run not found: abcdefghijklmnopqrst",
+        ),
+        (vec!["report", "--tag"], "--tag needs a value"),
+        (vec!["merge", "--tag", "x"], "Unknown option: --tag"),
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(refused.contains(expected), "{args:?}: {refused}");
+    }
+    // A test name may begin with a dash.
+    let named = project.supercov(&["runs", "latest", "test", "-x"]).exits(2);
+    assert!(named.contains("Test not found: -x"), "{named}");
+}

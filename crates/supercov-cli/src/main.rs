@@ -440,6 +440,14 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
         .into_iter()
         .filter(|argument| argument != "--allow-changed")
         .collect::<Vec<_>>();
+    // An option merge does not take is no run id.
+    if let Some(option) = run_ids
+        .iter()
+        .find(|argument| argument.starts_with('-') && argument.len() > 1)
+    {
+        eprintln!("[supercov] Unknown option: {option}\n\n{MERGE_USAGE}");
+        return ExitCode::from(2);
+    }
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {

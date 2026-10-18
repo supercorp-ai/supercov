@@ -424,7 +424,11 @@ fn parse_options(
                     }
                 };
             }
-            option if option.starts_with("--") => {
+            // A single dash is an option too (`-q`), except in a test name.
+            option
+                if option.starts_with("--")
+                    || (option.starts_with('-') && option.len() > 1 && command != "test") =>
+            {
                 let mut error = PublicQueryError::invalid(
                     Some(&agent_command),
                     json_output,
@@ -511,6 +515,21 @@ fn coverage_invocation(
         titles: options.titles.clone(),
         test_files: options.test_files.clone(),
     };
+    // A word a query does not take would be read as a filter it is not.
+    let takes = match command {
+        "file" | "decision" => 1,
+        "line" | "test" => usize::MAX,
+        _ => 0,
+    };
+    if let Some(extra) = options.positional.get(takes) {
+        let mut error = PublicQueryError::invalid(
+            Some(&agent_command),
+            json_output,
+            format!("Unexpected argument: {extra}"),
+        );
+        error.error.details = Some(json!({ "argument": extra }));
+        return Err(error);
+    }
     match command {
         "summary" | "kinds" | "runners" | "gaps" | "tests-without-evidence" => {}
         "files" => {
