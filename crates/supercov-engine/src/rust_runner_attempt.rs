@@ -551,4 +551,107 @@ mod tests {
             .is_err()
         );
     }
+
+    /// Each part of `nextest --version` is checked on its own: a variant that
+    /// breaks exactly one is refused for that one.
+    #[test]
+    fn every_part_of_the_version_output_is_checked() {
+        let full = |first: &str, hash: &str, date: &str, host: &str| {
+            format!(
+                "cargo-nextest 0.9.148{first}\nrelease: 0.9.148\ncommit-hash: {hash}\ncommit-date: {date}\nhost: {host}\n"
+            )
+        };
+        let hash = "cd1d6d5467322dbc0d39a80cb671d000ac302798";
+        let ok = full(
+            " (cd1d6d546 2026-10-07)",
+            hash,
+            "2026-10-07",
+            "aarch64-apple-darwin",
+        );
+        assert_eq!(
+            parse_nextest_version_output(ok.as_bytes()).unwrap(),
+            "0.9.148"
+        );
+        let refused = |output: &[u8], said: &str| {
+            let error = parse_nextest_version_output(output)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(said), "{error} (wanted {said})");
+        };
+        refused(b"cargo-nextest \xff\n", "not UTF-8");
+        refused(ok.replace('\n', "\r\n").as_bytes(), "carriage return");
+        refused(b"cargo-nextest\n", "lacks a version");
+        refused(b"cargo-nextest 0.9.148\n", "lacks release metadata");
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.147\nhost: x\n",
+            "disagrees with its product version",
+        );
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.148\nhost: \n",
+            "lacks a build host",
+        );
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.148\nplatform: x\n",
+            "lacks a build host",
+        );
+        refused(
+            format!(
+                "cargo-nextest 0.9.148\nrelease: 0.9.148\nhost: {}\n",
+                "x".repeat(256)
+            )
+            .as_bytes(),
+            "oversized or non-ASCII",
+        );
+        refused(
+            "cargo-nextest 0.9.148\nrelease: 0.9.148\nhost: hôte\n".as_bytes(),
+            "oversized or non-ASCII",
+        );
+        let first = " (cd1d6d546 2026-10-07)";
+        for bad in [
+            "cd1d6d54",
+            &"a".repeat(65),
+            "CD1D6D5467",
+            "cd1d6d546z",
+            "nothex!!!!",
+        ] {
+            refused(
+                full(first, bad, "2026-10-07", "x").as_bytes(),
+                "invalid commit hash",
+            );
+        }
+        refused(
+            ok.replace("commit-hash: ", "hash: ").as_bytes(),
+            "invalid commit hash",
+        );
+        for bad in ["2026-10-7", "2026/10/07", "2026-1a-07", "20261-0-07"] {
+            refused(
+                full(first, hash, bad, "x").as_bytes(),
+                "invalid commit date",
+            );
+        }
+        refused(
+            ok.replace("commit-date: ", "date: ").as_bytes(),
+            "invalid commit date",
+        );
+        for bad_first in [
+            "",
+            " (cd1d6d546)",
+            " (cd1d6d547 2026-10-07)",
+            " (cd1d6d546 2026-10-08)",
+            " cd1d6d546 2026-10-07)",
+        ] {
+            refused(
+                full(bad_first, hash, "2026-10-07", "x").as_bytes(),
+                "short build identity disagrees",
+            );
+        }
+        refused(
+            b"cargo-nextest 0.9.148 (cd1d6d546 2026-10-07)\nrelease: 0.9.148\nhost: x\n",
+            "only partially present",
+        );
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.148\na\nb\nc\nd\n",
+            "unknown metadata layout",
+        );
+    }
 }
