@@ -75,14 +75,13 @@ pub fn command(args: &[String]) -> ExitCode {
         || args.get(2).map(String::as_str) != Some("affected")
     {
         print!("{HELP}");
-        return if args
-            .get(2)
-            .is_some_and(|a| a != "affected" && !a.starts_with('-'))
-        {
-            eprintln!("[supercov] unknown tests action: {}", args[2]);
-            ExitCode::from(2)
-        } else {
-            ExitCode::SUCCESS
+        let asked_for_help = args.iter().any(|a| matches!(a.as_str(), "--help" | "-h"));
+        return match args.get(2) {
+            Some(action) if !asked_for_help && action != "affected" => {
+                eprintln!("[supercov] unknown tests action: {action}");
+                ExitCode::from(2)
+            }
+            _ => ExitCode::SUCCESS,
         };
     }
     let mut json_output = false;

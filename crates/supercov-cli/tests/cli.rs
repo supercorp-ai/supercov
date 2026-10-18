@@ -7842,3 +7842,68 @@ fn a_changed_helper_reaches_the_tests_that_load_it_and_an_unplaced_one_reaches_a
         "{said}"
     );
 }
+
+#[test]
+fn tests_affected_reads_formatting_other_runners_and_dependencies_apart() {
+    let project = Project::cart("affected-shapes");
+    project.write("vitest.config.js", "export default {};\n");
+    project.commit("config");
+    project.measure(&[]);
+    let said = |args: &[&str]| project.supercov(args).succeeds();
+    contains_all(
+        &said(&["runs", "latest", "tests", "affected"]),
+        &[
+            "0 of 3 tests affected",
+            "No captured file has changed.",
+            "Working tree: matches the run.",
+        ],
+    );
+    // Asked for an action it does not have, flag or word: refused.
+    for action in ["-x", "nope"] {
+        contains_all(
+            &project
+                .supercov(&["runs", "latest", "tests", action])
+                .exits(2),
+            &["unknown tests action"],
+        );
+    }
+    contains_all(
+        &said(&["runs", "latest", "tests", "--help"]),
+        &["Usage: supercov runs <run> tests affected"],
+    );
+    // Another runner's settings and a comment in a test change no test.
+    project.write("vitest.config.js", "export default { test: {} };\n");
+    project.write(
+        "test/cart.test.js",
+        &format!("{}\n// touched\n", common::CART_TESTS),
+    );
+    contains_all(
+        &said(&["runs", "latest", "tests", "affected"]),
+        &[
+            "0 of 3 tests affected",
+            "test/cart.test.js  formatting",
+            "vitest.config.js  declarations  top level",
+        ],
+    );
+    assert_eq!(
+        said(&["runs", "latest", "tests", "affected", "--names"]),
+        ""
+    );
+    // A dependency change reaches every test.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" }, "dependencies": {"x": "1"} }"#,
+    );
+    contains_all(
+        &said(&["runs", "latest", "tests", "affected"]),
+        &[
+            "3 of 3 tests affected",
+            "dependencies or lockfile changed (every test)",
+            "package.json  changed",
+        ],
+    );
+    assert_eq!(
+        said(&["runs", "latest", "tests", "affected", "--files"]),
+        "test/cart.test.js\n"
+    );
+}
