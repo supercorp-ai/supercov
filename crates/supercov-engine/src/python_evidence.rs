@@ -3971,4 +3971,78 @@ mod tests {
         ));
         fs::remove_dir_all(directory).unwrap();
     }
+
+    /// A runtime path is the project file it names, or nothing outside it.
+    /// An evidence directory holds only what a run writes: a missing one is
+    /// empty, a cut-short layout and an unsized slot are passed over, and
+    /// anything else -- a directory, an unknown name, a bad shared-memory
+    /// marker -- is refused by name.
+    #[test]
+    fn evidence_entries_and_paths_are_read_or_refused_by_name() {
+        let root = Path::new("/project");
+        assert_eq!(
+            relative(root, "/project/src/a.py").as_deref(),
+            Some("src/a.py")
+        );
+        assert_eq!(relative(root, "./src/a.py").as_deref(), Some("src/a.py"));
+        assert_eq!(relative(root, "/elsewhere/a.py"), None);
+        assert_eq!(relative(root, "../a.py"), None);
+        assert_eq!(relative(root, "/project"), None);
+        let base = std::env::temp_dir().join(format!(
+            "supercov-python-entries-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&base).unwrap();
+        let base = crate::test_directory::TestDirectory::adopt(base);
+        let read = |directory: &Path| match read_evidence_directory(directory, "run") {
+            Ok(evidence) => format!("ok {}", evidence.interpreters),
+            Err(error) => format!("{error:?}"),
+        };
+        assert_eq!(read(&base.join("missing")), "ok 0");
+        let fresh = |label: &str| {
+            let directory = base.join(label);
+            fs::create_dir(&directory).unwrap();
+            directory
+        };
+        let passed_over = fresh("passed-over");
+        fs::write(
+            passed_over.join(format!("{SLOT_LAYOUT_NAME}.1.partial")),
+            b"cut",
+        )
+        .unwrap();
+        fs::write(passed_over.join("p.1.slot"), b"").unwrap();
+        assert!(
+            read(&passed_over).starts_with("ok"),
+            "{}",
+            read(&passed_over)
+        );
+        let nested = fresh("nested");
+        fs::create_dir(nested.join("inner.mmap")).unwrap();
+        assert!(read(&nested).contains("UnsafeEntry"), "{}", read(&nested));
+        let unknown = fresh("unknown");
+        fs::write(unknown.join("notes.txt"), b"x").unwrap();
+        assert!(read(&unknown).contains("notes.txt"), "{}", read(&unknown));
+        for (label, marker) in [
+            ("no-size", "/name".to_owned()),
+            ("long-name", format!("/{} 64", "a".repeat(40))),
+            ("no-slash", "name 64".to_owned()),
+            ("bad-char", "/na-me 64".to_owned()),
+        ] {
+            let directory = fresh(label);
+            fs::write(directory.join("p.1.shm"), marker.as_bytes()).unwrap();
+            assert!(
+                read(&directory).contains("UnsafeEntry"),
+                "{label}: {}",
+                read(&directory)
+            );
+        }
+        // Killed before it named its object: nothing to read.
+        let unnamed = fresh("unnamed");
+        fs::write(unnamed.join("p.1.shm"), b"").unwrap();
+        assert!(read(&unnamed).starts_with("ok"), "{}", read(&unnamed));
+    }
 }
