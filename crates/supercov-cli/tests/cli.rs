@@ -8489,3 +8489,38 @@ fn a_go_suite_behind_make_is_measured_and_other_go_commands_are_left_alone() {
         vetted.stderr()
     );
 }
+
+/// A merged run is answered from the runs it was merged from, and a test
+/// both of them ran is one test, counted once, with its reasons together.
+#[test]
+fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
+    let project = Project::cart("merged-affected");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let first = project.latest();
+    project
+        .supercov(&["--", "node", "--test", "test/cart.test.js"])
+        .succeeds();
+    let second = project.latest();
+    project.supercov(&["merge", &first, &second]).succeeds();
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    let affected = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &affected,
+        &[
+            "1 of 3 tests affected by changes since the run",
+            "test/cart.test.js › shipping is free over fifty",
+            "src/cart.js: shipping (line 12) changed (this test ran it)",
+        ],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    assert_eq!(
+        json["data"]["mergedFrom"],
+        serde_json::json!([first, second])
+    );
+    assert_eq!(json["data"]["summary"]["tests"], 3);
+    assert_eq!(json["data"]["summary"]["unaffected"], 2);
+}
