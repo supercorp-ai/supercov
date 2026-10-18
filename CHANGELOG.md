@@ -4,6 +4,8 @@
 
 **Fixed**
 
+- `kinds` and `runners` ignored `--kind` and `--runner` while echoing them back, so `runners --kind unit` (which `summary` suggests) counted every test; they now group only the tests the filter picks.
+- `line <file>:<n>` past the end of the file read as a line the run did not measure, and `:0` showed line 1 as line 0; both are refused now.
 - `summary` and `scope` with a `--kind` or `--runner` no test has said the coverage index was invalid; they now say no tests match, as the other queries do.
 - The assertion assessment asked whether a test catches a Rust `let Ok(x) = ... else` changing to `Default::default()`, a value a `Result` does not have; it now asks about the other variant.
 

@@ -3646,6 +3646,69 @@ pub struct CoverageDimensionQueryOptions<'a> {
     pub limit: usize,
 }
 
+/// The coverage by kind or by runner of the tests a kind or runner filter
+/// picks: each entry is the projection of its own value with the filter's.
+/// Unfiltered, the index's own entries.
+fn filtered_dimensions(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+    dimension: CoverageDimension,
+    kind: Option<&str>,
+    runner: Option<&str>,
+) -> Result<Vec<IndexedDimensionCoverage>, QueryError> {
+    let values = index.dimensions(view, dimension)?;
+    if kind.is_none() && runner.is_none() {
+        return Ok(values);
+    }
+    let tests = index.test_summaries(view)?;
+    let mut filtered = Vec::new();
+    for value in values {
+        let (pair_kind, pair_runner) = match dimension {
+            CoverageDimension::Kind => (value.kind.as_deref(), runner),
+            CoverageDimension::Runner => (kind, value.runner.as_deref()),
+            CoverageDimension::Tests => (kind, runner),
+        };
+        // A kind entry under a kind filter, or a runner under a runner
+        // filter, is that value or none.
+        if kind.is_some_and(|kind| pair_kind != Some(kind))
+            || runner.is_some_and(|runner| pair_runner != Some(runner))
+        {
+            continue;
+        }
+        let picked = |role: &str, own: bool| {
+            tests
+                .iter()
+                .filter(|test| {
+                    test.role == role
+                        && pair_kind.is_none_or(|kind| test.provenance.kind == kind)
+                        && pair_runner.is_none_or(|runner| test.provenance.runner == runner)
+                        && (!own || crate::coverage_report::coverage_is_its_own(&test.attribution))
+                })
+                .count()
+        };
+        let count = picked("test", false);
+        if count == 0 {
+            continue;
+        }
+        let projection = index.projection(view, pair_kind, pair_runner)?;
+        filtered.push(IndexedDimensionCoverage {
+            kind: value.kind.clone(),
+            runner: value.runner.clone(),
+            tests: count,
+            setups: picked("setup", false),
+            attributed: picked("test", true),
+            summary: projection.summary,
+        });
+    }
+    if filtered.is_empty() {
+        return Err(QueryError::TestFilterEmpty {
+            kind: kind.map(str::to_owned),
+            runner: runner.map(str::to_owned),
+        });
+    }
+    Ok(filtered)
+}
+
 pub fn coverage_dimension_query(
     index: &CoverageIndex<'_>,
     options: CoverageDimensionQueryOptions<'_>,
@@ -3661,7 +3724,13 @@ pub fn coverage_dimension_query(
     if limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let values = index.dimensions(view, dimension)?;
+    let values = filtered_dimensions(
+        index,
+        view,
+        dimension,
+        filters.kind.as_deref(),
+        filters.runner.as_deref(),
+    )?;
     let total = values.len();
     let selected = values
         .into_iter()

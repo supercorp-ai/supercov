@@ -2919,6 +2919,24 @@ fn execute_public_query(
                 }
             }
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
+                // One line past the end of the file is no line: reading it as
+                // code the run did not measure would be an answer.
+                if request.command == "line"
+                    && request.more_lines.is_empty()
+                    && let (Some(file), Some(line)) = (&request.file, request.line)
+                    && let Ok(contents) = fs::read_to_string(root.join(file))
+                    && line > contents.lines().count()
+                {
+                    return Err(agent_json::AgentError {
+                        code: agent_json::ErrorCode::InvalidArgument,
+                        message: format!(
+                            "{file} has {} lines; there is no line {line}",
+                            contents.lines().count()
+                        ),
+                        retryable: false,
+                        details: Some(serde_json::json!({ "file": file, "line": line })),
+                    });
+                }
                 let progress = ProgressLine::start("loading run evidence");
                 let test_filter = request.test_filter();
                 let container = open_query_index_for(run, test_filter.as_ref()).map_err(|error| {

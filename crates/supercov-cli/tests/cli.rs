@@ -549,6 +549,39 @@ fn suites_started_together_from_one_command_are_one_run_with_their_kinds() {
     contains_all(&kinds, &["unit", "integration"]);
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(&summary, &["Total       4", "Passed      4"]);
+    // A filter narrows the grouping to the tests it picks.
+    let counted = |args: &[&str], field: &str| -> Vec<(String, u64)> {
+        let mut all = vec!["runs", "latest"];
+        all.extend_from_slice(args);
+        all.push("--json");
+        project.supercov(&all).json()["data"][field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                let name = entry["kind"].as_str().or(entry["runner"].as_str()).unwrap();
+                (name.to_owned(), entry["tests"].as_u64().unwrap())
+            })
+            .collect()
+    };
+    assert_eq!(
+        counted(&["runners", "--kind", "integration"], "runners"),
+        [("node:test".to_owned(), 1)]
+    );
+    assert_eq!(
+        counted(&["runners", "--kind", "unit"], "runners"),
+        [("node:test".to_owned(), 3)]
+    );
+    assert_eq!(
+        counted(&["kinds", "--kind", "unit"], "kinds"),
+        [("unit".to_owned(), 3)]
+    );
+    let mut by_runner = counted(&["kinds", "--runner", "node:test"], "kinds");
+    by_runner.sort();
+    assert_eq!(
+        by_runner,
+        [("integration".to_owned(), 1), ("unit".to_owned(), 3)]
+    );
 }
 
 #[test]
@@ -7083,7 +7116,7 @@ fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
 fn a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query() {
     let project = Project::cart("filter-matches-nothing");
     project.measure(&[]);
-    for query in ["summary", "scope", "gaps", "files"] {
+    for query in ["summary", "scope", "gaps", "files", "kinds", "runners"] {
         for (flag, value, said) in [
             ("--kind", "e2e", "No tests match kind=e2e"),
             ("--runner", "jest", "No tests match runner=jest"),
@@ -7092,7 +7125,10 @@ fn a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query() {
                 .supercov(&["runs", "latest", query, flag, value])
                 .exits(2);
             assert!(stderr.contains(said), "{query} {flag} {value}: {stderr}");
-            assert!(!stderr.contains("invalid coverage index"), "{query}: {stderr}");
+            assert!(
+                !stderr.contains("invalid coverage index"),
+                "{query}: {stderr}"
+            );
         }
     }
     contains_all(
@@ -7101,4 +7137,38 @@ fn a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query() {
             .succeeds(),
         &["(runner node:test)"],
     );
+}
+
+#[test]
+fn a_line_that_is_not_in_the_file_is_refused_not_read_as_unmeasured() {
+    let project = Project::cart("line-bounds");
+    project.measure(&[]);
+    let lines = project.read("src/cart.js").lines().count();
+    let past = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:9999"])
+        .exits(2);
+    assert!(
+        past.contains(&format!(
+            "src/cart.js has {lines} lines; there is no line 9999"
+        )),
+        "{past}"
+    );
+    let zero = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:0"])
+        .exits(2);
+    assert!(zero.contains("with lines counted from 1"), "{zero}");
+    // The last line is still a line.
+    project
+        .supercov(&["runs", "latest", "line", &format!("src/cart.js:{lines}")])
+        .succeeds();
+    // Several lines answer what they can, as before.
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:1",
+            "src/cart.js:9999",
+        ])
+        .succeeds();
 }

@@ -463,6 +463,7 @@ fn parse_options(
     Ok(options)
 }
 
+/// `file:line` or `file:line:column`; lines count from 1.
 fn parse_location(selector: &str) -> Option<(String, usize)> {
     let without_column = selector.rsplit_once(':')?;
     let (file_and_maybe_line, final_number) = without_column;
@@ -470,9 +471,9 @@ fn parse_location(selector: &str) -> Option<(String, usize)> {
     if let Some((file, line)) = file_and_maybe_line.rsplit_once(':')
         && let Ok(line) = line.parse::<usize>()
     {
-        return Some((file.to_owned(), line));
+        return (line > 0).then(|| (file.to_owned(), line));
     }
-    Some((file_and_maybe_line.to_owned(), final_number))
+    (final_number > 0).then(|| (file_and_maybe_line.to_owned(), final_number))
 }
 
 fn coverage_invocation(
@@ -582,7 +583,7 @@ fn coverage_invocation(
                     let mut error = PublicQueryError::invalid(
                         Some(&agent_command),
                         json_output,
-                        "Expected <source-file>:<line>",
+                        "Expected <source-file>:<line>, with lines counted from 1",
                     );
                     error.error.details = Some(json!({ "selector": selector }));
                     return Err(error);
