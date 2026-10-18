@@ -2013,13 +2013,13 @@ impl Population {
 
     /// What Jev sees for one statement asked of one test, line numbers aside:
     /// the same code renumbered is the same question. Equal keys, equal question.
-    /// `salt` carries what changes every answer at once: the run's dependency
-    /// and configuration fingerprints.
-    pub fn pair_key(&self, statement: usize, test: usize, model: &str, salt: &str) -> String {
+    /// Nothing Jev does not see is in it: a key that also held the run's
+    /// dependency and configuration fingerprints threw every answer away when
+    /// a lockfile or a config file changed, though each question was the same.
+    pub fn pair_key(&self, statement: usize, test: usize, model: &str) -> String {
         let t = &self.tests[test];
         let parts = json!([
             model,
-            salt,
             INSTRUCTIONS,
             runtime(&t.runner),
             true,
