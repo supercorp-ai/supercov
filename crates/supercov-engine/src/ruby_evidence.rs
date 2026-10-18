@@ -2354,6 +2354,74 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// An expected failure is expected to fail; a phase the runtime entered
+    /// and the runner never reported is a failed phase that says so; a file
+    /// limitation takes the file's obligations out; and one naming an
+    /// obligation the run does not have is refused.
+    #[test]
+    fn expected_failures_unreported_phases_and_limitations_read_as_what_they_are() {
+        let source = "def f(a)\n  if a\n    1\n  else\n    0\n  end\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let run_with = |label: &str, extra: &[serde_json::Value]| {
+            let directory = temporary(label);
+            let mut records = vec![
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"]}),
+                serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"failed","xfail":true,"runner":"rspec"}),
+                serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":"spec/m_spec.rb[1:2]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"hit","ctx":2,"id":statement.id}),
+            ];
+            records.extend(extra.iter().cloned());
+            records.push(serde_json::json!({"t":"exit","at":9}));
+            fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+            let run = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            );
+            fs::remove_dir_all(directory).unwrap();
+            run
+        };
+        let run = run_with(
+            "outcomes",
+            &[serde_json::json!({"t":"limitation","id":"ruby-iseq-unmapped","reason":"no ranges","file":"lib/m.rb"})],
+        )
+        .unwrap();
+        let result = |test: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|raw| raw.test == test)
+                .unwrap()
+        };
+        let expected = result("spec/m_spec.rb[1:1]");
+        assert_eq!(expected.expected_status.as_deref(), Some("failed"));
+        let unreported = result("spec/m_spec.rb[1:2]");
+        assert_eq!(unreported.status.as_deref(), Some("failed"));
+        assert!(unreported.phases.iter().any(|phase| {
+            phase.error.as_deref() == Some("the phase started but the runner reported no outcome")
+        }));
+        assert!(run.request.manifest.unmeasured.contains(&statement.id));
+        assert!(matches!(
+            run_with(
+                "unknown-obligation",
+                &[serde_json::json!({"t":"limitation","id":"ruby-decision-folded","reason":"folded","obligation":"nope"})],
+            ),
+            Err(RubyEvidenceError::UnknownObligation(id)) if id == "nope"
+        ));
+    }
+
     #[test]
     fn an_rspec_example_carries_its_tags_and_description_and_a_level_tag_is_its_kind() {
         let source = "def f(a)\n  a ? 1 : 0\nend\n";
