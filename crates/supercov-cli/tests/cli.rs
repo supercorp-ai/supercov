@@ -7999,3 +7999,120 @@ fn runs_that_ran_no_tests_keep_the_command_status_and_say_so() {
         ],
     );
 }
+
+/// Pages past the end, views with no tests, files and decisions that are not
+/// there, and the narrower views of one run each read as what they are.
+#[test]
+fn odd_pages_and_empty_views_read_as_what_they_are() {
+    let project = Project::cart("odd-views");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let past = project
+        .supercov(&["runs", "latest", "files", "--offset", "100"])
+        .succeeds();
+    assert!(
+        past.contains(
+            "every included source file\n\nshowing none of 1: --offset 100 is past the end"
+        ),
+        "{past}"
+    );
+    let past = project
+        .supercov(&["runs", "latest", "gaps", "--offset", "100"])
+        .succeeds();
+    assert!(
+        past.contains("unresolved obligations\n\nshowing none of 1: --offset 100 is past the end"),
+        "{past}"
+    );
+    let runners = project
+        .supercov(&["runs", "latest", "runners", "--offset", "5"])
+        .succeeds();
+    assert!(
+        runners.starts_with("showing none of 1: --offset 5 is past the end"),
+        "{runners}"
+    );
+    let kinds = project
+        .supercov(&["runs", "latest", "kinds", "--filter", "failed"])
+        .succeeds();
+    assert!(
+        kinds.contains("No tests in this view (failed attempts only)"),
+        "{kinds}"
+    );
+    let directories = project
+        .supercov(&["runs", "latest", "files", "--group", "dir"])
+        .succeeds();
+    assert!(
+        directories.contains("src            1     13  76.92%  76.92%"),
+        "{directories}"
+    );
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/cart.js", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "showing 1-1 of 6 gap lines",
+            "file 'src/cart.js' --offset 1 --limit 1",
+            "all 6 at once",
+        ],
+    );
+    let missing = project
+        .supercov(&["runs", "latest", "file", "package.json"])
+        .exits(2);
+    assert!(
+        missing.contains("Source file not found: package.json"),
+        "{missing}"
+    );
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/cart.js:1"])
+        .exits(2);
+    assert!(
+        decision.contains("Decision not found: src/cart.js:1"),
+        "{decision}"
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:1"])
+        .succeeds();
+    assert!(
+        line.contains("Function at column 8 — covered (2 covering tests)"),
+        "{line}"
+    );
+    let scope = project
+        .supercov(&["runs", "latest", "scope", "--files", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &scope,
+        &["INCLUDED  src/cart.js", "showing 1-1 of 2", "all 2 at once"],
+    );
+    let failed = project
+        .supercov(&["runs", "latest", "--filter", "failed"])
+        .succeeds();
+    contains_all(
+        &failed,
+        &[
+            "(failed attempts only)",
+            "No test recorded coverage",
+            "Total       0",
+        ],
+    );
+    let titled = project
+        .supercov(&["runs", "latest", "--title", "nothing-matches"])
+        .exits(2);
+    assert!(
+        titled.contains("No tests match --title nothing-matches"),
+        "{titled}"
+    );
+    let without = project
+        .supercov(&["runs", "latest", "tests", "without-evidence"])
+        .succeeds();
+    assert!(without.contains("recorded no coverage: 0"), "{without}");
+    let source = project
+        .supercov(&["runs", "latest", "source", "src/cart.js", "--limit", "2"])
+        .succeeds();
+    contains_all(
+        &source,
+        &[
+            " 2 │   let sum = 0;",
+            "Showing 1-2 of 21",
+            "--offset 2 --limit 2",
+        ],
+    );
+}

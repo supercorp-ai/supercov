@@ -485,7 +485,13 @@ fn render_files(
     } else {
         body
     };
-    let mut output = format!("{title}{projection}\n\n{body}\n\n{}", page_label(page));
+    // Past the end, there is no body to set apart.
+    let body = if body.is_empty() {
+        String::new()
+    } else {
+        format!("{body}\n\n")
+    };
+    let mut output = format!("{title}{projection}\n\n{body}{}", page_label(page));
     if let Some(inspect) =
         inspect_file_command(run, request, rows.first().map(|row| row.file.as_str()))
     {
@@ -610,7 +616,12 @@ fn render_dimension(
     } else {
         body
     };
-    let mut output = format!("{body}\n{}", page_label(page));
+    let body = if body.is_empty() {
+        String::new()
+    } else {
+        format!("{body}\n")
+    };
+    let mut output = format!("{body}{}", page_label(page));
     if let Some(next) = next_page(&coverage_command(run, request, child), page) {
         output.push_str(&format!("\nnext page: {next}"));
     }
