@@ -3093,3 +3093,22 @@ fn a_distribution_is_a_probability_for_every_choice_summing_to_one() {
     assert_eq!(host("example.com:443"), "example.com");
     assert_eq!(host("https://h.example?q=1"), "h.example");
 }
+
+#[test]
+fn a_dense_run_counts_a_token_a_byte_and_an_oversized_declaration_splits_at_its_children() {
+    // 64 dense bytes, then 11 ordinary ones: 64 + ceil(11 / 3).
+    let text = format!("{} {}", "A".repeat(DENSE_RUN), "b".repeat(10));
+    assert_eq!(estimated_tokens(text.as_bytes()), DENSE_RUN + 4);
+    let filler = "x".repeat(SPLIT_INSIDE_BYTES + 10);
+    let source = format!(
+        "export class Big {{\n  one() {{\n    return \"{filler}\";\n  }}\n  two() {{\n    return 2;\n  }}\n}}\nexport function huge() {{\n  return \"{filler}\";\n}}\nexport function small() {{\n  return 1;\n}}\n"
+    );
+    let (outline, units) = split_units("src/a.js", &source).unwrap();
+    let names = units
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Big.one", "Big.two", "huge", "small"]);
+    assert_eq!(outline.as_array().unwrap().len(), 4);
+    assert!(split_units("notes.txt", "plain\n").is_none());
+}
