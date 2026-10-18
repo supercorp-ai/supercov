@@ -303,6 +303,8 @@ npx supercov -- wasm-pack test --headless --chrome
   measured yet; the run says so.
 - `wasm-pack test` is measured on Linux and macOS. On Windows, run the
   `cargo test --target wasm32-unknown-unknown` it runs.
+- Deno is not supported. `wasm-bindgen-test-runner`'s Deno mode
+  (`WASM_BINDGEN_USE_DENO=1`) does not run on Deno 2.
 
 ## Python
 
