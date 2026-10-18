@@ -1479,9 +1479,65 @@ mod tests {
             .map(|(name, status)| (name.to_owned(), status.to_owned()))
         );
         // Counts that do not add up to what the harness printed name nothing.
-        let wrong = text.replace("2 passed", "3 passed");
-        assert!(quiet_cases(&wrong, &order, &selected, &ran, &root).is_none());
+        for wrong in [
+            text.replace("2 passed", "3 passed"),
+            text.replace("1 failed", "2 failed"),
+            text.replace("1 ignored", "0 ignored"),
+            text.replace("test result: ", "result: "),
+        ] {
+            assert!(
+                quiet_cases(&wrong, &order, &selected, &ran, &root).is_none(),
+                "{wrong}"
+            );
+        }
         fs::remove_dir_all(root).ok();
+    }
+
+    /// rustdoc's reports go under the package Cargo announced them for; a
+    /// package nothing was asked of says so; and where a heading or a report
+    /// cannot be placed, the reports are passed on as they came.
+    #[test]
+    fn doctest_reports_go_under_the_package_cargo_announced() {
+        let package = PackageDoctests {
+            package: "my-crate".into(),
+            manifest_dir: PathBuf::from("/nowhere"),
+            cases: vec![DoctestCase {
+                name: "src/lib.rs - a (line 1)".into(),
+                status: "passed".into(),
+                evidence: None,
+            }],
+            listed: 3,
+            exit_code: 0,
+        };
+        let report = "running 1 test\ntest src/lib.rs - a (line 1) ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s\n\n";
+        let reports = |stdout: &str, stderr: &str, packages: &[PackageDoctests]| {
+            doctest_reports(stdout, stderr, packages, false)
+                .into_iter()
+                .map(|announced| (announced.heading, announced.report))
+                .collect::<Vec<_>>()
+        };
+        assert!(reports("", "", &[]).is_empty());
+        let heading = "   Doc-tests my_crate";
+        assert_eq!(
+            reports(report, heading, std::slice::from_ref(&package)),
+            [(Some(heading.to_owned()), report.to_owned())]
+        );
+        let unasked = reports("", "", std::slice::from_ref(&package));
+        assert_eq!(unasked.len(), 1);
+        assert!(unasked[0].1.contains("3 filtered out"), "{unasked:?}");
+        assert_eq!(
+            reports(report, "   Doc-tests other", std::slice::from_ref(&package)),
+            [(None, report.to_owned())]
+        );
+        let stray = "running 1 test\ntest src/lib.rs - z (line 9) ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n";
+        assert_eq!(
+            reports(
+                &format!("{report}{stray}"),
+                heading,
+                std::slice::from_ref(&package)
+            ),
+            [(None, format!("{report}{stray}"))]
+        );
     }
 
     #[test]
