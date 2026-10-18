@@ -3995,6 +3995,7 @@ impl<'a> CoverageIndex<'a> {
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
             let covered_conditions = usize::try_from(get_u64(record, 40))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let counted = total != 0 || covered_conditions != 0;
             let (kind, conditions, covered_conditions) = match record[1] {
                 0 => {
                     if total == 0 || covered_conditions > total {
@@ -4009,7 +4010,7 @@ impl<'a> CoverageIndex<'a> {
                 3 => ("function", None, None),
                 _ => return Err(CoverageIndexError::InvalidRecord("anchor kind")),
             };
-            if kind != "decision" && (total != 0 || covered_conditions.is_some()) {
+            if kind != "decision" && counted {
                 return Err(CoverageIndexError::InvalidRecord("anchor conditions"));
             }
             anchors.push(IndexedAnchor {
@@ -5011,6 +5012,168 @@ mod tests {
         );
         assert!(scoped(set(vec![(3, vec![2])]).as_ref()).contains("compiler scope shape"));
         assert!(scoped(set(vec![(2, vec![0])]).as_ref()).contains("scope presence flag"));
+        // A string any record may name: the projection's own timestamp.
+        let with_string = move |offsets: Vec<usize>, also: Vec<(usize, Vec<u8>)>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                let section = s.iter().find(|section| section.kind == kind).unwrap();
+                let at = record * size + 12;
+                let string = section.bytes[at..at + 4].to_vec();
+                for offset in &offsets {
+                    patch(s, kind, record, size, *offset, &string);
+                }
+                for (offset, bytes) in &also {
+                    patch(s, kind, record, size, *offset, bytes);
+                }
+            })
+        };
+        let none = NO_STRING.to_le_bytes().to_vec();
+        let one = 1u64.to_le_bytes().to_vec();
+        // No scope: each scope field set alone is refused.
+        for edit in [
+            set(vec![(32, 1u32.to_le_bytes().to_vec())]),
+            with_string(vec![16], vec![]),
+            with_string(vec![504], vec![]),
+            with_string(vec![508], vec![]),
+            with_string(vec![512], vec![]),
+            set(vec![(516, vec![1])]),
+            set(vec![(480, one.clone())]),
+            set(vec![(488, one.clone())]),
+            set(vec![(496, one.clone())]),
+        ] {
+            let got = read(edit.as_ref());
+            assert!(got.contains("absent scope data"), "{got}");
+        }
+        // A scope missing its language or model is no scope.
+        for offset in [504, 508] {
+            let got = scoped(set(vec![(offset, none.clone())]).as_ref());
+            assert!(got.contains("scope presence flag"), "{offset}: {got}");
+        }
+        // Source discovery has a mode and no compiler unit.
+        assert!(
+            scoped(set(vec![(16, none.clone())]).as_ref()).contains("source-discovery scope shape")
+        );
+        assert!(
+            scoped(with_string(vec![512], vec![]).as_ref())
+                .contains("source-discovery scope shape")
+        );
+        // A compiler scope: a unit and a completeness flag, no mode, roots or
+        // counts. Valid, then breaking each rule alone.
+        let compiler = |also: Vec<(usize, Vec<u8>)>| {
+            let mut fields = vec![
+                (3, vec![2]),
+                (16, none.clone()),
+                (516, vec![1]),
+                (517, vec![1]),
+                (32, 0u32.to_le_bytes().to_vec()),
+                (480, 0u64.to_le_bytes().to_vec()),
+                (488, 0u64.to_le_bytes().to_vec()),
+                (496, 0u64.to_le_bytes().to_vec()),
+            ];
+            fields.extend(also);
+            with_string(vec![512], fields)
+        };
+        assert_eq!(
+            scoped(compiler(vec![]).as_ref()),
+            "accepted Some(\"compiler\")"
+        );
+        for also in [
+            vec![(512, none.clone())],
+            vec![(516, vec![0]), (517, vec![0])],
+            vec![(32, 1u32.to_le_bytes().to_vec())],
+            vec![(480, one.clone())],
+            vec![(488, one.clone())],
+            vec![(496, one.clone())],
+        ] {
+            let got = scoped(compiler(also.clone()).as_ref());
+            assert!(got.contains("compiler scope shape"), "{also:?}: {got}");
+        }
+        let got = scoped(with_string(vec![16, 512], vec![(3, vec![2]), (516, vec![1])]).as_ref());
+        assert!(got.contains("compiler scope shape"), "{got}");
+        // A count of tests with no evidence names its first one, and only then.
+        for edit in [set(vec![(472, one.clone()), (20, none.clone())]), {
+            with_string(vec![20], vec![(472, 0u64.to_le_bytes().to_vec())])
+        }] {
+            let got = read(edit.as_ref());
+            assert!(got.contains("empty-evidence diagnostic identity"), "{got}");
+        }
+    }
+
+    #[test]
+    fn an_anchor_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_ANCHORS, ANCHOR_RECORD_SIZE);
+        // The whole view's first anchor of this kind.
+        let first = move |sections: &[QueryIndexSection], anchor_kind: u8| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..section.count as usize)
+                .find(|record| {
+                    let bytes = &section.bytes[record * size..(record + 1) * size];
+                    bytes[0] == CoverageViewId::All as u8 && bytes[1] == anchor_kind
+                })
+                .unwrap()
+        };
+        // Every line's and decision's anchors, so whichever place the record
+        // is at is read.
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            let places = index
+                .lines(CoverageViewId::All)
+                .unwrap()
+                .into_iter()
+                .map(|line| (line.file, line.line))
+                .chain(
+                    index
+                        .decision_metadata(CoverageViewId::All)
+                        .unwrap()
+                        .into_iter()
+                        .map(|decision| (decision.file, decision.line)),
+                )
+                .collect::<Vec<_>>();
+            for (file, line) in &places {
+                if let Err(error) = index.anchors(CoverageViewId::All, file, *line) {
+                    return format!("{error:?}");
+                }
+            }
+            "accepted".to_owned()
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = move |anchor_kind: u8, pairs: Vec<(usize, Vec<u8>)>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s, anchor_kind);
+                for (offset, bytes) in &pairs {
+                    patch(s, kind, record, size, *offset, bytes);
+                }
+            })
+        };
+        let (zero, one, many) = (
+            0u64.to_le_bytes().to_vec(),
+            1u64.to_le_bytes().to_vec(),
+            99u64.to_le_bytes().to_vec(),
+        );
+        let cases: Vec<(&str, Edit)> = vec![
+            ("anchor record", set(0, vec![(3, vec![1])])),
+            ("anchor record", set(0, vec![(12, vec![1])])),
+            (
+                "decision anchor conditions",
+                set(0, vec![(32, zero.clone())]),
+            ),
+            (
+                "decision anchor conditions",
+                set(0, vec![(40, many.clone())]),
+            ),
+            ("anchor kind", set(0, vec![(1, vec![4])])),
+            ("anchor conditions", set(2, vec![(32, one.clone())])),
+            // A statement claims no covered conditions either.
+            ("anchor conditions", set(2, vec![(40, one.clone())])),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
     }
 
     /// The first record of `kind` in the whole view, for the tables below.
