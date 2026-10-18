@@ -10664,6 +10664,26 @@ mod tests {
         );
     }
 
+    /// A function whose text is read keeps it whole, the functions inside
+    /// it with it; a file that reads no function's text is printed as is.
+    #[test]
+    fn a_read_function_keeps_its_nested_functions_as_written() {
+        let source = "export function outer(a) {\n  function inner(b) {  return b  * 2; }\n  const arrow = (c) =>  c + 1;\n  return inner(a) + arrow(a);\n}\nexport const text = outer.toString();\n";
+        let output = instrument_direct_candidate(source, "src/outer.js").unwrap();
+        assert!(
+            output
+                .code
+                .contains("function inner(b) {  return b  * 2; }")
+                && output.code.contains("const arrow = (c) =>  c + 1;"),
+            "{}",
+            output.code
+        );
+        let plain =
+            instrument_direct_candidate("export function f(a) {  return a; }\n", "src/f.js")
+                .unwrap();
+        assert!(!plain.code.contains("{  return a; }"), "{}", plain.code);
+    }
+
     #[test]
     fn codegen_output_reparses_for_typescript_and_tsx() {
         for (file, source) in [
