@@ -78,10 +78,6 @@ enum Record {
         python: String,
         executable: String,
         argv: Vec<String>,
-        /// Which observer measured the process. Probes are the only one
-        /// now; the field stays so evidence kept by an earlier runtime reads.
-        #[serde(default)]
-        frontend: Option<String>,
     },
     Worker {
         worker: String,
