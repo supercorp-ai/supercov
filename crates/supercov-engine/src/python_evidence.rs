@@ -1304,26 +1304,13 @@ fn apply_transport(
                 .extend(ids);
             }
             Record::Dec { ctx, id, v, o } => {
-                if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
-                    return Err(invalid("decision vector digits must be 0, 1 or 2"));
-                }
-                if o > 1 {
-                    return Err(invalid("decision outcome must be 0 or 1"));
-                }
-                let values = v
-                    .bytes()
-                    .map(|digit| match digit {
-                        b'0' => None,
-                        b'1' => Some(false),
-                        _ => Some(true),
-                    })
-                    .collect::<Vec<_>>();
+                let (values, outcome) = decision_vector(&v, o).map_err(invalid)?;
                 if let Some(before) = before_assertion.get_mut(&ctx) {
                     before
                         .vectors
                         .entry(id.clone())
                         .or_default()
-                        .insert((values.clone(), o == 1));
+                        .insert((values.clone(), outcome));
                 }
                 observations(
                     evidence,
@@ -1336,7 +1323,7 @@ fn apply_transport(
                 .vectors
                 .entry(id)
                 .or_default()
-                .insert((values, o == 1));
+                .insert((values, outcome));
             }
             Record::Decs { ctx, v: vectors } => {
                 let mut before = before_assertion.get_mut(&ctx);
@@ -1349,32 +1336,19 @@ fn apply_transport(
                     line_number,
                 )?;
                 for (id, v, o) in vectors {
-                    if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
-                        return Err(invalid("decision vector digits must be 0, 1 or 2"));
-                    }
-                    if o > 1 {
-                        return Err(invalid("decision outcome must be 0 or 1"));
-                    }
-                    let values = v
-                        .bytes()
-                        .map(|digit| match digit {
-                            b'0' => None,
-                            b'1' => Some(false),
-                            _ => Some(true),
-                        })
-                        .collect::<Vec<_>>();
+                    let (values, outcome) = decision_vector(&v, o).map_err(invalid)?;
                     if let Some(before) = before.as_mut() {
                         before
                             .vectors
                             .entry(id.clone())
                             .or_default()
-                            .insert((values.clone(), o == 1));
+                            .insert((values.clone(), outcome));
                     }
                     observed
                         .vectors
                         .entry(id)
                         .or_default()
-                        .insert((values, o == 1));
+                        .insert((values, outcome));
                 }
             }
             Record::Assert { ctx } => {
@@ -2386,6 +2360,29 @@ fn build_from_evidence(
         interpreters,
         python_versions: python_versions.into_iter().collect(),
     })
+}
+
+/// A decision record's vector: a digit per condition (`0` not evaluated,
+/// `1` false, `2` true) and the outcome, `0` or `1`. Ruby's records write
+/// it the same way.
+pub(crate) fn decision_vector(v: &str, o: u8) -> Result<(Vec<Option<bool>>, bool), &'static str> {
+    let values = v
+        .bytes()
+        .map(|digit| match digit {
+            b'0' => Ok(None),
+            b'1' => Ok(Some(false)),
+            b'2' => Ok(Some(true)),
+            _ => Err("decision vector digits must be 0, 1 or 2"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.is_empty() {
+        return Err("decision vector digits must be 0, 1 or 2");
+    }
+    match o {
+        0 => Ok((values, false)),
+        1 => Ok((values, true)),
+        _ => Err("decision outcome must be 0 or 1"),
+    }
 }
 
 #[cfg(test)]
@@ -4062,5 +4059,21 @@ mod tests {
         let unnamed = fresh("unnamed");
         fs::write(unnamed.join("p.1.shm"), b"").unwrap();
         assert!(read(&unnamed).starts_with("ok"), "{}", read(&unnamed));
+    }
+
+    #[test]
+    fn decision_vectors_read_each_digit_and_refuse_anything_else() {
+        assert_eq!(
+            decision_vector("012", 1),
+            Ok((vec![None, Some(false), Some(true)], true))
+        );
+        assert_eq!(decision_vector("2", 0), Ok((vec![Some(true)], false)));
+        for (v, o, reason) in [
+            ("", 0, "decision vector digits must be 0, 1 or 2"),
+            ("13", 0, "decision vector digits must be 0, 1 or 2"),
+            ("1", 2, "decision outcome must be 0 or 1"),
+        ] {
+            assert_eq!(decision_vector(v, o), Err(reason), "{v} {o}");
+        }
     }
 }

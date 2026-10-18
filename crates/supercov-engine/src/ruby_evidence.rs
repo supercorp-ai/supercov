@@ -705,26 +705,14 @@ fn read_evidence_file(
                 .extend(ids);
             }
             Record::Dec { ctx, id, v, o } => {
-                if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
-                    return Err(invalid("decision vector digits must be 0, 1 or 2"));
-                }
-                if o > 1 {
-                    return Err(invalid("decision outcome must be 0 or 1"));
-                }
-                let values = v
-                    .bytes()
-                    .map(|digit| match digit {
-                        b'0' => None,
-                        b'1' => Some(false),
-                        _ => Some(true),
-                    })
-                    .collect::<Vec<_>>();
+                let (values, outcome) =
+                    crate::python_evidence::decision_vector(&v, o).map_err(invalid)?;
                 if let Some(before) = before_assertion.get_mut(&ctx) {
                     before
                         .vectors
                         .entry(id.clone())
                         .or_default()
-                        .insert((values.clone(), o == 1));
+                        .insert((values.clone(), outcome));
                 }
                 observations(
                     evidence,
@@ -737,7 +725,7 @@ fn read_evidence_file(
                 .vectors
                 .entry(id)
                 .or_default()
-                .insert((values, o == 1));
+                .insert((values, outcome));
             }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
