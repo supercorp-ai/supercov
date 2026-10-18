@@ -1680,4 +1680,45 @@ mod tests {
             Some(1_792_271_137_000)
         );
     }
+
+    /// The daemon a client would reach, by `DOCKER_HOST`: a local socket is
+    /// stood in for, a TCP daemon is not. The relay's own socket sits in the
+    /// run's directory when it fits an address, and in a private directory
+    /// under /tmp, removed with it, when it does not.
+    #[test]
+    fn the_upstream_and_relay_sockets_are_chosen_by_their_paths() {
+        let host = |value: &str| {
+            upstream_socket(
+                &[("DOCKER_HOST".to_owned(), value.to_owned())]
+                    .into_iter()
+                    .collect(),
+            )
+        };
+        assert_eq!(
+            host("unix:///run/user/docker.sock"),
+            Some(PathBuf::from("/run/user/docker.sock"))
+        );
+        assert_eq!(host("tcp://127.0.0.1:2375"), None);
+        // A base short enough for a socket address; the system temporary
+        // directory on macOS is nearly too long on its own.
+        let base = PathBuf::from("/tmp").join(format!(
+            "sc-relay-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let short = base.join("s");
+        assert_eq!(socket_path(&short).unwrap(), short.join("docker.sock"));
+        let long = base.join("x".repeat(120));
+        let private = socket_path(&long).unwrap();
+        assert!(private.starts_with("/tmp"), "{}", private.display());
+        let directory = private.parent().unwrap().to_owned();
+        assert!(directory.is_dir());
+        fs::write(&private, b"").unwrap();
+        remove_socket(&private);
+        assert!(!directory.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
 }
