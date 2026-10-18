@@ -1186,4 +1186,49 @@ mod tests {
         ));
         assert!(!declares_test_main_textually("package p\n"));
     }
+
+    /// The package clause past comments, the runtime of the module a file
+    /// is in, and the flags Supercov adds only where the command has none.
+    #[test]
+    fn go_package_runtime_and_command_flags_read_the_way_go_does() {
+        assert_eq!(
+            package_name("// c\n/* b */ package main\n").as_deref(),
+            Some("main")
+        );
+        assert_eq!(package_name("/* never closed").as_deref(), None);
+        assert_eq!(package_name("").as_deref(), None);
+        let runtimes = vec![
+            ("svc/api".to_owned(), "example.com/api/rt".to_owned()),
+            (".".to_owned(), "example.com/rt".to_owned()),
+        ];
+        assert_eq!(runtime_for(&runtimes, "svc/api/h.go"), "example.com/api/rt");
+        assert_eq!(runtime_for(&runtimes, "svc/apix/h.go"), "example.com/rt");
+        assert_eq!(
+            runtime_for(&[("svc".to_owned(), "r".to_owned())], "other/x.go"),
+            ""
+        );
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            command_run_in_order(&words("go test ./...")),
+            (words("go test -parallel=1 ./..."), true)
+        );
+        for kept in ["go test -parallel 4 ./...", "go test -parallel=2"] {
+            assert_eq!(
+                command_run_in_order(&words(kept)),
+                (words(kept), false),
+                "{kept}"
+            );
+        }
+        assert_eq!(
+            command_with_fresh_results(&words("go test ./...")),
+            (words("go test -count=1 ./..."), true)
+        );
+        for kept in ["go test -count 3", "go test -count=1"] {
+            assert_eq!(
+                command_with_fresh_results(&words(kept)),
+                (words(kept), false),
+                "{kept}"
+            );
+        }
+    }
 }
