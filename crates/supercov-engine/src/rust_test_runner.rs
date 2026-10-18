@@ -357,7 +357,8 @@ fn nextest_run_only_option(argument: &str) -> Option<bool> {
         | "--no-output-indent"
         | "--hide-progress-bar"
         | "--no-input-handler" => Some(false),
-        _ if argument.starts_with("-j") && argument.len() > 2 => Some(false),
+        // `-j` alone, or with `=`, is matched above: what reaches here is `-j4`.
+        _ if argument.starts_with("-j") => Some(false),
         _ => None,
     }
 }
@@ -442,18 +443,21 @@ fn nextest_shared_option(argument: &str) -> Option<bool> {
         | "--future-incompat-report"
         | "--ignore-default-filter"
         | "--override-version-check" => Some(false),
-        _ if argument.starts_with("-p") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-F") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-E") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-P") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-Z") && argument.len() > 2 => Some(false),
+        // The short options alone, or with `=`, are matched above: what
+        // reaches here carries its value attached (`-pfoo`).
+        _ if ["-p", "-F", "-E", "-P", "-Z"]
+            .iter()
+            .any(|short| argument.starts_with(short)) =>
+        {
+            Some(false)
+        }
+        // `-vv`, `-vvv`: a lone `-` is no verbosity.
         _ if argument.len() > 2
             && argument.starts_with('-')
             && argument[1..].bytes().all(|byte| byte == b'v') =>
         {
             Some(false)
         }
-        _ if argument.starts_with("--timings=") => Some(false),
         _ => None,
     }
 }
@@ -643,9 +647,13 @@ fn cargo_option_takes_value(argument: &str) -> Option<bool> {
         | "--offline"
         | "--frozen" => Some(false),
         _ if argument.starts_with("-vv") => Some(false),
-        _ if argument.starts_with("-p") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-F") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-j") && argument.len() > 2 => Some(false),
+        // `-p`, `-F` and `-j` alone, or with `=`, are matched above.
+        _ if ["-p", "-F", "-j"]
+            .iter()
+            .any(|short| argument.starts_with(short)) =>
+        {
+            Some(false)
+        }
         _ => None,
     }
 }
@@ -728,7 +736,8 @@ pub(crate) fn rust_libtest_selection(
                 list_arguments.extend([argument.clone(), value.clone()]);
                 index += 1;
             }
-            _ if argument.starts_with("-Z") && argument.len() > 2 => {
+            // `-Z` alone is matched above.
+            _ if argument.starts_with("-Z") => {
                 list_arguments.push(argument.clone());
             }
             "--logfile" | "--color" | "--format" | "--shuffle-seed" => {
@@ -2791,6 +2800,70 @@ mod tests {
                 .to_string()
                 .contains("cannot yet be assigned exact selected-test identity")
         );
+    }
+
+    #[test]
+    fn nextest_list_keeps_attached_selection_values_and_drops_run_only_options() {
+        let list = |arguments: &[&str]| {
+            nextest_list_invocation(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::NextestRun,
+                arguments: ["nextest", "run"]
+                    .iter()
+                    .chain(arguments)
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+                runner_arguments: Vec::new(),
+            })
+            .map(|listed| listed.arguments)
+            .map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            list(&[
+                "-pfoo",
+                "-Ffeat",
+                "-Eall()",
+                "-Pci",
+                "-Zflag",
+                "-vv",
+                "--timings=html",
+                "-j4",
+                "-j",
+                "2",
+                "--",
+                "--exact",
+                "x",
+            ])
+            .unwrap(),
+            [
+                "nextest",
+                "list",
+                "-pfoo",
+                "-Ffeat",
+                "-Eall()",
+                "-Pci",
+                "-Zflag",
+                "-vv",
+                "--timings=html",
+                "--",
+                "--exact",
+                "x",
+                "--message-format",
+                "json",
+            ]
+        );
+        for (arguments, refusal) in [
+            (&["-p"][..], "nextest option -p has no value"),
+            (
+                &["--test-threads"][..],
+                "nextest option --test-threads has no value",
+            ),
+            (&["--rerun"][..], "nextest option --rerun has no value"),
+            (&["-"][..], "does not recognize option -"),
+        ] {
+            let error = list(arguments).unwrap_err();
+            assert!(error.contains(refusal), "{arguments:?}: {error}");
+        }
     }
 
     /// A package script's command split as `sh` runs it.
