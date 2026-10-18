@@ -2087,8 +2087,7 @@ mod tests {
         relay(pipe, kept.clone(), ConsoleNames::default())
             .recv_timeout(Duration::from_secs(10))
             .expect("the relay ends with its input");
-        let bytes = kept.0.lock().unwrap().clone();
-        bytes
+        kept.0.lock().unwrap().clone()
     }
 
     /// A line longer than the limit, bytes that are not text, an interrupted
