@@ -4025,6 +4025,91 @@ mod tests {
         assert_eq!(view.decisions[0].conditions.len(), 2);
     }
 
+    /// A server's decision record names a decision of the frozen manifest
+    /// as the manifest has it, with a vector; one of a file outside it is
+    /// passed over.
+    #[test]
+    fn a_server_decision_record_is_refused_for_each_way_it_breaks_the_manifest() {
+        let meta = |id: &str, file: &str, source: &str| DecisionMeta {
+            id: id.into(),
+            file: file.into(),
+            line: 1,
+            column: 0,
+            source: source.into(),
+            conditions: vec!["left".into(), "right".into()],
+            kind: "if".into(),
+        };
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![meta("decision", "src/app.js", "left && right")],
+            points: vec![],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let vector = McdcVector {
+            values: vec![Some(true), Some(true)],
+            outcome: true,
+        };
+        let record = |meta: Option<DecisionMeta>, vector: Option<McdcVector>| ServerRecord {
+            record_type: "decision".into(),
+            meta,
+            vector,
+            id: None,
+            timestamp_ms: None,
+            phase_id: None,
+            statement_id: None,
+            scope: None,
+            request: None,
+        };
+        let read = |record: ServerRecord| {
+            let mut attempt = raw("test", 0, "passed", &[]);
+            attempt.server.push(record);
+            match create_coverage_view(&manifest, &[attempt], "time") {
+                Ok(view) => format!("ok {}", view.summary.covered_conditions),
+                Err(ReportError::InvalidServerRecord(reason)) => reason,
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(record(None, Some(vector.clone()))), "missing meta");
+        assert_eq!(
+            read(record(
+                Some(meta("decision", "src/app.js", "left && right")),
+                None
+            )),
+            "missing vector"
+        );
+        assert!(
+            read(record(
+                Some(meta("other", "src/app.js", "a && b")),
+                Some(vector.clone())
+            ))
+            .contains("absent from the frozen manifest")
+        );
+        assert!(
+            read(record(
+                Some(meta("decision", "src/app.js", "left || right")),
+                Some(vector.clone())
+            ))
+            .contains("metadata differs from the frozen manifest")
+        );
+        assert!(
+            read(record(
+                Some(meta("other", "lib/vendor.js", "a && b")),
+                Some(vector.clone())
+            ))
+            .starts_with("ok")
+        );
+        assert!(
+            read(record(
+                Some(meta("decision", "src/app.js", "left && right")),
+                Some(vector)
+            ))
+            .starts_with("ok")
+        );
+    }
+
     #[test]
     fn frozen_manifest_ignores_out_of_scope_synthetic_decisions() {
         let manifest = CoverageManifest {
