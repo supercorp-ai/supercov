@@ -1436,11 +1436,14 @@ class Outer {
             "class A { int f(int a, boolean b) { while (a > 0) a--; do a++; while (a < 3 && b); for (int i = 0; i < a; i++) { if (i == 2) continue; if (i > 5) break; } if ((a > 1)) { return a; } return b ? 1 : 2; } }",
             "class B { @SuppressWarnings(value = \"x\") int g(Object o) { switch (o.hashCode()) { case 1: return 1; default: break; } label: for (;;) { break label; } return o instanceof String s && !s.isEmpty() ? 1 : 0; } }",
             "class C { boolean h(int a, int b) { boolean c = (a & b) == 0 | a > b; return c || (a > 0 && b > 0); } }",
+            // For-each loops: labelled, without braces, and as an arm.
+            "class D { void f(int[] xs, boolean a) { outer: for (int x : xs) { if (x > 1) break outer; } for (int x : xs) g(x); if (a) for (int x : xs) { g(x); } } void g(int x) {} }",
         ] {
             java(source);
         }
         for source in [
             "package k\n\nclass Box @Inject internal constructor(val n: Int) {\n    fun f(x: Any?): Int {\n        if (x is String && x.isNotEmpty()) return 1\n        if (x == null || (x as? String).isNullOrEmpty()) return 2\n        for (i in 0 until n) {\n            if (i == 3) continue\n            if (i > 5) break\n        }\n        while (n > 9) return 3\n        do { } while (n < 0)\n        return when {\n            n > 1 && n < 5 -> 4\n            else -> 5\n        }\n    }\n}\n",
+            "package k\n\nclass Loops {\n    fun f(xs: List<Int>, s: String?, a: Boolean) {\n        outer@ for (x in xs) {\n            for (y in xs) {\n                if (y > x) continue@outer\n            }\n        }\n        for (x in xs) println(x)\n        if (a) for (x in xs) { println(x) }\n        for (@Suppress(\"UNUSED\") x in xs) { }\n        if (s.isNullOrBlank() || !s.isNullOrEmpty()) println(s)\n    }\n}\n",
             "package k\n\nannotation class Marker(val on: Boolean)\n\nclass Gated {\n    @Marker(on = 1 > 0)\n    fun g(a: Boolean, b: Boolean): Boolean {\n        val c = if (a) b else !b\n        return c && (a || b)\n    }\n}\n",
         ] {
             let mut next = 0;
