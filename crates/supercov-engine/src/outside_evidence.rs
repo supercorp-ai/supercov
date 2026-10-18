@@ -870,4 +870,53 @@ mod tests {
         assert!(is_llvm_profile(&indexed));
         assert!(!is_llvm_profile(b"SF:a\nDA:1,1\n"));
     }
+
+    /// A recorded path is the project file it names: under the root, the
+    /// longest measured file it ends with, or the longest tail that is a
+    /// file of the project; otherwise it says why not.
+    #[test]
+    fn a_recorded_path_is_read_as_the_project_file_it_names() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-project-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("src/deep")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(base);
+        std::fs::write(root.join("README.md"), "hi\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "\n").unwrap();
+        let measured = ["src/lib.rs", "src/deep/x.rs", "deep/x.rs"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let canonical = root.canonicalize().unwrap();
+        let read = |recorded: &str| project_path(&root, &canonical, recorded, &measured);
+        let inside = format!("{}/src/lib.rs", root.display());
+        for (recorded, expected) in [
+            ("/app/src/lib.rs", Ok("src/lib.rs")),
+            ("./src/lib.rs", Ok("src/lib.rs")),
+            (inside.as_str(), Ok("src/lib.rs")),
+            ("C:\\proj\\src\\lib.rs", Ok("src/lib.rs")),
+            // Both end it; the longer is the file.
+            ("/app/src/deep/x.rs", Ok("src/deep/x.rs")),
+            // Not measured, but a file of the project.
+            ("/elsewhere/README.md", Ok("README.md")),
+            ("/nowhere/zzz.rs", Err("outside the project")),
+            ("zzz.rs", Err("no such file in the project")),
+        ] {
+            assert_eq!(
+                read(recorded),
+                expected.map(str::to_owned).map_err(str::to_owned),
+                "{recorded}"
+            );
+        }
+        let magic = |kind: u8| vec![0x81, kind, b'f', b'o', b'r', b'p', b'l', 0xff, 0];
+        assert!(is_llvm_profile(&magic(b'r')));
+        assert!(is_llvm_profile(&magic(b'i')));
+        assert!(!is_llvm_profile(&magic(b'x')));
+        assert!(!is_llvm_profile(&magic(b'r')[..7]));
+    }
 }

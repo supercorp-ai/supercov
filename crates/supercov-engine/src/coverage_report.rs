@@ -4925,4 +4925,40 @@ mod tests {
         assert!(coverage_is_its_own(""));
         assert!(coverage_is_complete(""));
     }
+
+    /// Recognized JSONL evidence ends with a newline, holds a record, and
+    /// has no blank line; the MC/DC files are told by their names.
+    #[test]
+    fn jsonl_evidence_is_refused_for_each_way_it_can_be_malformed() {
+        let entry = |contents: &str| EvidenceArchiveEntry {
+            path: "probe.jsonl".into(),
+            contents: contents.as_bytes().to_vec(),
+        };
+        let read = |contents: &str| match parse_json_lines::<serde_json::Value>(std::iter::once(
+            &entry(contents),
+        )) {
+            Ok(records) => format!("{} records", records.len()),
+            Err(ReportError::InvalidJson { reason, .. }) => reason,
+            Err(error) => format!("{error:?}"),
+        };
+        assert_eq!(read("{}\n{}\n"), "2 records");
+        assert!(read("{}").contains("must end with a newline"));
+        assert!(read("\n").contains("at least one record"));
+        assert!(read("{}\n\n{}\n").contains("blank JSONL record at line 2"));
+        assert!(read("{}\nnope\n").contains("invalid JSONL record at line 2"));
+        for (path, result, journal) in [
+            ("mcdc.json", true, false),
+            ("worker/mcdc.json", true, false),
+            ("xmcdc.json", false, false),
+            ("mcdc.jsonl", false, true),
+            ("worker-1.mcdc.jsonl", false, true),
+            ("mcdc.jsonl.gz", false, false),
+        ] {
+            assert_eq!(
+                (is_mcdc_result(path), is_mcdc_journal(path)),
+                (result, journal),
+                "{path}"
+            );
+        }
+    }
 }

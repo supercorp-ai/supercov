@@ -885,6 +885,119 @@ mod tests {
 
     use super::*;
 
+    fn fresh_root(label: &str) -> crate::test_directory::TestDirectory {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-{label}-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        crate::test_directory::TestDirectory::adopt(root)
+    }
+
+    /// A Playwright configuration is a source file named `playwright` then
+    /// plain characters then `.config.`, found under the test directories to
+    /// four levels, past hidden directories, `node_modules` and links.
+    #[test]
+    fn nested_playwright_configurations_are_found_by_name_and_depth() {
+        for (name, config) in [
+            ("playwright.config.ts", true),
+            ("playwright-ct.config.mjs", true),
+            ("Playwright.e2e.config.js", true),
+            ("playwright.config.json", false),
+            ("playwright.ts", false),
+            ("jest.config.js", false),
+            ("playwright@x.config.ts", false),
+        ] {
+            assert_eq!(playwright_config_name(name), config, "{name}");
+        }
+        let root = fresh_root("nested-playwright");
+        for file in [
+            "tests/a/playwright.config.ts",
+            "tests/node_modules/playwright.config.ts",
+            "tests/.cache/playwright.config.ts",
+            "tests/1/2/3/4/playwright.config.ts",
+            "tests/1/2/3/4/5/playwright.config.ts",
+            "tests/notes/playwright.config.txt",
+            "e2e/playwright.config.js",
+            "src/playwright.config.ts",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "export default {};\n").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("tests/a"), root.join("tests/linked")).unwrap();
+        let found = nested_playwright_configs(&root)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&*root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            [
+                "e2e/playwright.config.js",
+                "tests/1/2/3/4/playwright.config.ts",
+                "tests/a/playwright.config.ts",
+            ]
+        );
+    }
+
+    /// A package manager's command shows the script it runs after it.
+    #[test]
+    fn a_package_manager_command_is_expanded_with_its_script() {
+        let root = fresh_root("expanded-command");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts": {"test": "vitest run", "e2e": "playwright test"}}"#,
+        )
+        .unwrap();
+        let expanded = |command: &[&str]| {
+            expanded_command(
+                &root,
+                &command
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(expanded(&["npm", "test"]), "npm test vitest run");
+        assert_eq!(
+            expanded(&["pnpm", "run", "e2e"]),
+            "pnpm run e2e playwright test"
+        );
+        assert_eq!(
+            expanded(&["/usr/local/bin/yarn.cmd", "e2e"]),
+            "/usr/local/bin/yarn.cmd e2e playwright test"
+        );
+        assert_eq!(expanded(&["node", "x.js"]), "node x.js");
+        assert_eq!(expanded(&["npm"]), "npm");
+        assert_eq!(expanded(&["npm", "missing"]), "npm missing ");
+        // A script started from a command string names the script it runs.
+        for (program, script) in [
+            ("npm run start", Some("start")),
+            ("yarn dev", Some("dev")),
+            ("pnpm", None),
+            ("", None),
+            ("node server.js", None),
+        ] {
+            assert_eq!(
+                launched_package_script(program, None).as_deref(),
+                script,
+                "{program}"
+            );
+        }
+    }
+
     /// A script runs with the arguments after its name appended, the package
     /// manager's own `--` left out and each argument kept whole.
     #[test]
