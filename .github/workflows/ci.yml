@@ -210,6 +210,7 @@ jobs:
           targets: wasm32-unknown-unknown, wasm32-wasip1
           components: clippy, rustfmt
       - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: cargo install wasm-pack --version 0.15.0 --locked
       - name: Install wasmtime 49.0.3
         run: |
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"

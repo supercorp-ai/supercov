@@ -1003,6 +1003,18 @@ fn build_test_artifacts(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ArtifactLauncher {
     runner: Option<crate::rust_cargo_configuration::RustCargoResolvedRunner>,
+    /// Variables the runner reads, from what started the tests: the browser
+    /// driver `wasm-pack test` chose, headless or not.
+    environment: Vec<(String, String)>,
+    /// The proxy each browser test's runner drives Chrome through, which
+    /// takes the page's regions before the runner closes its session.
+    browser: Option<std::sync::Arc<crate::rust_wasm_browser::BrowserReader>>,
+    /// A browser whose tests run unmeasured, to say so.
+    unmeasured_browser: Option<String>,
+    /// The instrumentation's token, which a page's regions must carry.
+    token: String,
+    /// The runner is `wasm-bindgen-test-runner`.
+    wasm_bindgen_runner: bool,
     /// `NODE_OPTIONS` for a wasm module the runner runs under Node: a hook
     /// that writes each crate's region, which lives in the module's memory,
     /// to the test's evidence directory as the process ends.
@@ -1051,10 +1063,65 @@ impl ArtifactLauncher {
         } else {
             None
         };
+        let runner = runner.resolve(&project.workspace_root);
+        let wasm_bindgen_runner = Path::new(&runner.program)
+            .file_stem()
+            .is_some_and(|name| name == "wasm-bindgen-test-runner");
         Ok(Self {
-            runner: Some(runner.resolve(&project.workspace_root)),
+            runner: Some(runner),
+            environment: Vec::new(),
+            browser: None,
+            unmeasured_browser: None,
+            token: project.probes.token.clone(),
+            wasm_bindgen_runner,
             node_options,
         })
+    }
+
+    /// The runner's variables; and, for tests `wasm-bindgen-test-runner`
+    /// runs in Chrome, the reader of their pages.
+    pub(crate) fn with_environment(mut self, environment: &[(String, String)]) -> Self {
+        self.environment = environment.to_vec();
+        let in_node = environment
+            .iter()
+            .any(|(name, _)| name == "WASM_BINDGEN_TEST_ONLY_NODE")
+            || std::env::var_os("WASM_BINDGEN_TEST_ONLY_NODE").is_some();
+        if !self.wasm_bindgen_runner || in_node {
+            return self;
+        }
+        match crate::rust_wasm_browser::browser(environment) {
+            Some(crate::rust_wasm_browser::Browser::Chrome(driver, arguments)) => {
+                match crate::rust_wasm_browser::BrowserReader::start(
+                    &driver,
+                    &arguments,
+                    &self.token,
+                ) {
+                    Ok(reader) => self.browser = Some(std::sync::Arc::new(reader)),
+                    Err(error) => self.unmeasured_browser = Some(format!("Chrome ({error})")),
+                }
+            }
+            Some(crate::rust_wasm_browser::Browser::Other(name)) => {
+                // Said only where the driver was chosen by name: a driver
+                // found on PATH may never be used (the tests may run in Node).
+                let named =
+                    ["GECKODRIVER", "SAFARIDRIVER", "MSEDGEDRIVER"]
+                        .iter()
+                        .any(|variable| {
+                            environment.iter().any(|(key, _)| key == variable)
+                                || std::env::var_os(variable).is_some()
+                        });
+                if named {
+                    self.unmeasured_browser = Some(name);
+                }
+            }
+            None => {}
+        }
+        self
+    }
+
+    /// The browser whose tests this run cannot read, if one was named.
+    pub(crate) fn unmeasured_browser(&self) -> Option<&str> {
+        self.unmeasured_browser.as_deref()
     }
 
     /// The command that runs `executable`, writing its evidence to
@@ -1084,6 +1151,10 @@ impl ArtifactLauncher {
         };
         if let Some(options) = &self.node_options {
             command.env("NODE_OPTIONS", options);
+        }
+        command.envs(self.environment.iter().map(|(name, value)| (name, value)));
+        if let (Some(browser), Some(evidence)) = (&self.browser, evidence) {
+            command.env("CHROMEDRIVER_REMOTE", browser.remote_url(evidence));
         }
         command
     }
@@ -1922,6 +1993,7 @@ pub fn run_prepared_rust_tests(
     run_id: &str,
     generated_at: &str,
     rust_workers: Option<&crate::rust_worker::CargoTestWorkers>,
+    runner_environment: &[(String, String)],
     diagnostics: &mut dyn Write,
 ) -> Result<RustFrontendRun, RustTestRunnerError> {
     let invocation = cargo_invocation(&project.workspace_root, command)?;
@@ -2025,7 +2097,15 @@ pub fn run_prepared_rust_tests(
     let mut tasks = Vec::new();
     // Through the target runner the user configured, when there is one.
     let launcher =
-        ArtifactLauncher::for_invocation(project, &invocation, &evidence_root.join("hooks"))?;
+        ArtifactLauncher::for_invocation(project, &invocation, &evidence_root.join("hooks"))?
+            .with_environment(runner_environment);
+    if let Some(browser) = launcher.unmeasured_browser() {
+        writeln!(
+            diagnostics,
+            "[supercov] wasm tests run in {browser} are not measured: Supercov reads a browser's wasm through Chrome only (`wasm-pack test --chrome`)"
+        )
+        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+    }
     let target_libdir = if artifacts.is_empty() {
         PathBuf::new()
     } else {
@@ -2965,6 +3045,7 @@ mod tests {
             "rust-fixture-cfg",
             "2026-08-26T00:00:00.000Z",
             None,
+            &[],
             &mut Vec::new(),
         )
         .unwrap();
@@ -3057,6 +3138,7 @@ mod tests {
             "rust-fixture-assert",
             "2026-08-26T00:00:00.000Z",
             None,
+            &[],
             &mut Vec::new(),
         )
         .unwrap();
@@ -3149,6 +3231,7 @@ mod tests {
                 run,
                 "2026-08-26T00:00:00.000Z",
                 None,
+                &[],
                 &mut Vec::new(),
             )
             .unwrap();
@@ -3249,6 +3332,7 @@ mod tests {
             "rust-fixture-cwd",
             "2026-08-26T00:00:00.000Z",
             None,
+            &[],
             &mut Vec::new(),
         )
         .unwrap();
@@ -3355,6 +3439,7 @@ mod tests {
             "rust-fixture",
             "2026-08-26T00:00:00.000Z",
             None,
+            &[],
             &mut Vec::new(),
         )
         .unwrap();
