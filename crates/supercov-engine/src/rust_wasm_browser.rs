@@ -16,7 +16,7 @@
 //! DevTools protocol. A test run in another browser is said to be unmeasured.
 
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -229,7 +229,7 @@ struct Request {
     body: Vec<u8>,
 }
 
-fn read_request(stream: &mut BufReader<TcpStream>) -> Option<Request> {
+fn read_request(stream: &mut impl BufRead) -> Option<Request> {
     let mut line = String::new();
     stream.read_line(&mut line).ok()?;
     let mut parts = line.split_whitespace();
@@ -254,24 +254,38 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Option<Request> {
             }
         }
     }
-    let mut body = Vec::new();
-    if chunked {
-        loop {
-            let mut size = String::new();
-            stream.read_line(&mut size).ok()?;
-            let size = usize::from_str_radix(size.trim(), 16).ok()?;
-            let mut chunk = vec![0; size + 2];
-            stream.read_exact(&mut chunk).ok()?;
-            if size == 0 {
-                break;
-            }
-            body.extend_from_slice(&chunk[..size]);
-        }
+    let body = if chunked {
+        read_chunked(stream)?
     } else {
-        body.resize(length, 0);
+        let mut body = vec![0; length];
         stream.read_exact(&mut body).ok()?;
-    }
+        body
+    };
     Some(Request { method, path, body })
+}
+
+/// A chunked body, decoded: chunk extensions (`5;name=v`) are ignored, and
+/// trailers are read through the blank line that ends them.
+fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        let mut size = String::new();
+        if reader.read_line(&mut size).ok()? == 0 {
+            return None;
+        }
+        let size = usize::from_str_radix(size.split(';').next()?.trim(), 16).ok()?;
+        if size == 0 {
+            loop {
+                let mut trailer = String::new();
+                if reader.read_line(&mut trailer).ok()? == 0 || trailer.trim().is_empty() {
+                    return Some(body);
+                }
+            }
+        }
+        let mut chunk = vec![0; size + 2];
+        reader.read_exact(&mut chunk).ok()?;
+        body.extend_from_slice(&chunk[..size]);
+    }
 }
 
 /// One request to chromedriver; its status and body, chunked or not.
@@ -289,7 +303,12 @@ fn call(upstream: SocketAddr, method: &str, path: &str, body: &[u8]) -> Option<(
     stream.write_all(body).ok()?;
     // Read by the response's own length: chromedriver keeps the connection
     // open after answering, whatever the request asked.
-    let mut reader = BufReader::new(stream);
+    read_response(&mut BufReader::new(stream))
+}
+
+/// A response's status and body, framed by its length, by chunks, or by the
+/// connection closing.
+fn read_response(reader: &mut impl BufRead) -> Option<(u16, Vec<u8>)> {
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     let status = line.split_whitespace().nth(1)?.parse().ok()?;
@@ -312,25 +331,17 @@ fn call(upstream: SocketAddr, method: &str, path: &str, body: &[u8]) -> Option<(
             }
         }
     }
-    let mut payload = Vec::new();
-    if chunked {
-        loop {
-            let mut size = String::new();
-            reader.read_line(&mut size).ok()?;
-            let size = usize::from_str_radix(size.trim(), 16).ok()?;
-            let mut chunk = vec![0; size + 2];
-            reader.read_exact(&mut chunk).ok()?;
-            if size == 0 {
-                break;
-            }
-            payload.extend_from_slice(&chunk[..size]);
-        }
+    let payload = if chunked {
+        read_chunked(reader)?
     } else if let Some(length) = length {
-        payload.resize(length, 0);
+        let mut payload = vec![0; length];
         reader.read_exact(&mut payload).ok()?;
+        payload
     } else {
+        let mut payload = Vec::new();
         reader.read_to_end(&mut payload).ok()?;
-    }
+        payload
+    };
     Some((status, payload))
 }
 
@@ -464,5 +475,76 @@ mod tests {
             browser(&env(&[("CHROMEDRIVER_REMOTE", "http://x/")])),
             Some(Browser::Other("a remote chromedriver".into()))
         );
+    }
+
+    fn bytes(text: &str) -> std::io::Cursor<Vec<u8>> {
+        std::io::Cursor::new(text.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn a_request_is_read_by_its_length_or_its_chunks() {
+        let sized = read_request(&mut bytes(
+            "POST /e/00/session HTTP/1.1\r\nHost: x\r\nno colon\r\nContent-Length: 2\r\n\r\n{}tail",
+        ))
+        .unwrap();
+        assert_eq!(
+            (sized.method.as_str(), sized.path.as_str()),
+            ("POST", "/e/00/session")
+        );
+        assert_eq!(sized.body, b"{}");
+        // Chunks with an extension, then trailers through the blank line.
+        let chunked = read_request(&mut bytes(
+            "POST /e/00/x HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n3;n=v\r\n{\"a\r\n3\r\n\":1\r\n1\r\n}\r\n0\r\nX-Trailer: 1\r\n\r\n",
+        ))
+        .unwrap();
+        assert_eq!(chunked.body, br#"{"a":1}"#);
+        assert!(read_request(&mut bytes("")).is_none());
+        assert!(read_request(&mut bytes("GET\r\n\r\n")).is_none());
+        assert!(read_request(&mut bytes("POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n")).is_none());
+        // A body cut short, and chunks that stop before their end.
+        assert!(
+            read_request(&mut bytes("POST / HTTP/1.1\r\nContent-Length: 9\r\n\r\nab")).is_none()
+        );
+        assert!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n"
+            ))
+            .is_none()
+        );
+        assert!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_response_is_read_by_its_length_its_chunks_or_its_close() {
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}more"
+            )),
+            Some((200, b"{}".to_vec()))
+        );
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\nbad header\r\n\r\n2\r\nno\r\n0\r\n\r\n"
+            )),
+            Some((404, b"no".to_vec()))
+        );
+        // Neither: everything until the connection closes.
+        assert_eq!(
+            read_response(&mut bytes("HTTP/1.1 500 Error\r\n\r\nall of it")),
+            Some((500, b"all of it".to_vec()))
+        );
+        // A chunked body that ends at the end of the stream, with no blank line.
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n"
+            )),
+            Some((200, b"x".to_vec()))
+        );
+        assert!(read_response(&mut bytes("garbage\r\n\r\n")).is_none());
     }
 }
