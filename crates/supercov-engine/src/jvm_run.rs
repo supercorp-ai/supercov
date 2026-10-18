@@ -2485,7 +2485,25 @@ mod tests {
         assert_eq!(maven, ["stopped the build failing on warnings"]);
         let mut unchanged = Vec::new();
         note_relaxations("-Xlint:all", "-Xlint:all", &mut unchanged);
+        note_relaxations(
+            "-Werror -Xplugin:ErrorProne",
+            "-Werror -Xplugin:ErrorProne",
+            &mut unchanged,
+        );
         assert!(unchanged.is_empty());
+    }
+
+    /// A catalog's JUnit entries: the BOM by name, and Jupiter with its
+    /// version however it is written; other JUnit modules and a Jupiter
+    /// entry with no version add nothing.
+    #[test]
+    fn a_version_catalog_names_its_junit_bom_and_jupiter_versions() {
+        let catalog = "[versions]\njunit = \"5.10.0\"\n\n[libraries]\nbom = { module = \"org.junit:junit-bom\", version.ref = \"junit\" }\njupiter = { module = \"org.junit.jupiter:junit-jupiter\", version.ref = \"junit\" }\napi = { module = \"org.junit.jupiter:junit-jupiter-api\", version = \"5.9.0\" }\nparams = { module = \"org.junit.jupiter:junit-jupiter-params\", version=\"5.8.0\" }\nengine = { module = \"org.junit.jupiter:junit-jupiter-engine\" }\nlauncher = { module = \"org.junit.platform:junit-platform-launcher\" }\nother = { module = \"com.example:x\" }\n";
+        assert_eq!(
+            catalog_versions(catalog),
+            "junit-bom\norg.junit.jupiter:junit-jupiter:5.10.0\norg.junit.jupiter:junit-jupiter:5.9.0\norg.junit.jupiter:junit-jupiter:5.8.0\n"
+        );
+        assert_eq!(catalog_versions("[libraries]\n"), "");
     }
 
     #[test]
