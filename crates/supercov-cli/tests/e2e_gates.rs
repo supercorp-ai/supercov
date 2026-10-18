@@ -127,6 +127,8 @@ gates! {
     rust_worker_playwright => "rust-worker-playwright.mjs",
     rust_worker_cargo_test => "rust-worker-cargo-test.mjs",
     rust_wasm_hosts => "rust-wasm-hosts.mjs",
+    rust_wasm_js => "rust-wasm-js.mjs",
+    react_native => "react-native-compatibility.mjs",
     exec_handover => "exec-handover.mjs",
     import_line_evidence => "import-line-evidence.mjs",
     failure_output_node => "failure-output.mjs" ["node", "ava", "tap"],
