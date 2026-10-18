@@ -3057,6 +3057,47 @@ mod tests {
         fs::remove_dir_all(repository).unwrap();
     }
 
+    /// What the copy leaves out or links instead of copying: a directory
+    /// that is a Supercov workspace of its own, a virtual environment, an
+    /// absolute link to a file of the project (made relative to the copy),
+    /// and a FIFO, which holds no source.
+    #[test]
+    #[cfg(unix)]
+    fn the_copy_skips_workspaces_links_environments_and_relocates_absolute_links() {
+        let root = project();
+        let owned = root.join("old-copy");
+        fs::create_dir_all(&owned).unwrap();
+        fs::write(owned.join(WORKSPACE_MARKER), WORKSPACE_MARKER_CONTENTS).unwrap();
+        fs::write(owned.join("stale.js"), "x").unwrap();
+        fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/real.js"), "export {};\n").unwrap();
+        std::os::unix::fs::symlink(root.join("src/real.js"), root.join("src/alias.js")).unwrap();
+        let fifo =
+            std::ffi::CString::new(root.join("src/pipe").as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a FIFO at a path this test owns.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert!(fs::symlink_metadata(workspace.join("old-copy")).is_err());
+        assert!(
+            fs::symlink_metadata(workspace.join(".venv"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let alias = fs::read_link(workspace.join("src/alias.js")).unwrap();
+        assert!(alias.is_relative(), "{}", alias.display());
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/alias.js")).unwrap(),
+            "export {};\n"
+        );
+        assert!(fs::symlink_metadata(workspace.join("src/pipe")).is_err());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     #[cfg(unix)]
     fn dangling_symlinks_are_preserved_and_escaping_ones_still_refused() {
