@@ -7907,3 +7907,74 @@ fn tests_affected_reads_formatting_other_runners_and_dependencies_apart() {
         "test/cart.test.js\n"
     );
 }
+
+#[test]
+fn a_patch_counts_changed_and_untracked_lines_against_its_base() {
+    let project = Project::cart("patch-lines");
+    project.write(
+        "src/cart.js",
+        &format!(
+            "{}\nexport function more(x) {{\n  return x ? 1 : 2;\n}}\n",
+            common::CART
+        ),
+    );
+    project.write("src/new.js", "export const fresh = 1;\n");
+    project.measure(&[]);
+    let lines = [
+        "0 of 3 changed executable line(s) covered (0.00%)",
+        "src/cart.js: 23-24",
+        "src/new.js: 1",
+    ];
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", "HEAD"])
+            .succeeds(),
+        &lines,
+    );
+    let json = project
+        .supercov(&["runs", "latest", "patch", "--base", "HEAD", "--json"])
+        .json();
+    assert_eq!(json["data"]["patch"]["eligible"], 3, "{json}");
+    contains_all(
+        &project
+            .supercov(&[
+                "runs",
+                "latest",
+                "patch",
+                "--base",
+                "HEAD",
+                "--min-lines",
+                "90",
+            ])
+            .exits(1),
+        &["FAIL: below 90%"],
+    );
+    let annotated = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "patch",
+            "--base",
+            "HEAD",
+            "--annotate",
+            "github",
+            "--max-annotations",
+            "1",
+        ])
+        .succeeds();
+    assert_eq!(annotated.matches("::warning").count(), 1, "{annotated}");
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", "nope-ref"])
+            .exits(2),
+        &["git merge-base nope-ref HEAD failed"],
+    );
+    // A run of another tree cannot map this one's patch.
+    project.write("src/cart.js", common::CART);
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", "HEAD"])
+            .exits(2),
+        &["the run no longer matches the current checkout"],
+    );
+}
