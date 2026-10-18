@@ -899,6 +899,225 @@ mod tests {
     const PATHS_GOLDEN: &[u8] =
         include_bytes!("../test-assets/python-coverage-v1/pytest-paths.json");
 
+    /// The oracle importer refuses an export that breaks any one of its
+    /// rules, each for that rule.
+    #[test]
+    fn an_export_that_breaks_one_rule_is_refused_for_it() {
+        use serde_json::{Value, json};
+        let golden: Value = serde_json::from_slice(GOLDEN).unwrap();
+        let import = |edit: &dyn Fn(&mut Value)| {
+            let mut export = golden.clone();
+            edit(&mut export);
+            match import_python_coverage_json(
+                export.to_string().as_bytes(),
+                "python-tier-a-ctrace",
+                "2026-08-25T00:00:00.000Z",
+                Some(0),
+            ) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(import(&|_| {}), "accepted");
+        let file = |v: &mut Value| v["files"][0].take();
+        let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+            (
+                "UnsupportedSchema",
+                Box::new(|v| v["schemaVersion"] = json!(2)),
+            ),
+            (
+                "InvalidProducer",
+                Box::new(|v| v["producer"]["name"] = json!("other")),
+            ),
+            (
+                "InvalidProducer",
+                Box::new(|v| v["producer"]["version"] = json!(" ")),
+            ),
+            (
+                "UnsupportedCollectorCore",
+                Box::new(|v| v["collectorCore"] = json!("sysmon")),
+            ),
+            (
+                "BranchMeasurementRequired",
+                Box::new(|v| v["branch"] = json!(false)),
+            ),
+            ("InvalidRoot", Box::new(|v| v["root"] = json!("/abs"))),
+            (
+                "InvalidRunner",
+                Box::new(|v| v["runner"] = json!("unittest")),
+            ),
+            (
+                "InvalidPath",
+                Box::new(|v| v["files"][0]["path"] = json!("")),
+            ),
+            (
+                "InvalidPath",
+                Box::new(|v| v["files"][0]["path"] = json!("src\\calculator.py")),
+            ),
+            (
+                "InvalidPath",
+                Box::new(|v| v["files"][0]["path"] = json!("../calculator.py")),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["statements"] = json!([])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["statements"] = json!([2, 1])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["statements"] = json!([0, 1])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["executedLines"] = json!([2, 1])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["missingLines"] = json!([13, 6])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["excludedLines"] = json!([2, 2])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["executedBranches"] = json!([[4, 5], [2, 3]])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["missingBranches"] = json!([[12, 13], [4, 6]])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["missingLines"] = json!([5, 6, 13])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["missingLines"] = json!([6])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["missingBranches"] = json!([[2, 3], [4, 6], [12, 13]])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["missingBranches"] = json!([[0, 6], [12, 13]])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| v["files"][0]["missingBranches"] = json!([[4, 0], [12, 13]])),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| {
+                    v["files"][0]["sourceLines"].as_array_mut().unwrap().pop();
+                }),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| {
+                    let first = v["files"][0]["sourceLines"][0].clone();
+                    v["files"][0]["sourceLines"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(first);
+                }),
+            ),
+            (
+                "DuplicateFile",
+                Box::new(|v| {
+                    let copy = v["files"][0].clone();
+                    v["files"].as_array_mut().unwrap().push(copy);
+                }),
+            ),
+            (
+                "InvalidFile",
+                Box::new(|v| {
+                    let _ = file(v);
+                    v["files"] = json!([]);
+                }),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][0]["kind"] = json!("module")),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][0]["workerId"] = json!(" ")),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["identity"] = Value::Null),
+            ),
+            (
+                "RunMismatch",
+                Box::new(|v| v["contexts"][1]["identity"]["runId"] = json!("other-run")),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["identity"]["workerId"] = json!("gw0")),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["identity"]["testId"] = json!(" ")),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["identity"]["phase"] = json!("collect")),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["files"][0]["path"] = json!("src/other.py")),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["files"][0]["lines"] = json!([4, 2])),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["files"][0]["arcs"] = json!([[2, 4], [-1, 2]])),
+            ),
+            (
+                "InvalidContext",
+                Box::new(|v| v["contexts"][1]["files"][0]["lines"] = json!([2, 6])),
+            ),
+            (
+                "RunMismatch",
+                Box::new(|v| v["outcomes"][0]["runId"] = json!("other-run")),
+            ),
+            (
+                "InvalidOutcome",
+                Box::new(|v| v["outcomes"][0]["workerId"] = json!(" ")),
+            ),
+            (
+                "InvalidOutcome",
+                Box::new(|v| v["outcomes"][0]["testId"] = json!(" ")),
+            ),
+            (
+                "InvalidOutcome",
+                Box::new(|v| v["outcomes"][0]["phase"] = json!("collect")),
+            ),
+            (
+                "InvalidOutcome",
+                Box::new(|v| v["outcomes"][0]["outcome"] = json!("xpassed")),
+            ),
+            (
+                "InvalidOutcome",
+                Box::new(|v| {
+                    let copy = v["outcomes"][0].clone();
+                    v["outcomes"].as_array_mut().unwrap().push(copy);
+                }),
+            ),
+        ];
+        for (variant, edit) in &cases {
+            let said = import(edit.as_ref());
+            assert!(said.starts_with(variant), "{variant}: {said}");
+        }
+    }
+
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {
         let imported = import_python_coverage_json(
