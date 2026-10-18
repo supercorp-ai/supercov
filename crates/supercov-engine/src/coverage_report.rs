@@ -4110,6 +4110,43 @@ mod tests {
         );
     }
 
+    /// A branch whose every outcome a frontend declined is declined itself;
+    /// one with an outcome left is still counted by that outcome.
+    #[test]
+    fn a_branch_with_every_outcome_declined_is_declined() {
+        let branch = |id: &str, outcomes: &[&str]| BranchMeta {
+            id: id.into(),
+            kind: "if".into(),
+            file: "src/app.js".into(),
+            line: 1,
+            column: 0,
+            source: "x".into(),
+            alternatives: outcomes
+                .iter()
+                .map(|outcome| BranchAlternativeMeta {
+                    id: (*outcome).into(),
+                    label: (*outcome).into(),
+                })
+                .collect(),
+        };
+        let manifest = CoverageManifest {
+            unmeasured: vec!["a1".into(), "a2".into(), "a3".into()],
+            decisions: vec![],
+            points: vec![],
+            branches: vec![branch("b1", &["a1", "a2"]), branch("b2", &["a3", "a4"])],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let view =
+            create_coverage_view(&manifest, &[raw("test", 0, "passed", &[])], "time").unwrap();
+        assert_eq!(view.summary.branches.total, 1);
+        assert_eq!(view.branches.len(), 1);
+        assert_eq!(view.branches[0].meta.id, "b2");
+        assert_eq!(view.branches[0].alternatives.len(), 1);
+        assert_eq!(view.branches[0].alternatives[0].id, "a4");
+    }
+
     #[test]
     fn frozen_manifest_ignores_out_of_scope_synthetic_decisions() {
         let manifest = CoverageManifest {
