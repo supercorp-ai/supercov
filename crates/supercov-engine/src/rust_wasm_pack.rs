@@ -213,6 +213,8 @@ mod tests {
             root.join("crates/web").display()
         );
         let learned = parse_record(&root, &record).unwrap();
+        // The manifest path in the platform's own separators.
+        let manifest = Path::new("crates/web").join("Cargo.toml");
         assert_eq!(
             learned.command,
             [
@@ -223,7 +225,7 @@ mod tests {
                 "--config",
                 "target.wasm32-unknown-unknown.runner=\"/c/wasm-bindgen-test-runner\"",
                 "--manifest-path",
-                "crates/web/Cargo.toml",
+                &manifest.to_string_lossy(),
             ]
         );
         assert_eq!(
