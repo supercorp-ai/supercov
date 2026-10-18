@@ -1761,6 +1761,28 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Evidence whose length is not the one the run recorded is refused and
+    /// leaves nothing published; a staging directory left by an interrupted
+    /// attempt is cleared before the next.
+    #[test]
+    fn publication_refuses_evidence_of_another_length_and_clears_old_staging() {
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        let (evidence, bytes) = evidence(&root);
+        let staging = root.join(".supercov/work").join(id).join("run-publication");
+        assert!(matches!(
+            publish_run(&root, &metadata(id, bytes + 1), &evidence),
+            Err(LifecycleError::EvidenceLength { expected, actual }) if expected == bytes + 1 && actual == bytes
+        ));
+        assert!(!root.join(".supercov/runs").join(id).exists());
+        assert!(!staging.join("evidence.raw.gz").exists());
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("leftover"), b"from an interrupted attempt").unwrap();
+        let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
+        assert!(!published.join("leftover").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn final_rename_failure_exposes_no_run_and_removes_staging() {
         let root = project();
