@@ -3225,6 +3225,49 @@ mod tests {
         );
     }
 
+    /// A boolean assigned or returned is flipped; one of several targets,
+    /// or a value that is not a literal, becomes None instead.
+    #[test]
+    fn python_booleans_flip_and_other_values_become_none() {
+        let source = "def f(flag):\n    a = b = True\n    x: bool = True\n    y: bool = flag\n    return True\n    return None\n";
+        let starts = python_statement_starts(source);
+        let py = Language::Python;
+        assert_eq!(
+            change_at(&starts, 2, "a = b = True", py),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 3, "x: bool = True", py),
+            Some(Change::Flip)
+        );
+        assert_eq!(
+            change_at(&starts, 4, "y: bool = flag", py),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(change_at(&starts, 5, "return True", py), Some(Change::Flip));
+        assert_eq!(change_at(&starts, 6, "return None", py), Some(Change::Skip));
+        // No statement there: JavaScript reads the expression as undefined,
+        // other languages do not guess.
+        let none = BTreeMap::new();
+        assert_eq!(
+            change_at(&none, 1, "go()", Language::JavaScript),
+            Some(Change::ExpressionUndefined)
+        );
+        assert_eq!(change_at(&none, 1, "go()", Language::Rust), None);
+    }
+
+    /// A title not quoted is found where its words are, inside its group
+    /// first and then anywhere; an empty title is not looked for.
+    #[test]
+    fn a_javascript_test_title_falls_back_to_its_words() {
+        let lines = ["describe('g', () => {", "  test(x)", "});", "y = 1"];
+        assert_eq!(js_test_line(&lines, "g > x"), Some(1));
+        assert_eq!(js_test_line(&lines, "zzz > y"), Some(3));
+        assert_eq!(js_test_line(&lines, " > y"), Some(3));
+        assert_eq!(js_test_line(&lines, ""), None);
+        assert_eq!(js_test_line(&lines, "g > nowhere"), None);
+    }
+
     #[test]
     fn a_javascript_test_is_found_in_the_group_its_name_gives() {
         let text = "import { totals } from '../src/cart.js';\n\ndescribe('cart', () => {\n  it('totals', () => {\n    expect(totals([])).toBe(0);\n  });\n});\n\ndescribe('order', () => {\n  describe('refund', () => {\n    it('totals', () => {});\n  });\n  it('totals', () => {\n    expect(1).toBe(1);\n  });\n});\n";
