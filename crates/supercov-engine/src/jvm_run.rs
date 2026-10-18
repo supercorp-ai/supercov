@@ -2021,6 +2021,51 @@ impl JvmServer {
 mod tests {
     use super::*;
 
+    /// A catalog accessor counts only as itself, not as the start of a
+    /// longer one; a class's file is found by its path from the source root
+    /// or at the root itself; and only plain `<name>value</name>` children
+    /// are read.
+    #[test]
+    fn catalog_accessors_class_files_and_xml_children_are_read_exactly() {
+        let catalog = BTreeMap::from([("kotlin".to_owned(), "org.jetbrains:kotlin".to_owned())]);
+        for (text, named) in [
+            ("implementation(libs.kotlin)", true),
+            ("implementation libs.kotlin", true),
+            ("libs.kotlin.reflect", false),
+            ("libs.kotlinx", false),
+            ("libs.kotlin-x", false),
+            ("libs.kotlin_x", false),
+        ] {
+            assert_eq!(
+                with_catalog(text, &catalog).ends_with("\norg.jetbrains:kotlin"),
+                named,
+                "{text}"
+            );
+        }
+        let declared_in = BTreeMap::from([
+            ("Foo".to_owned(), "Foo.java".to_owned()),
+            ("Bar".to_owned(), "src/MyBar.java".to_owned()),
+        ]);
+        assert_eq!(
+            declaring_file(&declared_in, "Foo").as_deref(),
+            Some("Foo.java")
+        );
+        assert_eq!(
+            declaring_file(&declared_in, "pkg.Bar").as_deref(),
+            Some("src/MyBar.java")
+        );
+        let only = BTreeMap::from([("Baz".to_owned(), "src/MyBar.java".to_owned())]);
+        assert_eq!(declaring_file(&only, "pkg.Bar"), None);
+        assert_eq!(
+            xml_children("<a>1</a><!-- c --><b x=\"y\">2</b><?pi?></c><d> 4 </d><e>open"),
+            [
+                ("a".to_owned(), "1".to_owned()),
+                ("d".to_owned(), "4".to_owned())
+            ]
+        );
+        assert!(xml_children("<unclosed").is_empty());
+    }
+
     #[test]
     fn only_a_project_that_asked_for_parallel_execution_is_told_it_lost_it() {
         // The line is worth printing when something was taken away and noise
@@ -2458,6 +2503,7 @@ mod tests {
             "5.x.1",
             "4.13.2",
             "five.1.0",
+            "5.1.",
         ] {
             assert_eq!(platform_of_jupiter(unknown), None, "{unknown}");
         }
