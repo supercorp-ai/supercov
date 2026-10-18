@@ -675,7 +675,8 @@ fn erasure(source: &str, start: usize, end: usize) -> (usize, usize, &'static st
     }
     let preceded = start == line_start || blank(bytes[start - 1]);
     let stop = if preceded { after } else { end };
-    let glue = start > 0 && stop < bytes.len() && word(bytes[start - 1]) && word(bytes[stop]);
+    // Not at the line's end: what stops it is a character of the line.
+    let glue = start > 0 && word(bytes[start - 1]) && word(bytes[stop]);
     (start, stop, if glue { " " } else { "" })
 }
 
@@ -2529,6 +2530,32 @@ mod tests {
         let f = unit(&x, "f");
         assert_eq!((f.line, f.column), (1, 15), "é is two bytes");
         assert_eq!((f.end_line, f.end_column), (1, 30), "end is exclusive");
+    }
+
+    /// A comment that owns its line takes the line; one after code takes
+    /// the space before it; one between words leaves a space.
+    #[test]
+    fn a_comment_is_erased_as_if_never_written() {
+        for (source, (start, end), expected) in [
+            ("a /* c */\nb", (2, 9), (1, 9, "")),
+            ("  // c\nb", (2, 6), (0, 7, "")),
+            ("x // c", (2, 6), (1, 6, "")),
+            ("  // c", (2, 6), (0, 6, "")),
+            ("a/*c*/b", (1, 6), (1, 6, " ")),
+            ("a /*c*/ b", (2, 7), (2, 8, "")),
+            ("/*c*/b", (0, 5), (0, 5, "")),
+            ("(/*c*/b", (1, 6), (1, 6, "")),
+        ] {
+            assert_eq!(erasure(source, start, end), expected, "{source:?}");
+        }
+        for (text, position, expected) in [
+            ("a  \nb", 1, 4),
+            ("a\r\n", 1, 3),
+            ("a b", 1, 1),
+            ("a  ", 1, 1),
+        ] {
+            assert_eq!(line_end_after(text, position), expected, "{text:?}");
+        }
     }
 
     #[test]
