@@ -8266,7 +8266,14 @@ fn comparisons_and_their_mistakes_read_as_what_they_are() {
             "+ MC/DC src/cart.js:13 C1 express",
         ],
     );
-    let same = project.supercov(&["diff", &first, &first]).succeeds();
+    let ran = project.supercov(&["diff", &first, &first]);
+    assert_eq!(
+        ran.stderr().matches("stale run").count(),
+        1,
+        "{}",
+        ran.stderr()
+    );
+    let same = ran.succeeds();
     assert!(
         same.contains("Nothing was gained or lost.\nshowing 0-0 of 0 per category"),
         "{same}"

@@ -3003,7 +3003,10 @@ fn execute_public_query(
                     })?;
                     let newer_run =
                         select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
-                    if let Some(current) = current_integrity_for_run(root, newer_run).as_ref() {
+                    // A run compared with itself was warned about above.
+                    if newer_run.id != run.id
+                        && let Some(current) = current_integrity_for_run(root, newer_run).as_ref()
+                    {
                         let comparison =
                             compare_run_integrity(Some(&newer_run.metadata.integrity), current);
                         if comparison.stale {
