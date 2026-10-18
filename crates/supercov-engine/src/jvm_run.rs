@@ -1003,6 +1003,18 @@ fn command_with_fresh_results(
             {
                 return (updated, None);
             }
+            // A flag on the end of `make test` is make's, and make refuses
+            // it; Gradle has no setting in the environment that says the
+            // same.
+            if !starts_gradle(command) {
+                return (
+                    updated,
+                    Some(
+                        "did not add --rerun-tasks: the command does not start Gradle itself, so a test task Gradle considers up to date may not run and would record no coverage; add --rerun-tasks where your command starts Gradle"
+                            .into(),
+                    ),
+                );
+            }
             updated.push("--rerun-tasks".into());
             (
                 updated,
@@ -1016,6 +1028,21 @@ fn command_with_fresh_results(
         // build cache has no Maven equivalent worth defeating here.
         JvmBuild::Maven | JvmBuild::Plain => (updated, None),
     }
+}
+
+/// Whether the command starts Gradle itself, rather than through a wrapper
+/// of its own (`make test`, a script) that Gradle's flags would not reach.
+fn starts_gradle(command: &[String]) -> bool {
+    command
+        .iter()
+        .any(|token| token == "gradle" || token.ends_with("gradlew"))
+}
+
+/// Whether the command starts Maven itself.
+fn starts_maven(command: &[String]) -> bool {
+    command
+        .iter()
+        .any(|token| matches!(token.as_str(), "mvn" | "mvnw" | "maven") || token.ends_with("/mvnw"))
 }
 
 /// One module of the build, and where its evidence lands.
@@ -1611,8 +1638,26 @@ pub fn run_direct_jvm(
         // Apache RAT fails the build on a file without a license header, and
         // Supercov's runtime and listeners in the copy are such files: every
         // Apache Commons project stopped before its first test.
-        if instrumented.license_check && !command.iter().any(|a| a.contains("rat.skip")) {
-            command.push("-Drat.skip=true".into());
+        // Through a wrapper, the property reaches Maven in MAVEN_OPTS, which
+        // it reads as system properties.
+        let mut maven_opts = None;
+        if instrumented.license_check
+            && !command.iter().any(|a| a.contains("rat.skip"))
+            && !std::env::var("MAVEN_OPTS").is_ok_and(|opts| opts.contains("rat.skip"))
+        {
+            if starts_maven(&command) {
+                command.push("-Drat.skip=true".into());
+            } else {
+                maven_opts = Some(
+                    std::env::var("MAVEN_OPTS")
+                        .ok()
+                        .filter(|opts| !opts.trim().is_empty())
+                        .into_iter()
+                        .chain(["-Drat.skip=true".to_owned()])
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
             writeln!(
                 diagnostics,
                 "[supercov] added -Drat.skip=true: Apache RAT checks every file in the build for a license header, and the workspace copy holds Supercov's own runtime and listeners, which carry none. Your own build still runs the check."
@@ -1632,7 +1677,12 @@ pub fn run_direct_jvm(
                     program: command[0].clone().into(),
                     arguments: command[1..].iter().map(OsString::from).collect(),
                     cwd: workspace.clone(),
-                    environment: None,
+                    environment: maven_opts.map(|opts| {
+                        std::env::vars_os()
+                            .filter(|(name, _)| name != "MAVEN_OPTS")
+                            .chain([(OsString::from("MAVEN_OPTS"), OsString::from(opts))])
+                            .collect()
+                    }),
                     captured_output: None,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
@@ -2135,6 +2185,17 @@ mod tests {
         );
         assert_eq!(command, ["./gradlew", "test", "--rerun"]);
         assert!(note.is_none());
+
+        // Behind a wrapper the flag would be the wrapper's; it is left out
+        // and the run says so.
+        let (command, note) =
+            command_with_fresh_results(JvmBuild::Gradle, &["make".to_owned(), "test".to_owned()]);
+        assert_eq!(command, ["make", "test"]);
+        assert!(note.is_some_and(|note| note.starts_with("did not add --rerun-tasks")));
+        assert!(starts_gradle(&["gradle".to_owned(), "test".to_owned()]));
+        assert!(starts_maven(&["./mvnw".to_owned(), "verify".to_owned()]));
+        assert!(starts_maven(&["mvn".to_owned()]));
+        assert!(!starts_maven(&["make".to_owned(), "test".to_owned()]));
 
         // Maven's lifecycle re-runs surefire every time; nothing to defeat.
         let (command, note) =
