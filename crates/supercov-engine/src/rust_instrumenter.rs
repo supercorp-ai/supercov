@@ -342,7 +342,7 @@ fn push_direct(insertions: &mut Vec<Insertion>, offset: usize, text: String) {
 
 fn apply_insertions(
     source: &str,
-    mut insertions: Vec<Insertion>,
+    insertions: Vec<Insertion>,
 ) -> Result<String, RustInstrumenterError> {
     if insertions
         .iter()
@@ -350,7 +350,12 @@ fn apply_insertions(
     {
         return Err(RustInstrumenterError::InvalidRange);
     }
-    insertions.sort_by(|left, right| {
+    // Two wrappers of one range with the same scope and rank nest in the
+    // order they were pushed: the first opens first and closes last. Left to
+    // a stable sort alone they crossed, `{ a ({ b ) } }`, and an attributed
+    // `let` whose initializer is a decision did not parse.
+    let mut insertions = insertions.into_iter().enumerate().collect::<Vec<_>>();
+    insertions.sort_by(|(left_order, left), (right_order, right)| {
         left.offset.cmp(&right.offset).then_with(|| {
             let kind_order = |kind: InsertionKind| match kind {
                 InsertionKind::End => 0,
@@ -363,15 +368,21 @@ fn apply_insertions(
                     InsertionKind::End => left
                         .scope_len
                         .cmp(&right.scope_len)
-                        .then_with(|| right.rank.cmp(&left.rank)),
-                    InsertionKind::Direct => std::cmp::Ordering::Equal,
+                        .then_with(|| right.rank.cmp(&left.rank))
+                        .then_with(|| right_order.cmp(left_order)),
+                    InsertionKind::Direct => left_order.cmp(right_order),
                     InsertionKind::Start => right
                         .scope_len
                         .cmp(&left.scope_len)
-                        .then_with(|| left.rank.cmp(&right.rank)),
+                        .then_with(|| left.rank.cmp(&right.rank))
+                        .then_with(|| left_order.cmp(right_order)),
                 })
         })
     });
+    let insertions = insertions
+        .into_iter()
+        .map(|(_, insertion)| insertion)
+        .collect::<Vec<_>>();
 
     let mut output = source.to_owned();
     let mut index = insertions.len();
@@ -4065,6 +4076,10 @@ fn main() {
             "macro_rules! m { ($e:expr) => { $e }; }\nfn h(a: bool) -> bool { m!(a && a) }\n",
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn it() { assert!(1 + 1 == 2); }\n}\n",
             "fn i(a: u8) -> u8 {\n    let x = { a + 1 };\n    #[allow(unused)]\n    let y = a;\n    vec![x, y].len() as u8\n}\n",
+            "fn j(c: bool) -> u8 {\n    'blk: {\n        if c {\n            break 'blk 1;\n        }\n        loop {\n            break;\n        }\n        while c {\n            break;\n        }\n        for _ in 0..1 {\n            break;\n        }\n        let _f = || loop {\n            break;\n        };\n        2\n    }\n}\n",
+            "fn k(xs: &[u8]) {\n    for x in xs {\n        assert!(*x > 0)\n    }\n    if xs.is_empty() {\n        assert!(true)\n    } else {\n        assert_eq!(xs.len(), xs.len())\n    }\n}\n",
+            "fn l(a: bool) -> bool {\n    #[allow(unused_must_use)]\n    assert!(a || !a);\n    #[cfg(any())]\n    let gone = 1;\n    #[allow(unused)]\n    let kept = a && !a;\n    kept\n}\n",
+            "fn m(v: Option<u8>) -> u8 {\n    match v {\n        Some(x) if let Some(y) = Some(x) && y > 1 => y,\n        Some(x) => x,\n        None => 0,\n    }\n}\n",
         ];
         for shape in shapes {
             let out = super::instrument_rust_source("src/lib.rs", shape, "crate::supercov_runtime")
@@ -4141,6 +4156,32 @@ fn main() {
         assert_eq!(instrumented.status, original.status);
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stderr, original.stderr);
+    }
+
+    /// An attributed `let` whose initializer is a decision: its probe block
+    /// and the decision both wrap the initializer, and nest. They crossed,
+    /// and the file was not instrumented at all.
+    #[test]
+    fn an_attributed_let_holding_a_decision_still_compiles() {
+        let source = r#"fn main() {
+    let a = std::env::args().count() > 5;
+    #[allow(unused)]
+    let kept = a && !a;
+    #[allow(clippy::nonminimal_bool)]
+    let either = a || !a;
+    println!("{kept} {either}");
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert_eq!(transformed.code.matches("::decision(").count(), 2);
+        let original = compile_and_run(source, "attributed-let-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "attributed-let-instrumented",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
     }
 
     #[test]
