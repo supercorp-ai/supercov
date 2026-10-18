@@ -1620,4 +1620,60 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn run_ids_digests_and_integrity_are_checked_part_by_part() {
+        assert!(valid_run_id("run_0123"));
+        for bad in ["", ".", "..", "a/b", "a\\b", "a\0b", "a\nb"] {
+            assert!(!valid_run_id(bad), "{bad:?}");
+        }
+        assert!(valid_hex_digest("0a1b", 4));
+        for bad in ["0a1", "0A1B", "0g1b"] {
+            assert!(!valid_hex_digest(bad, 4), "{bad:?}");
+        }
+        validate_integrity(&integrity()).unwrap();
+        type Edit = Box<dyn Fn(&mut RunIntegrity)>;
+        let refused: Vec<(&str, Edit)> = vec![
+            (
+                "integrity fingerprint",
+                Box::new(|i| i.fingerprint.algorithm = "md5".into()),
+            ),
+            (
+                "integrity fingerprint",
+                Box::new(|i| i.fingerprint.source = "abc".into()),
+            ),
+            (
+                "integrity fingerprint",
+                Box::new(|i| i.fingerprint.combined = digest('G')),
+            ),
+            (
+                "git revision",
+                Box::new(|i| {
+                    i.git = Some(GitIntegrity {
+                        revision: Some("abc".into()),
+                        branch: None,
+                        dirty: false,
+                    });
+                }),
+            ),
+        ];
+        for (reason, edit) in &refused {
+            let mut changed = integrity();
+            edit(&mut changed);
+            assert!(
+                matches!(validate_integrity(&changed), Err(RunStoreError::InvalidRun(r)) if r == *reason),
+                "{reason}"
+            );
+        }
+        // A SHA-1 or SHA-256 revision, or none, is a revision.
+        for revision in [Some("a".repeat(40)), Some("b".repeat(64)), None] {
+            let mut with_git = integrity();
+            with_git.git = Some(GitIntegrity {
+                revision,
+                branch: Some("main".into()),
+                dirty: true,
+            });
+            validate_integrity(&with_git).unwrap();
+        }
+    }
 }
