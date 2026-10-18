@@ -2996,3 +2996,63 @@ fn an_answer_is_accepted_only_as_the_question_asked_for_it() {
         Err("invalid request questions".into())
     );
 }
+
+#[test]
+fn layout_targets_benchmarks_banners_and_build_scripts() {
+    let (_temp, map) = layout(&[
+        (
+            "package.json",
+            r#"{"name":"app","exports":{"./x":"./lib/x.js"},"bin":{"app":"./cli/app.js"},"browser":["./web/a.js"]}"#,
+        ),
+        ("lib/x.js", "export const x = 1;\n"),
+        ("cli/app.js", "console.log(1);\n"),
+        ("web/a.js", "export const a = 1;\n"),
+        ("src/index.js", "export const i = 1;\n"),
+        ("src/speed.bench.js", "bench();\n"),
+        ("src/a.benchmark.ts", "bench();\n"),
+        (
+            "public/licensed.js",
+            "/** @license Apache-2.0 */\nvar b=1;\n",
+        ),
+        (
+            "public/mit.js",
+            "// Licensed under the MIT license\nvar c=1;\n",
+        ),
+        (
+            "rust/Cargo.toml",
+            "[package]\nname = \"r\"\n[lib]\npath = \"lib/mylib.rs\"\n[[bin]]\npath= \"tools/run.rs\"\n",
+        ),
+        ("rust/lib/mylib.rs", "pub fn a() {}\n"),
+        ("rust/tools/run.rs", "fn main() {}\n"),
+        ("jvm/build.gradle.kts", "plugins {}\n"),
+        ("jvm/settings.gradle.kts", "rootProject.name = \"jvm\"\n"),
+        ("jvm/src/main/kotlin/A.kt", "class A\n"),
+    ]);
+    included(
+        &map,
+        &[
+            "lib/x.js",
+            "cli/app.js",
+            "web/a.js",
+            "src/index.js",
+            "rust/lib/mylib.rs",
+            "rust/tools/run.rs",
+            "jvm/src/main/kotlin/A.kt",
+        ],
+    );
+    excluded_as(
+        &map,
+        "benchmark",
+        &["src/speed.bench.js", "src/a.benchmark.ts"],
+    );
+    excluded_as(
+        &map,
+        "vendored third-party library",
+        &["public/licensed.js", "public/mit.js"],
+    );
+    excluded_as(
+        &map,
+        "build or tool configuration",
+        &["jvm/build.gradle.kts", "jvm/settings.gradle.kts"],
+    );
+}

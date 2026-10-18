@@ -398,6 +398,12 @@ fn beside_the_product(file: &str) -> Option<&'static str> {
     if parts.len() > 2 && parts.contains(&"config") {
         return Some("build or tool configuration");
     }
+    // A Gradle build script in Kotlin is a `.kts` file, so it is found as
+    // source: `build.gradle.kts`, `settings.gradle.kts`, or one named for its
+    // module as JUnit names `junit-jupiter-api.gradle.kts`.
+    if name.ends_with(".gradle.kts") {
+        return Some("build or tool configuration");
+    }
     // The older dotfile spelling, `.eslintrc.js` and its kind. Splitting a name
     // that begins with a dot leaves an empty first part, so the tool's name is
     // the second one.
