@@ -3136,3 +3136,28 @@ fn line_windows_cut_a_long_declaration_and_merge_what_fits() {
         [(1, 6)]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn quality_targets_are_refused_by_what_they_are_and_where_they_lead() {
+    let temp = Temp::new();
+    temp.write("src/a.js", "export const a = 1;\n");
+    temp.write("src/node_modules/dep/index.js", "module.exports = 1;\n");
+    temp.write("notes.txt", "words\n");
+    temp.write("empty/README", "none\n");
+    std::os::unix::fs::symlink(temp.0.join("src/a.js"), temp.0.join("linked.js")).unwrap();
+    std::os::unix::fs::symlink(temp.0.join("src"), temp.0.join("via")).unwrap();
+    let found = discover(&temp.0, &[PathBuf::from("src")]).unwrap();
+    assert_eq!(found, [temp.0.join("src/a.js")], "node_modules is left out");
+    for (path, said) in [
+        ("missing.js", "missing.js:"),
+        ("linked.js", "symbolic link is not a quality target"),
+        ("via/a.js", "symbolic link in quality target path"),
+        ("notes.txt", "unsupported source extension"),
+        ("empty", "no supported source files found"),
+        ("..", "outside current directory"),
+    ] {
+        let error = discover(&temp.0, &[PathBuf::from(path)]).unwrap_err();
+        assert!(error.contains(said), "{path}: {error}");
+    }
+}
