@@ -7708,3 +7708,90 @@ fn every_view_names_its_filters_pages_and_notes() {
         &["showing 1-3 of 5 per category", "every test and phase:"],
     );
 }
+
+#[test]
+fn check_patch_and_affected_tests_answer_or_say_what_is_missing() {
+    let project = Project::cart("check-patch-affected");
+    project.measure(&[]);
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "check", "--min-mcdc", "10"])
+            .succeeds(),
+        &[
+            "mcdc          20.00%  1/5  (floor 10%)",
+            "PASS: every floor is met.",
+        ],
+    );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "check", "--min-lines", "99"])
+            .exits(1),
+        &[
+            "FAIL: 1 floor(s) not met.",
+            "(whole run): lines 76.92%  10/13 below 99%",
+        ],
+    );
+    for (args, said) in [
+        (
+            &["runs", "latest", "check", "--min-branches", "abc"][..],
+            "\"abc\" is not a percentage",
+        ),
+        (
+            &["runs", "latest", "check", "--bogus"][..],
+            "unknown option --bogus",
+        ),
+        (
+            &["runs", "latest", "check"][..],
+            "no floor requested; give at least one --min-<metric>",
+        ),
+        (
+            &["runs", "run_0000000000000000"][..],
+            "Coverage run not found: run_0000000000000000",
+        ),
+        (&["runs", "latest", "patch"][..], "patch needs --base <ref>"),
+        (
+            &["runs", "latest", "patch", "--json"][..],
+            "patch needs --base <ref>",
+        ),
+        (
+            &["runs", "latest", "patch", "extra"][..],
+            "unknown option extra",
+        ),
+        (
+            &["report", "--runs", "0"][..],
+            "--runs must be between 1 and 20",
+        ),
+        (&["report", "--bogus"][..], "Unknown report option: --bogus"),
+    ] {
+        contains_all(&project.supercov(args).exits(2), &[said]);
+    }
+    project.write(
+        "src/cart.js",
+        &format!(
+            "{}\nexport function extra() {{ return 1; }}\n",
+            common::CART.replace("sum * 100", "sum * 1000")
+        ),
+    );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "tests", "affected"])
+            .succeeds(),
+        &[
+            "3 of 3 tests affected by changes since the run",
+            "src/cart.js: top level, total (line 1); added extra (line 23) changed",
+            "Changed files:",
+        ],
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--names"])
+            .succeeds(),
+        "shipping is free over fifty\ntotal adds prices\ntotal applies a coupon\n"
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--files"])
+            .succeeds(),
+        "test/cart.test.js\n"
+    );
+}
