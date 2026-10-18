@@ -164,12 +164,20 @@ fn render(data: &Value) -> String {
     let page = &data["pagination"];
     let offset = page["offset"].as_u64().unwrap_or(0);
     let returned = page["returned"].as_u64().unwrap_or(0);
-    let (start, end) = if returned == 0 {
-        (0, 0)
+    let total = page["total"].as_u64().unwrap_or(0);
+    if returned == 0 && total > 0 {
+        let _ = writeln!(
+            out,
+            "\nShowing none of {total}: --offset {offset} is past the end"
+        );
     } else {
-        (offset + 1, offset + returned)
-    };
-    let _ = writeln!(out, "\nShowing {start}-{end} of {}", page["total"]);
+        let (start, end) = if returned == 0 {
+            (0, 0)
+        } else {
+            (offset + 1, offset + returned)
+        };
+        let _ = writeln!(out, "\nShowing {start}-{end} of {total}");
+    }
     if let Some(next) = page["nextOffset"].as_u64() {
         let _ = writeln!(
             out,
@@ -194,5 +202,12 @@ mod tests {
         assert!(rendered.contains(" 34 │   const x = '🧪';\n 35 │ \n 36 │ \tassert(x);\n"));
         assert!(rendered.contains("Showing 34-36 of 100"));
         assert!(rendered.contains("source 'tests/a b'\\''s.ts' --offset 36 --limit 3"));
+    }
+
+    #[test]
+    fn a_page_past_the_last_line_says_so() {
+        let data = json!({"view":"source","run":"run_one","file":"a.ts","items":[],
+            "pagination":{"offset":9999,"returned":0,"total":21}});
+        assert!(render(&data).contains("Showing none of 21: --offset 9999 is past the end"));
     }
 }
