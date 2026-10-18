@@ -6,6 +6,7 @@
 
 - The compiler source scope the old Rust frontend wrote (`unit` and `measurementComplete` in `scope --json`) is gone: every frontend reports a source-discovery scope with its `mode`. A run stored by a release from before that frontend's removal is refused instead of read.
 - Leftovers of the assertion-map confidence, which nothing sets any more: the `asserted` confidence level and `asserted`/`assertedTests` of a line's confidence, `confidence.lines.asserted` and `assertionCoveredMcdcConditions` in the summary, `assertionCovered` on MC/DC conditions, and a server record's `statementId`. Whether a test checks a statement is the assertion assessment's answer (`runs <run> assertions`).
+- Python evidence written by an older runtime's transport version 1 is no longer read; the runtime has written version 2 since.
 - `runs clean` no longer looks for `.supercov/.cache`, a directory only old releases wrote.
 - The quality answer cache's first location (`.supercov/quality/<hash>.json`) is no longer read; answers live under `requests/`.
 

@@ -52,7 +52,6 @@ const TRANSPORT_MAGIC: &[u8; 8] = b"SCVPYTH1";
 /// record's five. Evidence kept from a failed run by an older runtime still
 /// reads, by its own checksum.
 const TRANSPORT_VERSION: u32 = 2;
-const TRANSPORT_VERSION_FNV: u32 = 1;
 const TRANSPORT_HEADER_SIZE: usize = 64;
 const TRANSPORT_RECORD_HEADER_SIZE: usize = 16;
 const TRANSPORT_MAX_RECORD_SIZE: usize = 4 * 1024 * 1024;
@@ -966,15 +965,6 @@ fn checked_u64(bytes: &[u8], offset: usize) -> u64 {
     transport_u64(bytes, offset).expect("the header was checked to hold this field")
 }
 
-fn transport_checksum(payload: &[u8], version: u32) -> u32 {
-    if version == TRANSPORT_VERSION_FNV {
-        return payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
-            (value ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
-        });
-    }
-    crc32fast::hash(payload)
-}
-
 fn align_transport(value: usize) -> Option<usize> {
     value.checked_add(7).map(|value| value & !7)
 }
@@ -1000,12 +990,11 @@ fn parse_transport(
     let version = transport_u32(contents, 8);
     if contents.len() < TRANSPORT_HEADER_SIZE
         || contents.get(..8) != Some(TRANSPORT_MAGIC.as_slice())
-        || !matches!(version, Some(TRANSPORT_VERSION | TRANSPORT_VERSION_FNV))
+        || version != Some(TRANSPORT_VERSION)
         || transport_u32(contents, 12) != Some(TRANSPORT_HEADER_SIZE as u32)
     {
         return Err(invalid_transport("header or version does not match"));
     }
-    let version = version.unwrap_or(TRANSPORT_VERSION);
     let declared_capacity = checked_u64(contents, 16);
     if declared_capacity < TRANSPORT_HEADER_SIZE as u64 || declared_capacity > contents.len() as u64
     {
@@ -1067,7 +1056,7 @@ fn parse_transport(
         }
         let payload = &contents[payload_start..payload_end];
         let expected_checksum = checked_u32(contents, cursor + 8);
-        if transport_checksum(payload, version) != expected_checksum {
+        if crc32fast::hash(payload) != expected_checksum {
             return Err(invalid("payload checksum does not match"));
         }
         let record: Record = serde_json::from_slice(payload).map_err(|error| {
@@ -2833,13 +2822,7 @@ mod tests {
             // Computed here, not through the reader's own function: a test of
             // which checksum a version means must not share the code under
             // test with the transport it writes.
-            let expected = if version == TRANSPORT_VERSION_FNV {
-                payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
-                    (value ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
-                })
-            } else {
-                crc32fast::hash(&payload)
-            };
+            let expected = crc32fast::hash(&payload);
             let checksum = expected ^ u32::from(corrupt == Some(index));
             bytes[cursor + 8..cursor + 12].copy_from_slice(&checksum.to_le_bytes());
             bytes[cursor] = 1;
@@ -3763,12 +3746,11 @@ mod tests {
         }
     }
 
-    // Version 2 checksums with CRC-32, version 1 with FNV-1a. A runtime older
-    // than this reader -- evidence kept from a failed run, say -- still reads,
-    // by its own checksum; a payload that does not match its checksum, and a
-    // version this reader does not know, are refused rather than guessed at.
+    // The transport is version 2, checksummed with CRC-32; a payload that
+    // does not match its checksum, and any other version, are refused rather
+    // than guessed at.
     #[test]
-    fn a_transport_reads_by_its_own_versions_checksum() {
+    fn a_transport_is_read_only_at_its_version_and_checksum() {
         let obligations = build_python_obligations("m.py", "x = 1\n").unwrap();
         let process = json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"p","argv":[]});
         let read = |name: &str, version: u32, corrupt: Option<usize>| {
@@ -3792,11 +3774,9 @@ mod tests {
             outcome.map(|_| ()).map_err(|error| error.to_string())
         };
         let current = read("checksum-v2", TRANSPORT_VERSION, None);
-        let older = read("checksum-v1", TRANSPORT_VERSION_FNV, None);
-        assert_eq!(
-            older, current,
-            "a version 1 transport reads as a version 2 one does"
-        );
+        // Version 1, which an older runtime wrote with FNV-1a, is no longer read.
+        let older = read("checksum-v1", 1, None).unwrap_err();
+        assert!(older.contains("version"), "{older}");
         assert!(
             !current
                 .as_ref()
