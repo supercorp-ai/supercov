@@ -1432,6 +1432,103 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn settings_go_into_any_config_shape_and_a_container_s_own_cache_prefix_stays() {
+        let directory = PathBuf::from("/tmp/scv-settings");
+        let mount = format!("{0}:{0}", directory.join("mount").display());
+        let environment = |config: &Value| -> Vec<String> {
+            config["Env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect()
+        };
+        // No HostConfig at all, and a cache prefix of the container's own.
+        let mut bare = json!({"Image": "app", "Env": ["PYTHONPYCACHEPREFIX=/mine", "KEEP=1", "SUPERCOV_CONTAINER=0"]});
+        add_settings(&mut bare, &settings(&directory), &BTreeMap::new());
+        let env = environment(&bare);
+        assert!(
+            env.contains(&"PYTHONPYCACHEPREFIX=/mine".to_owned()),
+            "{env:?}"
+        );
+        assert!(
+            !env.iter()
+                .any(|entry| entry == "PYTHONPYCACHEPREFIX=/tmp/supercov-pycache")
+        );
+        assert!(
+            env.contains(&"KEEP=1".to_owned()) && env.contains(&"SUPERCOV_CONTAINER=1".to_owned())
+        );
+        assert!(!env.contains(&"SUPERCOV_CONTAINER=0".to_owned()), "{env:?}");
+        assert_eq!(bare["HostConfig"]["Binds"], json!([mount]));
+        // A HostConfig that is not an object, and one without Binds.
+        let mut odd = json!({"HostConfig": null});
+        add_settings(&mut odd, &settings(&directory), &BTreeMap::new());
+        assert_eq!(odd["HostConfig"]["Binds"], json!([mount]));
+        let mut unbound = json!({"HostConfig": {"Binds": "not a list", "Privileged": true}});
+        add_settings(&mut unbound, &settings(&directory), &BTreeMap::new());
+        assert_eq!(unbound["HostConfig"]["Binds"], json!([mount]));
+        assert_eq!(unbound["HostConfig"]["Privileged"], json!(true));
+        // The image's own prefix stays too.
+        let mut imaged = json!({});
+        add_settings(
+            &mut imaged,
+            &settings(&directory),
+            &BTreeMap::from([("PYTHONPYCACHEPREFIX".to_owned(), "/image".to_owned())]),
+        );
+        assert!(
+            !environment(&imaged)
+                .iter()
+                .any(|entry| entry.starts_with("PYTHONPYCACHEPREFIX="))
+        );
+    }
+
+    #[test]
+    fn a_bind_or_mount_of_the_relay_s_socket_becomes_one_of_the_daemon_s() {
+        let directory = temporary("binds");
+        let daemon = directory.join("d.sock");
+        let created = fake_daemon(&daemon);
+        let ours = directory.join("p.sock");
+        let proxy = DockerProxy::start(&ours, &daemon, settings(&directory)).unwrap();
+        let theirs = daemon_side_socket(&daemon).display().to_string();
+        let ours = ours.display().to_string();
+        let mut stream = UnixStream::connect(&ours).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        // An image from before the run: only the socket binds change.
+        let config = json!({
+            "Image": "pulled-app",
+            "HostConfig": {
+                "Binds": [7, "/data:/data", format!("{ours}:/var/run/docker.sock"), format!("{ours}x:/x")],
+                "Mounts": [{"Source": ours, "Target": "/var/run/docker.sock"}, {"Source": "/data"}],
+            },
+        })
+        .to_string();
+        exchange(
+            &mut stream,
+            &mut reader,
+            &format!(
+                "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{config}",
+                config.len()
+            ),
+        );
+        let sent = created.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            sent["HostConfig"]["Binds"],
+            json!([
+                7,
+                "/data:/data",
+                format!("{theirs}:/var/run/docker.sock"),
+                format!("{ours}x:/x")
+            ])
+        );
+        assert_eq!(sent["HostConfig"]["Mounts"][0]["Source"], json!(theirs));
+        assert_eq!(sent["HostConfig"]["Mounts"][1]["Source"], json!("/data"));
+        assert!(sent.get("Env").is_none(), "{sent}");
+        drop(stream);
+        proxy.finish();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn head(start: &str, headers: &[(&str, &str)]) -> Head {
         Head {
             start: start.into(),
