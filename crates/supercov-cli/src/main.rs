@@ -1966,6 +1966,17 @@ fn process_exit_code(code: i32) -> ExitCode {
 fn could_not_measure(error: &str) -> ExitCode {
     if error.contains("storage is being cleaned") {
         ExitCode::from(2)
+    } else if let Some(code) = error
+        .strip_prefix("the test command exited ")
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(code, rest)| {
+            rest.starts_with("before any test reported an outcome")
+                .then(|| code.parse::<i32>().ok())
+                .flatten()
+        })
+    {
+        // No run, and the command's own status is the answer.
+        process_exit_code(code)
     } else if error.contains("could not spawn") && error.contains("(os error 2)") {
         ExitCode::from(127)
     } else if error.contains("could not spawn") && error.contains("(os error 13)") {

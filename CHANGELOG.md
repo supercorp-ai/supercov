@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A test command that failed before any test ran (pytest's `5` for no tests selected, `4` for a bad path) made Supercov exit `1`; it keeps the command's own status, as it does for a run.
 - `file` and `line` on a file the run's scope left out, such as a test file, said "Source file not found"; they give the scope's reason.
 - A page past the last entry (`--offset` beyond the total) read "showing 0-1 of 1"; it says the offset is past the end.
 - A test command that could not start (no such program) exited `1`, which reads as a failed policy; it exits `127`, or `126` for a file that may not be run, as a shell does.
