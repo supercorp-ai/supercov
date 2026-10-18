@@ -4970,6 +4970,240 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Every paged query refuses an empty page, and a directory roll-up
+    /// one with no depth, before it reads anything.
+    #[test]
+    fn every_paged_query_refuses_a_page_of_nothing() {
+        let report = report(vec![result(
+            "admin",
+            McdcVector {
+                values: vec![Some(true), None],
+                outcome: true,
+            },
+        )]);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-empty-pages-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let path = root.join("query-index.v1.bin");
+        let identity = crate::query_index::QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        crate::query_index::write_query_index(
+            &crate::coverage_index::coverage_index_sections(&report).unwrap(),
+            &identity,
+            &path,
+        )
+        .unwrap();
+        let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let view = CoverageViewId::All;
+        let refused = |result: Result<(), QueryError>| {
+            assert!(
+                matches!(result, Err(QueryError::InvalidPagination)),
+                "{result:?}"
+            );
+        };
+        refused(
+            coverage_minimize_query(
+                &report.view,
+                CoverageMinimizeQueryOptions {
+                    run: "r",
+                    view_id: view,
+                    kind: None,
+                    runner: None,
+                    target: None,
+                    metric: MinimizeMetric::All,
+                    max_states: 10,
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_covers_query(
+                &index,
+                CoverageCoversQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    file: "src/a.js",
+                    line: 1,
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_test_query(
+                &index,
+                CoverageTestQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "admin",
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_decision_query(
+                &index,
+                CoverageDecisionQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "src/a.js:1",
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_file_detail_query(
+                &index,
+                CoverageFileDetailOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "src/a.js",
+                    metric: MinimizeMetric::All,
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_diff_query(
+                &index,
+                &index,
+                CoverageDiffQueryOptions {
+                    older_run: "a",
+                    newer_run: "b",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 0,
+                    gained_only: false,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_scope_query(
+                &index,
+                CoverageScopeQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        for (depth, limit) in [(1, 0), (0, 5)] {
+            refused(
+                coverage_areas_query(
+                    &index,
+                    CoverageAreasQueryOptions {
+                        run: "r",
+                        view,
+                        metric: MinimizeMetric::All,
+                        kind: None,
+                        runner: None,
+                        depth,
+                        offset: 0,
+                        limit,
+                    },
+                )
+                .map(|_| ()),
+            );
+        }
+        refused(
+            tests_without_evidence_query(
+                &index,
+                TestsWithoutEvidenceOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_dimension_query(
+                &index,
+                CoverageDimensionQueryOptions {
+                    run: "r",
+                    view,
+                    dimension: CoverageDimension::Kind,
+                    filters: query_filters(view, None, None),
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_file_decisions_query(
+                &index,
+                CoverageFileDecisionsOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    file: "src/a.js",
+                    sort: DecisionSort::Location,
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+        refused(
+            coverage_file_query(
+                &index,
+                CoverageFileQueryOptions {
+                    run: "r",
+                    view,
+                    metric: MinimizeMetric::All,
+                    gaps_only: true,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 0,
+                },
+            )
+            .map(|_| ()),
+        );
+    }
+
     #[test]
     fn refuses_background_evidence() {
         let mut aggregate = result(

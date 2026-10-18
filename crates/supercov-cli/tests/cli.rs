@@ -195,7 +195,9 @@ fn a_measured_suite_reads_back_through_every_query() {
         "{assertions}"
     );
 
-    let impossible = project.supercov(&["runs", "latest", "minimize"]).exits(2);
+    let impossible = project
+        .supercov(&["runs", "latest", "minimize", "--target", "100"])
+        .exits(2);
     assert!(
         impossible.contains("target 100% is impossible"),
         "{impossible}"
