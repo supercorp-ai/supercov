@@ -547,4 +547,61 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Each launcher a command can name, and only a launch shape, picks its
+    /// frontend; Ruby run directly picks it by its test files and flags.
+    #[test]
+    fn every_launcher_form_picks_its_frontend() {
+        use FrontendLanguage::*;
+        let picked = |command: &str| {
+            supported_by_command(&tokens(command))
+                .into_iter()
+                .map(|(language, _)| language)
+                .collect::<Vec<_>>()
+        };
+        for (command, languages) in [
+            ("cargo nextest run", vec![Rust]),
+            ("cargo-nextest run", vec![Rust]),
+            ("cross test", vec![Rust]),
+            ("wasm-pack test --node", vec![Rust]),
+            ("go test ./...", vec![Go]),
+            ("go build", vec![]),
+            ("./gradlew test", vec![Jvm]),
+            ("./mvnw test", vec![Jvm]),
+            ("maven test", vec![Jvm]),
+            ("py.test -q", vec![Python]),
+            ("nox", vec![Python]),
+            ("python manage.py test", vec![Python]),
+            ("m test/a_test.rb", vec![Ruby]),
+            ("rake spec", vec![Ruby]),
+            ("rails test", vec![Ruby]),
+            ("ruby a_spec.rb", vec![Ruby]),
+            ("ruby -Itest a.rb", vec![Ruby]),
+            ("ruby -ispec a.rb", vec![Ruby]),
+            ("ruby script.rb", vec![]),
+            ("playwright-ct test", vec![JavaScript]),
+            ("ts-node a.ts", vec![JavaScript]),
+            ("make test", vec![]),
+        ] {
+            assert_eq!(picked(command), languages, "{command}");
+        }
+        let root = std::env::temp_dir().join(format!(
+            "supercov-frontends-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Rakefile"), "").unwrap();
+        let opaque = ["make".to_owned(), "test".to_owned()];
+        assert!(
+            !detect_frontends(&root, &opaque).frontends.contains(&Ruby),
+            "no test directory"
+        );
+        fs::create_dir(root.join("spec")).unwrap();
+        assert!(detect_frontends(&root, &opaque).frontends.contains(&Ruby));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
