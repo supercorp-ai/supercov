@@ -2336,3 +2336,88 @@ fn assessing_checks_only_the_files_its_questions_quote() {
         .exits(2);
     assert!(refused.contains("src/cart.js"), "{refused}");
 }
+
+#[test]
+fn a_test_file_whose_tests_were_never_asked_is_not_read_as_asserting_nothing() {
+    // Two files run the same statements. The assessment asks one test per
+    // statement first, and stops at a catch: the other file's tests were
+    // never asked, and reading them out of it said 0% asserted.
+    let project = Project::empty("assertions-unasked");
+    project.write(
+        "package.json",
+        r#"{ "name": "f", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/cart.js",
+        "export function total(prices) {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n\nexport function label(sum) {\n  if (sum > 100) {\n    return \"big\";\n  }\n  return \"small\";\n}\n",
+    );
+    project.write(
+        "test/total.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\ntest(\"total adds\", () => {\n  assert.equal(total([1, 2]), 3);\n});\n",
+    );
+    project.write(
+        "test/label.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { label, total } from \"../src/cart.js\";\ntest(\"label says big for a big total\", () => {\n  assert.equal(label(total([150, 50])), \"big\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let (base, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["runs", "latest", "assertions", "assess"], &through(&base))
+        .succeeds();
+    let reading = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "assertions",
+            "--test-file",
+            "test/total.test.js",
+        ])
+        .succeeds();
+    assert!(!reading.contains("0% asserted"), "{reading}");
+    contains_all(
+        &reading,
+        &[
+            "not assessed for the tests --test-file test/total.test.js picks",
+            "assertions assess --test-file 'test/total.test.js'",
+        ],
+    );
+    let json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "assertions",
+            "--test-file",
+            "test/total.test.js",
+            "--json",
+        ])
+        .json();
+    assert_eq!(json["data"]["summary"]["unasked"], 4, "{json}");
+    // Asked, they are what they assert.
+    project
+        .supercov_with(
+            &[
+                "runs",
+                "latest",
+                "assertions",
+                "assess",
+                "--test-file",
+                "test/total.test.js",
+            ],
+            &through(&base),
+        )
+        .succeeds();
+    let asked = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "assertions",
+            "--test-file",
+            "test/total.test.js",
+        ])
+        .succeeds();
+    assert!(
+        asked.contains("100% asserted (4 of 4 executed statements)"),
+        "{asked}"
+    );
+}
