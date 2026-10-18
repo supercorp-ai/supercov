@@ -4365,7 +4365,7 @@ fn a_comparison_says_which_files_the_difference_is_in() {
     contains_all(
         &text,
         &[
-            "in 2 files, most lost first:\n  src/panel.js: lost 6 lines, 1 branches\n  src/fee.js: lost 1 lines, 1 branches; gained 1 lines, 1 branches\n",
+            "in 2 files, most lost first:\n  src/panel.js: lost 6 lines, 1 branch\n  src/fee.js: lost 1 line, 1 branch; gained 1 line, 1 branch\n",
             "- line src/panel.js:2",
         ],
     );
@@ -4422,8 +4422,8 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
     contains_all(
         &same,
         &[
-            "gained: 1 lines, 1 branches",
-            "lost: 1 lines, 1 branches",
+            "gained: 1 line, 1 branch,",
+            "lost: 1 line, 1 branch,",
             "Both runs measured the same source with the same test files",
             "Run again before acting on a loss.",
         ],
@@ -4450,8 +4450,8 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
     contains_all(
         &only,
         &[
-            "gained: 0 lines, 0 branches",
-            "lost: 1 lines, 1 branches",
+            "gained: 0 lines, 0 branches,",
+            "lost: 1 line, 1 branch,",
             "- line src/fee.js:3",
             "- branch src/fee.js:2 true",
             "showing 1-1 of 1 per category",
@@ -4482,7 +4482,7 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
     );
     let changed = run("large");
     let source = project.supercov(&["diff", &added, &changed]).succeeds();
-    assert!(source.contains("gained: 1 lines"), "{source}");
+    assert!(source.contains("gained: 1 line,"), "{source}");
     assert!(!source.contains("Both runs measured"), "{source}");
     assert_eq!(
         project
@@ -8238,5 +8238,98 @@ fn run_lists_lines_and_tests_read_as_what_they_are() {
     assert!(
         listed.contains("INVALID (exit status unavailable)"),
         "{listed}"
+    );
+}
+
+/// A diff counts in the singular where there is one and says when nothing
+/// differs; a report that fails writes no progress line to a pipe; and the
+/// mistakes `diff`, `merge`, `import` and `report` can be handed are named.
+#[test]
+fn comparisons_and_their_mistakes_read_as_what_they_are() {
+    let project = Project::cart("compare-views");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let first = project.latest();
+    project.edit(
+        "test/cart.test.js",
+        "assert.equal(shipping(60, false), 0);",
+        "assert.equal(shipping(60, false), 0);\n  assert.equal(shipping(10, true), 15);",
+    );
+    project.commit("express");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let second = project.latest();
+    let gained = project.supercov(&["diff", &first, &second]).succeeds();
+    contains_all(
+        &gained,
+        &[
+            "gained: 1 line, 2 branches, 1 MC/DC condition\n",
+            "lost: 0 lines, 0 branches, 0 MC/DC conditions\n",
+            "+ MC/DC src/cart.js:13 C1 express",
+        ],
+    );
+    let same = project.supercov(&["diff", &first, &first]).succeeds();
+    assert!(
+        same.contains("Nothing was gained or lost.\nshowing 0-0 of 0 per category"),
+        "{same}"
+    );
+    let half = project.supercov(&["diff", &first]).exits(2);
+    assert!(
+        half.contains("Usage: supercov diff <older-run> <newer-run>"),
+        "{half}"
+    );
+    let unknown = project.supercov(&["diff", &first, "nope"]).exits(2);
+    assert!(
+        unknown.contains("Coverage run not found: nope"),
+        "{unknown}"
+    );
+    let alone = project.supercov(&["merge"]).succeeds();
+    assert!(alone.contains("nothing to merge it with"), "{alone}");
+    let changed = project.supercov(&["merge", &first, &second]).exits(2);
+    assert!(
+        changed.contains("a file of its own tests, has changed"),
+        "{changed}"
+    );
+    let twice = project.supercov(&["merge", &first, &first]).exits(2);
+    assert!(twice.contains("Each merged run must be unique"), "{twice}");
+    let keep = project.supercov(&["runs", "clean", "--keep", "x"]).exits(2);
+    assert!(
+        keep.contains("--keep must be a non-negative integer"),
+        "{keep}"
+    );
+    let report = project.supercov(&["report", "nope"]);
+    assert_eq!(report.code(), 2);
+    assert_eq!(
+        report.stderr(),
+        "[supercov] report failed: coverage run not found: nope\n"
+    );
+    let unread = project
+        .supercov(&["import", "missing.info", "--test", "t"])
+        .exits(2);
+    assert!(unread.contains("Cannot read missing.info"), "{unread}");
+    project.write(
+        "cov.info",
+        "SF:src/cart.js\nDA:20,1\nend_of_record\nSF:/elsewhere/x.js\nDA:1,1\nend_of_record\n",
+    );
+    let unnamed = project.supercov(&["import", "cov.info"]).exits(2);
+    assert!(
+        unnamed.contains("--test <name> or --background"),
+        "{unnamed}"
+    );
+    let status = project
+        .supercov(&[
+            "import", "cov.info", "--test", "outside", "--status", "weird",
+        ])
+        .exits(2);
+    assert!(
+        status.contains("--status is passed or failed, not weird"),
+        "{status}"
+    );
+    let imported = project.supercov(&["import", "cov.info", "--test", "outside"]);
+    assert_eq!(imported.code(), 0, "{}", imported.stderr());
+    contains_all(
+        &format!("{}{}", imported.stdout(), imported.stderr()),
+        &[
+            "imported 1 line(s) that ran",
+            "left out 1 file(s) of the evidence: /elsewhere/x.js (outside the project)",
+        ],
     );
 }

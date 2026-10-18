@@ -1001,6 +1001,9 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A line redrawn in place is for a terminal; in a log the carriage
+    // returns and the spaces that erase it are noise.
+    let progress = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let result = (|| -> Result<(PathBuf, usize), String> {
         let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
         // An assessment is worth reading on its own, so no run is only fatal
@@ -1020,13 +1023,15 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
             .or_else(|| selected.get(1).map(|run| run.id.clone()));
         let mut runs = Vec::with_capacity(selected.len());
         for (position, run) in selected.iter().enumerate() {
-            eprint!(
-                "\r[supercov] preparing report run {}/{}: {}",
-                position + 1,
-                selected.len(),
-                run.id
-            );
-            let _ = std::io::stderr().flush();
+            if progress {
+                eprint!(
+                    "\r[supercov] preparing report run {}/{}: {}",
+                    position + 1,
+                    selected.len(),
+                    run.id
+                );
+                let _ = std::io::stderr().flush();
+            }
             let filter = (!options.filter.is_empty()).then_some(&options.filter);
             match build_run(&root, run, filter)? {
                 Some(built) => runs.push(built),
@@ -1042,8 +1047,10 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
                 None => {}
             }
         }
-        eprint!("\r{}\r", " ".repeat(96));
-        let _ = std::io::stderr().flush();
+        if progress {
+            eprint!("\r{}\r", " ".repeat(96));
+            let _ = std::io::stderr().flush();
+        }
         let mut qualities = build_assessments(&root, "quality", DEFAULT_SNAPSHOTS);
         let mut securities = build_assessments(&root, "security", DEFAULT_SNAPSHOTS);
         let mut timeline = build_timeline(&runs, &qualities);
@@ -1097,7 +1104,9 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
     let (output, bytes) = match result {
         Ok(result) => result,
         Err(error) => {
-            eprint!("\r{}\r", " ".repeat(96));
+            if progress {
+                eprint!("\r{}\r", " ".repeat(96));
+            }
             eprintln!("[supercov] report failed: {error}");
             return ExitCode::from(2);
         }

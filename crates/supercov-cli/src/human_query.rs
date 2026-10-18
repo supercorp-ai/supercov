@@ -869,6 +869,19 @@ fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
     }
 }
 
+/// `1 line, 2 branches, 0 MC/DC conditions`.
+fn diff_counts(lines: usize, branches: usize, conditions: usize) -> String {
+    let counted = |value: usize, one: &str, many: &str| {
+        format!("{} {}", count(value), if value == 1 { one } else { many })
+    };
+    format!(
+        "{}, {}, {}",
+        counted(lines, "line", "lines"),
+        counted(branches, "branch", "branches"),
+        counted(conditions, "MC/DC condition", "MC/DC conditions")
+    )
+}
+
 /// `3 lines, 1 hit, 0 decisions, 1 phase`.
 fn test_totals(totals: &supercov_engine::coverage_query::CoverageTestTotals) -> String {
     let counted = |value: usize, one: &str, many: &str| {
@@ -2085,15 +2098,23 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     format!("{} -> {} ({label})", data.older, data.newer)
                 },
                 format!(
-                    "gained: {} lines, {} branches, {} MC/DC conditions",
-                    data.gained.line_count, data.gained.branch_count, data.gained.mcdc_count
+                    "gained: {}",
+                    diff_counts(
+                        data.gained.line_count,
+                        data.gained.branch_count,
+                        data.gained.mcdc_count
+                    )
                 ),
             ];
             if !data.gained_only {
                 lines.insert(1, delta);
                 lines.push(format!(
-                    "lost: {} lines, {} branches, {} MC/DC conditions",
-                    data.lost.line_count, data.lost.branch_count, data.lost.mcdc_count
+                    "lost: {}",
+                    diff_counts(
+                        data.lost.line_count,
+                        data.lost.branch_count,
+                        data.lost.mcdc_count
+                    )
                 ));
             }
             // Two runs of one commit differ a little wherever what runs
@@ -2121,13 +2142,15 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 const SHOWN: usize = 10;
                 let counted = |counts: &supercov_engine::coverage_query::CoverageDiffCounts| {
                     [
-                        (counts.lines, "lines"),
-                        (counts.branches, "branches"),
-                        (counts.mcdc, "MC/DC"),
+                        (counts.lines, "line", "lines"),
+                        (counts.branches, "branch", "branches"),
+                        (counts.mcdc, "MC/DC", "MC/DC"),
                     ]
                     .into_iter()
-                    .filter(|(count, _)| *count > 0)
-                    .map(|(count, noun)| format!("{count} {noun}"))
+                    .filter(|(count, _, _)| *count > 0)
+                    .map(|(count, one, many)| {
+                        format!("{count} {}", if count == 1 { one } else { many })
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
                 };
@@ -2171,8 +2194,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     .collect::<Vec<_>>()
             };
             let (lost, gained) = (listed(&data.lost, "-"), listed(&data.gained, "+"));
-            if lost.is_empty() && gained.is_empty() {
-                lines.push(String::new());
+            if !differs {
+                lines.push("Nothing was gained or lost.".into());
             } else {
                 lines.extend(lost);
                 lines.extend(gained);

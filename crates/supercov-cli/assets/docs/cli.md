@@ -541,8 +541,8 @@ Neither input run is changed. Under the totals it lists what was lost, marked
 `-`, and then what was gained, marked `+`:
 
 ```
-gained: 1 lines, 1 branches, 0 MC/DC conditions
-lost: 1 lines, 1 branches, 0 MC/DC conditions
+gained: 1 line, 1 branch, 0 MC/DC conditions
+lost: 1 line, 1 branch, 0 MC/DC conditions
 - line src/fee.js:5
 - branch src/fee.js:2 false
 + line src/fee.js:3
@@ -555,8 +555,8 @@ as one row and not as forty:
 
 ```
 in 2 files, most lost first:
-  src/panel.js: lost 6 lines, 1 branches
-  src/fee.js: lost 1 lines, 1 branches; gained 1 lines, 1 branches
+  src/panel.js: lost 6 lines, 1 branch
+  src/fee.js: lost 1 line, 1 branch; gained 1 line, 1 branch
 ```
 
 The counts are of the whole difference, whatever page of it is shown. In
