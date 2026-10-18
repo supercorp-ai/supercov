@@ -869,6 +869,15 @@ fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
     }
 }
 
+/// Where a line's source was read from, when not from the run itself.
+fn source_origin_note(origin: &str) -> &'static str {
+    if origin == "working-tree-stale" {
+        "  (read from the working tree, which changed since this run)"
+    } else {
+        "  (read from the current working tree)"
+    }
+}
+
 /// What a line is, from what is anchored on it, what is left of it, the
 /// tests that reached it, how much of the anchored is complete, and its
 /// limitations.
@@ -1694,15 +1703,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         );
                     }
                     if let Some(origin) = &data.source_origin {
-                        lines.insert(
-                            4,
-                            if origin == "working-tree-stale" {
-                                "  (read from the working tree, which changed since this run)"
-                                    .into()
-                            } else {
-                                "  (read from the current working tree)".into()
-                            },
-                        );
+                        lines.insert(4, source_origin_note(origin).into());
                     }
                     if !data.remaining.is_empty() {
                         lines.extend([String::new(), "Unobserved coverage".into()]);
@@ -1785,15 +1786,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ),
                     ];
                     if let Some(origin) = &data.source_origin {
-                        lines.insert(
-                            4,
-                            if origin == "working-tree-stale" {
-                                "  (read from the working tree, which changed since this run)"
-                                    .into()
-                            } else {
-                                "  (read from the current working tree)".into()
-                            },
-                        );
+                        lines.insert(4, source_origin_note(origin).into());
                     }
                     if !data.remaining.is_empty() {
                         lines.extend([String::new(), "Unobserved coverage".into()]);
@@ -2337,6 +2330,15 @@ mod tests {
     /// A line with nothing on it is not measured; one nothing ran is not
     /// covered; one whose every anchored obligation is complete, with no
     /// limitation and nothing left, is covered; anything between is partial.
+    #[test]
+    fn a_line_s_source_says_where_it_was_read() {
+        assert!(source_origin_note("working-tree-stale").contains("changed since this run"));
+        assert_eq!(
+            source_origin_note("working-tree"),
+            "  (read from the current working tree)"
+        );
+    }
+
     #[test]
     fn a_line_s_state_follows_what_is_on_it() {
         for ((anchored, remaining, tests, complete, limitations), state) in [
