@@ -2232,4 +2232,53 @@ fn made() -> Thing {
         assert_eq!(at(18), "Default::default()", "`file` is no pointer");
         assert_eq!(at(19), "Err(Default::default())");
     }
+
+    #[test]
+    fn each_type_shape_takes_a_value_of_its_own_type() {
+        let lib = "pub struct Open { pub a: u8 }\nmod inner { pub(crate) struct Hidden { x: u8 } }\npub trait Tr { type Item; }\nimpl Tr for Open { type Item = u8; }\n";
+        let source = r#"fn f(o: Open, s: &mut String) -> std::fmt::Result {
+    let e1: std::fmt::Error = std::fmt::Error;
+    let e2: core::fmt::Error = core::fmt::Error;
+    let r1: std::fmt::Result = Ok(());
+    let nz: std::num::NonZeroU8 = std::num::NonZeroU8::new(1).unwrap();
+    let sl: &[u8] = &[1, 2];
+    let ms: &mut String = s;
+    let arr: [bool; 2] = [true, false];
+    let arr2: [String; 1] = [String::new()];
+    let one: (u8,) = (1,);
+    let tup: (u8, String) = (1, String::new());
+    let opt: Option<u8> = None;
+    let cl = |x: u8| -> u8 { x + 1 };
+    let cl2 = |x: u8| -> u8 x;
+    let nested: Vec<Vec<Option<u8>>> = Vec::new();
+    let st = &v[1..];
+    let ch: char = 'a';
+    let fl: f32 = 1.5;
+    let un: () = ();
+    Ok(())
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        // A unit struct or `()` has one value, so lines 2, 3 and 19 are read
+        // but not pinned: their "change" is the value they already have.
+        for (line, changed) in [
+            (4, "Err(std::fmt::Error)"),
+            (5, "std::num::NonZeroU8::MAX"),
+            (8, "[false, false]"),
+            (9, "[String::from(\"supercov\")]"),
+            (11, "(0, String::new())"),
+            (12, "Some(0)"),
+            (13, "|x: u8| -> u8 { 0 }"),
+            (15, "vec![Default::default()]"),
+            (16, "&v[..0]"),
+            (17, "'\\0'"),
+            (18, "0.0"),
+            (20, "Err(std::fmt::Error)"),
+        ] {
+            assert_eq!(at(line), changed, "line {line}");
+        }
+        assert_eq!(r[&13][1].1, "(x + 1) ^ 1");
+    }
 }
