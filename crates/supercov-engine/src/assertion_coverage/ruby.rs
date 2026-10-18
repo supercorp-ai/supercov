@@ -701,4 +701,51 @@ mod tests {
         assert_eq!(start("OrderTest#test_total"), 8);
         assert_eq!(start("Shop::CartTest#test_total"), 2);
     }
+
+    /// The remaining name shapes: a scenario ended by an `Example`, a class
+    /// line with nothing after its name, a method with arguments, a
+    /// test-unit `test: ` name; and the files a test requires.
+    #[test]
+    fn remaining_name_shapes_and_required_helpers_are_found() {
+        let feature = "Feature: f\n  Scenario: one\n    Given x\n  Example: two\n    Given y\n";
+        let lines = feature.split('\n').collect::<Vec<_>>();
+        let one = locate(feature, &lines, "cucumber", "features/f.feature:2").unwrap();
+        assert_eq!((one.start, one.end), (1, 2));
+        assert!(locate(feature, &lines, "cucumber", "features/f.feature:x").is_none());
+        let tests = "class Bare\n  def test_args(a)\n    assert a\n  end\n  test \"adds two\" do\n    assert true\n  end\nend\n";
+        let lines = tests.split('\n').collect::<Vec<_>>();
+        let found = locate(tests, &lines, "minitest", "Bare#test_args").unwrap();
+        assert_eq!((found.context, found.start), (vec![0], 1));
+        let found = locate(tests, &lines, "test-unit", "Bare#test: adds two").unwrap();
+        assert_eq!(found.start, 4);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-ruby-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("spec/support")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        for file in [
+            "spec/spec_helper.rb",
+            "spec/support/money.rb",
+            "spec/local.rb",
+            "lib/shop.rb",
+        ] {
+            std::fs::write(root.join(file), "\n").unwrap();
+        }
+        let text = "require 'support/money'\nrequire_relative(\"local\")\nrequire_relative \"missing\"\nrequire lib_path\nrequire 'lib/shop.rb'\nputs 1\n";
+        assert_eq!(
+            helpers(&root, "spec/cart_spec.rb", text),
+            [
+                "spec/spec_helper.rb",
+                "spec/support/money.rb",
+                "spec/local.rb",
+                "lib/shop.rb"
+            ]
+        );
+    }
 }
