@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A damaged run index with a huge uncovered count overflowed the file-gap score check, which could let the damaged record read as valid; it is refused.
 - `quality` and `security` read a Gradle Kotlin build script (`build.gradle.kts`, `settings.gradle.kts`) as unclassified first-party source; it is build configuration.
 - `diff --kind` and `--runner` (as the CLI guide shows) were ignored while echoed back, and a filter no test matched read as no change; the comparison now keeps what the picked tests covered, MC/DC by the engine's own rule, its delta is theirs, its first line names the filter, and a filter neither run has is refused.
 - A test command that failed before any test ran (pytest's `5` for no tests selected, `4` for a bad path) made Supercov exit `1`; it keeps the command's own status, as it does for a run.

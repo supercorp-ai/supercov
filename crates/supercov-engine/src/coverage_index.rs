@@ -2770,12 +2770,21 @@ impl<'a> CoverageIndex<'a> {
             let missing_branches = number(32)?;
             let missing_mcdc_conditions = number(40)?;
             let score = number(64)?;
-            let expected_score = uncovered_lines
-                + uncovered_functions * 2
-                + missing_branches * 2
-                + missing_mcdc_conditions * 3
-                + measurement_limitations * 3;
-            if score != expected_score {
+            // Counts a damaged record could carry would overflow the sum.
+            let expected_score = [
+                (uncovered_lines, 1),
+                (uncovered_functions, 2),
+                (missing_branches, 2),
+                (missing_mcdc_conditions, 3),
+                (measurement_limitations, 3),
+            ]
+            .into_iter()
+            .try_fold(0usize, |sum, (count, weight)| {
+                count
+                    .checked_mul(weight)
+                    .and_then(|part| sum.checked_add(part))
+            });
+            if expected_score != Some(score) {
                 return Err(CoverageIndexError::InvalidRecord("file-gap score"));
             }
             let record_kind = self.optional_string(get_u32(record, 72))?;
@@ -5108,6 +5117,79 @@ mod tests {
         for (said, edit) in &cases {
             let got = read(edit.as_ref());
             assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+    /// Everything a query can read from an index, in every view.
+    fn read_everything(index: &CoverageIndex<'_>) -> Result<usize, CoverageIndexError> {
+        let mut read = 0;
+        index.model()?;
+        for view in [
+            CoverageViewId::All,
+            CoverageViewId::Passed,
+            CoverageViewId::Failed,
+        ] {
+            index.summary(view)?;
+            read += index.file_gaps(view, None, None)?.len();
+            for dimension in [
+                CoverageDimension::Kind,
+                CoverageDimension::Runner,
+                CoverageDimension::Tests,
+            ] {
+                read += index.dimensions(view, dimension)?.len();
+            }
+            read += index.scope_entries(view)?.len();
+            let lines = index.lines(view)?;
+            for line in &lines {
+                read += index.anchors(view, &line.file, line.line)?.len();
+            }
+            read += lines.len();
+            read += index.test_summaries(view)?.len();
+            read += index.test_details(view)?.len();
+            read += index.hit_metadata(view)?.len();
+            read += index.limitations(view)?.len();
+            read += index.decision_metadata(view)?.len();
+            read += index.decision_details(view)?.len();
+            read += index.phase_summaries(view)?.len();
+        }
+        Ok(read)
+    }
+
+    /// Whatever one byte of a correctly signed index says, every reader
+    /// returns a value or a typed error, never a panic: each byte of each
+    /// section's first record is set in turn, which is also every record
+    /// check those readers make.
+    #[test]
+    fn no_single_byte_of_a_signed_index_makes_a_reader_panic() {
+        for report in [report(), scoped_report()] {
+            let sections = coverage_index_sections(&report).unwrap();
+            {
+                let (_root, container) = index_of(&report, &|_| {});
+                read_everything(&CoverageIndex::new(&container).unwrap()).unwrap();
+            }
+            let mut refused = 0;
+            for section in &sections {
+                let size = section.record_size as usize;
+                if size == 0 || section.count == 0 || section.kind == SECTION_STRING_BYTES {
+                    continue;
+                }
+                for (offset, value) in
+                    (0..size).flat_map(|offset| [(offset, 0xffu8), (offset, 0x01)])
+                {
+                    let (kind, original) = (section.kind, section.bytes[offset]);
+                    let (_root, container) = index_of(&report, &move |s: &mut Vec<
+                        QueryIndexSection,
+                    >| {
+                        let section = s.iter_mut().find(|section| section.kind == kind).unwrap();
+                        section.bytes[offset] = if original == value { 0 } else { value };
+                    });
+                    let outcome =
+                        CoverageIndex::new(&container).and_then(|index| read_everything(&index));
+                    if outcome.is_err() {
+                        refused += 1;
+                    }
+                }
+            }
+            assert!(refused > 0);
         }
     }
 }
