@@ -901,7 +901,7 @@ mod tests {
                 Some(&superseded)
             ),
             Ok(Some(
-                "{\"scope\":{\"runId\":\"merged\"},\"testId\":\"t1\"}\n{\"scope\":\"text\"}\n"
+                "{\"testId\":\"t1\",\"scope\":{\"runId\":\"merged\"}}\n{\"scope\":\"text\"}\n"
                     .to_owned()
             ))
         );
