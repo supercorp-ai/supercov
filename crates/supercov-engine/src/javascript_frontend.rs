@@ -2311,4 +2311,157 @@ mod tests {
                 .is_none()
         );
     }
+
+    /// Sprockets directives go back to the top with the map moved under
+    /// them, unless a moved line carries a mapping, which drops the map.
+    #[test]
+    fn sprockets_directives_go_back_to_the_top_with_their_map() {
+        let source = "//= require a\n//= link b\nexport const x = 1;\n";
+        let fresh = || {
+            crate::js_instrumenter::instrument_candidate(source, "app/assets/config/manifest.js")
+                .unwrap()
+        };
+        let lines_of = |code: &str| code.split('\n').map(str::to_owned).collect::<Vec<_>>();
+        // Already first: left as it is.
+        let mut first = fresh();
+        let before = first.clone();
+        first.code = format!(
+            "//= require a\n//= link b\n{}",
+            first.code.replace("//= require a\n//= link b\n", "")
+        );
+        let as_first = first.code.clone();
+        keep_directives_first(source, &mut first);
+        assert_eq!(first.code, as_first);
+        // Below a runtime line: moved up, and the map with them.
+        let mut below = before.clone();
+        below.code = format!("RUNTIME;\n{as_first}");
+        below.map = Some(serde_json::json!({"version": 3, "mappings": "AAAA;;;CACA"}));
+        keep_directives_first(source, &mut below);
+        let lines = lines_of(&below.code);
+        assert_eq!(&lines[..3], ["//= require a", "//= link b", "RUNTIME;"]);
+        // One segment per line of the code, the empty ones past the end too.
+        assert_eq!(
+            below.map.as_ref().unwrap()["mappings"]
+                .as_str()
+                .unwrap()
+                .trim_end_matches(';'),
+            ";;AAAA;CACA"
+        );
+        // A moved line that carries a mapping: the map goes.
+        let mut mapped = before.clone();
+        mapped.code = format!("RUNTIME;\n{as_first}");
+        mapped.map = Some(serde_json::json!({"version": 3, "mappings": "AAAA;CACA"}));
+        keep_directives_first(source, &mut mapped);
+        assert!(mapped.map.is_none());
+        assert_eq!(
+            &lines_of(&mapped.code)[..2],
+            ["//= require a", "//= link b"]
+        );
+        // Directives the output lost, or a source with none: nothing moves.
+        let mut lost = before.clone();
+        lost.code = "RUNTIME;\nexport const x = 1;\n".into();
+        keep_directives_first(source, &mut lost);
+        assert_eq!(lost.code, "RUNTIME;\nexport const x = 1;\n");
+        let mut plain = before;
+        plain.code = "RUNTIME;\n//= require a\n".into();
+        keep_directives_first("export const x = 1;\n", &mut plain);
+        assert_eq!(plain.code, "RUNTIME;\n//= require a\n");
+    }
+
+    /// A helper's declaration is found by its value, typed or not.
+    #[test]
+    fn a_helper_declaration_is_found_by_its_value() {
+        assert_eq!(
+            helper_declaration("const a = g.mcdcBegin, b = 1;", "a", "g", false),
+            Some(6)
+        );
+        assert_eq!(
+            helper_declaration("ab = 1;\nconst a = g.mcdcBegin;\n", "a", "g", false),
+            Some(14)
+        );
+        let typed = "const a: typeof import(\"x\").mcdcBegin = g.mcdcBegin;";
+        assert_eq!(helper_declaration(typed, "a", "g", true), Some(6));
+        assert_eq!(helper_declaration(typed, "a", "g", false), None);
+        assert_eq!(
+            helper_declaration("const a = h.mcdcBegin;", "a", "g", true),
+            None
+        );
+    }
+
+    /// A cached artifact is used only where its paths stay inside, its
+    /// cache file is named by its digest, and its bytes still match it.
+    #[test]
+    fn a_cached_artifact_is_used_only_when_every_check_holds() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-frontend-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(FRONTEND_CACHE_DIRECTORY)).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let contents = b"export {};\n";
+        let sha = format!("{:x}", Sha256::digest(contents));
+        std::fs::write(root.join(FRONTEND_CACHE_DIRECTORY).join(&sha), contents).unwrap();
+        let artifact =
+            |path: &str, cache_file: String, sha256: String| JavascriptFrontendCacheArtifact {
+                path: path.into(),
+                cache_file,
+                sha256,
+            };
+        let cached = format!("{FRONTEND_CACHE_DIRECTORY}/{sha}");
+        assert!(valid_cached_artifact(
+            &root,
+            &artifact("src/a.js", cached.clone(), sha.clone())
+        ));
+        let other = "0".repeat(64);
+        for (case, bad) in [
+            (
+                "parent path",
+                artifact("../a.js", cached.clone(), sha.clone()),
+            ),
+            ("empty path", artifact("", cached.clone(), sha.clone())),
+            (
+                "misnamed cache file",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/x"),
+                    sha.clone(),
+                ),
+            ),
+            (
+                "short digest",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/{}", &sha[1..]),
+                    sha[1..].to_owned(),
+                ),
+            ),
+            (
+                "upper-case digest",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/{}", sha.to_uppercase()),
+                    sha.to_uppercase(),
+                ),
+            ),
+            (
+                "no cache file",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/{other}"),
+                    other.clone(),
+                ),
+            ),
+        ] {
+            assert!(!valid_cached_artifact(&root, &bad), "{case}");
+        }
+        std::fs::write(root.join(FRONTEND_CACHE_DIRECTORY).join(&sha), b"changed").unwrap();
+        assert!(
+            !valid_cached_artifact(&root, &artifact("src/a.js", cached, sha)),
+            "changed bytes"
+        );
+    }
 }
