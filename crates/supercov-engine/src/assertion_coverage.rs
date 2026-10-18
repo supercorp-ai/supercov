@@ -2975,8 +2975,8 @@ mod tests {
     }
 
     /// A Ruby test's helpers are what it loads that is not measured source,
-    /// cut to fit; a file named twice is shown once; and the support files
-    /// its constants name follow, cut to their own allowance.
+    /// cut to fit and stopping once full; the support files its constants
+    /// name follow, cut to their own allowance and stopping once it is spent.
     #[test]
     fn a_ruby_test_s_helpers_and_support_files_are_shown_within_their_limits() {
         let root = std::env::temp_dir().join(format!(
@@ -3030,8 +3030,10 @@ mod tests {
         assert!(helper.len() < 4000, "{}", helper.len());
         let fixture = &helpers["spec/support/big_fixture.rb"];
         assert!(fixture.contains("... (cut)"));
+        // The helper filled its allowance before the require came up, and
+        // the fixture filled the support files' before this one did.
         assert!(
-            helpers.contains_key("spec/support/fake_api.rb"),
+            !helpers.contains_key("spec/support/fake_api.rb"),
             "{:?}",
             helpers.keys()
         );
