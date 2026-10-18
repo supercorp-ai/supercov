@@ -1757,4 +1757,95 @@ mod tests {
             ExecutionModel::ParallelUnattributed
         );
     }
+
+    /// A JavaScript run's archive is read result by result: malformed files
+    /// are named, a run that recorded nothing gets the command's own result,
+    /// background server records get a runner of their own, and the
+    /// declaration and model are added.
+    #[test]
+    fn javascript_archive_entries_are_read_or_refused_by_name() {
+        let manifest: crate::javascript_frontend::JavascriptManifest =
+            serde_json::from_value(serde_json::json!({
+                "decisions": [], "points": [], "branches": [], "limitations": [],
+                "scope": {"version": 1, "mode": "automatic", "roots": [], "entries": []}
+            }))
+            .unwrap();
+        let entry = |path: &str, contents: &[u8]| EvidenceArchiveEntry {
+            path: path.into(),
+            contents: contents.to_vec(),
+        };
+        let read = |entries: Vec<EvidenceArchiveEntry>, exit: i32| {
+            javascript_archive_entries(entries, &manifest, "run", exit)
+        };
+        let good =
+            serde_json::to_vec(&result(Some("a"), Some(0), Some(("w1", "a", 0)), true)).unwrap();
+        for (entries, said) in [
+            (
+                vec![entry("results/a/mcdc.json", b"{")],
+                "invalid results/a/mcdc.json",
+            ),
+            (
+                vec![entry("w.mcdc.jsonl", &good)],
+                "does not end with a newline",
+            ),
+            (
+                vec![entry(
+                    "w.mcdc.jsonl",
+                    &[good.as_slice(), b"\n\n", good.as_slice(), b"\n"].concat(),
+                )],
+                "blank record at line 2",
+            ),
+            (
+                vec![entry("w.mcdc.jsonl", b"{}\n")],
+                "invalid w.mcdc.jsonl record at line 1",
+            ),
+        ] {
+            let error = read(entries, 0).unwrap_err();
+            assert!(error.contains(said), "{said}: {error}");
+        }
+        let declaration = |entries: &[EvidenceArchiveEntry]| -> serde_json::Value {
+            serde_json::from_slice(
+                &entries
+                    .iter()
+                    .find(|e| e.path == "frontend.json")
+                    .unwrap()
+                    .contents,
+            )
+            .unwrap()
+        };
+        // Nothing recorded: the command's own result, failed with its exit.
+        let empty = read(vec![], 3).unwrap();
+        let command = empty
+            .iter()
+            .find(|e| e.path == "results/command/mcdc.json")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&command.contents).contains("\"status\":\"failed\""));
+        assert!(empty.iter().any(|e| e.path == "coverage-model.json"));
+        let timed_out = read(vec![], supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE).unwrap();
+        assert!(
+            String::from_utf8_lossy(
+                &timed_out
+                    .iter()
+                    .find(|e| e.path == "results/command/mcdc.json")
+                    .unwrap()
+                    .contents
+            )
+            .contains("timedOut")
+        );
+        let with_server = read(
+            vec![
+                entry("w.mcdc.jsonl", &[good.as_slice(), b"\n"].concat()),
+                entry("server/background/p1.jsonl", b"{}\n"),
+            ],
+            0,
+        )
+        .unwrap();
+        let runners = declaration(&with_server)["runners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|runner| runner["runner"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(runners, ["background", "vitest"]);
+    }
 }
