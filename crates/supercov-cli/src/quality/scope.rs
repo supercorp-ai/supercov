@@ -756,3 +756,189 @@ pub fn configured_roots() -> Option<Vec<String>> {
         .collect();
     (!roots.is_empty()).then_some(roots)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn directory(files: &[(&str, &str)]) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-scope-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for (file, text) in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        root
+    }
+
+    /// A manifest's declared locations become roots: a file in a directory
+    /// of its own names the directory, one at the package root only itself;
+    /// build output, absolute, parent and missing paths name nothing.
+    #[test]
+    fn declared_entry_points_name_their_directories() {
+        let root = directory(&[
+            (
+                "package.json",
+                r#"{"main":"lib/index.js","bin":{"x":"bin/x.js"},"browser":"./dist/b.js","module":"/abs.js","exports":{"./runtime/*":"./runtime/*.mjs","./up":"../up.js","./all":"*","./gone":"./gone.js","deep":{"a":{"b":{"c":{"d":"too/deep.js"}}}}}}"#,
+            ),
+            ("lib/index.js", ""),
+            ("bin/x.js", ""),
+            ("runtime/a.mjs", ""),
+            ("too/deep.js", ""),
+            ("dist/b.js", ""),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"x\"\n[[bin]]\npath = \"src/main.rs\"\n",
+            ),
+            ("src/main.rs", ""),
+            ("build.rs", ""),
+        ]);
+        let mut found = declared_entry_points(&root)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, ["bin", "build.rs", "lib", "runtime", "src"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Manifests named after their project, and which files declare a package.
+    #[test]
+    fn variable_manifests_and_package_files_are_told_by_name() {
+        for (file, expected) in [
+            ("api.gradle.kts", Some(false)),
+            ("api.gradle", Some(false)),
+            ("App.fsproj", Some(true)),
+            ("App.vbproj", Some(true)),
+            ("notes.txt", None),
+        ] {
+            let root = directory(&[(file, "")]);
+            assert_eq!(variable_manifest(&root), expected, "{file}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        for (path, declares) in [
+            ("a/Cargo.toml", true),
+            ("a/junit.gradle.kts", true),
+            ("App.CSPROJ", true),
+            ("All.sln", true),
+            ("notes.txt", false),
+        ] {
+            assert_eq!(declares_a_package(path), declares, "{path}");
+        }
+    }
+
+    /// A root manifest's members: npm's workspaces in either form, Cargo's
+    /// across lines, a trailing `*` read as every directory under it.
+    #[test]
+    fn declared_members_are_read_from_either_ecosystem() {
+        let root = directory(&[
+            (
+                "package.json",
+                r#"{"workspaces":{"packages":["packages/*","tools","missing"]}}"#,
+            ),
+            ("packages/a/index.js", ""),
+            ("packages/b/index.js", ""),
+            ("packages/file.txt", ""),
+            ("tools/index.js", ""),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"x\"\n[workspace]\nmembers = [\n  \"crates/one\",\n  \"crates/*\",\n]\n[dependencies]\nserde = \"1\"\n",
+            ),
+            ("crates/one/Cargo.toml", ""),
+            ("crates/two/Cargo.toml", ""),
+        ]);
+        let mut found = declared_members(&root)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "crates/one",
+                "crates/two",
+                "packages/a",
+                "packages/b",
+                "tools"
+            ]
+        );
+        let flat = directory(&[
+            ("package.json", r#"{"workspaces":["tools"]}"#),
+            ("tools/x.js", ""),
+        ]);
+        assert_eq!(declared_members(&flat).len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(flat).unwrap();
+    }
+
+    /// Tool configuration by its name, and a served file left out as a
+    /// vendored library by its licence banner, its name or its minification.
+    #[test]
+    fn configuration_and_vendored_files_are_told_by_name_and_text() {
+        for (file, configuration) in [
+            ("vite.config.ts", true),
+            ("build.gradle.kts", true),
+            (".eslintrc.js", true),
+            (".babelrc.json", true),
+            (".rc.js", false),
+            (".eslint.js", false),
+            ("configure.ts", false),
+        ] {
+            assert_eq!(
+                beside_the_product(file) == Some("build or tool configuration"),
+                configuration,
+                "{file}"
+            );
+        }
+        let root = directory(&[
+            ("public/js/banner.js", "/*! some library v1 */\nvar a=1;\n"),
+            ("public/js/jquery.min.js", "var j = 1;\n"),
+            ("public/js/myjquery.js", "var j = 1;\n"),
+            ("public/js/app.js", "export const app = 1;\n"),
+            ("public/js/blob.js", &format!("{}\n", "x".repeat(3000))),
+            ("src/jquery.min.js", "var j = 1;\n"),
+        ]);
+        let vendored = |file: &str| third_party(&root.join(file), file);
+        assert_eq!(
+            vendored("public/js/banner.js"),
+            Some("vendored third-party library")
+        );
+        assert_eq!(
+            vendored("public/js/jquery.min.js"),
+            Some("vendored third-party library")
+        );
+        assert_eq!(
+            vendored("public/js/myjquery.js"),
+            None,
+            "a name inside another word"
+        );
+        assert_eq!(vendored("public/js/app.js"), None);
+        assert_eq!(vendored("public/js/blob.js"), Some("minified code"));
+        assert_eq!(
+            vendored("src/jquery.min.js"),
+            None,
+            "not a served directory"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
