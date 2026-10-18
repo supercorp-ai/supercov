@@ -328,4 +328,79 @@ mod tests {
         ));
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn each_loader_form_config_name_and_override_is_read() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-imports-forms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let elides = |file: &str, command: &str| elides_type_imports(&root, file, &words(command));
+        let write = |name: &str, text: &str| fs::write(root.join(name), text).unwrap();
+        write("tsconfig.json", "{}");
+        write("base.json", r#"{"compilerOptions":{"strict":true}}"#);
+        write(
+            "preserve.json",
+            r#"{"compilerOptions":{"importsNotUsedAsValues":"preserve"}}"#,
+        );
+        // Each way Node is told to load a TypeScript loader.
+        assert!(elides("src/main.ts", "node --import=tsx src/main.ts"));
+        assert!(elides(
+            "src/main.ts",
+            "node --loader ts-node/esm src/main.ts"
+        ));
+        assert!(elides(
+            "src/main.ts",
+            "node --experimental-loader=ts-node/esm src/main.ts"
+        ));
+        assert!(!elides("src/main.ts", "node --loader other src/main.ts"));
+        // An extends chain without an extension, as a list, or leaving the project.
+        write("tsconfig.json", r#"{"extends":"./base"}"#);
+        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", r#"{"extends":["./base.json","./base"]}"#);
+        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", r#"{"extends":"../outside.json"}"#);
+        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", r#"{"extends":7}"#);
+        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", "{}");
+        // Explicit configs: named in every form, and refused where not a root tsconfig.
+        write(
+            "tsconfig.build.json",
+            r#"{"compilerOptions":{"importsNotUsedAsValues":"remove"}}"#,
+        );
+        assert!(elides("src/main.ts", "tsc --project=tsconfig.build.json"));
+        assert!(elides(
+            "src/main.ts",
+            "tsx --tsconfig=tsconfig.build.json src/main.ts"
+        ));
+        assert!(!elides("src/main.ts", "tsc -p"));
+        assert!(!elides("src/main.ts", "tsc -ptsconfig.build.json"));
+        assert!(!elides("src/main.ts", "tsc -p preserve.json"));
+        write(
+            "tsconfig.preserve.json",
+            r#"{"compilerOptions":{"importsNotUsedAsValues":"preserve"}}"#,
+        );
+        assert!(!elides("src/main.ts", "tsc -p tsconfig.preserve.json"));
+        write("tsconfig.txt", "{}");
+        assert!(!elides("src/main.ts", "tsc -p tsconfig.txt"));
+        assert!(!elides("src/main.ts", "tsc -p missing.json"));
+        // An override on the command line, or a bundler beside the compiler.
+        assert!(!elides("src/main.ts", "tsc --verbatimModuleSyntax"));
+        assert!(!elides("src/main.ts", "tsc && vite build"));
+        // The nearest tsconfig decides for a file below it.
+        write(
+            "src/nested/tsconfig.json",
+            r#"{"compilerOptions":{"verbatimModuleSyntax":true}}"#,
+        );
+        assert!(!elides("src/nested/deep.ts", "tsx src/nested/deep.ts"));
+        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
