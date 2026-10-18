@@ -2974,6 +2974,69 @@ mod tests {
             .test_code(0)
     }
 
+    /// A Ruby test's helpers are what it loads that is not measured source,
+    /// cut to fit; a file named twice is shown once; and the support files
+    /// its constants name follow, cut to their own allowance.
+    #[test]
+    fn a_ruby_test_s_helpers_and_support_files_are_shown_within_their_limits() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-ruby-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let write = |file: &str, text: &str| {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("lib/m.rb", "def m\n  1\nend\n");
+        write("spec/spec_helper.rb", &"# helper\n".repeat(500));
+        write("spec/support/fake_api.rb", "class FakeApi\nend\n");
+        write("spec/support/big_fixture.rb", &"# fixture\n".repeat(2000));
+        write(
+            "spec/a_spec.rb",
+            "require_relative '../lib/m'\nrequire_relative 'support/fake_api'\nRSpec.describe FakeApi do\n  it { BigFixture }\nend\n",
+        );
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "spec/a_spec.rb[1:1]".into(),
+                file: Some("spec/a_spec.rb".into()),
+                name: "spec/a_spec.rb[1:1]".into(),
+                role: "test".into(),
+                runner: "rspec".into(),
+            }],
+            points: vec![InputPoint {
+                file: "lib/m.rb".into(),
+                line: 2,
+                source: "1".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("lib/m.rb".to_owned(), "def m\n  1\nend\n".to_owned())]);
+        let population = population_from(&root, &input, &sources, Language::Ruby).unwrap();
+        let helpers = population.helpers(0, 1);
+        assert!(
+            !helpers.contains_key("lib/m.rb"),
+            "measured source is not a helper"
+        );
+        let helper = &helpers["spec/spec_helper.rb"];
+        assert!(helper.contains("... (cut)"), "{helper}");
+        assert!(helper.len() < 4000, "{}", helper.len());
+        let fixture = &helpers["spec/support/big_fixture.rb"];
+        assert!(fixture.contains("... (cut)"));
+        assert!(
+            helpers.contains_key("spec/support/fake_api.rb"),
+            "{:?}",
+            helpers.keys()
+        );
+    }
+
     /// A JVM test's code leaves out block comments -- a license header, a
     /// one-line `/* */`, one inside the body -- and keeps the code.
     #[test]
