@@ -1931,4 +1931,60 @@ mod tests {
             );
         }
     }
+
+    /// Names split the way identifiers read, and a declaration's own lines
+    /// are its span less its children's.
+    #[test]
+    fn words_names_and_own_lines_read_the_way_code_does() {
+        assert_eq!(split_words("receiveBuffer_v2"), ["receive", "buffer", "v2"]);
+        assert_eq!(split_words("HTTPServer"), ["httpserver"]);
+        assert_eq!(split_words("aB"), Vec::<String>::new());
+        assert_eq!(split_words("__x__yz"), ["yz"]);
+        let words = |path: &str| words_of(path).into_iter().collect::<Vec<_>>();
+        assert_eq!(words("tests/test_receive_buffer.py"), ["buffer", "receive"]);
+        assert_eq!(words("ReceiveBufferTest.java"), ["buffer", "receive"]);
+        assert_eq!(words("C:\\app\\spec_io.rb"), ["io"]);
+        assert!(names_word("let total_x = total;", "total"));
+        assert!(names_word("(total)", "total"));
+        assert!(!names_word("subtotal + total_x", "total"));
+        assert!(!names_word("", "total"));
+        let changed = ["buffer", "receive", "send"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            name_match(
+                &serde_json::json!({"file": "tests/test_buffer.py", "name": "tests/test_buffer.py::test_receive[1]"}),
+                &changed
+            ),
+            2
+        );
+        assert_eq!(
+            name_match(&serde_json::json!({"name": "Suite > sends(x)"}), &changed),
+            0
+        );
+        assert_eq!(name_match(&serde_json::json!({}), &changed), 0);
+        let own = |source: &str, path: &str| {
+            let code = crate::source_units::code("src/a.rs", source).unwrap();
+            let index = code
+                .units
+                .iter()
+                .position(|unit| unit.path == path)
+                .unwrap();
+            own_lines(&code, index)
+        };
+        // Adjacent children leave the first and last lines.
+        assert_eq!(
+            own("mod m {\n    fn a() {}\n    fn b() {}\n}\n", "m"),
+            [[1, 1], [4, 4]]
+        );
+        // A gap between children is the declaration's own.
+        assert_eq!(
+            own("mod m {\n    fn a() {}\n\n    fn b() {}\n}\n", "m"),
+            [[1, 1], [3, 3], [5, 5]]
+        );
+        // A child that fills the declaration leaves it nothing.
+        assert_eq!(own("mod m { fn a() {} }\n", "m"), Vec::<[usize; 2]>::new());
+        assert_eq!(own("fn a() {\n}\n", "a"), [[1, 2]]);
+    }
 }

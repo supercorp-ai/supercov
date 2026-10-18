@@ -3056,3 +3056,40 @@ fn layout_targets_benchmarks_banners_and_build_scripts() {
         &["jvm/build.gradle.kts", "jvm/settings.gradle.kts"],
     );
 }
+
+#[test]
+fn a_distribution_is_a_probability_for_every_choice_summing_to_one() {
+    let keys = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>();
+    let values = |pairs: &[(&str, f64)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert!(distribution(
+        &values(&[("a", 0.33), ("b", 0.33), ("c", 0.33)]),
+        keys(&["a", "b", "c"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", 0.5), ("b", 0.5)]),
+        keys(&["a", "c"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", f64::NAN), ("b", 1.0)]),
+        keys(&["a", "b"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", 1.5), ("b", -0.5)]),
+        keys(&["a", "b"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", 0.4), ("b", 0.4)]),
+        keys(&["a", "b"])
+    ));
+    assert!(!probability(f64::INFINITY));
+    assert!(probability(0.0) && probability(1.0));
+    // A bracket only opens an IPv6 host at the start of the authority.
+    assert_eq!(host("http://a]b:1/x"), "a]b");
+    assert_eq!(host("example.com:443"), "example.com");
+    assert_eq!(host("https://h.example?q=1"), "h.example");
+}

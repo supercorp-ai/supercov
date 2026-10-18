@@ -2926,4 +2926,67 @@ mod edge_unit_tests {
             assert_eq!(only_added(&before, "h.py", after), expected, "{label}");
         }
     }
+
+    /// What erasing one comment takes out: its whole line where it owns
+    /// it, the whitespace before it at a line's end, and a space where two
+    /// words would otherwise join.
+    #[test]
+    fn a_comment_is_erased_as_if_it_had_never_been_written() {
+        for (source, (start, end), expected) in [
+            ("x = 1; // c", (7, 11), (6, 11, "")),
+            ("// c\nx", (0, 4), (0, 5, "")),
+            ("// c", (0, 4), (0, 4, "")),
+            ("x\n  // c\ny", (4, 8), (2, 9, "")),
+            ("a/*c*/b", (1, 6), (1, 6, " ")),
+            ("/*c*/b", (0, 5), (0, 5, "")),
+            ("a /*c*/ b", (2, 7), (2, 8, "")),
+            ("a/*c*/", (1, 6), (1, 6, "")),
+            ("(/*c*/b", (1, 6), (1, 6, "")),
+            ("a/*c*/)", (1, 6), (1, 6, "")),
+        ] {
+            assert_eq!(erasure(source, start, end), expected, "{source:?}");
+        }
+    }
+
+    /// Spans a parser reported that do not fit the file -- past its end,
+    /// empty, reversed, repeated -- are left out, as if never reported.
+    #[test]
+    fn spans_that_do_not_fit_the_file_are_left_out() {
+        let source = "let a = 1; // one\nfunction f() { return 'x  y'; }\n";
+        let item = |start: usize, end: usize| Item {
+            name: "f".into(),
+            kind: "function",
+            start,
+            end,
+            inert: false,
+        };
+        let comment = (11, 17);
+        let string = (39, 45);
+        let function = (18, 49);
+        let clean = build(
+            source,
+            Outline {
+                comments: vec![comment],
+                strings: vec![string],
+                declarations: vec![item(function.0, function.1)],
+                separator: ".",
+            },
+        );
+        let noisy = build(
+            source,
+            Outline {
+                comments: vec![comment, (40, 400), (5, 5), (9, 3), (12, 15)],
+                strings: vec![string, (60, 70), (8, 8)],
+                declarations: vec![
+                    item(function.0, function.1),
+                    item(function.0, function.1),
+                    item(20, 900),
+                    item(7, 7),
+                ],
+                separator: ".",
+            },
+        );
+        assert_eq!(noisy, clean);
+        assert_eq!(clean.units.len(), 2);
+    }
 }
