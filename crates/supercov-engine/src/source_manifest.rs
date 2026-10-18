@@ -1620,6 +1620,32 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// What moved between two readings of a file, by name: changed, added
+    /// and removed units each where there are some, and `declarations` when
+    /// no unit did.
+    #[test]
+    fn a_change_is_described_by_the_units_that_moved() {
+        let read = |source: &str| crate::source_units::code("a.js", source).unwrap();
+        let describe_between = |before: &str, after: &str| {
+            let (before, after) = (read(before), read(after));
+            let diff = before.diff(&after);
+            describe(&before, &after, &diff)
+        };
+        let base = "function a() {\n  return 1;\n}\nfunction b() {\n  return 2;\n}\n";
+        assert_eq!(
+            describe_between(
+                base,
+                &base.replace("function b() {\n  return 2;", "function c() {\n  return 3;")
+            ),
+            "added c (line 4); removed b (line 4)"
+        );
+        assert_eq!(
+            describe_between(base, &base.replace("return 1;", "return 9;")),
+            "a (line 1)"
+        );
+        assert_eq!(describe_between(base, base), "declarations");
+    }
+
     /// h11's `test_receivebuffer.py` for `_receivebuffer.py`, commons-cli's
     /// `ConverterTests#testClassDoesNotInitialize` for `Converter.java`.
     #[test]
