@@ -7579,3 +7579,132 @@ fn covered_unmeasured_and_empty_views_say_which_they_are() {
         &["in 2 files, most lost first:", "src/part0.js: lost"],
     );
 }
+
+#[test]
+fn every_view_names_its_filters_pages_and_notes() {
+    let project = Project::cart("view-notes");
+    let first = project.measure(&[]);
+    for at in 0..12 {
+        project.write(
+            &format!("src/part{at}.js"),
+            &format!("export function part{at}(a) {{\n  return a ? {at} : -{at};\n}}\n"),
+        );
+        project.write(
+            &format!("test/part{at}.test.js"),
+            &format!("import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ part{at} }} from \"../src/part{at}.js\";\ntest(\"part{at} both\", () => {{\n  assert.equal(part{at}(true), {at});\n  assert.equal(part{at}(false), -{at});\n}});\n"),
+        );
+    }
+    project.write(
+        "test/none.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\ntest(\"asserts alone\", () => {\n  assert.equal(1 + 1, 2);\n});\n",
+    );
+    project.commit("parts");
+    let second = project.measure(&[]);
+    let said = |args: &[&str]| project.supercov(args).succeeds();
+    // Gains over more files than are listed.
+    contains_all(
+        &said(&["diff", &first, &second, "--gained"]),
+        &[
+            "in 12 files:",
+            "  ... and 2 more files",
+            "+ line src/part0.js:1",
+        ],
+    );
+    // A page of a filtered comparison carries the filters to the next one.
+    contains_all(
+        &said(&[
+            "diff",
+            &first,
+            &second,
+            "--filter",
+            "passed",
+            "--runner",
+            "node:test",
+            "--limit",
+            "1",
+        ]),
+        &[
+            "(passed attempts only, runner node:test)",
+            "showing 1-1 of 24 per category",
+            "--filter passed --runner 'node:test' --offset 1 --limit 1",
+        ],
+    );
+    contains_all(
+        &said(&["diff", &first, &second, "--kind", "unit", "--limit", "2"]),
+        &["(kind unit)", "--kind 'unit' --offset 2 --limit 2"],
+    );
+    contains_all(
+        &said(&["runs", "latest", "tests", "without-evidence"]),
+        &[
+            "Tests that made assertions and recorded no coverage: 1",
+            "asserts alone",
+            "1 assertion; its file imports no measured source",
+        ],
+    );
+    for (args, next) in [
+        (
+            &["runs", "latest", "minimize", "--limit", "2"][..],
+            "minimize --offset 2 --limit 2",
+        ),
+        (
+            &["runs", "latest", "scope", "--files", "--limit", "3"][..],
+            "scope --files --offset 3 --limit 3",
+        ),
+        (
+            &["runs", "latest", "files", "--limit", "3"][..],
+            "files --offset 3 --limit 3",
+        ),
+    ] {
+        contains_all(&said(args), &[next]);
+    }
+    contains_all(
+        &said(&["runs", "latest", "--test-file", "test/part3.test.js"]),
+        &["(tests in test/part3.test.js)", "Lines      5.41% (2/37)"],
+    );
+    contains_all(
+        &said(&["runs", "latest", "gaps", "--title", "part"]),
+        &[
+            "Projection: title containing \"part\"",
+            "file --title 'part' 'src/cart.js'",
+        ],
+    );
+    contains_all(
+        &said(&["runs", "latest", "line", "src/part3.js:2"]),
+        &[
+            "COVERED",
+            "Test phases",
+            "node:assert/strict.equal (passed)",
+        ],
+    );
+    // A run whose command failed says its coverage cannot gate.
+    project.write(
+        "src/cart.js",
+        &common::CART.replace("return 0;", "return 1;"),
+    );
+    project.supercov(&["--", "node", "--test"]).exits(1);
+    contains_all(
+        &said(&["runs", "latest"]),
+        &[
+            "status: wrapped command exited 1 — coverage below is diagnostic and cannot gate",
+            "Failed      1",
+        ],
+    );
+    contains_all(
+        &said(&["runs", "latest", "decision", "src/cart.js:14"]),
+        &[
+            "C1 MISSING: express (never evaluated)",
+            "confidence unexecuted",
+        ],
+    );
+    contains_all(
+        &said(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:14",
+            "src/cart.js:21",
+            "src/cart.js:2",
+        ]),
+        &["showing 1-3 of 5 per category", "every test and phase:"],
+    );
+}
