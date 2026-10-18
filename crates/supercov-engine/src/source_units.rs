@@ -3059,4 +3059,37 @@ mod edge_unit_tests {
         assert_eq!(noisy, clean);
         assert_eq!(clean.units.len(), 2);
     }
+
+    /// An addition is only functions defined: a declared function, an
+    /// overload's signature, a declared or a plain value is not one; a
+    /// const holding a function is.
+    #[test]
+    fn only_typescript_function_definitions_are_additions() {
+        let head = "export function a() {\n  return 1;\n}\n";
+        let before = code("h.ts", head).unwrap();
+        for (added, expected) in [
+            (
+                "export const arrow = () => 1;\n",
+                Some(vec!["arrow".to_owned()]),
+            ),
+            (
+                "export const fn = function () {\n  return 2;\n};\n",
+                Some(vec!["fn".to_owned()]),
+            ),
+            ("export declare function d(): void;\n", None),
+            (
+                "export function o(a: string): void;\nexport function o(a: any) {\n  return a;\n}\n",
+                None,
+            ),
+            ("declare const v: () => void;\n", None),
+            ("export const plain = 1;\n", None),
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{head}{added}")),
+                expected,
+                "{added}"
+            );
+        }
+        assert!(code("a.ts", "export function (").is_none());
+    }
 }
