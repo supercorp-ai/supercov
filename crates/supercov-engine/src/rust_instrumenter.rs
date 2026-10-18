@@ -4017,6 +4017,73 @@ fn main() {
         assert_eq!(instrumented.stderr, original.stderr);
     }
 
+    /// A runtime path is `crate::` and identifiers; a test file is one
+    /// under tests, examples or benches, or named for tests.
+    #[test]
+    fn runtime_paths_and_test_files_are_read_by_their_names() {
+        for (path, valid) in [
+            ("crate::supercov_runtime", true),
+            ("crate::a::_b2", true),
+            ("crate", false),
+            ("crate::", false),
+            ("crate::a::", false),
+            ("crate::2a", false),
+            ("crate::a-b", false),
+            ("self::a", false),
+        ] {
+            assert_eq!(super::valid_runtime_path(path), valid, "{path}");
+        }
+        for (file, test) in [
+            ("tests/it.rs", true),
+            ("crates/a/benches/b.rs", true),
+            ("examples\\demo.rs", true),
+            ("src/tests.rs", true),
+            ("src/parser_tests.rs", true),
+            ("src/parser-tests.rs", true),
+            ("src/_tests.rs", false),
+            ("src/a.b_tests.rs", false),
+            ("src/contests.rs", false),
+            ("src/lib.rs", false),
+        ] {
+            assert_eq!(super::test_code_path(file), test, "{file}");
+        }
+    }
+
+    /// Shapes a probe has to be placed around without breaking the file:
+    /// each instruments, and what comes out still parses.
+    #[test]
+    fn every_shape_instruments_to_source_that_parses() {
+        let shapes = [
+            "fn a(x: Option<u8>) -> u8 {\n    let Some(v) = x else { return 0 };\n    if let Some(w) = x && w > 1 { w } else { v }\n}\n",
+            "fn b(x: u8) -> u8 {\n    match x {\n        0 => 1,\n        n if n > 5 && n < 9 => 2,\n        _ => {\n            3\n        }\n    }\n}\n",
+            "fn c(v: &[u8]) -> usize {\n    let mut n = 0;\n    'outer: loop {\n        for x in v {\n            while *x > 0 && n < 3 {\n                n += 1;\n                continue 'outer;\n            }\n        }\n        break n;\n    }\n}\n",
+            "const K: u8 = if true { 1 } else { 2 };\nstatic S: [u8; 2] = [K, K];\nfn d() -> u8 { K }\n",
+            "fn e(a: bool, b: bool) -> bool {\n    assert!(a || b, \"one of them\");\n    debug_assert!(a && !b);\n    assert_eq!(a, b);\n    (a)\n}\n",
+            "fn f() -> Result<u8, String> {\n    let x: u8 = \"1\".parse().map_err(|e: std::num::ParseIntError| e.to_string())?;\n    Ok(x)\n}\n",
+            "fn g(a: bool) {\n    let _c = || if a { 1 } else { 2 };\n    let _b = async { a };\n    unsafe { std::hint::unreachable_unchecked() }\n}\n",
+            "trait T {\n    fn t(&self) -> bool { true }\n    const C: u8 = 1;\n}\nimpl T for () {}\n",
+            "macro_rules! m { ($e:expr) => { $e }; }\nfn h(a: bool) -> bool { m!(a && a) }\n",
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn it() { assert!(1 + 1 == 2); }\n}\n",
+            "fn i(a: u8) -> u8 {\n    let x = { a + 1 };\n    #[allow(unused)]\n    let y = a;\n    vec![x, y].len() as u8\n}\n",
+        ];
+        for shape in shapes {
+            let out = super::instrument_rust_source("src/lib.rs", shape, "crate::supercov_runtime")
+                .unwrap_or_else(|error| panic!("{error:?}\n{shape}"));
+            let parsed =
+                ra_ap_syntax::SourceFile::parse(&out.code, ra_ap_syntax::Edition::Edition2024);
+            assert!(
+                parsed.errors().is_empty(),
+                "{:?}\n{}",
+                parsed.errors(),
+                out.code
+            );
+        }
+        assert!(matches!(
+            super::instrument_rust_source("src/lib.rs", "fn a() {}\n", "self::rt"),
+            Err(super::RustInstrumenterError::InvalidRuntimePath)
+        ));
+    }
+
     #[test]
     fn instrumented_const_and_static_initialisers_still_compile() {
         // Every one of these positions is const-evaluated, so none of them can

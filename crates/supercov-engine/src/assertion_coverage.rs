@@ -3013,7 +3013,9 @@ mod tests {
     #[test]
     fn a_python_test_is_found_by_async_def_or_shown_as_its_file() {
         let constants = (0..12).map(|i| format!("C{i} = {i}\n")).collect::<String>();
-        let text = &format!("import pytest\n{constants}\n\n@pytest.mark.asyncio\nasync def test_fetch():\n    assert await fetch() == 1\n\n\ndef test_other():\n    assert True\n");
+        let text = &format!(
+            "import pytest\n{constants}\n\n@pytest.mark.asyncio\nasync def test_fetch():\n    assert await fetch() == 1\n\n\ndef test_other():\n    assert True\n"
+        );
         let code = shown_test_code(
             "tests/test_fetch.py",
             text,

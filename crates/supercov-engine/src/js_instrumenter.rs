@@ -2298,8 +2298,19 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                 }),
             callee => {
                 let member_operation = assertion_member_object(callee).and_then(|object| {
-                    let Expression::Identifier(identifier) = object else {
-                        return None;
+                    // `assert.strict.equal(...)`: the strict namespace of the
+                    // module the binding holds.
+                    let (identifier, strict) = match object {
+                        Expression::Identifier(identifier) => (identifier, false),
+                        Expression::StaticMemberExpression(member)
+                            if member.property.name == "strict" =>
+                        {
+                            let Expression::Identifier(identifier) = &member.object else {
+                                return None;
+                            };
+                            (identifier, true)
+                        }
+                        _ => return None,
                     };
                     let symbol = referenced_symbol(identifier, self.scoping)?;
                     let method = assertion_member_name(callee)?;
@@ -2307,6 +2318,10 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                         .objects
                         .get(&symbol)
                         .filter(|_| NODE_ASSERT_METHODS.contains(&method))
+                        .map(|module| match module.as_str() {
+                            "node:assert" if strict => "node:assert/strict",
+                            module => module,
+                        })
                         .map(|module| format!("{module}.{method}"))
                 });
                 member_operation.or_else(|| expect_operation(callee, self.bindings, self.scoping))
@@ -10253,6 +10268,89 @@ fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shapes the instrumenter has to place probes around: each
+    /// instruments (output that does not parse is an error), and a test
+    /// file's assertions are counted through every way of importing them.
+    #[test]
+    fn every_shape_instruments_and_every_assertion_import_counts() {
+        for (file, source) in [
+            (
+                "src/a.js",
+                "export default function f(a, b) { return (a && b) || (a, b); }\n",
+            ),
+            (
+                "src/b.ts",
+                "export function g(x = 1, y?: number): number { return -1 + x + (y ?? 0); }\nlet z;\nexport const t = `a${z}b`;\nexport const u = `plain`;\n",
+            ),
+            (
+                "src/c.jsx",
+                "export const V = ({ x }) => <div>{}{/* c */}{x ? 1 : 2}</div>;\n",
+            ),
+            (
+                "src/d.js",
+                "const k = 'a';\nexport const o = { [k]: 1, [`t`]: 2 };\nString(o);\nconst a = null;\na?.b();\na?.();\na?.y?.z;\n",
+            ),
+            (
+                "src/e.js",
+                "import * as stylex from '@stylexjs/stylex';\nexport const s = stylex.create({ a: { color: 'red' } });\n",
+            ),
+            (
+                "app/routes/x.jsx",
+                "export async function loader() { return null; }\nexport async function action() { return null; }\nexport default function R() { return null; }\n",
+            ),
+            (
+                "app/entry.server.jsx",
+                "export default function handleRequest() { return 1; }\n",
+            ),
+            (
+                "src/f.js",
+                "export function f(a, b) {\n  switch (a) { case 1: break; default: }\n  label: for (;;) { break label; }\n  for (const x of []) ;\n  while (a) b();\n  do {} while (0);\n}\n",
+            ),
+            (
+                "src/g.js",
+                "export function g(b, c, e, f, h, i, p, q) {\n  const a = b && c;\n  const d = (e || f);\n  let w = (f ?? h) && i;\n  if ((p && q)) { return w; }\n  return [a, d];\n}\n",
+            ),
+            (
+                "src/h.js",
+                "export function h(x, y, z, arr) {\n  x = y || z;\n  x ||= y;\n  x += 1;\n  arr.map(function (v) { return v; });\n  setTimeout(() => {}, 1);\n  return x;\n}\n",
+            ),
+            (
+                "src/i.ts",
+                "declare const q: number;\ndeclare function r(): void;\nexport type T = { a: string };\nimport type { U } from './u';\nexport enum E { A }\nexport namespace N { export const n = 1; }\nexport class C { constructor(private readonly v = 1) {} m(): number { return this.v; } }\n",
+            ),
+        ] {
+            let out = instrument_candidate(source, file)
+                .unwrap_or_else(|error| panic!("{file}: {error:?}\n{source}"));
+            assert!(!out.code.is_empty(), "{file}");
+        }
+        for (source, assertions) in [
+            (
+                "import assert from 'node:assert';\nimport test from 'node:test';\ntest('a', () => { assert.strict.equal(1, 1); assert(1); });\n",
+                2,
+            ),
+            (
+                "import { strict as assert } from 'assert';\ntest('b', () => { assert.ok(true); });\n",
+                1,
+            ),
+            (
+                "import expect from 'expect';\ntest('d', () => { expect(1).toBe(1); });\n",
+                1,
+            ),
+            ("test('e', () => { notExpect(1); });\n", 0),
+        ] {
+            let out = instrument_node_assertion_phases(source, "tests/x.test.mjs")
+                .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+            assert_eq!(out.assertions, assertions, "{source}\n{}", out.code);
+            if source.contains("assert.strict.equal") {
+                assert!(
+                    out.code.contains("\"node:assert/strict.equal\""),
+                    "{}",
+                    out.code
+                );
+            }
+        }
+    }
 
     #[test]
     fn line_index_lookups_agree_with_walking_the_line() {
