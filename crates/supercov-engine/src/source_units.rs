@@ -2721,6 +2721,76 @@ mod tests {
         }
     }
 
+    /// A Python helper is only added to where nothing else moved: a
+    /// removal, an edit outside the file's own lines, no addition at all, a
+    /// name the old code already reads, or one exported by `__all__` is not.
+    #[test]
+    fn a_python_change_beside_an_addition_is_a_change() {
+        let before = code(
+            "t/h.py",
+            "def make(x):\n    return more(x)\n\n\ndef keep(x):\n    return x\n",
+        )
+        .unwrap();
+        let kept = "def make(x):\n    return more(x)\n\n\ndef keep(x):\n    return x\n";
+        for after in [
+            // `keep` removed.
+            "def make(x):\n    return more(x)\n\n\ndef other(x):\n    return x\n".to_owned(),
+            // Nothing added.
+            kept.to_owned(),
+            // `keep` edited too.
+            format!(
+                "{}\n\ndef extra(x):\n    return x\n",
+                kept.replace("return x", "return x + 1")
+            ),
+            // The old code already called `more`: defining it changes `make`.
+            format!("{kept}\n\ndef more(x):\n    return x\n"),
+            // Exported in double quotes.
+            format!("{kept}\n\ndef extra(x):\n    return x\n\n__all__ = [\"extra\"]\n"),
+        ] {
+            assert_eq!(only_added(&before, "t/h.py", &after), None, "{after}");
+        }
+        assert_eq!(
+            only_added(
+                &before,
+                "t/h.py",
+                &format!("{kept}\n\ndef extra(x):\n    return x\n")
+            ),
+            Some(vec!["extra".to_owned()])
+        );
+    }
+
+    /// A diff is narrow only where bodies alone changed, each in a unit with
+    /// a probe of its own.
+    #[test]
+    fn a_diff_is_narrow_only_for_probed_body_edits() {
+        let old = code(
+            "a.js",
+            "function a() { return 1; }\nfunction b() { return 2; }\n",
+        )
+        .unwrap();
+        let a = old.units.iter().position(|unit| unit.path == "a").unwrap();
+        let edited = old.diff(
+            &code(
+                "a.js",
+                "function a() { return 3; }\nfunction b() { return 2; }\n",
+            )
+            .unwrap(),
+        );
+        assert_eq!(edited.changed, [a]);
+        assert!(edited.narrow(&old, &[a]));
+        assert!(!edited.narrow(&old, &[]));
+        let added = old.diff(
+            &code(
+                "a.js",
+                "function a() { return 1; }\nfunction b() { return 2; }\nfunction c() {}\n",
+            )
+            .unwrap(),
+        );
+        assert!(!added.narrow(&old, &[a]));
+        let removed = old.diff(&code("a.js", "function a() { return 1; }\n").unwrap());
+        assert!(!removed.narrow(&old, &[a]));
+    }
+
     #[test]
     fn an_added_function_that_shadows_a_global_is_a_change() {
         let before = code(

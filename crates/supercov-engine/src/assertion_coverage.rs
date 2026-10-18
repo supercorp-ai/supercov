@@ -2929,6 +2929,111 @@ mod tests {
         assert!(quoted_fragments("return a + b").is_empty());
     }
 
+    /// The code shown for a test, in a fresh directory holding its file.
+    fn shown_test_code(
+        file: &str,
+        text: &str,
+        name: &str,
+        runner: &str,
+        language: Language,
+    ) -> String {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-shown-test-code-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: name.into(),
+                file: Some(file.into()),
+                name: name.into(),
+                role: "test".into(),
+                runner: runner.into(),
+            }],
+            points: vec![InputPoint {
+                file: "src/a".into(),
+                line: 1,
+                source: "x".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("src/a".to_owned(), "x\n".to_owned())]);
+        population_from(&root, &input, &sources, language)
+            .unwrap()
+            .test_code(0)
+    }
+
+    /// A JVM test's code leaves out block comments -- a license header, a
+    /// one-line `/* */`, one inside the body -- and keeps the code.
+    #[test]
+    fn block_comments_are_left_out_of_a_jvm_test_s_code() {
+        let text = "/*\n * License header\n */\npackage shop;\n\nimport org.junit.jupiter.api.Test;\n/* one-line */\nclass CartTest {\n    @Test\n    void adds() {\n        /* inside\n           block */\n        assertEquals(2, add(1, 1));\n    }\n}\n";
+        let code = shown_test_code(
+            "src/test/java/shop/CartTest.java",
+            text,
+            "shop.CartTest#adds()",
+            "junit",
+            Language::Jvm,
+        );
+        for kept in [
+            "package shop;",
+            "import org.junit",
+            "void adds()",
+            "assertEquals(2, add(1, 1));",
+        ] {
+            assert!(code.contains(kept), "{kept}: {code}");
+        }
+        for left in ["License header", "one-line", "inside", "block */"] {
+            assert!(!code.contains(left), "{left}: {code}");
+        }
+        // A method the file does not have: its head, then the rest of it.
+        let missing = shown_test_code(
+            "src/test/java/shop/CartTest.java",
+            text,
+            "shop.CartTest#gone()",
+            "junit",
+            Language::Jvm,
+        );
+        assert!(missing.contains("  ..."), "{missing}");
+        assert!(missing.contains("assertEquals"), "{missing}");
+    }
+
+    /// An `async def` test is found; one not in the file shows the file.
+    #[test]
+    fn a_python_test_is_found_by_async_def_or_shown_as_its_file() {
+        let constants = (0..12).map(|i| format!("C{i} = {i}\n")).collect::<String>();
+        let text = &format!("import pytest\n{constants}\n\n@pytest.mark.asyncio\nasync def test_fetch():\n    assert await fetch() == 1\n\n\ndef test_other():\n    assert True\n");
+        let code = shown_test_code(
+            "tests/test_fetch.py",
+            text,
+            "tests/test_fetch.py::test_fetch",
+            "pytest",
+            Language::Python,
+        );
+        assert!(code.contains("@pytest.mark.asyncio"), "{code}");
+        assert!(code.contains("assert await fetch() == 1"), "{code}");
+        assert!(!code.contains("test_other"), "{code}");
+        let missing = shown_test_code(
+            "tests/test_fetch.py",
+            text,
+            "tests/test_fetch.py::test_gone",
+            "pytest",
+            Language::Python,
+        );
+        assert!(missing.contains("  ..."), "{missing}");
+    }
+
     /// A pytest method far into its file: the file's first lines, then the
     /// class around it, its decorators and its body, each once.
     #[test]
