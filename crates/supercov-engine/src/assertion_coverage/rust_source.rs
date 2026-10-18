@@ -1953,6 +1953,60 @@ mod replacement_tests {
         }
     }
 
+    /// Integer arithmetic by its shape, float literals, whole words, test
+    /// files by their directory, and tests and doctests by their names.
+    #[test]
+    fn small_readings_of_rust_text() {
+        for (e, integer) in [
+            ("a + 1", true),
+            ("v.len() - n", true),
+            ("x as u32 * y", true),
+            ("x.wrapping_add(1)", true),
+            ("(a + 1)", false),
+            ("a + b", false),
+            ("a - 0.5", false),
+            ("s + \"x\"", false),
+            ("c + 'x'", false),
+            ("é + 1", true),
+        ] {
+            assert_eq!(integer_shaped(e), integer, "{e}");
+        }
+        assert!(float_literal("0.5") && float_literal("x * 1.25"));
+        assert!(!float_literal("1.x") && !float_literal("v.0") && !float_literal(".5"));
+        assert!(contains_word("let a_b = a;", "a"));
+        assert!(!contains_word("a_b + ab", "a"));
+        assert_eq!(replace_word("a + a_b + (a)", "a", "z"), "z + a_b + (z)");
+        for (file, test) in [
+            ("tests/it.rs", true),
+            ("crates/x/benches/b.rs", true),
+            ("examples/demo.rs", true),
+            ("src/lib.rs", false),
+            ("src/testsuite.rs", false),
+        ] {
+            assert_eq!(test_path(file), test, "{file}");
+        }
+        let lines = [
+            "/// ```",
+            "/// assert!(a::f());",
+            "/// ```",
+            "#[inline]",
+            "",
+            "pub fn f() -> bool { true }",
+            "#[test]",
+            "#[ignore]",
+            "async fn works() {",
+            "}",
+            "fn worksnot() {}",
+        ];
+        let doctest = locate(&lines, "src/lib.rs - f (line 1)").unwrap();
+        assert_eq!((doctest.start, doctest.end), (0, 5));
+        assert!(locate(&lines, "src/lib.rs - f (line x)").is_none());
+        assert!(locate(&lines, "src/lib.rs - f (line 0)").is_none());
+        let test = locate(&lines, "src/lib.rs::works").unwrap();
+        assert_eq!((test.context, test.start), (vec![6, 7], 8));
+        assert!(locate(&lines, "src/lib.rs::work").is_none());
+    }
+
     /// A value made for a type: from its shape, its fields where every one
     /// can be set from here, or not at all -- three structs deep, a maker
     /// private to another module, a field private to another module.
