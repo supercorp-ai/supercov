@@ -535,6 +535,26 @@ pub fn checkout_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_sits_with_the_tests_by_its_directory_or_its_name() {
+        for (file, beside) in [
+            ("test/helpers.js", true),
+            ("Tests/fixture.json", true),
+            ("__tests__/setup.ts", true),
+            ("src/cart.test.js", true),
+            ("src/cart_spec.rb", true),
+            ("spec-helpers/run.js", true),
+            ("src/testing/latest.js", false),
+            ("src/contest.js", false),
+            ("lib/inspect.js", false),
+        ] {
+            assert_eq!(beside_the_tests(file), beside, "{file}");
+        }
+        assert!(dependency_file("packages/a/package.json"));
+        assert!(dependency_file("yarn.lock"));
+        assert!(!dependency_file("src/package.ts"));
+    }
     use serde_json::json;
 
     #[test]
