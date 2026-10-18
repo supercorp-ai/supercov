@@ -2433,4 +2433,62 @@ mod tests {
         let text = render(&line);
         assert!(text.contains("    Not asked: 130 test(s). No test was asked from 7 file(s) that run it: relay.test.js (40), safety.test.js (22), a.test.js (9), b.test.js (8), c.test.js (7), and 2 more\n"), "{text}");
     }
+
+    /// Each option is refused where it does not belong, without its value,
+    /// or beside a second target; the rest set what they say.
+    #[test]
+    fn assertion_options_are_refused_where_they_do_not_belong() {
+        let parsed = |args: &[&str]| parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        for (args, said) in [
+            (
+                &["--dry-run"][..],
+                "--dry-run belongs to `assertions assess`",
+            ),
+            (
+                &["--workers", "2"][..],
+                "--workers belongs to `assertions assess`",
+            ),
+            (
+                &["--changed"][..],
+                "--changed belongs to `assertions assess`",
+            ),
+            (
+                &["assess", "--test", "x"][..],
+                "--test reads a saved result",
+            ),
+            (&["assess", "--all"][..], "--all reads a saved result"),
+            (&["--test"][..], "--test needs a test name"),
+            (&["--test", ""][..], "--test needs a test name"),
+            (&["a.js", "--test", "x"][..], "not more than one"),
+            (&["a.js", "b.js"][..], "not more than one"),
+            (&["--offset", "x"][..], "--offset needs a number"),
+            (&["--limit", "-1"][..], "--limit needs a number of rows"),
+            (
+                &["assess", "--workers", "0"][..],
+                "--workers needs a positive number",
+            ),
+            (&["assess", "a.js"][..], "Unknown option: a.js"),
+            (&["--bogus"][..], "Unknown option: --bogus"),
+            (&["a.js:3", "--weak"][..], "give a file or nothing"),
+        ] {
+            let error = parsed(args).err().unwrap_or_default();
+            assert!(error.contains(said), "{args:?}: {error}");
+        }
+        let assess = parsed(&[
+            "assess",
+            "--dry-run",
+            "--refresh",
+            "--changed",
+            "--workers",
+            "999",
+            "--json",
+        ])
+        .unwrap();
+        assert!(assess.assess && assess.dry_run && assess.refresh && assess.changed && assess.json);
+        assert_eq!(assess.workers, 64);
+        let read = parsed(&["--all", "--offset", "3"]).unwrap();
+        assert_eq!((read.limit, read.offset), (None, 3));
+        assert_eq!(parsed(&["--weak"]).unwrap().target, Target::Weak);
+        assert_eq!(parsed(&["--limit", "5"]).unwrap().limit, Some(5));
+    }
 }
