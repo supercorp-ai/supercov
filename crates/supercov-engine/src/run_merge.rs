@@ -993,6 +993,71 @@ mod tests {
                 "Cannot merge invalid frontend declaration".into(),
             ),
             (
+                "protocol version",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["protocolVersion"] = 3.into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "frontend id",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["frontendId"] = "other".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "declared language",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["language"] = "typescript".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "structural source",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["structuralSource"] = "mixed".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "structural limitations",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["structuralLimitations"] = serde_json::json!(["x"])),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "coverage schema",
+                Box::new(|root| edit_metadata(root, "run-b", |m| m.integrity.schema_version = 3)),
+                "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0".into(),
+            ),
+            (
                 "frontend version",
                 Box::new(|root| {
                     rewrite_entry(
@@ -1065,7 +1130,13 @@ mod tests {
                 v["runners"].as_array_mut().unwrap().push(second);
             }),
         );
+        // One run whose tests failed makes the merged run's tests fail.
+        edit_metadata(&root, "run-b", |m| m.test_exit_code = Some(1));
         merge(&["run-a", "run-b"]).unwrap();
+        let merged: RunMetadata =
+            serde_json::from_slice(&fs::read(root.join(".supercov/runs/merged/run.json")).unwrap())
+                .unwrap();
+        assert_eq!(merged.test_exit_code, Some(1));
         let entries = read_archive(&root.join(".supercov/runs/merged/evidence.raw.gz")).unwrap();
         let declaration: Value = serde_json::from_slice(
             &entries
