@@ -2053,6 +2053,69 @@ mod tests {
         }
     }
 
+    /// A writer whose reader has gone.
+    struct Gone;
+
+    impl Write for Gone {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Reads that are interrupted once, then give what they hold, then fail.
+    struct Uneven {
+        steps: Vec<io::Result<Vec<u8>>>,
+    }
+
+    impl Read for Uneven {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.steps.is_empty() {
+                return Ok(0);
+            }
+            let bytes = self.steps.remove(0)?;
+            buffer[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    fn relayed(pipe: impl Read + Send + 'static) -> Vec<u8> {
+        let kept = Kept::default();
+        relay(pipe, kept.clone(), ConsoleNames::default())
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the relay ends with its input");
+        let bytes = kept.0.lock().unwrap().clone();
+        bytes
+    }
+
+    /// A line longer than the limit, bytes that are not text, an interrupted
+    /// read and a failed one all pass on what was written; a reader that
+    /// has gone ends the relay.
+    #[test]
+    fn the_relay_passes_on_long_lines_raw_bytes_and_uneven_reads() {
+        let long = [vec![b'a'; RELAY_LINE_LIMIT * 2], b"\nend".to_vec()].concat();
+        assert_eq!(relayed(io::Cursor::new(long.clone())), long);
+        let raw = b"\xff\xfe\nnext\n".to_vec();
+        assert_eq!(relayed(io::Cursor::new(raw.clone())), raw);
+        let uneven = Uneven {
+            steps: vec![
+                Err(io::ErrorKind::Interrupted.into()),
+                Ok(b"one\ntw".to_vec()),
+                Err(io::ErrorKind::Other.into()),
+                Ok(b"never\n".to_vec()),
+            ],
+        };
+        assert_eq!(relayed(uneven), b"one\ntw");
+        for input in [b"line\n".to_vec(), vec![b'a'; RELAY_LINE_LIMIT * 2]] {
+            relay(io::Cursor::new(input), Gone, ConsoleNames::default())
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a relay with no reader ends");
+        }
+    }
+
     #[test]
     fn what_a_command_prints_names_the_project() {
         // Go names a file in a compile error from where it runs, Maven and
