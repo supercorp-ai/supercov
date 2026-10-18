@@ -1897,4 +1897,38 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn a_manifest_names_local_paths_with_full_hashes() {
+        assert!(local_path("src/a.ts"));
+        for bad in ["", "a\\b", "C:/a", "a//b", "./a", "a/../b", "a/."] {
+            assert!(!local_path(bad), "{bad:?}");
+        }
+        let manifest = |path: &str, sha256: &str| InputManifest {
+            schema_version: MANIFEST_SCHEMA,
+            language: "javascript".into(),
+            files: [(
+                path.to_owned(),
+                FileFingerprint {
+                    sha256: sha256.into(),
+                    bytes: 1,
+                    code: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let good = "a".repeat(64);
+        validate_manifest(&manifest("src/a.ts", &good)).unwrap();
+        for (path, sha256) in [
+            ("../a.ts", good.as_str()),
+            ("src/a.ts", "abc"),
+            ("src/a.ts", &"z".repeat(64)),
+        ] {
+            assert!(
+                validate_manifest(&manifest(path, sha256)).is_err(),
+                "{path} {sha256}"
+            );
+        }
+    }
 }
