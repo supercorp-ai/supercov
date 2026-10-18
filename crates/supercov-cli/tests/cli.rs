@@ -8563,3 +8563,92 @@ fn both_streams_into_one_file_name_the_project() {
         "{written}"
     );
 }
+
+/// A runner named alone narrows every view to its tests and says so; a
+/// runner no test used is refused by name.
+#[test]
+fn a_runner_alone_narrows_every_view_or_is_refused() {
+    let project = Project::cart("runner-filters");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let gaps = project
+        .supercov(&["runs", "latest", "gaps", "--runner", "node:test"])
+        .succeeds();
+    contains_all(
+        &gaps,
+        &[
+            "Projection: runner node:test.",
+            "[covered elsewhere: 0; nowhere: 15]",
+        ],
+    );
+    for args in [
+        vec!["runs", "latest", "gaps", "--runner", "vitest"],
+        vec!["runs", "latest", "files", "--runner", "vitest"],
+        vec!["runs", "latest", "--runner", "vitest"],
+        vec![
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--runner",
+            "vitest",
+        ],
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(
+            refused.contains("No tests match runner=vitest"),
+            "{args:?}: {refused}"
+        );
+    }
+    let summary = project
+        .supercov(&["runs", "latest", "--runner", "node:test"])
+        .succeeds();
+    contains_all(
+        &summary,
+        &["(runner node:test)", "files --runner 'node:test'"],
+    );
+    let kinds = project
+        .supercov(&["runs", "latest", "kinds", "--runner", "node:test"])
+        .succeeds();
+    assert!(kinds.contains("unit  3 test(s)  lines 76.92%"), "{kinds}");
+    let minimum = project
+        .supercov(&["runs", "latest", "minimize", "--runner", "node:test"])
+        .succeeds();
+    assert!(minimum.contains("exact minimum 3/3 test(s)"), "{minimum}");
+    let directories = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "files",
+            "--group",
+            "dir",
+            "--runner",
+            "node:test",
+        ])
+        .succeeds();
+    assert!(
+        directories.contains("Coverage by directory, 1 deep — runner node:test"),
+        "{directories}"
+    );
+    let decision = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "decision",
+            "src/cart.js:13",
+            "--runner",
+            "node:test",
+        ])
+        .succeeds();
+    assert!(decision.contains("FF -> F  tests=1"), "{decision}");
+    let tests = project
+        .supercov(&["runs", "latest", "test", "total"])
+        .succeeds();
+    contains_all(
+        &tests,
+        &[
+            "total adds prices",
+            "total applies a coupon",
+            "showing 1-2 of 2 matching tests",
+        ],
+    );
+}
