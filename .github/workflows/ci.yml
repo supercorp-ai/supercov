@@ -188,3 +188,31 @@ jobs:
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
+
+  # Rust tests compiled to wasm, run where Cargo runs them: Node through
+  # wasm-bindgen-test-runner, WASI through wasmtime.
+  rust-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+          components: clippy, rustfmt
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Install wasmtime 49.0.3
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-v49.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      - run: cargo build -p supercov
+      - run: node scripts/rust-wasm-hosts.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WASM: "1"
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure

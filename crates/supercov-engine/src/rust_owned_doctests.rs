@@ -264,7 +264,7 @@ pub(crate) fn run_doctests(
             .args(&selection.doctest_arguments)
             .current_dir(&project.workspace_root)
             .env("CARGO_TARGET_DIR", &project.target_directory)
-            .env("RUSTFLAGS", capped_rustflags())
+            .env("RUSTFLAGS", capped_rustflags(project, invocation))
             .env("RUSTDOC", &program)
             .env(WRAPPER_ROOT_ENV, root)
             .env(REAL_RUSTDOC_ENV, &real_rustdoc),
