@@ -14,8 +14,6 @@ on:
 
 permissions:
   contents: read
-  # The stop-on-failure step cancels this commit's runs.
-  actions: write
 
 jobs:
   reproduce:
@@ -40,6 +38,3 @@ jobs:
       - name: Package the tutorial starter
         if: runner.os == 'Linux'
         run: python3 scripts/package-starter.py "$RUNNER_TEMP/supercov-tutorial.zip"
-      # A failure here ends this commit's other runs too: no waiting on them.
-      - if: failure() && github.event_name == 'pull_request'
-        uses: ./.github/actions/stop-on-failure
