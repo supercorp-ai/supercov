@@ -7249,3 +7249,123 @@ fn a_file_the_scope_left_out_says_why_rather_than_not_found() {
         "{missing}"
     );
 }
+
+#[test]
+fn every_query_flag_is_read_and_a_wrong_one_named() {
+    let project = Project::cart("query-flags");
+    project.measure(&[]);
+    for (args, said) in [
+        (
+            &["runs", "latest", "gaps", "--offset", "nan"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--offset", "1.5"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--offset", "-1"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--offset", "1e20"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--filter", "bogus"][..],
+            "--filter must be all, passed, or failed",
+        ),
+        (
+            &["runs", "latest", "minimize", "--target", "inf"][..],
+            "--target must be between 0 and 100",
+        ),
+        (
+            &["runs", "latest", "minimize", "--metric", "nope"][..],
+            "--metric must be all, lines",
+        ),
+        (
+            &["runs", "latest", "files", "--sort", "missing"][..],
+            "--sort requires --group decision",
+        ),
+        (
+            &["runs", "latest", "files", "--sort", "bogus"][..],
+            "--sort must be location or missing",
+        ),
+        (
+            &["runs", "latest", "gaps", "--depth", "2"][..],
+            "--depth requires --group dir",
+        ),
+        (
+            &[
+                "runs",
+                "latest",
+                "file",
+                "src/cart.js",
+                "--group",
+                "decision",
+                "--metric",
+                "lines",
+            ][..],
+            "--group decision",
+        ),
+        (
+            &["runs", "latest", "line"][..],
+            "Usage: supercov runs <run-id> line",
+        ),
+        (
+            &["runs", "latest", "test"][..],
+            "Usage: supercov runs <run-id> test",
+        ),
+    ] {
+        let stderr = project.supercov(args).exits(2);
+        assert!(stderr.contains(said), "{args:?}: {stderr}");
+    }
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "gaps", "--filter", "passed"])
+            .succeeds(),
+        &["passed attempts only"],
+    );
+    for (metric, target, said) in [
+        ("statements", "50", "for 50% statements"),
+        ("functions", "50", "for 50% functions"),
+        ("branches", "50", "for 50% branches"),
+        ("mcdc", "10", "for 10% mcdc"),
+    ] {
+        contains_all(
+            &project
+                .supercov(&[
+                    "runs", "latest", "minimize", "--metric", metric, "--target", target,
+                ])
+                .succeeds(),
+            &[said],
+        );
+    }
+    project
+        .supercov(&["runs", "latest", "files", "--sort", "location"])
+        .succeeds();
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--sort",
+            "missing",
+        ])
+        .succeeds();
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--metric",
+            "mcdc",
+        ])
+        .succeeds();
+}
