@@ -354,11 +354,16 @@ pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
         .or_else(|| (from..lines.len()).find(declares_method))
         .or_else(|| (0..lines.len()).find(declares_method))?;
     let indent = super::indent(lines[start]);
+    // The annotations above it, an argument list spread over lines included:
+    // walking up, a line is taken while an annotation's parentheses are open.
     let mut first = start;
-    while first > 0 && {
+    let mut open = 0i64;
+    while first > 0 {
         let t = lines[first - 1].trim_start();
-        t.starts_with('@') || t.starts_with(')')
-    } {
+        if !(t.starts_with('@') || t.starts_with(')') || open > 0) {
+            break;
+        }
+        open += t.matches(')').count() as i64 - t.matches('(').count() as i64;
         first -= 1;
     }
     let class = (0..first).rev().find(|&i| {
@@ -412,6 +417,28 @@ mod tests {
         assert_eq!(
             locate(&lines, "app.CartSpec$EmptyOther#has no total()").map(|found| found.start + 1),
             Some(8)
+        );
+    }
+    #[test]
+    fn a_test_name_finds_its_method_by_whole_names_only() {
+        let text = "class T {\n  class MyInner {\n    void run() {}\n  }\n  class Inner_x {\n    void run() {}\n  }\n  class Inner {\n    @Tag(\n      \"slow\"\n    )\n    void run() {}\n  }\n  fun plain() {}\n}\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let at =
+            |name: &str| locate(&lines, name).map(|found| (found.start + 1, found.context.len()));
+        // `Inner` is a whole class name: not `MyInner`, not `Inner_x`.
+        assert_eq!(at("app.T$Inner#run()").map(|(line, _)| line), Some(12));
+        // An empty segment names no class, and the first method is taken.
+        assert_eq!(at("app.T$$Inner#run()").map(|(line, _)| line), Some(12));
+        assert_eq!(at("app.T#plain()").map(|(line, _)| line), Some(14));
+        // An annotation whose arguments close on their own line belongs to it.
+        assert!(at("app.T$Inner#run()").unwrap().1 >= 4);
+        assert_eq!(at("app.T#()"), None);
+        assert_eq!(at("app.T#missing()"), None);
+        // A method on the file's first line has nothing above it.
+        let first = ["void solo() {}", ""];
+        assert_eq!(
+            locate(&first, "app.S#solo()").map(|found| found.start),
+            Some(0)
         );
     }
     use crate::assertion_coverage::{Language, change_at};
