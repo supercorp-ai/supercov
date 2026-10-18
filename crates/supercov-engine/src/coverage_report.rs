@@ -2714,11 +2714,9 @@ fn create_coverage_view_with_model(
     let mut summary = summary_for_results(&decisions, &points, &branches, &lines, None)?;
     if total_obligations > measured_obligations {
         summary.unmeasured_obligations = Some(total_obligations - measured_obligations);
-        summary.exact_fraction_pct = Some(if total_obligations == 0 {
-            100.0
-        } else {
-            (measured_obligations as f64) * 100.0 / (total_obligations as f64)
-        });
+        // More in total than measured: the total is not zero.
+        summary.exact_fraction_pct =
+            Some((measured_obligations as f64) * 100.0 / (total_obligations as f64));
     }
     // A limitation that says `"blocking": false` is a declared boundary of
     // the denominator -- a macro the compiler expands, a const context no
