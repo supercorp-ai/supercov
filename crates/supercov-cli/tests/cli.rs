@@ -7428,3 +7428,56 @@ fn a_diff_keeps_only_what_the_tests_a_filter_picks_covered() {
         .exits(2);
     assert!(refused.contains("No tests match runner=jest"), "{refused}");
 }
+
+#[test]
+fn tests_affected_lists_files_names_and_why_and_says_when_it_cannot_narrow() {
+    let project = Project::cart("affected-forms");
+    project.measure(&[]);
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total adds all prices",
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--files"])
+            .succeeds()
+            .trim(),
+        "test/cart.test.js"
+    );
+    for narrowing in ["--ran-changed", "--asserting"] {
+        let ran = project.supercov(&["runs", "latest", "tests", "affected", narrowing, "--names"]);
+        assert_eq!(ran.code(), 0);
+        assert!(
+            ran.stderr()
+                .contains("no assertion assessment; listing every affected test"),
+            "{narrowing}"
+        );
+        assert_eq!(ran.stdout().lines().count(), 3, "{narrowing}");
+    }
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    let affected = json["data"]["affected"].as_array().unwrap();
+    assert_eq!(affected.len(), 3);
+    let reasons = |name: &str| {
+        affected.iter().find(|test| test["name"] == name).unwrap()["reasons"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    // The shipping test never ran the changed `total`; the other two did.
+    assert_eq!(reasons("shipping is free over fifty"), 1);
+    assert_eq!(reasons("total applies a coupon"), 2);
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "tests", "affected"])
+            .succeeds(),
+        &[
+            "3 of 3 tests affected",
+            "test file changed: top level",
+            "this test ran it",
+        ],
+    );
+}
