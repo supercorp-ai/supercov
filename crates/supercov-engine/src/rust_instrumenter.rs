@@ -4080,6 +4080,10 @@ fn main() {
             "fn k(xs: &[u8]) {\n    for x in xs {\n        assert!(*x > 0)\n    }\n    if xs.is_empty() {\n        assert!(true)\n    } else {\n        assert_eq!(xs.len(), xs.len())\n    }\n}\n",
             "fn l(a: bool) -> bool {\n    #[allow(unused_must_use)]\n    assert!(a || !a);\n    #[cfg(any())]\n    let gone = 1;\n    #[allow(unused)]\n    let kept = a && !a;\n    kept\n}\n",
             "fn m(v: Option<u8>) -> u8 {\n    match v {\n        Some(x) if let Some(y) = Some(x) && y > 1 => y,\n        Some(x) => x,\n        None => 0,\n    }\n}\n",
+            "const fn n(mut i: u8) -> u8 {\n    while i < 3 && i != 9 {\n        i += 1;\n    }\n    loop {\n        if i > 1 {\n            break;\n        }\n    }\n    match i {\n        0 => 1,\n        _ if i > 2 => 2,\n        _ => {\n            3\n        }\n    }\n}\n",
+            "fn o(n: std::convert::Infallible) -> u8 {\n    match n {}\n}\n",
+            "fn p(a: bool) -> u8 {\n    let f = || -> u8 {\n        if a { 1 } else { 2 }\n    };\n    let v = vec![f(), 2];\n    let w = [f(); 2];\n    println!(\"{:?} {:?}\", v, w);\n    #[rustfmt::skip]\n    println!(\"{}\", a);\n    f()\n}\n",
+            "fn q(a: Option<u8>) -> Option<u8> {\n    let b = a?;\n    let c = if let Some(x) = a { x } else { b };\n    while let Some(y) = a {\n        if y > c { break; }\n    }\n    Some(c)\n}\n",
         ];
         for shape in shapes {
             let out = super::instrument_rust_source("src/lib.rs", shape, "crate::supercov_runtime")
@@ -4182,6 +4186,114 @@ fn main() {
         );
         assert_eq!(instrumented.status, original.status);
         assert_eq!(instrumented.stdout, original.stdout);
+    }
+
+    /// Labelled blocks, loops inside them and in closures, trailing
+    /// asserting blocks, `const fn` control flow, an empty `match`, bracket
+    /// macros and `?`: instrumented, the program builds and prints the same.
+    #[test]
+    fn control_flow_shapes_still_compile_and_run_the_same() {
+        let source = r#"fn j(c: bool) -> u8 {
+    'blk: {
+        if c {
+            break 'blk 1;
+        }
+        loop {
+            break;
+        }
+        while c {
+            break;
+        }
+        for _ in 0..1 {
+            break;
+        }
+        let _f = || loop {
+            break;
+        };
+        2
+    }
+}
+
+fn k(xs: &[u8]) {
+    for x in xs {
+        assert!(*x > 0)
+    }
+    if xs.is_empty() {
+        assert!(true)
+    } else {
+        assert_eq!(xs.len(), xs.len())
+    }
+}
+
+const fn n(mut i: u8) -> u8 {
+    while i < 3 && i != 9 {
+        i += 1;
+    }
+    loop {
+        if i > 1 {
+            break;
+        }
+    }
+    match i {
+        0 => 1,
+        _ if i > 2 => 2,
+        _ => {
+            3
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn o(n: std::convert::Infallible) -> u8 {
+    match n {}
+}
+
+fn p(a: bool) -> u8 {
+    let f = || -> u8 {
+        if a { 1 } else { 2 }
+    };
+    let v = vec![f(), 2];
+    let w = [f(); 2];
+    println!("{:?} {:?}", v, w);
+    #[rustfmt::skip]
+    println!("{}", a);
+    f()
+}
+
+fn q(a: Option<u8>) -> Option<u8> {
+    let b = a?;
+    let c = if let Some(x) = a { x } else { b };
+    while let Some(y) = a {
+        if y > c {
+            break;
+        }
+        break;
+    }
+    Some(c)
+}
+
+const N: u8 = n(0);
+
+fn main() {
+    k(&[1, 2]);
+    k(&[]);
+    println!("{} {} {} {} {} {:?} {:?}", j(true), j(false), N, p(true), p(false), q(Some(3)), q(None));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let original = compile_and_run(source, "control-flow-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "control-flow-instrumented",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert!(
+            original.status.success(),
+            "{}",
+            String::from_utf8_lossy(&original.stderr)
+        );
     }
 
     #[test]
