@@ -67,6 +67,14 @@ const ROOT_INPUT_EXCLUSIONS: &[&str] = &[
     "test-results",
 ];
 
+/// An LLVM profile, written to the working directory by default: what a
+/// binary built for coverage leaves, never what a build reads. Counted as
+/// configuration, writing one -- to import its lines -- made every run stale.
+fn is_coverage_output(name: &str) -> bool {
+    let extension = Path::new(name).extension().and_then(|value| value.to_str());
+    matches!(extension, Some("profraw" | "profdata"))
+}
+
 fn collect_project_inputs(
     root: &Path,
     directory: &Path,
@@ -89,6 +97,7 @@ fn collect_project_inputs(
             // wrangler's local state (`.wrangler/`), which `wrangler dev`
             // writes beside a Worker: what it served, never what Cargo reads.
             || matches!(name.as_str(), ".supercov" | ".mcdc-pool" | ".wrangler")
+            || is_coverage_output(&name)
         {
             continue;
         }

@@ -70,6 +70,8 @@ Compare, combine, and maintain:
   supercov diff <older> <newer>        compare two runs
   supercov report [run-id]             open a portable interactive HTML report
   supercov merge [<id> <id> ...]       combine runs; with none, those on the current source
+  supercov import <tracefile> --test <name>
+                                       add line evidence measured where Supercov could not run
   supercov runs clean [--keep N]       remove stored runs (all by default)
   supercov quality clean [--keep N]    remove saved assessments
 
@@ -297,6 +299,7 @@ fn main() -> ExitCode {
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("report") => html_report::report_command(arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
+        Some("import") => import_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
             ExitCode::from(2)
@@ -484,6 +487,128 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+const IMPORT_USAGE: &str = "Usage: supercov import <tracefile> (--test <name> | --background) [--run <run-id>]\n                       [--status passed|failed]\n\nAdds line evidence measured where Supercov could not run, as an LCOV tracefile, to a run, as a\nnew run. The lines are credited to a test of their own, or to the run's background, and only by\nline: the evidence says nothing of branches, decisions or which statement on a line ran. A file\nthe run did not measure joins it with one statement per recorded line. A profile another tool\nrecorded is exported as LCOV by that tool first: `supercov docs cli` shows how.\n\n--test <name>     credit the lines to a test with this name (kind imported, runner lines)\n--background      credit them to the run's background\n--run <run-id>    the run to add them to (default: the latest)\n--status <status> the imported test's outcome, where it is known";
+
+fn import_command(arguments: Vec<String>) -> ExitCode {
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+    {
+        println!("{IMPORT_USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    let mut evidence = None;
+    let mut test = None;
+    let mut background = false;
+    let mut run = None;
+    let mut status = None;
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        let (flag, inline) = match argument.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => {
+                (flag.to_owned(), Some(value.to_owned()))
+            }
+            _ => (argument.clone(), None),
+        };
+        let mut value = |name: &str| {
+            inline
+                .clone()
+                .or_else(|| arguments.next())
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        let parsed = match flag.as_str() {
+            "--test" => value("--test").map(|name| test = Some(name)),
+            "--background" => {
+                background = true;
+                Ok(())
+            }
+            "--run" => value("--run").map(|id| run = Some(id)),
+            "--status" => value("--status").map(|value| status = Some(value)),
+            _ if argument.starts_with('-') => Err(format!("unknown option {argument}")),
+            _ if evidence.is_none() => {
+                evidence = Some(PathBuf::from(argument));
+                Ok(())
+            }
+            _ => Err(format!("unexpected argument {argument}")),
+        };
+        if let Err(error) = parsed {
+            eprintln!("[supercov] {error}\n\n{IMPORT_USAGE}");
+            return ExitCode::from(2);
+        }
+    }
+    let credit = match (test, background) {
+        (Some(name), false) => supercov_engine::outside_evidence::Credit::Test(name),
+        (None, true) => supercov_engine::outside_evidence::Credit::Background,
+        _ => {
+            eprintln!(
+                "[supercov] name who the lines are credited to: --test <name> or --background\n\n{IMPORT_USAGE}"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let Some(evidence) = evidence else {
+        eprintln!("[supercov] name the evidence file to import\n\n{IMPORT_USAGE}");
+        return ExitCode::from(2);
+    };
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("[supercov] could not resolve the current directory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let (run_id, started_at) = match public_run_identity() {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match supercov_engine::outside_evidence::import_line_evidence(
+        &supercov_engine::outside_evidence::ImportRequest {
+            root: &root,
+            run: run.as_deref(),
+            evidence: &evidence,
+            credit,
+            status: status.as_deref(),
+            run_id: &run_id,
+            started_at: &started_at,
+        },
+    ) {
+        Ok(outcome) => {
+            println!(
+                "[supercov] imported {} line(s) that ran into run {} as run {}: {} statement(s) and function(s) credited, by line only",
+                outcome.lines_run, outcome.parent, outcome.run_id, outcome.credited
+            );
+            if !outcome.added_files.is_empty() {
+                println!(
+                    "[supercov] measured only by this evidence: {}",
+                    supercov_engine::run_merge::listed(&outcome.added_files)
+                );
+            }
+            if !outcome.skipped.is_empty() {
+                eprintln!(
+                    "[supercov] left out {} file(s) of the evidence: {}",
+                    outcome.skipped.len(),
+                    supercov_engine::run_merge::listed(
+                        &outcome
+                            .skipped
+                            .iter()
+                            .map(|(file, reason)| format!("{file} ({reason})"))
+                            .collect::<Vec<_>>()
+                    )
+                );
+            }
+            println!("{} runs {}", launcher_command(), outcome.run_id);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// What a recorded run says when it is done: where its evidence is, and,

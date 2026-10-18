@@ -59,6 +59,9 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          # The import gate reads an LLVM profile with llvm-profdata and llvm-cov.
+          components: llvm-tools
       # The Ruby server gate measures a Puma app; Supercov measures Ruby 3.3
       # and newer, and the runner's own Ruby is older.
       - uses: ruby/setup-ruby@v1
@@ -78,6 +81,8 @@ jobs:
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps
       - run: npm run test:engine-integrations
+        env:
+          SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
