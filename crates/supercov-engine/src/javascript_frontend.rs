@@ -2228,4 +2228,87 @@ mod tests {
                 .contains(RUNTIME_INSTANCE_MARKER)
         );
     }
+
+    /// The collector's id replaces the runtime's marker in either quote;
+    /// a runtime with no marker is refused.
+    #[test]
+    fn a_runtime_is_isolated_by_its_marker_in_either_quote() {
+        let double = format!("let runtimeInstanceToken = \"{RUNTIME_INSTANCE_MARKER}\";\n");
+        let single = format!("let runtimeInstanceToken = '{RUNTIME_INSTANCE_MARKER}';\n");
+        assert_eq!(
+            isolate_runtime(&double, "c1").unwrap(),
+            "/* eslint-disable */\nlet runtimeInstanceToken = \"c1\";\n"
+        );
+        assert_eq!(
+            isolate_runtime(&single, "c2").unwrap(),
+            "/* eslint-disable */\nlet runtimeInstanceToken = 'c2';\n"
+        );
+        assert!(matches!(
+            isolate_runtime("let x = 1;\n", "c3"),
+            Err(JavascriptFrontendError::MissingRuntimeMarker)
+        ));
+    }
+
+    /// Only a last line that is a source-map directive is taken off.
+    #[test]
+    fn only_a_trailing_source_map_directive_is_stripped() {
+        let strip = |text: &str| {
+            String::from_utf8(strip_source_map_reference(text.as_bytes().to_vec())).unwrap()
+        };
+        assert_eq!(strip("a();\n//# sourceMappingURL=a.js.map\n"), "a();\n");
+        assert_eq!(strip("a();\n//# sourceMappingURL=a.js.map\r\n"), "a();\n");
+        assert_eq!(strip("a();\n//# sourceMappingURL=a.js.map"), "a();\n");
+        assert_eq!(
+            strip("a();\n//# sourceMappingURL=a.js.map\nb();\n"),
+            "a();\n//# sourceMappingURL=a.js.map\nb();\n"
+        );
+        assert_eq!(strip("a();\n"), "a();\n");
+    }
+
+    /// The inlined map is shifted past banner lines, its first column mapped
+    /// where there is no shebang, and its directive line mapped.
+    #[test]
+    fn an_inlined_map_is_shifted_past_banners_and_maps_its_last_line() {
+        use base64::Engine as _;
+        let mappings = |code: &str, map: &str| {
+            let inlined = inline_instrumentation_map(
+                code,
+                Some(&serde_json::json!({"version": 3, "mappings": map})),
+                Path::new("src/a.js"),
+                "original\n",
+            )
+            .unwrap();
+            let encoded = inlined.rsplit_once("base64,").unwrap().1.trim_end();
+            let map: serde_json::Value = serde_json::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(map["sources"], serde_json::json!(["src/a.js"]));
+            assert_eq!(map["sourcesContent"], serde_json::json!(["original\n"]));
+            map["mappings"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(mappings("a;\nb;\n", "AAAA;AACA"), "AAAA;AACA;;AAAA");
+        assert_eq!(
+            mappings("/* eslint-disable */\na;\n", "AAAA"),
+            "AAAA,C;AAAA;;AAAA"
+        );
+        assert_eq!(
+            mappings(
+                "#!/usr/bin/env node\n/* eslint-disable */\nx\n",
+                "AAAA;AACA"
+            ),
+            ";AAAA;AACA;;AAAA"
+        );
+        // Nothing mapped: no position to add.
+        assert_eq!(mappings("x\n", ""), "");
+        // Already past the directive line.
+        assert_eq!(mappings("x", ";;;;;;"), "AAAA,C;;;;;;");
+        assert!(inline_instrumentation_map("x", None, Path::new("a.js"), "x").is_none());
+        assert!(
+            inline_instrumentation_map("x", Some(&serde_json::json!({})), Path::new("a.js"), "x")
+                .is_none()
+        );
+    }
 }
