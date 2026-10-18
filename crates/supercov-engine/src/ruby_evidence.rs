@@ -1975,6 +1975,14 @@ mod tests {
                 set(16, &(TRANSPORT_HEADER_SIZE as u64 - 1).to_le_bytes()),
                 "declared capacity is outside the mapped file",
             ),
+            (
+                set(12, &1_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(16, &u64::MAX.to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
             (set(65, &[1]), "commit marker or reserved bytes are invalid"),
             (set(76, &[1]), "commit marker or reserved bytes are invalid"),
             (
