@@ -4264,6 +4264,129 @@ mod tests {
         assert_eq!(explicit.points[0].confidence.level, "executed");
     }
 
+    /// Each event counts for its phase as a browser's or a server's, named
+    /// or placed by its time; one in no phase, or in a phase the test does
+    /// not have, counts for none. A snapshot that names its phase counts each
+    /// of its hits and vectors as that phase's. A decision without a vector
+    /// and an event of no known type are refused.
+    #[test]
+    fn events_count_for_their_phase_by_environment_and_by_how_they_were_placed() {
+        let decision = DecisionMeta {
+            id: "d".into(),
+            file: "src/app.js".into(),
+            line: 1,
+            column: 0,
+            source: "left && right".into(),
+            conditions: vec!["left".into(), "right".into()],
+            kind: "if".into(),
+        };
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![decision.clone()],
+            points: vec![point("hit", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let both = McdcVector {
+            values: vec![Some(true), Some(true)],
+            outcome: true,
+        };
+        let neither = McdcVector {
+            values: vec![Some(false), Some(false)],
+            outcome: false,
+        };
+        let phase = |id: &str, started_at_ms: i64| CoveragePhase {
+            id: id.into(),
+            kind: "action".into(),
+            operation: id.into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms,
+            ended_at_ms: Some(started_at_ms + 20),
+            status: Some("passed".into()),
+            error: None,
+        };
+        let event = |event_type: &str,
+                     id: &str,
+                     vector: Option<&McdcVector>,
+                     timestamp_ms: i64,
+                     phase_id: Option<&str>,
+                     environment: &str| RuntimeEvent {
+            event_type: event_type.into(),
+            id: id.into(),
+            vector: vector.cloned(),
+            timestamp_ms,
+            phase_id: phase_id.map(str::to_owned),
+            environment: environment.into(),
+        };
+        let mut attempt = raw("test", 0, "passed", &["hit"]);
+        attempt.phases = vec![phase("a", 100), phase("b", 200)];
+        attempt.runtime[0].decisions.push(DecisionSnapshot {
+            meta: decision.clone(),
+            vectors: vec![both.clone()],
+        });
+        attempt.runtime[0].events = vec![
+            event("hit", "hit", None, 0, Some("a"), "browser"),
+            event("hit", "hit", None, 210, None, "server"),
+            event("decision", "d", Some(&both), 105, None, "browser"),
+            event("decision", "d", Some(&neither), 0, Some("b"), "server"),
+            event("hit", "hit", None, 0, Some("ghost"), "server"),
+            event("hit", "hit", None, 50, None, "server"),
+        ];
+        attempt.browser.push(RuntimeSnapshot {
+            decisions: vec![DecisionSnapshot {
+                meta: decision.clone(),
+                vectors: vec![both.clone()],
+            }],
+            hits: vec!["hit".into()],
+            events: vec![],
+            logicals: vec![],
+            phase_id: Some("b".into()),
+        });
+        attempt.runtime.push(RuntimeSnapshot {
+            decisions: vec![],
+            hits: vec!["hit".into()],
+            events: vec![],
+            logicals: vec![],
+            phase_id: Some("ghost".into()),
+        });
+        let view = create_coverage_view(&manifest, &[attempt.clone()], "time").unwrap();
+        let counts = |id: &str| {
+            let phase = view
+                .phases
+                .iter()
+                .find(|phase| phase.phase.id == id)
+                .unwrap();
+            [
+                phase.browser_events,
+                phase.server_events,
+                phase.explicit_events,
+                phase.inferred_events,
+                phase.explicit_browser_events,
+                phase.inferred_browser_events,
+                phase.explicit_server_events,
+                phase.inferred_server_events,
+            ]
+        };
+        assert_eq!(counts("a"), [2, 0, 1, 1, 1, 1, 0, 0]);
+        assert_eq!(counts("b"), [2, 2, 3, 1, 2, 0, 1, 1]);
+
+        let mut vectorless = attempt.clone();
+        vectorless.runtime[0].events = vec![event("decision", "d", None, 0, Some("a"), "server")];
+        assert!(matches!(
+            create_coverage_view(&manifest, &[vectorless], "time"),
+            Err(ReportError::InvalidEvent(id)) if id == "d"
+        ));
+        let mut unknown = attempt;
+        unknown.runtime[0].events = vec![event("logical", "hit", None, 0, Some("a"), "server")];
+        assert!(matches!(
+            create_coverage_view(&manifest, &[unknown], "time"),
+            Err(ReportError::InvalidEvent(kind)) if kind == "logical"
+        ));
+    }
+
     #[test]
     fn an_event_in_the_millisecond_one_phase_ended_and_the_next_began_is_the_first_ones() {
         let phase = |id: &str, started_at_ms: i64, ended_at_ms: i64| CoveragePhase {

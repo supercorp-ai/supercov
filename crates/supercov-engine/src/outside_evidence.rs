@@ -205,9 +205,8 @@ fn project_path(
     {
         return Ok(relative);
     }
-    // The longest measured path the recorded one ends with, where only one
-    // is that long: `/app/src/lib.rs` is `src/lib.rs`, never a guess
-    // between `a/lib.rs` and `b/lib.rs`.
+    // The longest measured path the recorded one ends with:
+    // `/app/x/src/lib.rs` is `x/src/lib.rs` over `src/lib.rs`.
     let mut matches = measured
         .iter()
         // A path equal to a measured file was returned above; only a tail
@@ -233,11 +232,11 @@ fn project_path(
             return Ok(tail);
         }
     }
-    match matches[..] {
-        [only] => Ok(only.clone()),
-        [first, second, ..] if first.len() > second.len() => Ok(first.clone()),
-        [_, _, ..] => Err("more than one measured file ends with this path".into()),
-        [] => Err(if absolute {
+    // Two tails of one path are never the same length, so the longest is
+    // the only one that long.
+    match matches.first() {
+        Some(longest) => Ok((*longest).clone()),
+        None => Err(if absolute {
             "outside the project".into()
         } else {
             "no such file in the project".into()
@@ -844,6 +843,9 @@ mod tests {
                 .contains("malformed FNDA")
         );
         assert!(parse_lcov("SF:a\nDA:3\n").unwrap_err().contains("DA needs"));
+        // A count for a function no FN named is no function's.
+        let files = parse_lcov("SF:a\nFNDA:2,ghost\nend_of_record\n").unwrap();
+        assert!(files["a"].functions.is_empty());
     }
 
     #[test]
