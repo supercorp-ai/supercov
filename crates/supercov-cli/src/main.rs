@@ -201,6 +201,21 @@ fn main() -> ExitCode {
             .clamp(0, 255) as u8,
         );
     }
+    // The `wrangler` a measured test starts, and the poller it leaves behind:
+    // the test's arguments pass through untouched.
+    if let Some(command) = os_arguments.first().and_then(|argument| argument.to_str()) {
+        let rest = || os_arguments.iter().skip(1).cloned().collect::<Vec<_>>();
+        if command == supercov_engine::rust_worker::WRANGLER_COMMAND {
+            return ExitCode::from(
+                supercov_engine::rust_worker::launch_wrangler(rest()).clamp(0, 255) as u8,
+            );
+        }
+        if command == supercov_engine::rust_worker::WRANGLER_POLL_COMMAND {
+            return ExitCode::from(
+                supercov_engine::rust_worker::poll_wrangler(rest()).clamp(0, 255) as u8,
+            );
+        }
+    }
     // The parent-death watchdog inherits arbitrary wrapper environments. It
     // must dispatch before rustdoc wrapper detection and must never emit
     // user-visible output.

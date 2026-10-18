@@ -355,6 +355,13 @@ class CoveragePhaseController {
                 hits: [],
                 events: [],
             })));
+            if (process.env.SUPERCOV_WASM_REGIONS === "1") {
+                // What the frame's wasm ran since the last take is this test's.
+                const regions = await frame
+                    .evaluate(() => globalThis.__SUPERCOV_DIRECT_RUNTIME__?.takeWasmRegions?.() ?? [])
+                    .catch(() => []);
+                directRuntime()?.appendWasmRecord?.(this.scope.attemptId, regions);
+            }
         }
         return snapshots;
     }
@@ -496,6 +503,10 @@ class CoveragePhaseController {
         patchContextPrototype(context);
         if (adopted)
             this.adoptedContexts.add(context);
+        // A Rust crate compiled to wasm the run measures: pages remember
+        // their wasm instances, so each test's work can be taken from them.
+        if (process.env.SUPERCOV_WASM_REGIONS === "1")
+            await context.addInitScript({ content: "globalThis.__SUPERCOV_WASM_REGIONS__ = true;" }).catch(() => undefined);
         await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
         // A context that outlives its test (a worker-scoped browser fixture)
         // is registered again by every later test, so this script accumulates

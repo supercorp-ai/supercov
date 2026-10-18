@@ -2439,6 +2439,7 @@ mod tests {
             expected_status: "passed".into(),
             provenance: TestProvenance::default(),
             window: Some(window),
+            attempt_id: None,
         };
         // Two workers' tests at once; one server per worker, and one server
         // only a mock calls.

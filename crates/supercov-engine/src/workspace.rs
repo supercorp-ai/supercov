@@ -1537,6 +1537,18 @@ fn compiled_javascript(path: &Path) -> bool {
         .is_some_and(|extension| matches!(extension, "js" | "mjs" | "cjs" | "map"))
 }
 
+/// A wasm module with Supercov's region export in it: built from a crate
+/// the run instrumented.
+fn instrumented_wasm(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "wasm")
+        && fs::read(path).is_ok_and(|bytes| {
+            bytes
+                .windows(b"__supercov_region_".len())
+                .any(|window| window == b"__supercov_region_")
+        })
+}
+
 fn is_build_output(root: &Path, directory: &Path) -> bool {
     if fs::symlink_metadata(root.join(directory)).is_err() {
         return true;
@@ -1819,6 +1831,21 @@ pub fn sync_outputs_of(
                         if compiled {
                             built_directories.add(relative);
                         }
+                    } else if cargo_targets.hold(relative)
+                        || relative
+                            .file_name()
+                            .is_some_and(|name| name == "Cargo.lock")
+                    {
+                        // A Rust crate the run instrumented, which the suite
+                        // built in the copy (a Worker, a wasm library): what
+                        // Cargo built carries the probes.
+                        built.insert(relative.clone());
+                    } else if instrumented_wasm(&workspace.join(relative)) {
+                        // And so does the wasm generated from it, with the
+                        // glue beside it: `pkg/` would hand the project a
+                        // module that records coverage.
+                        built.insert(relative.clone());
+                        built_directories.add(relative);
                     }
                 }
                 CommandOutputs::Go => {
@@ -1848,6 +1875,13 @@ pub fn sync_outputs_of(
                         || cargo_targets.hold(relative)
                     {
                         built.insert(relative.clone());
+                    } else if instrumented_wasm(&workspace.join(relative)) {
+                        // A Worker a test started had `wrangler dev` build
+                        // it from the rewritten crate: returned, its `build/`
+                        // put a module that records coverage in the project,
+                        // where a build that embeds it would ship it.
+                        built.insert(relative.clone());
+                        built_directories.add(relative);
                     }
                 }
             }

@@ -195,6 +195,77 @@ npx supercov -- cargo nextest run --workspace
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
 
+### Rust compiled to wasm in JavaScript tests
+
+A crate wasm-bindgen exposes to JavaScript (a `cdylib` that depends on
+`wasm-bindgen`) is measured when JavaScript tests load it: a Node suite
+(Vitest, Jest, node:test, Mocha) through the `nodejs` or bundler glue, or a
+Playwright suite whose page loads the `web` glue. Build the wasm in the test
+command, as the suite already does when it tests the crate it ships
+(`wasm-pack build && vitest`, or `cargo build --target wasm32-unknown-unknown`
+and `wasm-bindgen`), so the module the tests load is built from Supercov's
+copy:
+
+```sh
+npx supercov -- npm test
+npx supercov -- npx playwright test
+```
+
+The JavaScript runtime remembers each wasm instance, in the test process and
+in each page, and reads what the module ran at every test's end, so each test
+is credited exactly with its own lines and decisions. The crate's coverage is
+a Rust run beside the JavaScript run. What the copy built (`target/`, and the
+generated `pkg/` with its instrumented wasm) stays in the copy.
+
+### A Rust Worker under browser tests
+
+A Playwright suite that starts a Cloudflare Worker written in Rust with
+`wrangler dev`, built by `worker-build`, measures the Worker:
+
+```sh
+npx supercov -- npx playwright test
+```
+
+The crate is rewritten with probes in the copy the suite runs in, and
+`wrangler dev` builds it there as usual. The copy's wrangler configuration
+(`wrangler.toml`, `wrangler.json` or `wrangler.jsonc`) points `main` at a
+small entry of Supercov's that remembers the Worker's wasm instances and then
+is your entry, and gives `[dev]` an inspector port unless you set one; your
+own configuration and command are not changed. While the suite runs,
+Supercov reads what the Worker ran through that inspector every 5 ms, and
+each read is credited to the browser test that was running then, if only one
+was, as for a [Go server](#a-go-server-under-browser-tests). The Worker's
+coverage is a Rust run of its own, published as the run or beside the browser
+run. Requests made before the first test, such as the readiness check
+`webServer` waits on, are the run's and no test's.
+
+The build runs with `--cap-lints=warn`, so a crate that denies warnings still
+builds with the probes in it.
+
+### A Rust Worker that `cargo test` starts
+
+Integration tests that start `wrangler dev` themselves -- to test a Worker in
+Cloudflare's own runtime -- measure the Worker too:
+
+```sh
+npx supercov -- cargo test
+```
+
+The Worker crate is instrumented with the rest of the workspace, and `wrangler
+dev` builds it in the copy as usual. The tests find a `wrangler` of
+Supercov's first on `PATH`: for `wrangler dev` it picks an inspector port,
+starts a reader of the Worker through it, and then runs your `wrangler` with
+the test's own arguments, process and signals. What the Worker ran is
+credited to the test that started it, exactly, as its own coverage. The
+Worker crate counts though `cargo test` never compiles it, once a test has
+run it. This needs a `wrangler` on `PATH` when the run starts; without one,
+nothing is put in front of it.
+
+The Worker built with probes stays in the copy: its `build/` output is never
+returned to the project, and neither is the copy's configuration, which
+points `main` at Supercov's entry. wrangler's `.wrangler/` state is not a
+build input, so writing it does not make the run stale.
+
 ## Python
 
 | Runner | Attribution | Current requirement |
