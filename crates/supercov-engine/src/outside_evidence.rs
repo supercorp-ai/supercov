@@ -210,11 +210,12 @@ fn project_path(
     // between `a/lib.rs` and `b/lib.rs`.
     let mut matches = measured
         .iter()
+        // A path equal to a measured file was returned above; only a tail
+        // after a whole segment is left to match.
         .filter(|file| {
-            normalized == **file
-                || normalized
-                    .strip_suffix(file.as_str())
-                    .is_some_and(|prefix| prefix.ends_with('/'))
+            normalized
+                .strip_suffix(file.as_str())
+                .is_some_and(|prefix| prefix.ends_with('/'))
         })
         .collect::<Vec<_>>();
     matches.sort_by_key(|file| std::cmp::Reverse(file.len()));
@@ -818,6 +819,47 @@ mod tests {
         );
         // A suffix that is not a whole path segment is no match.
         assert!(path("/app/xsrc/lib.rs").is_err());
+    }
+
+    #[test]
+    fn lcov_edges_blank_lines_short_records_and_names_with_commas() {
+        let files = parse_lcov(
+            "SF:src/a.rs\n\nFN:4,(anonymous,1)\nFNDA:3,(anonymous,1)\nFN:8,b\nFNDA:1,x,b\nDA:4,1\nend_of_record\n",
+        )
+        .unwrap();
+        // A name with a comma, and a count whose name the record splits,
+        // are both found by the name's last field.
+        assert_eq!(
+            files["src/a.rs"].functions,
+            BTreeMap::from([(4, 3), (8, 1)])
+        );
+        assert!(
+            parse_lcov("SF:a\nFN:3\n")
+                .unwrap_err()
+                .contains("malformed FN")
+        );
+        assert!(
+            parse_lcov("SF:a\nFNDA:3\n")
+                .unwrap_err()
+                .contains("malformed FNDA")
+        );
+        assert!(parse_lcov("SF:a\nDA:3\n").unwrap_err().contains("DA needs"));
+    }
+
+    #[test]
+    fn a_longer_tail_wins_and_a_path_that_climbs_or_names_nothing_is_refused() {
+        let root = Path::new("/work/project");
+        let measured = BTreeSet::from(["src/util.rs".to_owned(), "x/src/util.rs".to_owned()]);
+        let path = |recorded| project_path(root, root, recorded, &measured);
+        // Both end the recorded path; the longer one is the file.
+        assert_eq!(path("/app/x/src/util.rs").unwrap(), "x/src/util.rs");
+        // A relative path naming no project file says so, not "outside".
+        assert!(
+            path("lib/none.rs")
+                .unwrap_err()
+                .contains("no such file in the project")
+        );
+        assert!(path("/app/../../etc/passwd").is_err());
     }
 
     #[test]
