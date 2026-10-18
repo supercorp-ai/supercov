@@ -10334,6 +10334,10 @@ mod tests {
                 1,
             ),
             (
+                "const assert = require('node:assert');\ntest('c', () => { assert.strict.equal(1, 1); assert.strict.deepEqual([], []); });\n",
+                2,
+            ),
+            (
                 "import expect from 'expect';\ntest('d', () => { expect(1).toBe(1); });\n",
                 1,
             ),

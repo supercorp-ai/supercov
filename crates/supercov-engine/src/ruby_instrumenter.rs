@@ -3564,6 +3564,46 @@ pub fn apply_edits(source: &[u8], edits: &[Edit]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Shapes probes go around -- jumps out of `unless`/`else` and
+    /// `begin`/`rescue`/`else`, empty bodies, negations, `case` without a
+    /// body, loops -- each still parses once probed, with its decisions.
+    #[test]
+    fn every_shape_still_parses_once_probed() {
+        let shapes = [
+            "def a(x)\n  unless x\n    return 1\n  else\n    return 2\n  end\nend\n",
+            "def b(x)\n  unless x\n  else\n    1\n  end\nend\n",
+            "def c(x)\n  begin\n    raise 'no' if x\n  rescue StandardError\n    return 1\n  else\n    return 2\n  ensure\n    x\n  end\nend\n",
+            "def d(x, y)\n  return 1 if !x && !!y\n  z = !(x || y)\n  (x; y) ? 1 : 2\n  (x) && (y)\n  z\nend\n",
+            "def e(x)\n  if x\n  elsif !x\n  else\n  end\n  while x\n  end\n  until x\n  end\nend\n",
+            "def f(x)\n  case x\n  when 1\n  when 2 then :two\n  else\n  end\n  case\n  when x then 1\n  end\nend\n",
+            "def g(xs)\n  for x in xs\n    next if x\n    break unless x\n  end\n  loop do\n    break\n  end\n  begin\n    xs.pop\n  end while xs.any?\nend\n",
+            "def h(x)\n  x ||= 1\n  x &&= 2\n  y = x or 3\n  w = (x and y)\n  puts(x) unless w\n  foo.bar&.baz\n  x.then { |v| v ? 1 : 2 }\nend\n",
+            "def i(x) = x ? 1 : 2\n",
+            "def j(x)\n  x rescue nil\n  y = x.nil? ? (raise 'n') : x\n  y\nend\n",
+        ];
+        for source in shapes {
+            let mut next = 0;
+            let obligations = build_ruby_obligations("lib/l.rb", source.as_bytes(), &mut next)
+                .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+            let probed = apply_edits(source.as_bytes(), &obligations.plan.edits);
+            let parsed = ruby_prism::parse(&probed);
+            let errors = parsed
+                .errors()
+                .map(|error| error.message().to_owned())
+                .collect::<Vec<_>>();
+            assert!(
+                errors.is_empty(),
+                "{errors:?}\n{source}\n{}",
+                String::from_utf8_lossy(&probed)
+            );
+        }
+        let mut next = 0;
+        assert!(matches!(
+            build_ruby_obligations("lib/l.rb", b"def broken(\n", &mut next),
+            Err(RubyInstrumenterError::Parse(_))
+        ));
+    }
+
     #[test]
     fn a_ternary_on_a_literal_still_parses_once_probed() {
         // Ruby compiles only the live arm of `true ? a : b`; that arm alone is
