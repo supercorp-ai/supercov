@@ -2910,28 +2910,9 @@ fn check_results(request: &CoverageReportRequest) -> Result<(), ReportError> {
 pub fn analyze_coverage_results(
     request: &CoverageReportRequest,
 ) -> Result<CoverageReport, ReportError> {
-    if let Some(scope) = request
-        .raw_results
-        .iter()
-        .filter_map(|raw| raw.scope.as_ref())
-        .find(|scope| scope.run_id != request.run_id)
-    {
-        return Err(ReportError::ScopeMismatch {
-            expected: request.run_id.clone(),
-            actual: scope.run_id.clone(),
-        });
-    }
-    if request.raw_results.is_empty() {
-        return Err(ReportError::NoEvidence(request.run_id.clone()));
-    }
+    check_results(request)?;
     let default_model = javascript_coverage_model();
     let coverage_model = request.coverage_model.as_ref().unwrap_or(&default_model);
-    PersistedCoverageModel::from_declaration(coverage_model).map_err(|reason| {
-        ReportError::InvalidJson {
-            path: "coverage-model.json".into(),
-            reason: reason.into(),
-        }
-    })?;
     // The three views are built side by side: each reads the same evidence
     // and nothing the others write. Each holds one copy of each id it names.
     // They do not share copies: two threads cloning the same ids contend on
@@ -4260,6 +4241,49 @@ mod tests {
             "failed"
         );
         assert_eq!(report.view.tests[1].outcome, "flaky");
+    }
+
+    /// A request with no evidence, or evidence of another run, is refused
+    /// before anything is analysed.
+    #[test]
+    fn a_request_without_its_own_evidence_is_refused() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("a", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let request = |raw_results: Vec<RawTestResult>| CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: manifest.clone(),
+            raw_results,
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        };
+        assert!(matches!(
+            analyze_coverage_results(&request(Vec::new())),
+            Err(ReportError::NoEvidence(run)) if run == "run"
+        ));
+        let mut foreign = raw("a", 0, "passed", &["a"]);
+        foreign.scope = Some(ExecutionScope {
+            version: 1,
+            run_id: "other".into(),
+            worker_id: "w".into(),
+            test_id: "a".into(),
+            test_key: "a".into(),
+            retry: 0,
+            attempt_id: "a:0".into(),
+        });
+        assert!(matches!(
+            analyze_coverage_results(&request(vec![foreign])),
+            Err(ReportError::ScopeMismatch { actual, .. }) if actual == "other"
+        ));
+        assert!(analyze_coverage_results(&request(vec![raw("a", 0, "passed", &["a"])])).is_ok());
     }
 
     #[test]
