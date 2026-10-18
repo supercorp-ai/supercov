@@ -3559,4 +3559,63 @@ mod tests {
             Err(WorkspaceError::UnsafePath(_))
         ));
     }
+
+    /// The workspace container is Supercov's only where it holds the marker
+    /// with its contents and its own ignore file: made fresh, found again,
+    /// and refused when anything else is there.
+    #[test]
+    fn the_workspace_container_is_made_once_and_refused_when_not_ours() {
+        static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let fresh_root = || {
+            let root = std::env::temp_dir().join(format!(
+                "supercov-container-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).unwrap();
+            crate::test_directory::TestDirectory::adopt(root)
+        };
+        let root = fresh_root();
+        fs::create_dir_all(root.join(".supercov")).unwrap();
+        fs::write(root.join(".supercov/.gitignore"), b"kept\n").unwrap();
+        let container = ensure_container(&root).unwrap();
+        assert!(owned_workspace_path(&container));
+        assert_eq!(fs::read(container.join(".gitignore")).unwrap(), b"*\n");
+        assert_eq!(
+            fs::read(root.join(".supercov/.gitignore")).unwrap(),
+            b"kept\n"
+        );
+        assert_eq!(ensure_container(&root).unwrap(), container);
+        // Something else at the usual place is left alone: the container
+        // goes beside it.
+        for foreign in [true, false] {
+            let root = fresh_root();
+            let usual = root.join(".supercov/workspaces");
+            fs::create_dir_all(root.join(".supercov")).unwrap();
+            if foreign {
+                fs::write(&usual, b"a file").unwrap();
+            } else {
+                fs::create_dir(&usual).unwrap();
+            }
+            let container = ensure_container(&root).unwrap();
+            assert_ne!(container, usual);
+            assert!(owned_workspace_path(&container));
+            assert_eq!(usual.is_file(), foreign);
+        }
+        // Ours by its marker, with something that is not a file where its
+        // ignore file goes: refused.
+        let root = fresh_root();
+        let container = workspace_container(&root);
+        fs::create_dir_all(&container).unwrap();
+        fs::write(container.join(WORKSPACE_MARKER), WORKSPACE_MARKER_CONTENTS).unwrap();
+        fs::create_dir(container.join(".gitignore")).unwrap();
+        assert!(matches!(
+            ensure_container(&root),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+    }
 }
