@@ -1354,6 +1354,44 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// An import scores for a `test` export by name, for `expect` by either
+    /// name, and for a module named like Playwright; the search skips what
+    /// is not the project's own source.
+    #[test]
+    fn test_apis_are_scored_by_what_they_import_and_found_in_project_source() {
+        let candidates = imported_test_apis(
+            Path::new("a.spec.ts"),
+            "import { e2eTest, expect as check } from 'my-playwright-kit'\nimport { helper } from './helper'\n",
+        );
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].module, "my-playwright-kit");
+        assert_eq!(candidates[0].score, 8 + 10 + 5);
+        assert_eq!(candidates[0].test_export, None);
+        let root = project(
+            "apis",
+            &[
+                ("e2e/a.spec.ts", "import { test } from '@acme/kit'"),
+                (
+                    "node_modules/x/a.ts",
+                    "import { test } from '@skip/modules'",
+                ),
+                ("results/a.ts", "import { test } from '@skip/results'"),
+                (".cache/a.ts", "import { test } from '@skip/hidden'"),
+                ("e2e/notes.txt", "import { test } from '@skip/text'"),
+            ],
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("results"), root.join("linked")).unwrap();
+        let mut found = Vec::new();
+        test_api_candidates(&root, &mut found);
+        assert_eq!(
+            found.iter().map(|c| c.module.as_str()).collect::<Vec<_>>(),
+            ["@acme/kit"]
+        );
+        test_api_candidates(&root.join("absent"), &mut found);
+        assert_eq!(found.len(), 1);
+    }
+
     #[test]
     fn environment_overrides_are_authoritative() {
         let root = project(
