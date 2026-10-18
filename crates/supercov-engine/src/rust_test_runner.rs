@@ -1639,19 +1639,24 @@ fn running_line(
 /// none.
 fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
     use std::io::IsTerminal;
-    let arguments = &invocation.arguments;
-    let asked = arguments
-        .iter()
-        .enumerate()
-        .find_map(|(index, argument)| {
-            argument
-                .strip_prefix("--color=")
-                .map(str::to_owned)
-                .or_else(|| (argument == "--color").then(|| arguments.get(index + 1).cloned())?)
-        })
-        .or_else(|| std::env::var("CARGO_TERM_COLOR").ok());
-    let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    match asked.as_deref() {
+    let asked =
+        colour_flag(&invocation.arguments).or_else(|| std::env::var("CARGO_TERM_COLOR").ok());
+    cargo_colour_choice(
+        asked.as_deref(),
+        &|name| std::env::var(name).ok(),
+        std::io::stderr().is_terminal(),
+    )
+}
+
+/// What Cargo decides from what was asked, its environment, and whether its
+/// lines go to a terminal.
+fn cargo_colour_choice(
+    asked: Option<&str>,
+    variable: &dyn Fn(&str) -> Option<String>,
+    terminal: bool,
+) -> bool {
+    let set = |name: &str| variable(name).filter(|value| !value.is_empty());
+    match asked {
         Some("always") => true,
         Some("never") => false,
         // As Cargo decides it when left to: forced, refused, and otherwise
@@ -1660,10 +1665,7 @@ fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
         _ if set("NO_COLOR").is_some() || set("CLICOLOR").is_some_and(|value| value == "0") => {
             false
         }
-        _ => {
-            std::io::stderr().is_terminal()
-                && (cfg!(windows) || set("TERM").is_some_and(|term| term != "dumb"))
-        }
+        _ => shows_colours(terminal, set("TERM").as_deref()),
     }
 }
 
@@ -1672,22 +1674,30 @@ fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
 /// process writes to a pipe, so it is told.
 fn libtest_colours(invocation: &CargoTestInvocation) -> bool {
     use std::io::IsTerminal;
-    let arguments = &invocation.runner_arguments;
-    let asked = arguments.iter().enumerate().find_map(|(index, argument)| {
+    match colour_flag(&invocation.runner_arguments).as_deref() {
+        Some("always") => true,
+        Some("never") => false,
+        _ => shows_colours(
+            std::io::stdout().is_terminal(),
+            std::env::var("TERM").ok().as_deref(),
+        ),
+    }
+}
+
+/// `--color=<when>` or `--color <when>`, as Cargo and libtest both take it.
+fn colour_flag(arguments: &[String]) -> Option<String> {
+    arguments.iter().enumerate().find_map(|(index, argument)| {
         argument
             .strip_prefix("--color=")
             .map(str::to_owned)
             .or_else(|| (argument == "--color").then(|| arguments.get(index + 1).cloned())?)
-    });
-    match asked.as_deref() {
-        Some("always") => true,
-        Some("never") => false,
-        _ => {
-            std::io::stdout().is_terminal()
-                && (cfg!(windows)
-                    || std::env::var("TERM").is_ok_and(|term| !term.is_empty() && term != "dumb"))
-        }
-    }
+    })
+}
+
+/// Whether output to this stream can be coloured: a terminal whose `TERM`
+/// is not empty or `dumb` (Windows consoles need no `TERM`).
+fn shows_colours(terminal: bool, term: Option<&str>) -> bool {
+    terminal && (cfg!(windows) || term.is_some_and(|term| !term.is_empty() && term != "dumb"))
 }
 
 /// `cargo test -q`.
@@ -2531,6 +2541,75 @@ pub fn run_prepared_rust_tests(
 
 #[cfg(test)]
 mod tests {
+
+    /// `--color` decides when given, in either spelling; otherwise Cargo
+    /// follows CLICOLOR_FORCE, NO_COLOR and CLICOLOR, and both colour a
+    /// terminal whose TERM is set and not `dumb`.
+    #[test]
+    fn colours_follow_the_flag_the_environment_and_the_terminal() {
+        use super::{cargo_colour_choice, colour_flag, shows_colours};
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            colour_flag(&words("test --color=never")).as_deref(),
+            Some("never")
+        );
+        assert_eq!(
+            colour_flag(&words("test --color always")).as_deref(),
+            Some("always")
+        );
+        assert_eq!(colour_flag(&words("test --color")), None);
+        assert_eq!(colour_flag(&words("test")), None);
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        for (asked, pairs, terminal, coloured) in [
+            (Some("always"), &[][..], false, true),
+            (Some("never"), &[("CLICOLOR_FORCE", "1")][..], true, false),
+            (None, &[("CLICOLOR_FORCE", "1")][..], false, true),
+            (
+                None,
+                &[("CLICOLOR_FORCE", "0"), ("TERM", "xterm")][..],
+                true,
+                true,
+            ),
+            (
+                None,
+                &[("NO_COLOR", "1"), ("TERM", "xterm")][..],
+                true,
+                false,
+            ),
+            (None, &[("NO_COLOR", ""), ("TERM", "xterm")][..], true, true),
+            (
+                None,
+                &[("CLICOLOR", "0"), ("TERM", "xterm")][..],
+                true,
+                false,
+            ),
+            (
+                None,
+                &[("CLICOLOR", "1"), ("TERM", "xterm")][..],
+                true,
+                true,
+            ),
+            (None, &[("TERM", "xterm")][..], false, false),
+            (Some("auto"), &[("TERM", "dumb")][..], true, cfg!(windows)),
+            (None, &[][..], true, cfg!(windows)),
+        ] {
+            assert_eq!(
+                cargo_colour_choice(asked, &env(pairs), terminal),
+                coloured,
+                "{asked:?} {pairs:?} {terminal}"
+            );
+        }
+        assert!(!shows_colours(false, Some("xterm")));
+        assert_eq!(shows_colours(true, Some("")), cfg!(windows));
+        assert!(shows_colours(true, Some("xterm-256color")));
+    }
 
     #[test]
     fn node_takes_a_hook_by_a_file_url_with_its_bytes_encoded() {
