@@ -186,8 +186,11 @@ fn project_path(
 ) -> Result<String, String> {
     let normalized = recorded.replace('\\', "/");
     let path = Path::new(&normalized);
+    // Absolute however it was recorded: `/app/...` from a Linux container is
+    // absolute on Windows too, though `Path` reads it as relative there.
+    let absolute = normalized.starts_with('/') || normalized.as_bytes().get(1) == Some(&b':');
     let mut relative = None;
-    if path.is_absolute() || normalized.as_bytes().get(1) == Some(&b':') {
+    if absolute {
         for base in [root, canonical_root] {
             if let Ok(inside) = path.strip_prefix(base) {
                 relative = Some(inside.to_string_lossy().replace('\\', "/"));
@@ -233,7 +236,7 @@ fn project_path(
         [only] => Ok(only.clone()),
         [first, second, ..] if first.len() > second.len() => Ok(first.clone()),
         [_, _, ..] => Err("more than one measured file ends with this path".into()),
-        [] => Err(if path.is_absolute() {
+        [] => Err(if absolute {
             "outside the project".into()
         } else {
             "no such file in the project".into()
