@@ -811,7 +811,7 @@ fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, SourceDiscoveryError
 /// directory: a copy kept under another checkout's `tmp/` or `.supercov/`.
 /// That repository's `.gitignore` files describe what it does not track, which
 /// is all of this project; applying them left the project with no source.
-fn ignored_by_enclosing_repository(root: &Path) -> bool {
+pub(crate) fn ignored_by_enclosing_repository(root: &Path) -> bool {
     if root.join(".git").exists() {
         return false;
     }
