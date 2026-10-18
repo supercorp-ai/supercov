@@ -1049,4 +1049,67 @@ mod tests {
             "the last line survives the cap"
         );
     }
+
+    /// Which extra files the security lane reads, the lines of a template or
+    /// configuration it asks about, and how many it keeps of a long file.
+    #[test]
+    fn security_extras_their_nodes_and_the_cap() {
+        for (path, extra) in [
+            ("yarn.lock", false),
+            ("package-lock.json", false),
+            ("package.json", false),
+            ("tsconfig.base.json", false),
+            ("composer.json", false),
+            ("public/app.min.js", false),
+            ("config/app.json", true),
+            ("data/strings.json", false),
+            ("app.settings.json", true),
+            ("deploy/.env.json", true),
+            ("views/index.html", true),
+            ("ci.yml", true),
+            ("README.md", false),
+        ] {
+            assert_eq!(is_security_extra(Path::new(path)), extra, "{path}");
+        }
+        let lines = |path: &str, source: &str| {
+            template_or_config_nodes(Path::new(path), source)
+                .into_iter()
+                .map(|node| node.line)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(
+                "t.html",
+                "<p>plain</p>\n<!-- {{ hidden }} -->\n<p>{{ user.name }}</p>\n\n# heading\n<a href=\"/x\">x</a>\n"
+            ),
+            [3, 6]
+        );
+        assert_eq!(
+            lines(
+                "c.yml",
+                "# note\nkey: value\nplain\n// also a comment\nother = 1\n"
+            ),
+            [2, 5]
+        );
+        let node = |line: usize| Node {
+            line,
+            text: format!("n{line}"),
+        };
+        let picked = spread_to((0..10).map(node).chain([node(4)]).collect(), 3)
+            .into_iter()
+            .map(|node| node.line)
+            .collect::<Vec<_>>();
+        assert_eq!(picked, [0, 3, 6]);
+        assert_eq!(spread_to(vec![node(2), node(1)], 5).len(), 2);
+        for (line, comment) in [
+            ("", true),
+            ("  # x", true),
+            ("// x", true),
+            (" * x", true),
+            ("/* x", true),
+            ("x = 1", false),
+        ] {
+            assert_eq!(is_comment(line), comment, "{line:?}");
+        }
+    }
 }
