@@ -205,7 +205,12 @@ pub(crate) fn run_nextest(
         serde_json::from_slice(&metadata.stdout).map_err(|error| {
             RustTestRunnerError::CargoJson(format!("invalid Cargo metadata: {error}"))
         })?;
-    let artifacts = nextest_artifacts(project, &catalog, &metadata)?;
+    let artifacts = nextest_artifacts(
+        &project.workspace_root,
+        &project.target_directory,
+        &catalog,
+        &metadata,
+    )?;
 
     // The run itself, streaming nextest's own output.
     let command = invocation.command_position();
@@ -405,11 +410,12 @@ fn built_as(nextest_kind: &str, cargo_kind: &str) -> bool {
 /// Join nextest's listing to Cargo's metadata: each binary to the target it
 /// was built from, and so to the source file its tests are attributed to.
 fn nextest_artifacts(
-    project: &PreparedRustProject,
+    workspace_root: &Path,
+    target_directory: &Path,
     catalog: &TestListSummary,
     metadata: &CargoMetadataOutput,
 ) -> Result<BTreeMap<String, NextestArtifact>, RustTestRunnerError> {
-    let canonical_target = fs::canonicalize(&project.target_directory).map_err(io_error)?;
+    let canonical_target = fs::canonicalize(target_directory).map_err(io_error)?;
     let packages = metadata
         .packages
         .iter()
@@ -473,7 +479,7 @@ fn nextest_artifacts(
                 } else {
                     "unit".into()
                 },
-                source: relative_source(&project.workspace_root, &source)?,
+                source: relative_source(workspace_root, &source)?,
             },
         );
     }
@@ -709,7 +715,179 @@ pub(crate) fn cargo_metadata_arguments(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::*;
+
+    /// A library's test binary is `lib` to nextest whatever crate type Cargo
+    /// builds it as; any other kind must match by name.
+    #[test]
+    fn nextest_kinds_match_cargo_target_kinds() {
+        for (nextest, cargo, built) in [
+            ("lib", "lib", true),
+            ("lib", "cdylib", true),
+            ("lib", "staticlib", true),
+            ("lib", "bin", false),
+            ("test", "test", true),
+            ("test", "lib", false),
+            ("bin", "lib", false),
+        ] {
+            assert_eq!(built_as(nextest, cargo), built, "{nextest} {cargo}");
+        }
+    }
+
+    /// nextest's listing joins Cargo's metadata only where every binary
+    /// names its own key, a known package by its own name, exactly one
+    /// target and an executable inside the target directory.
+    #[test]
+    fn nextest_binaries_join_cargo_targets_or_are_refused_by_name() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-nextest-join-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("tests/it.rs"), "").unwrap();
+        fs::write(root.join("target/debug/deps/tiny-1"), "").unwrap();
+        fs::write(root.join("target/debug/deps/it-2"), "").unwrap();
+        fs::write(root.join("outside"), "").unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        let suite = |key: &str, name: &str, kind: &str, binary: &str| {
+            json!({
+                "package-name": "tiny",
+                "binary-id": key,
+                "binary-name": name,
+                "package-id": "tiny-id",
+                "kind": kind,
+                "binary-path": root.join(binary),
+                "build-platform": "target",
+                "cwd": root,
+                "status": "listed",
+                "testcases": {}
+            })
+        };
+        let listing = |suites: Value| {
+            let text = json!({
+                "rust-build-meta": {
+                    "target-directory": root.join("target"),
+                    "build-directory": root.join("target"),
+                    "base-output-directories": ["debug"],
+                    "non-test-binaries": {},
+                    "build-script-out-dirs": {},
+                    "build-script-info": {},
+                    "linked-paths": [],
+                    "platforms": {
+                        "host": {
+                            "platform": {"triple": "aarch64-apple-darwin", "target-features": "unknown"},
+                            "libdir": {"status": "unavailable", "reason": "test"}
+                        },
+                        "targets": []
+                    },
+                    "target-platforms": [{"triple": "aarch64-apple-darwin", "target-features": "unknown"}],
+                    "target-platform": null
+                },
+                "test-count": 0,
+                "rust-suites": suites
+            })
+            .to_string();
+            TestListSummary::parse_json(text).unwrap()
+        };
+        let metadata = |targets: Value, name: &str| -> CargoMetadataOutput {
+            serde_json::from_value(json!({
+                "packages": [{"id": "tiny-id", "name": name, "targets": targets}]
+            }))
+            .unwrap()
+        };
+        let targets = json!([
+            {"name": "tiny", "kind": ["cdylib"], "src_path": root.join("src/lib.rs")},
+            {"name": "it", "kind": ["test"], "src_path": root.join("tests/it.rs")}
+        ]);
+        let join = |catalog: &TestListSummary, metadata: &CargoMetadataOutput| {
+            nextest_artifacts(&root, &root.join("target"), catalog, metadata)
+        };
+        let both = listing(json!({
+            "tiny": suite("tiny", "tiny", "lib", "target/debug/deps/tiny-1"),
+            "tiny::it": suite("tiny::it", "it", "test", "target/debug/deps/it-2")
+        }));
+        let joined = join(&both, &metadata(targets.clone(), "tiny")).unwrap();
+        assert_eq!(joined["tiny"].kind, "unit");
+        assert_eq!(joined["tiny"].source, "src/lib.rs");
+        assert_eq!(joined["tiny::it"].kind, "integration");
+        let refused = |catalog: TestListSummary, metadata: CargoMetadataOutput| match join(
+            &catalog, &metadata,
+        ) {
+            Err(error) => error.to_string(),
+            Ok(_) => "joined".into(),
+        };
+        let one = |suite: Value| listing(json!({ "tiny": suite }));
+        let lib = suite("tiny", "tiny", "lib", "target/debug/deps/tiny-1");
+        let mut unknown = lib.clone();
+        unknown["package-id"] = "other-id".into();
+        for (label, error, expected) in [
+            (
+                "key",
+                refused(
+                    one(suite("other", "tiny", "lib", "target/debug/deps/tiny-1")),
+                    metadata(targets.clone(), "tiny"),
+                ),
+                "nextest suite key disagrees with binary identity tiny",
+            ),
+            (
+                "package",
+                refused(one(unknown), metadata(targets.clone(), "tiny")),
+                "names an unknown Cargo package other-id",
+            ),
+            (
+                "name",
+                refused(one(lib.clone()), metadata(targets.clone(), "renamed")),
+                "package name disagrees",
+            ),
+            (
+                "target",
+                refused(
+                    one(suite("tiny", "gone", "lib", "target/debug/deps/tiny-1")),
+                    metadata(targets.clone(), "tiny"),
+                ),
+                "has no exact Cargo metadata target",
+            ),
+            (
+                "ambiguous",
+                refused(
+                    one(lib.clone()),
+                    metadata(
+                        json!([
+                            {"name": "tiny", "kind": ["lib"], "src_path": root.join("src/lib.rs")},
+                            {"name": "tiny", "kind": ["rlib"], "src_path": root.join("src/lib.rs")}
+                        ]),
+                        "tiny",
+                    ),
+                ),
+                "ambiguously matches",
+            ),
+            (
+                "outside",
+                refused(
+                    one(suite("tiny", "tiny", "lib", "outside")),
+                    metadata(targets.clone(), "tiny"),
+                ),
+                "outside",
+            ),
+            (
+                "empty",
+                refused(listing(json!({})), metadata(targets.clone(), "tiny")),
+                "nextest listed no test binaries",
+            ),
+        ] {
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn runner_configuration_names_every_target_once() {
