@@ -5176,6 +5176,65 @@ mod tests {
         }
     }
 
+    /// Phase summaries and decision details keep their reserved bytes zero,
+    /// and a decision covered is one executed.
+    #[test]
+    fn phase_and_decision_records_that_break_one_rule_are_refused() {
+        let first_all = |sections: &[QueryIndexSection], kind: u32, size: usize| {
+            let section = sections.iter().find(|section| section.kind == kind)?;
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+        };
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            [
+                index.phase_summaries(CoverageViewId::All).map(|_| ()),
+                index.decision_details(CoverageViewId::All).map(|_| ()),
+            ]
+            .into_iter()
+            .find_map(Result::err)
+            .map_or("accepted".to_owned(), |error| format!("{error:?}"))
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = move |kind: u32, size: usize, at: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first_all(s, kind, size).expect("a record of the whole view");
+                patch(s, kind, record, size, at, &bytes);
+            })
+        };
+        let (phases, phase_size) = (SECTION_PHASE_SUMMARIES, PHASE_SUMMARY_RECORD_SIZE);
+        let (details, detail_size) = (SECTION_DECISION_DETAILS, DECISION_DETAIL_RECORD_SIZE);
+        let has = |kind: u32, size: usize| {
+            let sections = coverage_index_sections(&report()).unwrap();
+            first_all(&sections, kind, size).is_some()
+        };
+        let mut cases: Vec<(&str, Edit)> = Vec::new();
+        if has(phases, phase_size) {
+            cases.push(("phase summary record", set(phases, phase_size, 1, vec![1])));
+            cases.push(("phase summary record", set(phases, phase_size, 48, vec![1])));
+        }
+        if has(details, detail_size) {
+            cases.push((
+                "decision detail record",
+                set(details, detail_size, 1, vec![4]),
+            ));
+            cases.push((
+                "decision detail record",
+                set(details, detail_size, 2, vec![1]),
+            ));
+            cases.push((
+                "covered unexecuted decision",
+                set(details, detail_size, 1, vec![2]),
+            ));
+        }
+        assert!(cases.len() >= 3, "the test report has decisions");
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
     /// The first record of `kind` in the whole view, for the tables below.
     fn first_of(sections: &[QueryIndexSection], kind: u32, size: usize) -> Option<usize> {
         let section = sections.iter().find(|section| section.kind == kind)?;
