@@ -2424,4 +2424,74 @@ mod tests {
         ));
         fs::remove_dir_all(directory).unwrap();
     }
+
+    /// A phase's snapshot names only obligations of the manifest, with
+    /// vectors as long as their decision's conditions; a branch outcome's
+    /// hit is one.
+    #[test]
+    fn a_snapshot_is_read_against_the_manifest() {
+        use crate::coverage_report::{BranchAlternativeMeta, BranchMeta};
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![DecisionMeta {
+                id: "d".into(),
+                file: "lib/a.rb".into(),
+                line: 1,
+                column: 0,
+                source: "a && b".into(),
+                conditions: vec!["a".into(), "b".into()],
+                kind: "if".into(),
+            }],
+            points: vec![],
+            branches: vec![BranchMeta {
+                id: "b".into(),
+                kind: "if".into(),
+                file: "lib/a.rb".into(),
+                line: 1,
+                column: 0,
+                source: "a && b".into(),
+                alternatives: vec![BranchAlternativeMeta {
+                    id: "alt".into(),
+                    label: "then".into(),
+                }],
+            }],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let index = ManifestIndex::new(&manifest);
+        let observed = |hits: &[&str], vectors: &[(&str, Vec<Option<bool>>)]| {
+            let mut observations = Observations::default();
+            observations
+                .hits
+                .extend(hits.iter().map(|hit| hit.to_string()));
+            for (id, values) in vectors {
+                observations
+                    .vectors
+                    .entry(id.to_string())
+                    .or_default()
+                    .insert((values.clone(), true));
+            }
+            snapshot(&index, &observations, "p")
+        };
+        assert!(
+            matches!(observed(&["zzz"], &[]), Err(RubyEvidenceError::UnknownObligation(id)) if id == "zzz")
+        );
+        assert!(
+            matches!(observed(&[], &[("zzz", vec![])]), Err(RubyEvidenceError::UnknownObligation(id)) if id == "zzz")
+        );
+        assert!(matches!(
+            observed(&[], &[("d", vec![Some(true)])]),
+            Err(RubyEvidenceError::InvalidVector {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        let good = observed(&["alt"], &[("d", vec![Some(true), Some(false)])])
+            .ok()
+            .unwrap();
+        assert_eq!(good.hits, ["alt".to_owned()]);
+        assert_eq!(good.decisions.len(), 1);
+    }
 }
