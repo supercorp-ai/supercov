@@ -508,13 +508,8 @@ pub struct IndexedSourceScope {
     pub kind: String,
     pub language: String,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub mode: String,
     pub roots: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub measurement_complete: Option<bool>,
     pub included: usize,
     pub excluded: usize,
     pub ambiguous: usize,
@@ -1003,21 +998,13 @@ fn dimension_record(
     Ok(record)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScopeKind {
-    SourceDiscovery = 1,
-    Compiler = 2,
-}
-
+/// A run's source scope: the files source discovery classified.
 struct ScopeProjection<'a> {
-    kind: ScopeKind,
     language: &'a str,
     model: &'a str,
-    mode: Option<&'a str>,
+    mode: &'a str,
     roots: Vec<String>,
-    unit: Option<&'a str>,
-    measurement_complete: Option<bool>,
-    entries: Option<&'a Vec<serde_json::Value>>,
+    entries: &'a Vec<serde_json::Value>,
 }
 
 fn scope_projection<'a>(
@@ -1031,10 +1018,11 @@ fn scope_projection<'a>(
     let object = scope
         .as_object()
         .ok_or(CoverageIndexError::InvalidRecord("coverage scope"))?;
-    if let Some(mode) = object.get("mode") {
-        let mode = mode
-            .as_str()
-            .ok_or(CoverageIndexError::InvalidRecord("source-scope mode"))?;
+    let mode = object
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(CoverageIndexError::InvalidRecord("source-scope mode"))?;
+    {
         let roots = object
             .get("roots")
             .and_then(serde_json::Value::as_array)
@@ -1050,46 +1038,14 @@ fn scope_projection<'a>(
             .get("entries")
             .and_then(serde_json::Value::as_array)
             .ok_or(CoverageIndexError::InvalidRecord("source-scope entries"))?;
-        return Ok(Some(ScopeProjection {
-            kind: ScopeKind::SourceDiscovery,
+        Ok(Some(ScopeProjection {
             language: coverage_language,
             model: coverage_model,
-            mode: Some(mode),
+            mode,
             roots,
-            unit: None,
-            measurement_complete: None,
-            entries: Some(entries),
-        }));
+            entries,
+        }))
     }
-
-    let language = object
-        .get("language")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(CoverageIndexError::InvalidRecord("compiler-scope language"))?;
-    let model = object
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(CoverageIndexError::InvalidRecord("compiler-scope model"))?;
-    let unit = object
-        .get("crate")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(CoverageIndexError::InvalidRecord("compiler-scope unit"))?;
-    let measurement_complete = object
-        .get("measurementComplete")
-        .and_then(serde_json::Value::as_bool)
-        .ok_or(CoverageIndexError::InvalidRecord(
-            "compiler-scope measurement completeness",
-        ))?;
-    Ok(Some(ScopeProjection {
-        kind: ScopeKind::Compiler,
-        language,
-        model,
-        mode: None,
-        roots: Vec::new(),
-        unit: Some(unit),
-        measurement_complete: Some(measurement_complete),
-        entries: None,
-    }))
 }
 
 fn projection_record(
@@ -1117,14 +1073,14 @@ fn projection_record(
 
     let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
     record[2] = u8::from(scope.is_some());
-    record[3] = scope.as_ref().map_or(0, |scope| scope.kind as u8);
+    // The scope's kind: source discovery, the only one there is.
+    record[3] = u8::from(scope.is_some());
     put_u32(
         &mut record,
         16,
         scope
             .as_ref()
-            .and_then(|scope| scope.mode)
-            .map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+            .map_or(Ok(NO_STRING), |scope| strings.intern(scope.mode))?,
     );
     let roots = scope
         .as_ref()
@@ -1363,7 +1319,7 @@ fn projection_record(
             .map_or(Ok(NO_STRING), |test| strings.intern(&test.name))?,
     );
 
-    let entries = scope.as_ref().and_then(|scope| scope.entries);
+    let entries = scope.as_ref().map(|scope| scope.entries);
     for (index, status) in ["included", "excluded", "ambiguous"]
         .into_iter()
         .enumerate()
@@ -1395,19 +1351,8 @@ fn projection_record(
             .as_ref()
             .map_or(Ok(NO_STRING), |scope| strings.intern(scope.model))?,
     );
-    put_u32(
-        &mut record,
-        512,
-        scope
-            .as_ref()
-            .and_then(|scope| scope.unit)
-            .map_or(Ok(NO_STRING), |value| strings.intern(value))?,
-    );
-    if let Some(measurement_complete) = scope.as_ref().and_then(|scope| scope.measurement_complete)
-    {
-        record[516] = 1;
-        record[517] = u8::from(measurement_complete);
-    }
+    // 512..518 held a compiler scope's unit and completeness; reserved.
+    put_u32(&mut record, 512, NO_STRING);
     Ok(record)
 }
 
@@ -2957,60 +2902,37 @@ impl<'a> CoverageIndex<'a> {
                 None
             };
             let has_scope = bool_field(record[2])?;
+            // The kind byte names source discovery, the only scope there is.
             let scope_kind = match record[3] {
-                0 => None,
-                1 => Some((ScopeKind::SourceDiscovery, "source-discovery")),
-                2 => Some((ScopeKind::Compiler, "compiler")),
+                0 => false,
+                1 => true,
                 _ => return Err(CoverageIndexError::InvalidRecord("coverage scope kind")),
             };
+            // Where a compiler scope kept its unit and completeness: reserved.
+            if get_u32(record, 512) != NO_STRING || record[516] != 0 || record[517] != 0 {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "projection reserved bytes",
+                ));
+            }
             let scope_mode = self.optional_string(get_u32(record, 16))?;
             let scope_language = self.optional_string(get_u32(record, 504))?;
             let scope_model = self.optional_string(get_u32(record, 508))?;
-            let scope_unit = self.optional_string(get_u32(record, 512))?;
-            let has_measurement_complete = bool_field(record[516])?;
-            let measurement_complete = bool_field(record[517])?;
-            if !has_measurement_complete && measurement_complete {
-                return Err(CoverageIndexError::InvalidRecord(
-                    "scope measurement completeness flag",
-                ));
-            }
-            if has_scope
-                != (scope_kind.is_some() && scope_language.is_some() && scope_model.is_some())
-            {
+            if has_scope != (scope_kind && scope_language.is_some() && scope_model.is_some()) {
                 return Err(CoverageIndexError::InvalidRecord("scope presence flag"));
             }
-            let source_scope = if let Some((kind, kind_name)) = scope_kind {
-                match kind {
-                    ScopeKind::SourceDiscovery => {
-                        if scope_mode.is_none() || scope_unit.is_some() || has_measurement_complete
-                        {
-                            return Err(CoverageIndexError::InvalidRecord(
-                                "source-discovery scope shape",
-                            ));
-                        }
-                    }
-                    ScopeKind::Compiler => {
-                        if scope_mode.is_some()
-                            || scope_unit.is_none()
-                            || !has_measurement_complete
-                            || get_u32(record, 32) != 0
-                            || number(480)? != 0
-                            || number(488)? != 0
-                            || number(496)? != 0
-                        {
-                            return Err(CoverageIndexError::InvalidRecord("compiler scope shape"));
-                        }
-                    }
-                }
+            let source_scope = if scope_kind {
+                let Some(mode) = scope_mode else {
+                    return Err(CoverageIndexError::InvalidRecord(
+                        "source-discovery scope shape",
+                    ));
+                };
                 Some(IndexedSourceScope {
-                    kind: kind_name.into(),
+                    kind: "source-discovery".into(),
                     language: scope_language.expect("validated scope language"),
                     model: scope_model.expect("validated scope model"),
-                    mode: scope_mode,
+                    mode,
                     roots: self
                         .relation_strings(get_u64(record, 24), u64::from(get_u32(record, 32)))?,
-                    unit: scope_unit,
-                    measurement_complete: has_measurement_complete.then_some(measurement_complete),
                     included: number(480)?,
                     excluded: number(488)?,
                     ambiguous: number(496)?,
@@ -3020,8 +2942,6 @@ impl<'a> CoverageIndex<'a> {
                     || scope_mode.is_some()
                     || scope_language.is_some()
                     || scope_model.is_some()
-                    || scope_unit.is_some()
-                    || has_measurement_complete
                     || number(480)? != 0
                     || number(488)? != 0
                     || number(496)? != 0
@@ -4665,46 +4585,21 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A scope is source discovery's, with its mode; the compiler scope the
+    /// old Rust frontend wrote is gone, and one written that way is refused.
     #[test]
-    fn compiler_owned_scope_round_trips_without_javascript_scope_fields() {
+    fn a_scope_without_a_mode_is_refused() {
         let mut report = report();
-        let scope = serde_json::json!({
+        report.view.scope = Some(serde_json::json!({
             "language": "rust",
             "model": "rust-source-v1",
             "crate": "fixture",
             "measurementComplete": false
-        });
-        report.view.scope = Some(scope.clone());
-        report.filters.passed.scope = Some(scope.clone());
-        report.filters.failed.scope = Some(scope);
-        let root = root();
-        let path = root.join("query-index.v2.bin");
-        write_query_index(
-            &coverage_index_sections(&report).unwrap(),
-            &identity(),
-            &path,
-        )
-        .unwrap();
-        let container = QueryIndex::open(&path, &identity()).unwrap();
-        let index = CoverageIndex::new(&container).unwrap();
-        let projection = index.projection(CoverageViewId::All, None, None).unwrap();
-        assert_eq!(
-            projection.source_scope,
-            Some(IndexedSourceScope {
-                kind: "compiler".into(),
-                language: "rust".into(),
-                model: "rust-source-v1".into(),
-                mode: None,
-                roots: Vec::new(),
-                unit: Some("fixture".into()),
-                measurement_complete: Some(false),
-                included: 0,
-                excluded: 0,
-                ambiguous: 0,
-            })
-        );
-        assert!(index.scope_entries(CoverageViewId::All).unwrap().is_empty());
-        fs::remove_dir_all(root).unwrap();
+        }));
+        assert!(matches!(
+            coverage_index_sections(&report),
+            Err(CoverageIndexError::InvalidRecord("source-scope mode"))
+        ));
     }
 
     /// A real index with one section's bytes changed, written with digests
@@ -4974,9 +4869,12 @@ mod tests {
                 set(vec![(1, vec![0]), (408, 1u64.to_le_bytes().to_vec())]),
             ),
             ("coverage scope kind", set(vec![(3, vec![3])])),
+            // Where a compiler scope kept its unit and completeness.
+            ("projection reserved bytes", set(vec![(516, vec![1])])),
+            ("projection reserved bytes", set(vec![(517, vec![1])])),
             (
-                "scope measurement completeness flag",
-                set(vec![(516, vec![0]), (517, vec![1])]),
+                "projection reserved bytes",
+                set(vec![(512, 0u32.to_le_bytes().to_vec())]),
             ),
             (
                 "scope presence flag",
@@ -5007,10 +4905,7 @@ mod tests {
             }
         };
         assert_eq!(scoped(&|_| {}), "accepted Some(\"source-discovery\")");
-        assert!(
-            scoped(set(vec![(516, vec![1])]).as_ref()).contains("source-discovery scope shape")
-        );
-        assert!(scoped(set(vec![(3, vec![2])]).as_ref()).contains("compiler scope shape"));
+        assert!(scoped(set(vec![(3, vec![2])]).as_ref()).contains("coverage scope kind"));
         assert!(scoped(set(vec![(2, vec![0])]).as_ref()).contains("scope presence flag"));
         // A string any record may name: the projection's own timestamp.
         let with_string = move |offsets: Vec<usize>, also: Vec<(usize, Vec<u8>)>| -> Edit {
@@ -5035,8 +4930,6 @@ mod tests {
             with_string(vec![16], vec![]),
             with_string(vec![504], vec![]),
             with_string(vec![508], vec![]),
-            with_string(vec![512], vec![]),
-            set(vec![(516, vec![1])]),
             set(vec![(480, one.clone())]),
             set(vec![(488, one.clone())]),
             set(vec![(496, one.clone())]),
@@ -5049,47 +4942,10 @@ mod tests {
             let got = scoped(set(vec![(offset, none.clone())]).as_ref());
             assert!(got.contains("scope presence flag"), "{offset}: {got}");
         }
-        // Source discovery has a mode and no compiler unit.
+        // Source discovery has a mode.
         assert!(
             scoped(set(vec![(16, none.clone())]).as_ref()).contains("source-discovery scope shape")
         );
-        assert!(
-            scoped(with_string(vec![512], vec![]).as_ref())
-                .contains("source-discovery scope shape")
-        );
-        // A compiler scope: a unit and a completeness flag, no mode, roots or
-        // counts. Valid, then breaking each rule alone.
-        let compiler = |also: Vec<(usize, Vec<u8>)>| {
-            let mut fields = vec![
-                (3, vec![2]),
-                (16, none.clone()),
-                (516, vec![1]),
-                (517, vec![1]),
-                (32, 0u32.to_le_bytes().to_vec()),
-                (480, 0u64.to_le_bytes().to_vec()),
-                (488, 0u64.to_le_bytes().to_vec()),
-                (496, 0u64.to_le_bytes().to_vec()),
-            ];
-            fields.extend(also);
-            with_string(vec![512], fields)
-        };
-        assert_eq!(
-            scoped(compiler(vec![]).as_ref()),
-            "accepted Some(\"compiler\")"
-        );
-        for also in [
-            vec![(512, none.clone())],
-            vec![(516, vec![0]), (517, vec![0])],
-            vec![(32, 1u32.to_le_bytes().to_vec())],
-            vec![(480, one.clone())],
-            vec![(488, one.clone())],
-            vec![(496, one.clone())],
-        ] {
-            let got = scoped(compiler(also.clone()).as_ref());
-            assert!(got.contains("compiler scope shape"), "{also:?}: {got}");
-        }
-        let got = scoped(with_string(vec![16, 512], vec![(3, vec![2]), (516, vec![1])]).as_ref());
-        assert!(got.contains("compiler scope shape"), "{got}");
         // A count of tests with no evidence names its first one, and only then.
         for edit in [set(vec![(472, one.clone()), (20, none.clone())]), {
             with_string(vec![20], vec![(472, 0u64.to_le_bytes().to_vec())])

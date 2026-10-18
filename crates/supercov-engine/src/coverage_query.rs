@@ -547,13 +547,8 @@ pub struct CoverageScopeData {
     pub kind: String,
     pub language: String,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub mode: String,
     pub roots: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub measurement_complete: Option<bool>,
     pub counts: ScopeCounts,
     pub measurement: IndexedMeasurement,
     /// Every entry of the scope, grouped; `entries` is one page of them.
@@ -3132,8 +3127,6 @@ pub fn coverage_scope_query(
             model: scope.model,
             mode: scope.mode,
             roots: scope.roots,
-            unit: scope.unit,
-            measurement_complete: scope.measurement_complete,
             counts: ScopeCounts {
                 included: scope.included,
                 excluded: scope.excluded,

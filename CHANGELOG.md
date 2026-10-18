@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Removed**
+
+- The compiler source scope the old Rust frontend wrote (`unit` and `measurementComplete` in `scope --json`) is gone: every frontend reports a source-discovery scope with its `mode`. A run stored by a release from before that frontend's removal is refused instead of read.
+
 **Fixed**
 
 - `file` on a file whose every line is covered said "Nothing measured: the run counts no obligation in this file"; it says every line is covered and measured.
