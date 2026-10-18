@@ -1432,4 +1432,80 @@ fn main() {
         }
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn the_runtime_names_and_the_region_header_are_checked_field_by_field() {
+        let source = "fn f(a: bool, b: bool) -> bool {\n    a && b\n}\n";
+        let probes = instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1")
+            .unwrap()
+            .probes;
+        let render = |module: &str, token: &str, key: &str, cfgs: &[usize]| {
+            render_rust_region_runtime(module, token, key, &probes, cfgs).err()
+        };
+        assert_eq!(render("__supercov_runtime_v1", TOKEN, "abcdef", &[]), None);
+        for module in ["", "1runtime", "run-time"] {
+            assert_eq!(
+                render(module, TOKEN, "abcdef", &[]).as_deref(),
+                Some("invalid Rust runtime module name"),
+                "{module:?}"
+            );
+        }
+        for token in ["", "0123456789abcdef0", "xyz"] {
+            assert_eq!(
+                render("rt", token, "abcdef", &[]).as_deref(),
+                Some("invalid Rust region token"),
+                "{token:?}"
+            );
+        }
+        for key in ["", "key"] {
+            assert_eq!(
+                render("rt", TOKEN, key, &[]).as_deref(),
+                Some("invalid Rust runtime crate key"),
+                "{key:?}"
+            );
+        }
+        assert_eq!(
+            render("rt", TOKEN, "abcdef", &[99]).as_deref(),
+            Some("a crate names a cfg gate the layout lacks")
+        );
+        // A header as the runtime writes it, then each field wrong in turn.
+        let mut header = vec![0u8; 128];
+        header[..8].copy_from_slice(REGION_MAGIC);
+        let put = |bytes: &mut Vec<u8>, at: usize, value: usize| {
+            bytes[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        };
+        put(&mut header, 8, REGION_VERSION as usize);
+        put(&mut header, 12, 128);
+        put(&mut header, 16, probes.hits.len());
+        put(&mut header, 20, probes.assertions.len());
+        put(&mut header, 24, probes.decisions.len());
+        put(&mut header, 72, probes.cfgs.len());
+        header[56..56 + TOKEN.len()].copy_from_slice(TOKEN.as_bytes());
+        assert!(region_header(&header, TOKEN, &probes).is_ok());
+        let broken = |at: usize, value: usize| {
+            let mut bytes = header.clone();
+            put(&mut bytes, at, value);
+            bytes
+        };
+        let mut wrong_magic = header.clone();
+        wrong_magic[0] ^= 1;
+        let mut wrong_token = header.clone();
+        wrong_token[56] = b'z';
+        for bytes in [
+            wrong_magic,
+            broken(8, 999),
+            broken(12, 64),
+            broken(16, probes.hits.len() + 1),
+            broken(20, probes.assertions.len() + 1),
+            broken(24, probes.decisions.len() + 1),
+            broken(72, probes.cfgs.len() + 1),
+            wrong_token,
+            header[..40].to_vec(),
+        ] {
+            assert!(matches!(
+                region_header(&bytes, TOKEN, &probes),
+                Err(RustProbeReadError::InvalidHeader)
+            ));
+        }
+    }
 }
