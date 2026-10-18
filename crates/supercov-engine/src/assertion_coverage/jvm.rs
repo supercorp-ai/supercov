@@ -460,6 +460,34 @@ mod tests {
         );
     }
 
+    /// A comparison with null is a value, not null assigned; a Kotlin
+    /// property delegated with `by` has no value of its own to change.
+    #[test]
+    fn null_comparisons_and_delegated_properties_are_told_apart() {
+        let java = "class A {\n    boolean f(String x) {\n        boolean b = x != null;\n        boolean c = x == null;\n        return b;\n    }\n}\n";
+        let starts = statement_starts("A.java", java);
+        let j = Language::Jvm;
+        assert_eq!(
+            change_at(&starts, 3, "boolean b = x != null;", j),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 4, "boolean c = x == null;", j),
+            Some(Change::ValueUndefined)
+        );
+        let kotlin = "fun k() {\n    val lazyOne by lazy { 1 }\n    val plain: Int = 2\n    var none: String? = null\n}\n";
+        let starts = statement_starts("K.kt", kotlin);
+        assert_eq!(change_at(&starts, 2, "val lazyOne by lazy { 1 }", j), None);
+        assert_eq!(
+            change_at(&starts, 3, "val plain: Int = 2", j),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 4, "var none: String? = null", j),
+            Some(Change::Skip)
+        );
+    }
+
     #[test]
     fn java_changes_follow_the_audit() {
         let source = "class A {\n    int f(int x) {\n        int y;\n        int z = x + 1;\n        if (z > 2) {\n            return z;\n        } else if (z < 0) {\n            z += 1;\n        }\n        y = z;\n        log(z);\n        return y;\n    }\n}\n";
