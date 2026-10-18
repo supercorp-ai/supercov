@@ -866,9 +866,10 @@ pub fn coverage_covers_query_cached(
         .collect::<BTreeSet<_>>();
     for anchor in anchors.iter().filter(|anchor| anchor.kind == "branch") {
         anchor_test_ids.extend(
-            metadata
-                .values()
-                .filter(|detail| detail.parent_id.as_deref() == Some(anchor.id.as_str()))
+            file.alternatives
+                .get(&anchor.id)
+                .unwrap_or(&no_alternatives)
+                .iter()
                 .flat_map(|detail| detail.tests.iter())
                 .filter(|id| selected_includes(id))
                 .cloned(),
