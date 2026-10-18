@@ -2738,27 +2738,50 @@ pub struct CoverageDiffQueryOptions<'a> {
 }
 
 struct DiffSnapshot {
-    summary: CoverageSummary,
+    /// Lines, branches and MC/DC, in percent, of what the snapshot covers.
+    percentages: [f64; 3],
     lines: BTreeSet<String>,
     branches: HashMap<String, String>,
     mcdc: HashMap<String, String>,
 }
 
+/// What a run covered, or, given the tests a filter picks, what those tests
+/// covered: a line or branch one of them reached, and a condition whose
+/// independence pair their own vectors show, by the engine's witness rule.
 fn diff_snapshot(
     index: &CoverageIndex<'_>,
     view: CoverageViewId,
+    (kind, runner): (Option<&str>, Option<&str>),
+    selected: Option<&BTreeSet<String>>,
 ) -> Result<DiffSnapshot, QueryError> {
-    let summary = index.summary(view)?;
+    let of = |summary: CoverageSummary| {
+        [
+            summary.lines.percentage,
+            summary.branches.percentage,
+            summary.condition_coverage_pct,
+        ]
+    };
+    // The filter's own projection; a run without its tests covered nothing.
+    let percentages = match selected {
+        None => of(index.summary(view)?),
+        Some(selected) if selected.is_empty() => [0.0; 3],
+        Some(_) => of(index.projection(view, kind, runner)?.summary),
+    };
+    let picks = |tests: &[String]| {
+        selected.is_none_or(|selected| tests.iter().any(|test| selected.contains(test)))
+    };
     let lines = index
         .lines(view)?
         .into_iter()
-        .filter(|line| line.covered)
+        .filter(|line| line.covered && picks(&line.tests))
         .map(|line| format!("{}:{}", line.file, line.line))
         .collect();
     let branches = index
         .hit_metadata(view)?
         .into_iter()
-        .filter(|metadata| metadata.obligation == "branch" && !metadata.tests.is_empty())
+        .filter(|metadata| {
+            metadata.obligation == "branch" && !metadata.tests.is_empty() && picks(&metadata.tests)
+        })
         .map(|metadata| {
             let parent = metadata
                 .parent_id
@@ -2778,10 +2801,33 @@ fn diff_snapshot(
         .decision_details(view)?
         .into_iter()
         .flat_map(|decision| {
+            // Under a filter, the pairs the picked tests' own vectors show.
+            let shown = selected.map(|selected| {
+                let vectors = decision
+                    .vector_observations
+                    .iter()
+                    .filter(|observation| {
+                        observation
+                            .tests
+                            .iter()
+                            .any(|test| selected.contains(&**test))
+                    })
+                    .map(|observation| observation.vector.clone())
+                    .collect::<Vec<_>>();
+                crate::coverage_analysis::find_witnesses_for_conditions(
+                    &vectors,
+                    decision.conditions.len(),
+                )
+                .map(|witnesses| witnesses.iter().map(Option::is_some).collect::<Vec<_>>())
+                .unwrap_or_default()
+            });
             decision
                 .conditions
                 .into_iter()
-                .filter(|condition| condition.covered)
+                .filter(move |condition| match &shown {
+                    Some(shown) => shown.get(condition.index).copied().unwrap_or(false),
+                    None => condition.covered,
+                })
                 .map(move |condition| {
                     (
                         format!("{}:c{}", decision.meta.id, condition.index),
@@ -2797,7 +2843,7 @@ fn diff_snapshot(
         })
         .collect();
     Ok(DiffSnapshot {
-        summary,
+        percentages,
         lines,
         branches,
         mcdc,
@@ -2820,8 +2866,37 @@ pub fn coverage_diff_query(
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let older = diff_snapshot(older, options.view)?;
-    let newer = diff_snapshot(newer, options.view)?;
+    // Each run picks its own tests; a filter neither run has a test for is
+    // refused, and one only a run has compares that run with nothing.
+    let select = |index: &CoverageIndex<'_>| match selected_test_ids(
+        &index.test_summaries(options.view)?,
+        options.kind,
+        options.runner,
+    ) {
+        Ok(selected) => Ok(Some(selected)),
+        Err(QueryError::TestFilterEmpty { .. }) => Ok(None),
+        Err(error) => Err(error),
+    };
+    let (older_selected, newer_selected) = (select(older)?, select(newer)?);
+    if older_selected.is_none() && newer_selected.is_none() {
+        return Err(QueryError::TestFilterEmpty {
+            kind: options.kind.map(str::to_owned),
+            runner: options.runner.map(str::to_owned),
+        });
+    }
+    let empty = BTreeSet::new();
+    fn picked<'a>(
+        selected: &'a Option<Option<BTreeSet<String>>>,
+        empty: &'a BTreeSet<String>,
+    ) -> Option<&'a BTreeSet<String>> {
+        match selected {
+            Some(selected) => selected.as_ref(),
+            None => Some(empty),
+        }
+    }
+    let filter = (options.kind, options.runner);
+    let older = diff_snapshot(older, options.view, filter, picked(&older_selected, &empty))?;
+    let newer = diff_snapshot(newer, options.view, filter, picked(&newer_selected, &empty))?;
     let mut gained_lines = newer
         .lines
         .difference(&older.lines)
@@ -2960,18 +3035,9 @@ pub fn coverage_diff_query(
             older: options.older_run.into(),
             newer: options.newer_run.into(),
             delta: CoverageDiffDelta {
-                lines: rounded_delta(
-                    newer.summary.lines.percentage,
-                    older.summary.lines.percentage,
-                ),
-                branches: rounded_delta(
-                    newer.summary.branches.percentage,
-                    older.summary.branches.percentage,
-                ),
-                mcdc: rounded_delta(
-                    newer.summary.condition_coverage_pct,
-                    older.summary.condition_coverage_pct,
-                ),
+                lines: rounded_delta(newer.percentages[0], older.percentages[0]),
+                branches: rounded_delta(newer.percentages[1], older.percentages[1]),
+                mcdc: rounded_delta(newer.percentages[2], older.percentages[2]),
             },
             gained,
             lost,

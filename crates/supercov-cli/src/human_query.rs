@@ -2061,8 +2061,13 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 signed(data.delta.branches),
                 signed(data.delta.mcdc)
             );
+            let label = filter_label(request);
             let mut lines = vec![
-                format!("{} -> {}", data.older, data.newer),
+                if label.is_empty() {
+                    format!("{} -> {}", data.older, data.newer)
+                } else {
+                    format!("{} -> {} ({label})", data.older, data.newer)
+                },
                 format!(
                     "gained: {} lines, {} branches, {} MC/DC conditions",
                     data.gained.line_count, data.gained.branch_count, data.gained.mcdc_count

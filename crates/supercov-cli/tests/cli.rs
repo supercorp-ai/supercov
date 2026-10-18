@@ -7369,3 +7369,62 @@ fn every_query_flag_is_read_and_a_wrong_one_named() {
         ])
         .succeeds();
 }
+
+#[test]
+fn a_diff_keeps_only_what_the_tests_a_filter_picks_covered() {
+    let project = Project::cart("diff-filters");
+    project.write(
+        "test/describe.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"describe lists names\", () => {\n  assert.equal(describe([{ name: \"a\" }]), \"a\");\n});\n",
+    );
+    project.commit("an integration test");
+    project
+        .supercov(&[
+            "--",
+            "sh",
+            "-c",
+            "SUPERCOV_TEST_KIND=unit node --test test/cart.test.js",
+        ])
+        .succeeds();
+    let unit_only = project.latest();
+    project
+        .supercov(&[
+            "--",
+            "sh",
+            "-c",
+            "SUPERCOV_TEST_KIND=unit node --test test/cart.test.js && SUPERCOV_TEST_KIND=integration node --test test/describe.test.js",
+        ])
+        .succeeds();
+    let both = project.latest();
+    let gained = |filter: &[&str]| {
+        let mut args = vec!["diff", unit_only.as_str(), both.as_str(), "--json"];
+        args.extend_from_slice(filter);
+        project.supercov(&args).json()["data"]["gained"]["lineCount"]
+            .as_u64()
+            .unwrap()
+    };
+    let everything = gained(&[]);
+    assert!(everything > 0, "the new test covered new lines");
+    // The unit tests are the same in both runs; the integration test is new.
+    assert_eq!(gained(&["--kind", "unit"]), 0);
+    // Run A has no integration test: all its lines are gained.
+    assert!(gained(&["--kind", "integration"]) >= everything);
+    assert_eq!(gained(&["--runner", "node:test"]), everything);
+    // The same unit tests in both runs cover the same share of the code.
+    let unit = project
+        .supercov(&["diff", &unit_only, &both, "--kind", "unit", "--json"])
+        .json();
+    assert_eq!(unit["data"]["delta"]["lines"], 0, "{unit}");
+    // A filtered comparison says so.
+    let human = project
+        .supercov(&["diff", &unit_only, &both, "--kind", "integration"])
+        .succeeds();
+    assert!(
+        human.lines().next().unwrap().contains("integration"),
+        "{human}"
+    );
+    let refused = project
+        .supercov(&["diff", &unit_only, &both, "--runner", "jest"])
+        .exits(2);
+    assert!(refused.contains("No tests match runner=jest"), "{refused}");
+}

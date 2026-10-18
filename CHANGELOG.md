@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- `diff --kind` and `--runner` (as the CLI guide shows) were ignored while echoed back, and a filter no test matched read as no change; the comparison now keeps what the picked tests covered, MC/DC by the engine's own rule, its delta is theirs, its first line names the filter, and a filter neither run has is refused.
 - A test command that failed before any test ran (pytest's `5` for no tests selected, `4` for a bad path) made Supercov exit `1`; it keeps the command's own status, as it does for a run.
 - `file` and `line` on a file the run's scope left out, such as a test file, said "Source file not found"; they give the scope's reason.
 - A page past the last entry (`--offset` beyond the total) read "showing 0-1 of 1", and `source` read "Showing 0-0 of 21"; both say the offset is past the end.
