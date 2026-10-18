@@ -884,4 +884,64 @@ mod tests {
             None
         );
     }
+
+    /// A merged entry keeps its records under the merged run's id, drops
+    /// those of tests measured again elsewhere, and is gone when nothing is
+    /// left of it; anything but JSON lines is refused.
+    #[test]
+    fn merged_records_take_the_new_run_and_drop_superseded_tests() {
+        let superseded = ["t2".to_owned()].into_iter().collect::<BTreeSet<_>>();
+        let rewrite = |text: &str, superseded: Option<&BTreeSet<String>>| {
+            rewritten_contents(text.as_bytes(), "merged", superseded)
+                .map(|kept| kept.map(|bytes| String::from_utf8(bytes).unwrap()))
+        };
+        assert_eq!(
+            rewrite(
+                "{\"testId\":\"t1\",\"scope\":{\"runId\":\"a\"}}\n{\"testId\":\"t2\"}\n{\"scope\":{\"testId\":\"t2\"}}\n{\"scope\":\"text\"}\n",
+                Some(&superseded)
+            ),
+            Ok(Some(
+                "{\"scope\":{\"runId\":\"merged\"},\"testId\":\"t1\"}\n{\"scope\":\"text\"}\n"
+                    .to_owned()
+            ))
+        );
+        // Every record superseded: nothing of the entry is left.
+        assert_eq!(
+            rewrite("{\"testId\":\"t2\"}\n", Some(&superseded)),
+            Ok(None)
+        );
+        // An entry with no records stays, empty.
+        assert_eq!(rewrite("", None), Ok(Some(String::new())));
+        // No newline at the end: none added.
+        assert_eq!(
+            rewrite("[{\"scope\":{}}]", None),
+            Ok(Some("[{\"scope\":{\"runId\":\"merged\"}}]".to_owned()))
+        );
+        assert!(
+            rewrite("not json\n", None)
+                .unwrap_err()
+                .contains("malformed")
+        );
+        assert!(
+            rewritten_contents(&[0xff, 0xfe], "merged", None)
+                .unwrap_err()
+                .contains("non-UTF-8")
+        );
+        let entry = |contents: &[u8]| EvidenceArchiveEntry {
+            path: "e.jsonl".into(),
+            contents: contents.to_vec(),
+        };
+        let tests = measured_tests(&[
+            entry(b"{\"testId\":\"t1\",\"test\":\"adds\"}\n{\"testId\":\"t3\"}\nnot \"testId\" json\nplain\n"),
+            entry(&[0xff, 0xfe]),
+        ]);
+        assert_eq!(
+            tests,
+            [("t1".to_owned(), "adds".to_owned())].into_iter().collect()
+        );
+        let items = |n: usize| (1..=n).map(|i| format!("i{i}")).collect::<Vec<_>>();
+        assert_eq!(listed(&items(0)), "");
+        assert_eq!(listed(&items(3)), "i1; i2; i3");
+        assert_eq!(listed(&items(5)), "i1; i2; i3; and 2 more");
+    }
 }
