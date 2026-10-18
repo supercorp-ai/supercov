@@ -2500,3 +2500,43 @@ fn assertion_views_page_name_assessed_tests_and_refuse_what_matches_nothing() {
         &["give a file, a file:line or --test, not more than one"],
     );
 }
+
+#[test]
+fn filtered_assertions_read_the_share_of_the_tests_a_filter_picks() {
+    let project = Project::cart("filtered-assertions");
+    let (base, _) = gateway(MODEL, answer_all_but_the_sum);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let said = |args: &[&str]| {
+        let mut full = vec!["runs", run.as_str(), "assertions"];
+        full.extend(args);
+        project.supercov(&full).succeeds()
+    };
+    contains_all(
+        &said(&["--title", "shipping"]),
+        &["100% asserted (2 of 2 executed statements), by the tests --title shipping picks"],
+    );
+    // Statements other tests answered for first are named, with how to ask these.
+    contains_all(
+        &said(&["--title", "total adds"]),
+        &[
+            "0% asserted (0 of 1 executed statements)",
+            "4 other statement(s) these tests run were not asked of them",
+            "assertions assess --title 'total adds'",
+            "inspect a file: ",
+        ],
+    );
+    contains_all(
+        &said(&["src/cart.js", "--title", "coupon"]),
+        &[
+            "src/cart.js: 83.3% asserted (5 of 6 statements)",
+            "assertions --title 'coupon' 'src/cart.js:2'",
+        ],
+    );
+    contains_all(
+        &said(&["src/cart.js", "--weak"]),
+        &["src/cart.js: 0 asserted statement(s) rest on an answer under 75%"],
+    );
+}
