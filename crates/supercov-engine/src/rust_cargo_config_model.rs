@@ -791,4 +791,27 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn a_cli_config_is_one_undecorated_dotted_key_assignment() {
+        // Whitespace around the dots is no decoration to Cargo; a comment is.
+        for good in [
+            "build . jobs = 4",
+            "build.jobs = 4",
+            "target.x86_64-unknown-linux-gnu.runner = \"r\"",
+            "a=1",
+        ] {
+            validate_cli_dotted_key(good).unwrap_or_else(|error| panic!("{good}: {error:?}"));
+        }
+        for bad in [
+            "not toml [",
+            "a = 1\nb = 2",
+            "[build]\njobs = 4",
+            "build = { jobs = 4 }",
+            "build.jobs = 4 # why",
+            "# lead\nbuild.jobs = 4",
+            "[[bin]]\nname = \"x\"",
+        ] {
+            assert!(validate_cli_dotted_key(bad).is_err(), "{bad:?}");
+        }
+    }
 }

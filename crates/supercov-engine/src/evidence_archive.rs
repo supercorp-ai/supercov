@@ -1073,4 +1073,11 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn an_archive_path_is_one_relative_forward_slash_path() {
+        validate_archive_path("runs/a/evidence.json").unwrap();
+        for bad in ["", "/abs", "dir/", "a\\b", "a\0b", "a//b", "./a", "a/../b"] {
+            assert!(validate_archive_path(bad).is_err(), "{bad:?}");
+        }
+    }
 }
