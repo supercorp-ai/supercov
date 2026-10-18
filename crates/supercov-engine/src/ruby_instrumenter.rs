@@ -3583,6 +3583,8 @@ mod tests {
             // Jumps inside a value: an arm returns, so the value is probed by arm.
             "def k(x)\n  y = unless x then 1 else return 2 end\n  z = unless x then return 3 end\n  w = (begin; return 4 if x; 5; rescue StandardError; return 6; else; 7; end)\n  v = (begin; x; rescue ArgumentError; 8; rescue StandardError; return 9; end)\n  u = case x when 1 then return 10 else 11 end\n  [y, z, w, v, u]\nend\n",
             "def l(x)\n  y = if x then 1 elsif x.nil? then return 2 else 3 end\n  z = (begin; 1; rescue; 2; end)\n  [y, z]\nend\n",
+            // Parentheses and negations around a decision's conditions.
+            "def m(a, b)\n  return 1 if ()\n  return 2 if (a; b)\n  return 3 if !(a && b)\n  return 4 if not(a || b)\n  return 5 if !!a\n  return 6 if (!a) && ((b))\n  7\nend\n",
         ];
         for source in shapes {
             let mut next = 0;
