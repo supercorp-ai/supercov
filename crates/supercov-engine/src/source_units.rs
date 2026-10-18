@@ -3092,4 +3092,81 @@ mod edge_unit_tests {
         }
         assert!(code("a.ts", "export function (").is_none());
     }
+
+    /// Go methods are named for their receiver's type, however written; a
+    /// comment is no change unless it is a Supercov pragma, a Go directive,
+    /// a Python encoding line or a Ruby magic comment.
+    #[test]
+    fn go_receivers_name_methods_and_only_significant_comments_change_code() {
+        let go = "package p\n\ntype Server struct{}\n\nfunc (s *Server) Start() {}\nfunc (Server) Stop() {}\nfunc (l *List[T]) Push(v T) {}\nfunc plain() {}\n";
+        let parsed = code("a.go", go).unwrap();
+        assert_eq!(
+            parsed
+                .units
+                .iter()
+                .map(|u| u.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "",
+                "Server",
+                "Server.Start",
+                "Server.Stop",
+                "List.Push",
+                "plain"
+            ]
+        );
+        for (file, plain, other, same) in [
+            (
+                "a.go",
+                "package p\n// note\nfunc f() {}\n",
+                "package p\n// other\nfunc f() {}\n",
+                true,
+            ),
+            (
+                "a.go",
+                "package p\n// note\nfunc f() {}\n",
+                "package p\n//go:noinline\nfunc f() {}\n",
+                false,
+            ),
+            (
+                "a.go",
+                "package p\nfunc f() {}\n",
+                "package p\n// supercov:ignore\nfunc f() {}\n",
+                false,
+            ),
+            (
+                "a.py",
+                "x = 1\n",
+                "# -*- coding: latin-1 -*-\nx = 1\n",
+                false,
+            ),
+            ("a.py", "x = 1\n", "# supercov: skip\nx = 1\n", false),
+            ("a.py", "x = 1\n", "#!/usr/bin/env python\nx = 1\n", true),
+            (
+                "a.rs",
+                "fn f() {}\n",
+                "// supercov ignore\nfn f() {}\n",
+                false,
+            ),
+            ("a.rs", "fn f() {}\n", "/// doc\nfn f() {}\n", true),
+            ("a.rb", "x = 1\n", "# supercov: skip\nx = 1\n", false),
+            (
+                "a.rb",
+                "x = 1\n",
+                "# frozen_string_literal: true\nx = 1\n",
+                false,
+            ),
+            ("A.java", "class A {}\n", "// supercov\nclass A {}\n", false),
+            ("A.kt", "class A\n", "/* supercov */\nclass A\n", false),
+            (
+                "a.js",
+                "const a = 1;\n",
+                "// supercov ignore\nconst a = 1;\n",
+                false,
+            ),
+        ] {
+            let (a, b) = (code(file, plain).unwrap(), code(file, other).unwrap());
+            assert_eq!(a.semantic == b.semantic, same, "{file}: {other:?}");
+        }
+    }
 }
