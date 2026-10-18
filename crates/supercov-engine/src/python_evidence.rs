@@ -3638,6 +3638,34 @@ mod tests {
                 "must name a worker and test",
             ),
             (
+                "record-worker",
+                vec![process.clone(), with(&phase, "worker", json!(""))],
+                "must name a worker and test",
+            ),
+            (
+                "record-python-short",
+                vec![with(&process, "python", json!("3"))],
+                "the test command ran Python 3",
+            ),
+            (
+                "record-empty-digits",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":decision,"v":"","o":1}),
+                ],
+                "decision vector digits must be 0, 1 or 2",
+            ),
+            (
+                "record-batch-bad-digit",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"decs","ctx":1,"v":[[decision, "29", 1]]}),
+                ],
+                "decision vector digits must be 0, 1 or 2",
+            ),
+            (
                 "record-outcome-phase",
                 vec![process.clone(), with(&outcome, "phase", json!("body"))],
                 "unknown test outcome phase",
