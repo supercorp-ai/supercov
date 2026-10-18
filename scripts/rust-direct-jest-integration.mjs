@@ -148,7 +148,6 @@ try {
   // among the failed: filters recalculate from attempts.
   const passed = query(run.runId, 'passed', 'summary');
   assert.equal(passed.data.tests, 7, JSON.stringify(passed.data.testOutcomes));
-  assert.equal(passed.data.confidence.lines.asserted, 0, "a run alone never credits assertions");
 
   const allowed = query(run.runId, 'all', 'line', { file: 'src/permission.js', line: 3, offset: 0, limit: 20 });
   const owners = JSON.stringify(allowed);

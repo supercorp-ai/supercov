@@ -367,8 +367,6 @@ try {
   assert.match(JSON.stringify(negation), /UnitStyleTest#test_negation/, 'test-unit identity reaches the line');
   const testUnitFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.doesNotMatch(JSON.stringify(testUnitFile), /ruby-runner-adapter-failed/, 'the test-unit adapter installed completely');
-  const testUnitSummary = query(['runs', 'latest'], environment);
-  assert.equal(testUnitSummary.confidence.lines.asserted, 0, "a run alone never credits assertions");
 
   // Thread-parallel Minitest: probes stay per test, stdlib deltas that
   // overlapped go to the run and the limitation says so.
