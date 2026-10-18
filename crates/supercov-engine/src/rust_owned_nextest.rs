@@ -87,6 +87,8 @@ pub struct NextestOutcome {
     /// The crates a test's Worker returned a region for: `wrangler dev`
     /// built them, though the run's own build did not.
     pub built_crates: BTreeSet<String>,
+    /// A test started a Worker with `wrangler dev --remote`.
+    pub remote_workers: bool,
 }
 
 // -------------------------------------------------------------- the engine
@@ -238,6 +240,7 @@ pub(crate) fn run_nextest(
     let mut seen = BTreeSet::new();
     let mut ran = BTreeSet::new();
     let mut built_crates = BTreeSet::new();
+    let mut remote_workers = false;
     let mut results = Vec::with_capacity(records.len());
     for record in records {
         let key = (record.binary_id.clone(), record.test_name.clone());
@@ -272,6 +275,7 @@ pub(crate) fn run_nextest(
         }
         let attempt_id = format!("{run_id}:{}:{}", record.runner_attempt_id, record.attempt);
         if rust_workers.is_some() {
+            remote_workers |= crate::rust_worker::started_remote(&record.evidence);
             built_crates.extend(
                 crate::rust_worker::materialize_worker_windows(
                     &record.evidence,
@@ -338,6 +342,7 @@ pub(crate) fn run_nextest(
     Ok(NextestOutcome {
         results,
         built_crates,
+        remote_workers,
         artifact_files: artifacts
             .into_values()
             .map(|artifact| artifact.executable)

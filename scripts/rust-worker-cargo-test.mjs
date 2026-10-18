@@ -164,6 +164,37 @@ fn a_low_score_fails() {
 fn a_test_that_starts_no_worker() {
     assert_eq!(1 + 1, 2);
 }
+
+/// \`wrangler dev --remote\` against an API that is not there: the stand-in
+/// sees \`--remote\` before wrangler asks Cloudflare for anything, and no
+/// account is ever reached.
+#[test]
+fn a_test_that_starts_a_remote_worker() {
+    if std::env::var_os("GATE_REMOTE").is_none() {
+        return;
+    }
+    let _one = exclusive();
+    let mut child = Command::new("wrangler")
+        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../worker"))
+        .args(["dev", "--remote", "--show-interactive-dev-session=false"])
+        .env("CLOUDFLARE_API_TOKEN", "gate-no-account")
+        .env("CLOUDFLARE_ACCOUNT_ID", "0")
+        .env("CLOUDFLARE_API_BASE_URL", "http://127.0.0.1:9/client/v4")
+        .env("WRANGLER_SEND_METRICS", "false")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("wrangler on PATH");
+    for _ in 0..600 {
+        if child.try_wait().unwrap().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    drop(Dev { child, port: 0 });
+}
 `,
 };
 
@@ -193,7 +224,7 @@ try {
     const label = command.join(' ');
     const measured = run(root, binary, ['--', ...command], { PATH: path });
     assert.equal(measured.status, 0, `${label}\n${measured.stdout}${measured.stderr}`);
-    assert.match(measured.stderr, /Rust coverage: 3 test\(s\)/u, `${label}\n${measured.stderr}`);
+    assert.match(measured.stderr, /Rust coverage: 4 test\(s\)/u, `${label}\n${measured.stderr}`);
     assert.doesNotMatch(measured.stderr, /did not compile[^\n]*worker\/src\/lib\.rs/u, `${label}\n${measured.stderr}`);
 
     const id = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
@@ -226,6 +257,15 @@ try {
   assert.match(workerFile, /A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`/u, workerFile);
   const gaps = run(root, binary, ['runs', unrunId, 'gaps']).stdout;
   assert.match(gaps, /worker\/src\/lib\.rs/u, gaps);
+
+  // A test that starts the Worker with \`wrangler dev --remote\`: it runs on
+  // Cloudflare's edge, where wrangler opens no inspector, and the file says
+  // so rather than that no test started it.
+  const remote = run(root, binary, ['--', 'cargo', 'test', '--workspace', '--', 'a_test_that_starts_a_remote_worker'], { PATH: path, GATE_REMOTE: '1' });
+  assert.equal(remote.status, 0, `${remote.stdout}${remote.stderr}`);
+  const remoteId = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
+  const remoteFile = run(root, binary, ['runs', remoteId, 'file', 'worker/src/lib.rs']).stdout;
+  assert.match(remoteFile, /started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector/u, remoteFile);
 
   // The project is as it was: the copy alone was pointed at Supercov's
   // entry, and the Worker built with probes stayed there.

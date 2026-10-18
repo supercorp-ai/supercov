@@ -1928,8 +1928,14 @@ fn note_unrun_workers(
     original: &PreparedRustProject,
     declined: &BTreeSet<String>,
     built_crates: &BTreeSet<String>,
+    remote: bool,
 ) {
     let directories = crate::rust_worker::worker_crate_directories(&project.workspace_root);
+    let reason = if remote {
+        "A Rust Worker started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector, so what it ran cannot be read; a test that starts it with `wrangler dev` measures it"
+    } else {
+        "A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`, and no test of this run did"
+    };
     if directories.is_empty() {
         return;
     }
@@ -1958,7 +1964,7 @@ fn note_unrun_workers(
             "line": 1,
             "column": 0,
             "source": "",
-            "reason": "A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`, and no test of this run did",
+            "reason": reason,
             "blocking": false,
         }));
     }
@@ -2046,7 +2052,13 @@ pub fn run_prepared_rust_tests(
         )?;
         let (mut project, declined) =
             redecline_for_workers(original, project, declined, &outcome.built_crates);
-        note_unrun_workers(&mut project, original, &declined, &outcome.built_crates);
+        note_unrun_workers(
+            &mut project,
+            original,
+            &declined,
+            &outcome.built_crates,
+            outcome.remote_workers,
+        );
         report_declined(&declined, diagnostics)?;
         let project = &project;
         let artifact_count = outcome.artifact_files.len();
@@ -2217,8 +2229,10 @@ pub fn run_prepared_rust_tests(
     // the crates `wrangler dev` built for them, whose files count though the
     // run's own build never compiled them.
     let mut built_crates = BTreeSet::new();
+    let mut remote = false;
     if rust_workers.is_some() {
         for outcome in &outcomes {
+            remote |= crate::rust_worker::started_remote(&outcome.task.directory);
             built_crates.extend(
                 crate::rust_worker::materialize_worker_windows(
                     &outcome.task.directory,
@@ -2229,7 +2243,7 @@ pub fn run_prepared_rust_tests(
         }
     }
     let (mut project, declined) = redecline_for_workers(original, project, declined, &built_crates);
-    note_unrun_workers(&mut project, original, &declined, &built_crates);
+    note_unrun_workers(&mut project, original, &declined, &built_crates, remote);
     report_declined(&declined, diagnostics)?;
     let project = &project;
     // What `cargo test` prints for each binary: every test, the failures

@@ -906,6 +906,35 @@ fn starts_dev(arguments: &[std::ffi::OsString]) -> bool {
     false
 }
 
+/// `wrangler dev --remote` (or `-r`): the Worker runs on Cloudflare's edge,
+/// and wrangler opens no inspector into it there, so nothing can read what
+/// it runs.
+fn runs_remote(arguments: &[std::ffi::OsString]) -> bool {
+    arguments.iter().any(|argument| {
+        matches!(
+            argument.to_string_lossy().as_ref(),
+            "--remote" | "-r" | "--remote=true"
+        )
+    })
+}
+
+/// The name of the note a test's `wrangler dev --remote` leaves in its
+/// evidence.
+const REMOTE_NOTE: &str = "worker-remote-";
+
+/// Whether a test, by its evidence, started a Worker with `wrangler dev
+/// --remote`.
+pub fn started_remote(directory: &Path) -> bool {
+    fs::read_dir(directory).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(REMOTE_NOTE))
+        })
+    })
+}
+
 /// The inspector port the arguments name, as `--inspector-port N` or
 /// `--inspector-port=N`.
 fn named_inspector_port(arguments: &[std::ffi::OsString]) -> Option<u16> {
@@ -935,6 +964,15 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
     if starts_dev(&arguments)
         && let Some(evidence) = evidence
     {
+        if runs_remote(&arguments) {
+            // No poller: the run says why the Worker has no coverage.
+            let _ = fs::create_dir_all(&evidence);
+            let _ = fs::write(
+                evidence.join(format!("{REMOTE_NOTE}{}", std::process::id())),
+                "",
+            );
+            return exec_wrangler(&real, &arguments);
+        }
         let port = match named_inspector_port(&arguments) {
             Some(port) => Some(port),
             None => free_port().ok().inspect(|port| {
@@ -955,9 +993,15 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
                 .spawn();
         }
     }
+    exec_wrangler(&real, &arguments)
+}
+
+/// Becomes the real `wrangler`, so the test keeps the process and the
+/// signals it expects; where it cannot (Windows), runs it to its end.
+fn exec_wrangler(real: &std::ffi::OsStr, arguments: &[std::ffi::OsString]) -> i32 {
     let rustflags = worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default());
-    let mut command = std::process::Command::new(&real);
-    command.args(&arguments).env("RUSTFLAGS", rustflags);
+    let mut command = std::process::Command::new(real);
+    command.args(arguments).env("RUSTFLAGS", rustflags);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1196,6 +1240,10 @@ mod tests {
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
         };
+        assert!(runs_remote(&os(&["dev", "--remote"])));
+        assert!(runs_remote(&os(&["dev", "-r", "--port", "8787"])));
+        assert!(!runs_remote(&os(&["dev", "--remote=false"])));
+        assert!(!runs_remote(&os(&["dev", "--local"])));
         assert!(starts_dev(&os(&["dev", "--local"])));
         assert!(starts_dev(&os(&["--cwd", "worker", "dev"])));
         assert!(starts_dev(&os(&[
