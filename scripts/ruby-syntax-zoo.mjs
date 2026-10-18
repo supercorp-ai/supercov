@@ -205,6 +205,54 @@ end
   // Shapes beside the ones above: empty branches, a rescue naming its error
   // with \`then\`, jumps that end an arm, and calls that look like the
   // special ones (\`Class.new\`, \`refine\`, \`!\`) but are not.
+  'lib/more.rb': `module More
+  def self.empty_loops(limit)
+    count = 0
+    while (count += 1) < limit
+    end
+    until count >= limit + 2
+      count += 1
+    end
+    count
+  end
+
+  def self.empty_elsif(flag, other)
+    if flag
+      :first
+    elsif other
+    else
+    end
+  end
+
+  def self.unless_else(flag)
+    unless flag
+      :no
+    else
+    end
+  end
+
+  def self.not_called(value) = value.!()
+
+  def self.built(klass) = klass.new
+
+  def self.doubled(value) = begin
+    value * 2
+  end
+
+  def self.retried(attempts)
+    tries = 0
+    begin
+      tries += 1
+      # Not a StandardError: a bare rescue does not select it.
+      raise NotImplementedError if attempts.zero?
+      raise 'again' if tries < attempts
+      tries
+    rescue
+      retry
+    end
+  end
+end
+`,
   'lib/edges.rb': `module Edges
   class Base; end
 
@@ -330,6 +378,7 @@ end
   'test/zoo_test.rb': `require 'minitest/autorun'
 require 'flow'
 require 'shapes'
+require 'more'
 require 'literals'
 require 'edges'
 
@@ -441,6 +490,24 @@ class ZooTest < Minitest::Test
     assert_raises(TypeError) { Edges.begin_next([nil]) }
   end
 
+  def test_more
+    assert_equal 4, More.empty_loops(2)
+    assert_equal 3, More.empty_loops(1)
+    assert_equal 1, More.empty_loops(-1)
+    assert_equal :first, More.empty_elsif(true, false)
+    assert_nil More.empty_elsif(false, true)
+    assert_nil More.empty_elsif(false, false)
+    assert_equal :no, More.unless_else(false)
+    assert_nil More.unless_else(true)
+    assert_equal true, More.not_called(nil)
+    assert_equal false, More.not_called(1)
+    assert_kind_of Object, More.built(Object)
+    assert_equal 4, More.doubled(2)
+    assert_equal 1, More.retried(1)
+    assert_equal 3, More.retried(3)
+    assert_raises(NotImplementedError) { More.retried(0) }
+  end
+
   def test_literals
     assert_equal %i[yes yes yes yes yes yes yes no no],
                  %i[true integer float rational imaginary string symbol false nil].map { |kind| Literals.constant(kind) }
@@ -468,7 +535,7 @@ try {
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb', 'lib/edges.rb']) {
+  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb', 'lib/edges.rb', 'lib/more.rb']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {
