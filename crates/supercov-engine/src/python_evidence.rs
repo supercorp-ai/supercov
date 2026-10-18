@@ -3481,6 +3481,80 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A file-wide limitation other than an unobserved module takes the
+    /// whole file out of the denominator even where it was seen to run; one
+    /// that names no file or obligation stands on the first measured file;
+    /// one for a file outside the run takes nothing out; and one naming an
+    /// obligation the run does not have is refused.
+    #[test]
+    fn runtime_limitations_take_out_what_they_name() {
+        let measured = build_python_obligations("m.py", "def f():\n    return 1\n").unwrap();
+        let statement = &measured.plan.statements[0];
+        let run_with = |label: &str, limitations: &[serde_json::Value]| {
+            let directory = temporary(label);
+            let mut records = vec![
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11","executable":"python","argv":["pytest"]}),
+                json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":1,"id":statement.id}),
+                json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            ];
+            records.extend(limitations.iter().cloned());
+            write_transport(&directory.join("main.1.mmap"), &records, 0);
+            let run = build_python_frontend_run(
+                &measured.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            );
+            fs::remove_dir_all(directory).unwrap();
+            run
+        };
+        let run = run_with(
+            "limitations",
+            &[
+                json!({"t":"limitation","id":"python-code-object-unmapped","file":"m.py","reason":"no ranges"}),
+                json!({"t":"limitation","id":"python-monitoring-unavailable","reason":"off"}),
+                json!({"t":"limitation","id":"python-code-object-unmapped","file":"elsewhere.py","reason":"no ranges"}),
+            ],
+        )
+        .unwrap();
+        let manifest = &run.request.manifest;
+        assert!(
+            measured
+                .manifest
+                .points
+                .iter()
+                .all(|point| manifest.unmeasured.contains(&point.id)),
+            "{:?}",
+            manifest.unmeasured
+        );
+        let bare = manifest
+            .limitations
+            .iter()
+            .find(|limitation| limitation["code"] == "python-monitoring-unavailable")
+            .unwrap();
+        assert_eq!(bare["id"], "python-monitoring-unavailable");
+        assert_eq!(
+            (bare["file"].as_str(), bare["line"].as_u64()),
+            (Some("m.py"), Some(1))
+        );
+        assert!(
+            manifest
+                .limitations
+                .iter()
+                .any(|limitation| limitation["file"] == "elsewhere.py")
+        );
+        assert!(matches!(
+            run_with(
+                "unknown-obligation",
+                &[json!({"t":"limitation","id":"python-decision-partially-mapped","reason":"folded","obligation":"nope"})],
+            ),
+            Err(PythonEvidenceError::UnknownObligation(id)) if id == "nope"
+        ));
+    }
+
     #[test]
     fn joins_phases_outcomes_hits_and_vectors_into_exact_results() {
         let source = "def f(a, b):\n    if a and b:\n        return 1\n    return 0\n";
