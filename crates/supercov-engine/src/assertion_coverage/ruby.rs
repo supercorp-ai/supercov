@@ -655,6 +655,55 @@ mod tests {
     /// is none, `it_behaves_like` is one group, and `include_examples` adds
     /// examples the source does not count, so a later number is shown as its
     /// group.
+    /// Every kind of write becomes undefined, a comparison with nil is no
+    /// nil assigned, and what declares rather than runs is not asked.
+    #[test]
+    fn ruby_writes_comparisons_and_declarations_are_told_apart() {
+        let source = "module M\n  def g(x)\n    @a = 1\n    @@b = 2\n    $c = 3\n    a, b = 1, 2\n    return\n    x == nil\n    unless x then 5 end\n    x ? 1 : 2\n  end\n  alias h g\n  class << self; end\n  undef h\n  CONST = 1\n  M::X = 2\nend\n";
+        let starts = statement_starts(source);
+        let rb = Language::Ruby;
+        for (line, text, change) in [
+            (1, "module M", None),
+            (3, "@a = 1", Some(Change::ValueUndefined)),
+            (4, "@@b = 2", Some(Change::ValueUndefined)),
+            (5, "$c = 3", Some(Change::ValueUndefined)),
+            (6, "a, b = 1, 2", Some(Change::ValueUndefined)),
+            (7, "return", Some(Change::Skip)),
+            (8, "x == nil", Some(Change::Skip)),
+            (9, "unless x then 5 end", Some(Change::Invert)),
+            (10, "x ? 1 : 2", Some(Change::ReturnUndefined)),
+            (12, "alias h g", None),
+            (13, "class << self; end", None),
+            (14, "undef h", None),
+            (15, "CONST = 1", Some(Change::ValueUndefined)),
+            (16, "M::X = 2", Some(Change::ValueUndefined)),
+        ] {
+            assert_eq!(
+                change_at(&starts, line, text, rb),
+                change,
+                "line {line}: {text}"
+            );
+        }
+    }
+
+    /// An example made in a loop is numbered where it is written once; how
+    /// many the loop made is unknown, so an id after it names the group.
+    /// `skip` with no block runs nothing.
+    #[test]
+    fn examples_made_in_a_loop_leave_their_group_named() {
+        let spec = "RSpec.describe A do\n  skip \"later\"\n  it \"first\" do\n  end\n  [1, 2].each do |n|\n    it \"each #{n}\" do\n    end\n  end\n  shared_context \"ctx\" do\n  end\n  include_context \"ctx\"\n  it \"after\" do\n  end\nend\n";
+        let lines = spec.split('\n').collect::<Vec<_>>();
+        let at = |id: &str| {
+            let found = locate(spec, &lines, "rspec", &format!("spec/a_spec.rb[{id}]")).unwrap();
+            (found.start + 1, found.end + 1)
+        };
+        assert_eq!(at("1:1"), (3, 4), "skip with no block is no example");
+        assert_eq!(at("1:2"), (6, 7), "the first made in the loop");
+        // How many the loop made is unknown: what follows names the group.
+        assert_eq!(at("1:3"), (1, 14));
+        assert_eq!(at("1:5"), (1, 14));
+    }
+
     #[test]
     fn shared_examples_number_the_way_rspec_runs_them() {
         let spec = "RSpec.shared_examples \"a thing\" do\n  it \"works\" do\n  end\nend\n\nRSpec.describe A do\n  before { skip \"not here\" if ENV[\"CI\"] }\n  it_behaves_like \"a thing\"\n  it \"after\" do\n    expect(1).to eq(1)\n  end\n  include_examples \"a thing\"\n  it \"last\" do\n  end\nend\n";
