@@ -1516,4 +1516,107 @@ mod tests {
             ["src/lib.rs - a (line 1)", "src/lib.rs - b (line 5)"]
         );
     }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// rustdoc's own arguments and the harness's, taken apart the way each
+    /// reads them; a flag left without its value at the end is dropped.
+    #[test]
+    fn rustdoc_and_harness_arguments_are_taken_apart_as_each_reads_them() {
+        let parsed = parse_rustdoc_arguments(&strings(&[
+            "--test",
+            "--test-args",
+            "a b",
+            "--test-runtool",
+            "x",
+            "--test-runtool-arg",
+            "y",
+            "--test-args=c",
+            "--test-runtool=z",
+            "--crate-name",
+            "k",
+            "--test-args",
+        ]));
+        assert!(parsed.test);
+        assert_eq!(parsed.crate_arguments, ["--test", "--crate-name", "k"]);
+        assert_eq!(parsed.harness_arguments, ["a b", "c"]);
+        assert!(!parse_rustdoc_arguments(&strings(&["--crate-name", "k"])).test);
+        let harness = parse_harness_arguments(&strings(&[
+            "--skip=s1",
+            "--skip",
+            "s2",
+            "-q",
+            "--format=terse",
+            "--format",
+            "json",
+            "--exact",
+            "--list",
+            "--test-threads",
+            "2",
+            "-Z",
+            "x",
+            "--nocapture",
+            "filter",
+            "--logfile",
+        ]));
+        assert_eq!(harness.filters, ["filter"]);
+        assert_eq!(harness.skips, ["s1", "s2"]);
+        assert!(harness.exact && harness.list);
+        assert_eq!(
+            harness.passthrough,
+            ["--test-threads", "2", "-Z", "x", "--nocapture", "--logfile"]
+        );
+        assert!(
+            parse_harness_arguments(&strings(&["--skip"]))
+                .skips
+                .is_empty()
+        );
+    }
+
+    /// libtest's result lines, read by name and outcome, the mode it
+    /// appends taken off; a fence marks a doctest ignored by its attributes.
+    #[test]
+    fn harness_lines_and_fence_attributes_are_read_as_libtest_prints_them() {
+        let lines = harness_lines(
+            "running 5 tests\ntest a ... ok\ntest b ... FAILED\ntest c ... ignored\ntest d ... bench\nnoise\ntest src/lib.rs - f (line 3) - compile fail ... ok\n",
+        );
+        assert_eq!(
+            lines,
+            [
+                ("a".to_owned(), "passed".to_owned()),
+                ("b".to_owned(), "failed".to_owned()),
+                ("c".to_owned(), "skipped".to_owned()),
+                ("src/lib.rs - f (line 3)".to_owned(), "passed".to_owned()),
+            ]
+        );
+        let root = std::env::temp_dir().join(format!(
+            "supercov-fence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        fs::write(
+            root.join("src/lib.rs"),
+            "/// ```ignore\n/// ```rust,ignore-wasm32\n/// ```rust no_run\n/// ```\n",
+        )
+        .unwrap();
+        for (name, ignored) in [
+            ("src/lib.rs - f (line 1)", true),
+            ("src/lib.rs - f (line 2)", true),
+            ("src/lib.rs - f (line 3)", false),
+            ("src/lib.rs - f (line 4)", false),
+            ("src/lib.rs - f (line 9)", false),
+            ("src/missing.rs - f (line 1)", false),
+            ("src/lib.rs - f", false),
+            ("plain", false),
+        ] {
+            assert_eq!(fence_says_ignore(name, &root), ignored, "{name}");
+        }
+    }
 }
