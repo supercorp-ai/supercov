@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.19.0
+
+**Added**
+
+- `wasm-pack test` is measured: `--node`, and `--headless --chrome`, where Supercov reads each test's page through the driver before the runner closes it. Each wasm test is credited its own lines and decisions. Tests run in Firefox, Safari or Edge are run and reported as not measured.
+- `cargo nextest run` measures a Rust Worker its tests start with `wrangler dev`, as `cargo test` does.
+
+**Changed**
+
+- A Rust Worker crate no test ran says why in `gaps` and the file view: no test started it with `wrangler dev`, or a test started it with `wrangler dev --remote`, where it runs on Cloudflare's edge and cannot be read.
+
+**Fixed**
+
+- Files a project's `.gitignore` ignores, such as `.zig-cache/` build output, no longer make Rust runs stale.
+- A container a test created through Supercov's Docker relay could lose its note (for example that its image was built from an earlier copy) when the client finished quickly.
+
 ## 4.18.0
 
 **Added**
