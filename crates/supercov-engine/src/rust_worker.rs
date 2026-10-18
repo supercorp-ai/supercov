@@ -1164,7 +1164,7 @@ pub fn materialize_worker_windows(
 }
 
 /// The instrumentation token a region's header carries.
-fn region_token(bytes: &[u8]) -> Option<&str> {
+pub(crate) fn region_token(bytes: &[u8]) -> Option<&str> {
     let field = bytes.get(56..72)?;
     let end = field
         .iter()

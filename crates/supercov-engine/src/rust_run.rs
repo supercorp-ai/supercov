@@ -292,6 +292,24 @@ pub fn run_direct_rust(
             .map_err(|error| error.to_string())?;
         }
 
+        // `wasm-pack test` is learned once and then run as the `cargo test` it
+        // stands for; the run keeps the command it was given.
+        let learned = if crate::rust_wasm_pack::is_wasm_pack_test(&request.command) {
+            Some(crate::rust_wasm_pack::learn(
+                &root,
+                &request.command,
+                &root.join(".supercov/work").join(&request.run_id),
+            )?)
+        } else {
+            None
+        };
+        let command: &[String] = learned
+            .as_ref()
+            .map_or(&request.command, |learned| &learned.command);
+        let runner_environment = learned
+            .as_ref()
+            .map(|learned| learned.runner_environment.clone())
+            .unwrap_or_default();
         let adapter_started = Instant::now();
         let source_roots = crate::source_discovery::configured_source_roots(
             &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
@@ -362,7 +380,7 @@ pub fn run_direct_rust(
             .map_err(|error| error.to_string())?;
             // The target the command builds for decides which `#[cfg]` items
             // exist; when it cannot be read, every item is measured.
-            let cfg = crate::rust_test_runner::cargo_invocation(&workspace, &request.command)
+            let cfg = crate::rust_test_runner::cargo_invocation(&workspace, command)
                 .ok()
                 .and_then(|invocation| {
                     crate::rust_cargo_configuration::active_target_cfg(&workspace, &invocation)
@@ -419,10 +437,11 @@ pub fn run_direct_rust(
             .map_err(|error| error.to_string())?;
         let run = run_prepared_rust_tests(
             &project,
-            &request.command,
+            command,
             &request.run_id,
             &request.started_at,
             rust_workers.as_ref(),
+            &runner_environment,
             diagnostics,
         )
         .map_err(|error| error.to_string())?;

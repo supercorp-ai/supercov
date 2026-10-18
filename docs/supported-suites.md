@@ -296,8 +296,25 @@ npx supercov -- cargo test --target wasm32-wasip1
   file there as it runs.
 
 Each test is credited exactly, assertions included, as for a native test.
-Tests that run in a browser through `wasm-bindgen-test-runner`'s headless
-mode are not covered yet.
+
+`wasm-pack test` works the same way. Supercov runs wasm-pack once to learn
+the `cargo test` it would run (the runner, the browser driver), then runs
+that command test by test:
+
+```sh
+npx supercov -- wasm-pack test --node
+npx supercov -- wasm-pack test --headless --chrome
+```
+
+- In headless Chrome, Supercov stands between the runner and `chromedriver`,
+  and reads what each test's module ran from the page before the runner
+  closes it.
+- Tests run in Firefox, Safari or Edge are run and reported, but not
+  measured yet; the run says so.
+- `wasm-pack test` is measured on Linux and macOS. On Windows, run the
+  `cargo test --target wasm32-unknown-unknown` it runs.
+- Deno is not supported. `wasm-bindgen-test-runner`'s Deno mode
+  (`WASM_BINDGEN_USE_DENO=1`) does not run on Deno 2.
 
 ## Python
 
