@@ -2545,4 +2545,67 @@ mod tests {
             "No test recorded coverage"
         );
     }
+
+    /// A saved assessment beside a file or a line: nothing without one,
+    /// the share and the lines left, a dozen of them named.
+    #[test]
+    fn assessment_lines_say_what_is_asserted_and_what_is_not() {
+        use serde_json::json;
+        assert!(file_assertion_lines(None).is_empty());
+        assert!(file_assertion_lines(Some(&json!({"available": false}))).is_empty());
+        assert!(
+            file_assertion_lines(Some(&json!({"available": true, "statements": 0}))).is_empty()
+        );
+        let all = file_assertion_lines(Some(&json!({
+            "available": true, "statements": 4, "asserted": 4, "percentage": 100.0
+        })));
+        assert_eq!(
+            all,
+            [
+                "",
+                "Assertions  100% (4/4 statements a test is judged to catch)"
+            ]
+        );
+        let lines = (1..=14).collect::<Vec<u64>>();
+        let some = file_assertion_lines(Some(&json!({
+            "available": true, "statements": 20, "asserted": 6, "percentage": 30.0,
+            "notAssertedLines": lines, "inspect": "supercov runs r assertions a.js"
+        })));
+        assert_eq!(
+            some[2],
+            "  Not asserted on line(s) 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 2 more"
+        );
+        assert_eq!(some[3], "  Inspect: supercov runs r assertions a.js");
+        assert!(
+            line_assertion_lines(Some(&json!({"available": true, "statements": []}))).is_empty()
+        );
+        let line = line_assertion_lines(Some(&json!({
+            "available": true,
+            "inspect": "supercov runs r assertions a.js:3",
+            "statements": [
+                {"asserted": true, "text": "x = 1", "change": "x is undefined", "test": {"name": "adds"}, "answer": 0.9},
+                {"asserted": false, "text": "y = 2", "change": "y is undefined"}
+            ]
+        })));
+        assert_eq!(
+            line,
+            [
+                "",
+                "Assertions",
+                "  Asserted: `x = 1`; adds is judged to fail if it changes (x is undefined, 90% likely to fail)",
+                "  Not asserted: `y = 2`; no test that runs it is judged to fail if it changes (y is undefined); closest: no test",
+                "  Inspect: supercov runs r assertions a.js:3",
+            ]
+        );
+        assert_eq!(state_label("missing"), "NOT COVERED");
+        assert_eq!(state_label("limited"), "NOT MEASURED");
+        assert_eq!(state_label("other"), "UNKNOWN");
+        assert_eq!(confidence_label("action"), "linked to a test action");
+        assert_eq!(branch_need("catch entered"), "catch outcome not observed");
+        assert_eq!(
+            branch_need("short-circuit / left selected"),
+            "left-selected short-circuit outcome not observed"
+        );
+        assert_eq!(branch_need("odd"), "branch outcome not observed: odd");
+    }
 }
