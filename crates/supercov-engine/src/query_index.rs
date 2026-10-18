@@ -539,15 +539,18 @@ mod tests {
     use super::*;
 
     fn root(label: &str) -> PathBuf {
+        // The counter keeps two tests that read the same clock tick apart.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "supercov-query-index-{label}-{}-{nonce}",
-            std::process::id()
+            "supercov-query-index-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir(&path).unwrap();
         path
     }
 
@@ -700,6 +703,144 @@ mod tests {
             QueryIndex::open(&link, &identity(1)),
             Err(QueryIndexError::NotRegularFile(_))
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every field of the header and of each section descriptor is checked:
+    /// an index whose header is re-signed after one field changed is refused
+    /// for that field.
+    #[test]
+    fn each_header_and_descriptor_field_is_checked() {
+        let root = root("fields");
+        let path = root.join("query-index.v1.bin");
+        write_query_index(&sections(9), &identity(1), &path).unwrap();
+        let valid = fs::read(&path).unwrap();
+        let open_with = |bytes: &[u8], expected: &QueryIndexIdentity| {
+            fs::write(&path, bytes).unwrap();
+            match QueryIndex::open(&path, expected) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        let open = |bytes: &[u8]| open_with(bytes, &identity(1));
+        let signed = |edit: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = valid.clone();
+            edit(&mut bytes);
+            let checksum = Sha256::digest(&bytes[..HEADER_CHECKSUM_OFFSET]);
+            bytes[HEADER_CHECKSUM_OFFSET..QUERY_INDEX_HEADER_SIZE].copy_from_slice(&checksum);
+            bytes
+        };
+        let put32 = |bytes: &mut Vec<u8>, at: usize, value: u32| {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        let put64 = |bytes: &mut Vec<u8>, at: usize, value: u64| {
+            bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        let field =
+            |section: usize, offset: usize| DESCRIPTOR_OFFSET + section * DESCRIPTOR_SIZE + offset;
+        let read64 = |at: usize| u64::from_le_bytes(valid[at..at + 8].try_into().unwrap());
+        assert_eq!(open(&valid), "accepted");
+        // The descriptor whose records have a fixed size.
+        let sized = (0..2)
+            .find(|&section| valid[field(section, 4)..field(section, 4) + 4] != [0; 4])
+            .unwrap();
+        let mut longer = valid.clone();
+        longer.extend_from_slice(&[0; 8]);
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (valid[..100].to_vec(), "InvalidHeader(\"truncated\")"),
+            (signed(&|b| b[0] = b'X'), "InvalidHeader(\"magic\")"),
+            (
+                signed(&|b| put32(b, 8, 99)),
+                "InvalidHeader(\"schema version\")",
+            ),
+            (
+                signed(&|b| put32(b, 12, 1)),
+                "InvalidHeader(\"header size\")",
+            ),
+            (
+                {
+                    let mut b = valid.clone();
+                    b[200] ^= 1;
+                    b
+                },
+                "InvalidHeader(\"checksum\")",
+            ),
+            (longer, "InvalidHeader(\"total length\")"),
+            (signed(&|b| put32(b, 40, 1)), "InvalidHeader(\"page size\")"),
+            (
+                signed(&|b| put32(b, 36, QUERY_INDEX_MAX_SECTIONS as u32 + 1)),
+                "TooManySections",
+            ),
+            (signed(&|b| put32(b, field(0, 0), 0)), "DuplicateSection(0)"),
+            (
+                signed(&|b| {
+                    let kind =
+                        u32::from_le_bytes(b[field(0, 0)..field(0, 0) + 4].try_into().unwrap());
+                    put32(b, field(1, 0), kind)
+                }),
+                "DuplicateSection",
+            ),
+            (signed(&|b| put64(b, field(sized, 24), 3)), "record shape"),
+            (signed(&|b| put32(b, field(0, 40), 7)), "digest count"),
+            (signed(&|b| put64(b, field(0, 8), 8)), "bounds"),
+            (
+                signed(&|b| put64(b, field(0, 8), valid.len() as u64)),
+                "bounds",
+            ),
+            (signed(&|b| put64(b, field(0, 32), 8)), "bounds"),
+            (
+                signed(&|b| put64(b, field(0, 32), valid.len() as u64)),
+                "bounds",
+            ),
+            (
+                signed(&|b| put64(b, field(1, 8), read64(field(0, 8)))),
+                "overlapping sections",
+            ),
+        ];
+        for (bytes, expected) in &cases {
+            let said = open(bytes);
+            assert!(said.contains(expected), "{expected}: {said}");
+        }
+        for (identity, reason) in [
+            (
+                QueryIndexIdentity {
+                    evidence_bytes: 1,
+                    ..identity(1)
+                },
+                "evidence length",
+            ),
+            (
+                QueryIndexIdentity {
+                    archive_schema_version: 9,
+                    ..identity(1)
+                },
+                "archive schema",
+            ),
+            (
+                QueryIndexIdentity {
+                    evidence_sha256: [0; 32],
+                    ..identity(1)
+                },
+                "evidence hash",
+            ),
+            (
+                QueryIndexIdentity {
+                    analysis_sha256: [0; 32],
+                    ..identity(1)
+                },
+                "analysis hash",
+            ),
+            (
+                QueryIndexIdentity {
+                    producer_sha256: [0; 32],
+                    ..identity(1)
+                },
+                "producer hash",
+            ),
+        ] {
+            let said = open_with(&valid, &identity);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
