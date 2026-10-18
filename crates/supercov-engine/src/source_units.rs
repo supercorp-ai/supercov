@@ -229,10 +229,8 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     let source_type =
         crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
     let allocator = oxc_allocator::Allocator::default();
+    // `code` read the same source with the same parser: it parses cleanly.
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return None;
-    }
     // Names a statement binds, where all it does is define functions.
     fn functions(declaration: &Declaration<'_>) -> Option<Vec<String>> {
         match declaration {
@@ -370,7 +368,8 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
         let named = specifiers
             .iter()
             .all(|specifier| matches!(specifier, ImportDeclarationSpecifier::ImportSpecifier(_)));
-        if !named || specifiers.len() < 2 {
+        // Some names unused and some used: there are at least two.
+        if !named {
             return None;
         }
         let first = specifiers[0].span();
@@ -2605,6 +2604,36 @@ mod tests {
         ] {
             assert_eq!(with(tail), None, "{tail}");
         }
+    }
+
+    /// Declarations with no body, a binding that is not a function, and an
+    /// added class are not additions a test could not have run; functions
+    /// bound together are.
+    #[test]
+    fn only_function_definitions_count_as_additions() {
+        let head = "export function a() {\n  return 1;\n}\n";
+        let before = code("h.ts", head).unwrap();
+        for added in [
+            "declare function b(): void;\nexport function c() {\n  return 2;\n}\n",
+            "declare const b: () => void;\nexport function c() {\n  return 2;\n}\n",
+            "export const x = 1, f = () => 1;\n",
+            "export class K {\n  m() {\n    return 1;\n  }\n}\n",
+            "export function c() {\n  return 2;\n}\nexport class K {\n  m() {\n    return 1;\n  }\n}\n",
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{head}{added}")),
+                None,
+                "{added}"
+            );
+        }
+        assert_eq!(
+            only_added(
+                &before,
+                "h.ts",
+                &format!("{head}export const f = () => 1, g = function () {{\n  return 2;\n}};\n")
+            ),
+            Some(vec!["f".to_owned(), "g".to_owned()])
+        );
     }
 
     #[test]
