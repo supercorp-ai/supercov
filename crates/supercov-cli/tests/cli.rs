@@ -7528,3 +7528,52 @@ fn a_branch_lists_its_unrun_outcomes_in_one_order() {
         );
     }
 }
+
+#[test]
+fn covered_unmeasured_and_empty_views_say_which_they_are() {
+    let project = Project::cart("empty-views");
+    let first = project.measure(&[]);
+    for at in 0..2 {
+        project.write(
+            &format!("src/part{at}.js"),
+            &format!("export function part{at}(a) {{\n  return a ? {at} : -{at};\n}}\n"),
+        );
+        project.write(
+            &format!("test/part{at}.test.js"),
+            &format!(
+                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ part{at} }} from \"../src/part{at}.js\";\ntest(\"part{at} both\", () => {{\n  assert.equal(part{at}(true), {at});\n  assert.equal(part{at}(false), -{at});\n}});\n"
+            ),
+        );
+    }
+    project.commit("parts");
+    let second = project.measure(&[]);
+    // Every line covered is not "nothing measured".
+    let covered = project
+        .supercov(&["runs", "latest", "file", "src/part1.js"])
+        .succeeds();
+    contains_all(
+        &covered,
+        &["No gap lines: every line is covered and measured."],
+    );
+    assert!(!covered.contains("Nothing measured"), "{covered}");
+    // Everything passed, so no attempt failed.
+    for query in ["kinds", "runners"] {
+        contains_all(
+            &project
+                .supercov(&["runs", "latest", query, "--filter", "failed"])
+                .succeeds(),
+            &[
+                "No tests in this view (failed attempts only)",
+                "showing 0-0 of 0",
+            ],
+        );
+    }
+    // Only gains: no "most lost first" over a list with nothing lost.
+    let gained = project.supercov(&["diff", &first, &second]).succeeds();
+    contains_all(&gained, &["in 2 files:", "src/part0.js: gained"]);
+    assert!(!gained.contains("most lost first"), "{gained}");
+    contains_all(
+        &project.supercov(&["diff", &second, &first]).succeeds(),
+        &["in 2 files, most lost first:", "src/part0.js: lost"],
+    );
+}

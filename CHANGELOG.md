@@ -4,6 +4,9 @@
 
 **Fixed**
 
+- `file` on a file whose every line is covered said "Nothing measured: the run counts no obligation in this file"; it says every line is covered and measured.
+- `kinds` and `runners` with a `--filter` no attempt matched (`--filter failed` on a passing run) printed an empty line; they say no tests are in that view.
+- `diff` said "most lost first" above a list of files where nothing was lost.
 - `minimize` with no `--target` asked for 100% and so failed on any run its tests do not fully cover, although the CLI guide shows it first; it now keeps everything the tests together cover, and `--target` still asks for a percentage.
 - `line` listed a branch's unrun outcomes in an order that changed from call to call (`true; false`, then `false; true`); they are listed in the order the run recorded them.
 - A damaged run evidence file whose count or length was enormous made Supercov overflow or try to allocate it and abort; it is reported as truncated.

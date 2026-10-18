@@ -604,6 +604,12 @@ fn render_dimension(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // `--filter failed` on a run where everything passed picks no attempt.
+    let body = if values.is_empty() && page.total == 0 {
+        format!("No tests in this view ({})", filter_label(request))
+    } else {
+        body
+    };
     let mut output = format!("{body}\n{}", page_label(page));
     if let Some(next) = next_page(&coverage_command(run, request, child), page) {
         output.push_str(&format!("\nnext page: {next}"));
@@ -1449,7 +1455,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     }
                 ),
             ];
-            if page.total == 0 && data.total_obligations == 0 {
+            if page.total == 0 && data.counts.total_lines == 0 {
                 // A file the build never compiled, or one with nothing to
                 // run: nothing in it was measured, so nothing is covered.
                 lines.truncate(lines.len() - 1);
@@ -2121,7 +2127,9 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     .collect::<Vec<_>>()
                     .join(", ")
                 };
-                lines.push(if data.gained_only {
+                let lost_any =
+                    data.lost.line_count + data.lost.branch_count + data.lost.mcdc_count > 0;
+                lines.push(if data.gained_only || !lost_any {
                     format!("in {} files:", data.files)
                 } else {
                     format!("in {} files, most lost first:", data.files)
