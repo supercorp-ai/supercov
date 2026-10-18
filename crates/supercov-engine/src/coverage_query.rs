@@ -5204,6 +5204,102 @@ mod tests {
         );
     }
 
+    /// Transport trouble is named in the summary: malformed records, and
+    /// remote launches no server evidence came back from.
+    #[test]
+    fn the_summary_names_corrupt_records_and_missing_remote_evidence() {
+        let codes = |scoped: usize| {
+            let mut report = report(vec![result(
+                "admin",
+                McdcVector {
+                    values: vec![Some(true), None],
+                    outcome: true,
+                },
+            )]);
+            let transport = crate::coverage_report::TransportStats {
+                processes: 1,
+                child_launches: 0,
+                remote_launches: 1,
+                workspace_capabilities: 0,
+                guest_processes: 0,
+                scoped_server_records: scoped,
+                background_server_records: 0,
+                corrupt_records: 2,
+                corrupt_files: 1,
+            };
+            for view in [
+                &mut report.view,
+                &mut report.filters.passed,
+                &mut report.filters.failed,
+            ] {
+                view.transport = Some(transport.clone());
+            }
+            let root = std::env::temp_dir().join(format!(
+                "supercov-transport-summary-{}-{}-{scoped}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let root = crate::test_directory::TestDirectory::adopt(root);
+            let path = root.join("query-index.v1.bin");
+            let identity = crate::query_index::QueryIndexIdentity {
+                evidence_sha256: [1; 32],
+                evidence_bytes: 100,
+                analysis_sha256: [2; 32],
+                producer_sha256: [3; 32],
+                archive_schema_version: 2,
+            };
+            crate::query_index::write_query_index(
+                &crate::coverage_index::coverage_index_sections(&report).unwrap(),
+                &identity,
+                &path,
+            )
+            .unwrap();
+            let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+            let index = CoverageIndex::new(&container).unwrap();
+            let summary = coverage_summary_query(
+                &index,
+                CoverageSummaryQueryOptions {
+                    run: "run",
+                    view: CoverageViewId::All,
+                    kind: None,
+                    runner: None,
+                    valid: true,
+                    test_exit_code: Some(0),
+                    stale: false,
+                    stale_reasons: Vec::new(),
+                },
+            )
+            .unwrap();
+            summary
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.clone())
+                .collect::<Vec<_>>()
+        };
+        let none_back = codes(0);
+        assert!(
+            none_back.contains(&"CORRUPT_EVIDENCE_RECORDS".to_owned()),
+            "{none_back:?}"
+        );
+        assert!(
+            none_back.contains(&"REMOTE_SERVER_EVIDENCE_MISSING".to_owned()),
+            "{none_back:?}"
+        );
+        let scoped_back = codes(1);
+        assert!(
+            scoped_back.contains(&"CORRUPT_EVIDENCE_RECORDS".to_owned()),
+            "{scoped_back:?}"
+        );
+        assert!(
+            !scoped_back.contains(&"REMOTE_SERVER_EVIDENCE_MISSING".to_owned()),
+            "{scoped_back:?}"
+        );
+    }
+
     #[test]
     fn refuses_background_evidence() {
         let mut aggregate = result(
