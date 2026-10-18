@@ -424,4 +424,37 @@ router.get('/x/:id', async (req, res) => {{
         assert!(!secretish("/api/users"));
         assert!(!secretish("select * from users"));
     }
+
+    #[test]
+    fn each_shape_of_a_secret_is_read_on_its_own() {
+        for (value, secret) in [
+            ("short", false),
+            ("0123456789abcdef0123", true),
+            ("0123456789abcdef012", false),
+            ("Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8==", true),
+            ("Aa1+Bb2/Cc3_Dd4-Ee5Ff6Gg7Hh8", true),
+            ("aa1bb2cc3dd4ee5ff6gg7hh8ii", false),
+            ("AA1BB2CC3DD4EE5FF6GG7HH8II", false),
+            ("AaBbCcDdEeFfGgHhIiJjKkLlMm", false),
+            ("Aa1Bb2Cc3 Dd4Ee5Ff6Gg7Hh8Ii", false),
+            ("my-secret-thing", true),
+            ("old passwd here", true),
+            ("plain words here", false),
+        ] {
+            assert_eq!(secretish(value), secret, "{value}");
+        }
+        // A template literal with no expressions is read as its text; one with
+        // an expression is not one literal.
+        let found = nodes(
+            Path::new("a.js"),
+            "const a = `my-secret-thing`;\nconst b = `x ${y} my-secret-thing`;\n",
+        )
+        .unwrap();
+        let literal_lines = found
+            .iter()
+            .filter(|node| node.kind == NodeKind::Literal)
+            .map(|node| node.line)
+            .collect::<Vec<_>>();
+        assert_eq!(literal_lines, [1]);
+    }
 }
