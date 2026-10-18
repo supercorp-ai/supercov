@@ -243,6 +243,7 @@ fn javascript_archive_entries(
             _ => "failed",
         };
         let command_result = RawTestResult {
+            span: None,
             test_id: Some(format!("command:{run_id}")),
             scope: None,
             test: "Test command".into(),
@@ -564,8 +565,9 @@ pub fn run_direct_javascript(
         &request.command,
     )
     .map_err(|error| error.to_string())?;
-    // Browser tests may drive a Python or Ruby server, whose source the
-    // probes measure in the copy the suite runs in. Without one, a project
+    // Browser tests may drive a server in another language -- Python, Ruby,
+    // Go, Java/Kotlin, a Rust Worker -- whose source the probes measure in
+    // the copy the suite runs in. Without one, a project
     // with no JavaScript source has nothing to measure.
     let browser_suite = project.playwright_config.is_some();
     let serves_python = browser_suite
@@ -577,6 +579,9 @@ pub fn run_direct_javascript(
     let serves_go = browser_suite
         && (root.join("go.mod").is_file()
             || !crate::go_project::workspace_modules(&root).is_empty());
+    let serves_rust_worker = browser_suite && crate::rust_worker::RustWorkerServer::present(&root);
+    // A wasm library any JavaScript suite may load, not only a browser one.
+    let serves_rust_wasm = crate::rust_wasm::RustWasmServer::present(&root);
     let serves_jvm = browser_suite
         && [
             "pom.xml",
@@ -592,6 +597,8 @@ pub fn run_direct_javascript(
         && !serves_ruby
         && !serves_go
         && !serves_jvm
+        && !serves_rust_worker
+        && !serves_rust_wasm
     {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
@@ -732,6 +739,34 @@ pub fn run_direct_javascript(
             crate::jvm_run::JvmServer::prepare(&root, &workspace, &run_id, &request.command)?
     {
         servers.push(Server::Jvm(server));
+    }
+    // A Rust Worker is instrumented in the copy too, and `wrangler dev`
+    // builds it there when the suite starts it.
+    if serves_rust_worker {
+        servers.extend(
+            crate::rust_worker::RustWorkerServer::prepare(
+                &root,
+                &workspace,
+                &run_id,
+                &request.command,
+                diagnostics,
+            )?
+            .into_iter()
+            .map(Server::RustWorker),
+        );
+    }
+    if serves_rust_wasm {
+        servers.extend(
+            crate::rust_wasm::RustWasmServer::prepare(
+                &root,
+                &workspace,
+                &workspace.join(".supercov/server-evidence"),
+                &run_id,
+                &request.command,
+            )?
+            .into_iter()
+            .map(Server::RustWasm),
+        );
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
@@ -882,56 +917,25 @@ pub fn run_direct_javascript(
     {
         overrides.insert("PATH".into(), path.to_owned());
     }
-    // A server compose builds from the copy runs in a container nothing of
-    // the run reaches. The `docker` launcher gives each service built from
-    // the copy the run's settings and Supercov's directory, mounted at its
-    // path (docker_servers.rs): a Go or Java server's windows and a Node
-    // server's evidence are written where the run reads them. The run stops
-    // what it started before reading.
+    // A server built from the copy runs in a container nothing of the run
+    // reaches: the suite's Docker clients reach the daemon through a relay
+    // that hands it the run's settings (`start_docker_relay`).
+    #[cfg(unix)]
     let docker_state = root.join(".supercov/work").join(&run_id).join("docker");
-    let mut docker_environment = overrides
-        .keys()
-        .filter(|name| name.starts_with("SUPERCOV_"))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    docker_environment.extend(
-        servers
-            .iter()
-            .flat_map(|server| server.environment().into_keys()),
-    );
-    let docker_environment = docker_environment.into_iter().collect::<Vec<_>>();
-    let docker_servers = !project.source_files.is_empty() || !servers.is_empty();
-    if cfg!(unix) && docker_servers {
-        let launchers = workspace.join(".supercov/node_modules/.docker");
-        let path = overrides
-            .get("PATH")
-            .map(std::ffi::OsString::from)
-            .or_else(|| std::env::var_os("PATH"));
-        if let Some(path) = path
-            && crate::docker_servers::write_launchers(&launchers, &path).is_some()
-            && let Ok(joined) =
-                std::env::join_paths(std::iter::once(launchers).chain(std::env::split_paths(&path)))
-            && let Some(joined) = joined.to_str()
-        {
-            overrides.insert("PATH".into(), joined.to_owned());
-            overrides.insert(
-                crate::docker_servers::STATE_VARIABLE.into(),
-                docker_state.display().to_string(),
-            );
-            overrides.insert(
-                crate::docker_servers::MOUNT_VARIABLE.into(),
-                root.join(".supercov").display().to_string(),
-            );
-            overrides.insert(
-                crate::docker_servers::COPY_VARIABLE.into(),
-                workspace.display().to_string(),
-            );
-            overrides.insert(
-                crate::docker_servers::ENVIRONMENT_VARIABLE.into(),
-                docker_environment.join(","),
-            );
-        }
-    }
+    #[cfg(unix)]
+    let mut docker_proxy = if !project.source_files.is_empty() || !servers.is_empty() {
+        start_docker_relay(
+            &root,
+            &workspace,
+            &docker_state,
+            &servers,
+            &environment,
+            &mut overrides,
+            diagnostics,
+        )?
+    } else {
+        None
+    };
     // What bootstrap.cjs installs in a process that runs the workspace without
     // these settings: one started in a container or VM the workspace is
     // mounted into. It moves `root` to where it sees the workspace from.
@@ -1040,8 +1044,14 @@ pub fn run_direct_javascript(
             return Err(message.into());
         }
     };
-    // A server compose left running writes its last window when stopped.
-    crate::docker_servers::stop_started(&docker_state);
+    // A server left running writes its last window when stopped.
+    #[cfg(unix)]
+    if let Some(proxy) = docker_proxy.take() {
+        proxy.finish();
+        for note in crate::docker_proxy::notes(&docker_state.join("containers.jsonl")) {
+            writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
+        }
+    }
     let test_command_ms = execution
         .phases
         .iter()
@@ -1432,12 +1442,75 @@ fn companion_run_id(run_id: &str, nth: usize) -> String {
     }
 }
 
+/// The relay the suite's Docker clients reach the daemon through
+/// (docker_proxy.rs). It gives each container whose image holds the copy's
+/// code the run's settings and Supercov's directory, mounted at its path: a
+/// Go or Java server's windows and a Node server's evidence are written where
+/// the run reads them. None when the daemon is not a local socket.
+#[cfg(unix)]
+fn start_docker_relay(
+    root: &Path,
+    workspace: &Path,
+    docker_state: &Path,
+    servers: &[Server],
+    environment: &BTreeMap<String, String>,
+    overrides: &mut BTreeMap<String, String>,
+    diagnostics: &mut dyn std::io::Write,
+) -> Result<Option<crate::docker_proxy::DockerProxy>, String> {
+    let Some(upstream) = crate::docker_proxy::upstream_socket(environment) else {
+        return Ok(None);
+    };
+    let mut names = overrides
+        .keys()
+        .filter(|name| name.starts_with("SUPERCOV_"))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    names.extend(
+        servers
+            .iter()
+            .flat_map(|server| server.environment().into_keys()),
+    );
+    let settings = crate::docker_proxy::ProxySettings {
+        copy: workspace.to_owned(),
+        mount: root.join(".supercov"),
+        environment: names
+            .iter()
+            .filter_map(|name| Some((name.clone(), overrides.get(name)?.clone())))
+            .collect(),
+        fingerprint: servers
+            .iter()
+            .map(Server::source_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        registry: root.join(".supercov/cache/docker-images.json"),
+        state: docker_state.join("containers.jsonl"),
+    };
+    match crate::docker_proxy::socket_path(docker_state)
+        .and_then(|socket| crate::docker_proxy::DockerProxy::start(&socket, &upstream, settings))
+    {
+        Ok(proxy) => {
+            overrides.extend(proxy.environment(environment));
+            Ok(Some(proxy))
+        }
+        Err(error) => {
+            writeln!(
+                diagnostics,
+                "[supercov] containers the tests start are not measured: the Docker relay could not start ({error})"
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+    }
+}
+
 /// A server in another language a browser suite may start.
 enum Server {
     Python(crate::python_run::PythonServer),
     Ruby(crate::ruby_run::RubyServer),
     Go(crate::go_run::GoServer),
     Jvm(crate::jvm_run::JvmServer),
+    RustWorker(crate::rust_worker::RustWorkerServer),
+    RustWasm(crate::rust_wasm::RustWasmServer),
 }
 
 impl Server {
@@ -1447,6 +1520,8 @@ impl Server {
             Self::Ruby(_) => "Ruby",
             Self::Go(_) => "Go",
             Self::Jvm(_) => "Java/Kotlin",
+            Self::RustWorker(_) => "Rust Worker",
+            Self::RustWasm(_) => "Rust wasm",
         }
     }
 
@@ -1456,6 +1531,22 @@ impl Server {
             Self::Ruby(server) => server.source_files(),
             Self::Go(server) => server.source_files(),
             Self::Jvm(server) => server.source_files(),
+            Self::RustWorker(server) => server.source_files(),
+            Self::RustWasm(server) => server.source_files(),
+        }
+    }
+
+    /// The source this server was instrumented from: an image built from an
+    /// earlier copy holds probes placed in other source.
+    #[cfg(unix)]
+    fn source_fingerprint(&self) -> String {
+        match self {
+            Self::Python(server) => server.source_fingerprint(),
+            Self::Ruby(server) => server.source_fingerprint(),
+            Self::Go(server) => server.source_fingerprint(),
+            Self::Jvm(server) => server.source_fingerprint(),
+            Self::RustWorker(server) => server.source_fingerprint(),
+            Self::RustWasm(server) => server.source_fingerprint(),
         }
     }
 
@@ -1465,6 +1556,8 @@ impl Server {
             Self::Ruby(server) => server.environment(),
             Self::Go(server) => server.environment(),
             Self::Jvm(server) => server.environment(),
+            Self::RustWorker(server) => server.environment(),
+            Self::RustWasm(server) => server.environment(),
         }
     }
 
@@ -1487,6 +1580,12 @@ impl Server {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
             Self::Jvm(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::RustWorker(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::RustWasm(server) => {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
         }

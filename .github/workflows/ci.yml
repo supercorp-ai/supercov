@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: read
+  # The stop-on-failure step cancels this commit's runs.
+  actions: write
 
 # A push to a pull request replaces the run of the commit before it. A run started by hand is left
 # to finish.
@@ -24,7 +26,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [22, 24]
+        # Every supported Node, here only: the Compatibility workflow's Node
+        # jobs ran the same check again on 22 and 24.
+        node: [22, 24, 25]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -36,6 +40,9 @@ jobs:
           components: clippy, rustfmt
       - run: npm ci
       - run: npm run check
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
 
   # The twelve integration scripts that drive the public wrapper, process
   # supervision and every JavaScript runner. They lived only in `test:engine`,
@@ -52,6 +59,9 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          # The import gate reads an LLVM profile with llvm-profdata and llvm-cov.
+          components: llvm-tools
       # The Ruby server gate measures a Puma app; Supercov measures Ruby 3.3
       # and newer, and the runner's own Ruby is older.
       - uses: ruby/setup-ruby@v1
@@ -71,6 +81,11 @@ jobs:
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps
       - run: npm run test:engine-integrations
+        env:
+          SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
 
   # The rest of the release check: the steps no other job ran, so a pull
   # request's green tick covers everything a release checks and a release
@@ -105,6 +120,9 @@ jobs:
       - run: node scripts/native-release-set-integration.mjs
       - run: npm run test:packed-npx
       - run: npm run benchmark:check
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
 
   # clang's own MC/DC as the oracle for Supercov's: the golden file was made
   # with Apple's toolchain, which the script finds through `xcrun`.
@@ -119,3 +137,87 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:clang-mcdc
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
+
+  # A Rust Worker under `wrangler dev`, measured through wrangler's inspector.
+  rust-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - run: cargo install worker-build --version 0.8.7 --locked
+      - run: npm ci
+      - run: cargo build -p supercov
+      - run: node scripts/rust-worker-playwright.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WORKER: "1"
+      - run: node scripts/rust-worker-cargo-test.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WORKER: "1"
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
+
+  # Rust compiled to wasm that JavaScript tests load: node:test through the
+  # nodejs glue, Playwright from a web page.
+  rust-wasm-js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: cargo build -p supercov
+      - run: node scripts/rust-wasm-js.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WASM: "1"
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
+
+  # Rust tests compiled to wasm, run where Cargo runs them: Node through
+  # wasm-bindgen-test-runner, WASI through wasmtime.
+  rust-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+          components: clippy, rustfmt
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Install wasmtime 49.0.3
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-v49.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      - run: cargo build -p supercov
+      - run: node scripts/rust-wasm-hosts.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WASM: "1"
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure

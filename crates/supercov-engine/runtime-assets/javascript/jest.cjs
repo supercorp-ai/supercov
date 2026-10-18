@@ -21,6 +21,9 @@ const runtime =
     globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??
     (typeof process !== "undefined" ? process.__SUPERCOV_DIRECT_RUNTIME__ : undefined);
 const evidenceDirectory = process.env.SUPERCOV_EVIDENCE_DIR;
+// This file's context has a `WebAssembly` of its own: the instances a Rust
+// crate compiled to wasm creates here are remembered with the runtime's.
+runtime?.registerWasmRealm?.(globalThis);
 
 function digest(value) {
     return createHash("sha256").update(value).digest("hex").slice(0, 24);

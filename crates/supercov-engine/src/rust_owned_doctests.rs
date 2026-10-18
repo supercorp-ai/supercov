@@ -264,7 +264,7 @@ pub(crate) fn run_doctests(
             .args(&selection.doctest_arguments)
             .current_dir(&project.workspace_root)
             .env("CARGO_TARGET_DIR", &project.target_directory)
-            .env("RUSTFLAGS", capped_rustflags())
+            .env("RUSTFLAGS", capped_rustflags(project, invocation))
             .env("RUSTDOC", &program)
             .env(WRAPPER_ROOT_ENV, root)
             .env(REAL_RUSTDOC_ENV, &real_rustdoc),
@@ -300,6 +300,17 @@ pub(crate) fn run_doctests(
     let any_failed = packages
         .iter()
         .any(|package| package.cases.iter().any(|case| case.status == "failed"));
+    // `cargo test` runs doctests only for the selected packages whose library
+    // can have them, and runs none, quietly, when no package can: a crate
+    // that is only a `cdylib`, as a Worker or a plugin is. `--doc` makes
+    // that same case an error, which the command never asked for.
+    if exit != 0
+        && selection.implicit_doctests
+        && packages.is_empty()
+        && String::from_utf8_lossy(&output.stderr).contains("no library targets found in package")
+    {
+        return Ok(Vec::new());
+    }
     if exit != 0 && !any_failed {
         // Doctests that do not compile, or rustdoc itself failing, is a build
         // failure, not a test failure.
@@ -361,6 +372,7 @@ pub(crate) fn run_doctests(
             let attempt_id = format!("{run_id}:doctest:{index:08}");
             let recorded = snapshot(&project.manifest, &project.probes, &evidence, &attempt_id)?;
             results.push(RawTestResult {
+                span: None,
                 test_id: Some(name.clone()),
                 scope: Some(ExecutionScope {
                     version: 1,

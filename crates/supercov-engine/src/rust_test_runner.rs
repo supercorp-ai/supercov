@@ -311,6 +311,9 @@ pub(crate) struct RustLibtestSelection {
 pub(crate) struct RustCargoExecutionSelection {
     pub run_libtests: bool,
     pub run_doctests: bool,
+    /// The command asked for every test, not `--doc` by name: Cargo then
+    /// runs doctests only for the selected packages that can have them.
+    pub implicit_doctests: bool,
     pub doctest_arguments: Vec<String>,
 }
 
@@ -792,6 +795,7 @@ pub(crate) fn rust_cargo_execution_selection(
         return Ok(RustCargoExecutionSelection {
             run_libtests: true,
             run_doctests: false,
+            implicit_doctests: false,
             doctest_arguments: Vec::new(),
         });
     }
@@ -845,6 +849,7 @@ pub(crate) fn rust_cargo_execution_selection(
     Ok(RustCargoExecutionSelection {
         run_libtests,
         run_doctests,
+        implicit_doctests: run_doctests && !doc,
         doctest_arguments,
     })
 }
@@ -899,6 +904,7 @@ fn build_test_artifacts(
     command: &[String],
 ) -> Result<Vec<TestArtifact>, RustTestRunnerError> {
     let mut invocation = cargo_invocation(&project.workspace_root, command)?;
+    let lint_invocation = invocation.clone();
     invocation.arguments = build_owned_arguments(invocation.arguments)?;
     invocation
         .arguments
@@ -913,7 +919,7 @@ fn build_test_artifacts(
         .args(invocation.arguments)
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
-        .env("RUSTFLAGS", capped_rustflags())
+        .env("RUSTFLAGS", capped_rustflags(project, &lint_invocation))
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
@@ -990,16 +996,140 @@ fn build_test_artifacts(
     Ok(artifacts)
 }
 
+/// How a test artifact runs: as itself, or through the runner Cargo would
+/// run it with (`target.<triple>.runner`) -- `wasm-bindgen-test-runner` for a
+/// wasm32 module, an emulator for another architecture. Running it any other
+/// way runs something Cargo would not.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ArtifactLauncher {
+    runner: Option<crate::rust_cargo_configuration::RustCargoResolvedRunner>,
+    /// `NODE_OPTIONS` for a wasm module the runner runs under Node: a hook
+    /// that writes each crate's region, which lives in the module's memory,
+    /// to the test's evidence directory as the process ends.
+    node_options: Option<OsString>,
+}
+
+impl ArtifactLauncher {
+    /// The launcher for the one target this invocation builds for.
+    pub(crate) fn for_invocation(
+        project: &PreparedRustProject,
+        invocation: &CargoTestInvocation,
+        hook_directory: &Path,
+    ) -> Result<Self, RustTestRunnerError> {
+        let Ok(plan) = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
+            &project.workspace_root,
+            &project.workspace_root,
+            invocation,
+        ) else {
+            return Ok(Self::default());
+        };
+        let [target] = plan.targets.as_slice() else {
+            if plan
+                .targets
+                .iter()
+                .any(|target| target.underlying_runner.is_some())
+            {
+                return Err(RustTestRunnerError::UnsupportedCommand(
+                    "a command that builds for several targets, one of them with a target runner, cannot be run test by test".into(),
+                ));
+            }
+            return Ok(Self::default());
+        };
+        let Some(runner) = &target.underlying_runner else {
+            return Ok(Self::default());
+        };
+        let node_options = if target.target.starts_with("wasm32-") {
+            fs::create_dir_all(hook_directory).map_err(io_error)?;
+            let hook = hook_directory.join("rust-wasm-node.mjs");
+            fs::write(&hook, RUST_WASM_NODE_HOOK).map_err(io_error)?;
+            let mut options = std::env::var_os("NODE_OPTIONS").unwrap_or_default();
+            if !options.is_empty() {
+                options.push(" ");
+            }
+            options.push(format!("--import={}", file_url(&hook)));
+            Some(options)
+        } else {
+            None
+        };
+        Ok(Self {
+            runner: Some(runner.resolve(&project.workspace_root)),
+            node_options,
+        })
+    }
+
+    /// The command that runs `executable`, writing its evidence to
+    /// `evidence` when it is a test run.
+    pub(crate) fn command(&self, executable: &Path, evidence: Option<&Path>) -> Command {
+        let mut command = match &self.runner {
+            Some(runner) => {
+                let mut command = Command::new(&runner.program);
+                command.args(&runner.arguments);
+                // A WASI runtime gives the module neither the host's
+                // directories nor its environment: the evidence directory,
+                // and the variable naming it, are handed over by name.
+                if let Some(evidence) = evidence
+                    && is_wasi_runtime(&runner.program)
+                {
+                    command
+                        .arg(format!("--dir={}", evidence.display()))
+                        .arg(format!(
+                            "--env=SUPERCOV_RUST_EVIDENCE_DIR={}",
+                            evidence.display()
+                        ));
+                }
+                command.arg(executable);
+                command
+            }
+            None => Command::new(executable),
+        };
+        if let Some(options) = &self.node_options {
+            command.env("NODE_OPTIONS", options);
+        }
+        command
+    }
+}
+
+/// Whether a runner program is a WASI runtime, by its name: wasmtime and
+/// wasmer both take `--dir` and `--env` before the module.
+fn is_wasi_runtime(program: &Path) -> bool {
+    program
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "wasmtime" | "wasmer"))
+}
+
+const RUST_WASM_NODE_HOOK: &str = include_str!("../runtime-assets/rust-wasm-node.mjs");
+
+/// A `file:` URL for a path, as `node --import` takes it: bytes outside the
+/// unreserved set are percent-encoded, so a space or a `#` is the path's.
+fn file_url(path: &Path) -> String {
+    let mut url = String::from("file://");
+    let text = path.to_string_lossy().replace('\\', "/");
+    if !text.starts_with('/') {
+        url.push('/');
+    }
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
 /// The tests an artifact would run for this invocation. `filters` are the
 /// user's libtest arguments that select tests -- a name, `--skip`, `--exact`,
 /// `--ignored` -- and libtest applies them to `--list` exactly as it applies
 /// them to a run, so the enumeration is the set plain Cargo would execute.
 fn list_tests(
+    launcher: &ArtifactLauncher,
     executable: &Path,
     filters: &[String],
     environment: &[(&'static str, OsString)],
 ) -> Result<Vec<String>, RustTestRunnerError> {
-    let output = Command::new(executable)
+    let output = launcher
+        .command(executable, None)
         .args(["--list", "--format", "terse"])
         .args(filters)
         .envs(environment.iter().map(|(key, value)| (key, value)))
@@ -1058,6 +1188,24 @@ pub(crate) fn snapshot(
     directory: &Path,
     attempt: &str,
 ) -> Result<RustEvidence, RustTestRunnerError> {
+    // Evidence files are named by the instrumentation that wrote them. A
+    // test may build and run a program instrumented on its own -- a fixture
+    // prepared inside the instrumented workspace -- and that program
+    // inherits the evidence directory; its obligations are not this run's.
+    let regions = read_rust_region_directory(directory, &probes.token, probes)
+        .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?
+        .into_iter()
+        .map(|(_, observations)| observations);
+    snapshot_regions(manifest, regions, attempt)
+}
+
+/// `snapshot` of regions already read: each one's records in the order its
+/// process wrote them. A server's windows arrive this way.
+pub(crate) fn snapshot_regions(
+    manifest: &CoverageManifest,
+    regions: impl IntoIterator<Item = Vec<crate::rust_runtime::RustProbeEntry>>,
+    attempt: &str,
+) -> Result<RustEvidence, RustTestRunnerError> {
     let points = manifest
         .points
         .iter()
@@ -1096,13 +1244,7 @@ pub(crate) fn snapshot(
     // Records carry no clock. The order they were written in is what matters,
     // and a sequence number preserves exactly that.
     let mut sequence = 0_i64;
-    // Evidence files are named by the instrumentation that wrote them. A
-    // test may build and run a program instrumented on its own -- a fixture
-    // prepared inside the instrumented workspace -- and that program
-    // inherits the evidence directory; its obligations are not this run's.
-    for (_, observations) in read_rust_region_directory(directory, &probes.token, probes)
-        .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?
-    {
+    for observations in regions {
         for entry in observations {
             sequence += 1;
             let thread = entry.thread;
@@ -1212,7 +1354,7 @@ pub(crate) fn snapshot(
     })
 }
 
-fn rust_coverage_model() -> CoverageModelDeclaration {
+pub(crate) fn rust_coverage_model() -> CoverageModelDeclaration {
     CoverageModelDeclaration {
         language: "rust".into(),
         variant: "rust-owned-probes-v1".into(),
@@ -1323,12 +1465,35 @@ pub(crate) fn dynamic_library_environment(
 /// is about Supercov's text: `cargo nextest run`, which shows its build,
 /// printed five warnings of unnecessary parentheses for a ten-line file, each
 /// quoting a line of probes. A project that denies warnings still builds.
-pub(crate) fn capped_rustflags() -> String {
+///
+/// Building for wasm, lints are capped at `warn` instead: Cargo learns which
+/// crate types a target supports from rustc's "dropping unsupported crate
+/// type" warnings, and wasm32 drops `dylib` and `proc-macro`, so with every
+/// lint allowed it cannot read the answer and stops. The probes'
+/// parentheses, the one lint they raise, are allowed by name.
+pub(crate) fn capped_rustflags(
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+) -> String {
+    let wasm = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
+        &project.workspace_root,
+        &project.workspace_root,
+        invocation,
+    )
+    .is_ok_and(|plan| {
+        plan.targets
+            .iter()
+            .any(|target| target.target.starts_with("wasm"))
+    });
     let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
     if !rustflags.is_empty() {
         rustflags.push(' ');
     }
-    rustflags.push_str("--cap-lints=allow");
+    rustflags.push_str(if wasm {
+        "--cap-lints=warn -A unused_parens"
+    } else {
+        "--cap-lints=allow"
+    });
     rustflags
 }
 
@@ -1491,7 +1656,7 @@ fn rust_runner_limitations(runner: &str) -> Vec<FrontendLimitation> {
     ]
 }
 
-fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration {
+pub(crate) fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration {
     FrontendRunnerDeclaration {
         runner: runner.into(),
         execution_model: ExecutionModel::ProcessPerTest,
@@ -1518,6 +1683,7 @@ fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration {
 /// was never there.
 fn decline_uncompiled_sources(
     project: &PreparedRustProject,
+    also_compiled: &BTreeSet<String>,
 ) -> (CoverageManifest, BTreeSet<String>) {
     let mut manifest = project.manifest.clone();
     let Some(compiled) = crate::rust_project::compiled_source_files(
@@ -1529,7 +1695,7 @@ fn decline_uncompiled_sources(
     let declined = project
         .source_files
         .iter()
-        .filter(|file| !compiled.contains(*file))
+        .filter(|file| !compiled.contains(*file) && !also_compiled.contains(*file))
         .cloned()
         .collect::<BTreeSet<_>>();
     // Depinfo that accounts for no crate root at all is depinfo this run did
@@ -1606,18 +1772,29 @@ fn settle_cfg_gates(
     evidence_root: &Path,
     diagnostics: &mut dyn Write,
 ) -> Result<CoverageManifest, RustTestRunnerError> {
-    let mut manifest = project.manifest.clone();
     let probes = &project.probes;
     if probes.cfgs.is_empty() {
-        return Ok(manifest);
+        return Ok(project.manifest.clone());
     }
     let settled =
         crate::rust_runtime::read_rust_cfg_settlement(evidence_root, &probes.token, probes)
             .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?;
+    settle_cfg_gates_with(&project.manifest, probes, &settled, diagnostics)
+}
+
+/// `settle_cfg_gates` with what the builds said already gathered: a byte per
+/// gate, bit 0 left out somewhere, bit 1 built somewhere.
+pub(crate) fn settle_cfg_gates_with(
+    manifest: &CoverageManifest,
+    probes: &crate::rust_instrumenter::RustProbeLayout,
+    settled: &[u8],
+    diagnostics: &mut dyn Write,
+) -> Result<CoverageManifest, RustTestRunnerError> {
+    let mut manifest = manifest.clone();
     let left_out = probes
         .cfgs
         .iter()
-        .zip(&settled)
+        .zip(settled)
         .filter(|(_, bits)| **bits == 1)
         .map(|(gate, _)| gate)
         .collect::<Vec<_>>();
@@ -1628,7 +1805,7 @@ fn settle_cfg_gates(
     let unanswered = probes
         .cfgs
         .iter()
-        .zip(&settled)
+        .zip(settled)
         .filter(|(gate, bits)| {
             **bits == 0
                 && gate
@@ -1702,7 +1879,7 @@ fn settle_cfg_gates(
 }
 
 /// The manifest's structural limitation IDs, as the declaration references them.
-fn structural_limitations(manifest: &CoverageManifest) -> Vec<String> {
+pub(crate) fn structural_limitations(manifest: &CoverageManifest) -> Vec<String> {
     manifest
         .limitations
         .iter()
@@ -1714,11 +1891,37 @@ fn structural_limitations(manifest: &CoverageManifest) -> Vec<String> {
         .collect()
 }
 
+/// Says which files the build left out of the denominator.
+fn report_declined(
+    declined: &BTreeSet<String>,
+    diagnostics: &mut dyn Write,
+) -> Result<(), RustTestRunnerError> {
+    if declined.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        diagnostics,
+        "[supercov] {} source file(s) this build did not compile are outside the denominator: {}{}",
+        declined.len(),
+        declined
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        if declined.len() > 3 { ", ..." } else { "" }
+    )
+    .map_err(|error| RustTestRunnerError::Io(error.to_string()))
+}
+
+/// `rust_workers`: the stand-in for `wrangler` the test processes find
+/// first, when the workspace has a Rust Worker a test may start.
 pub fn run_prepared_rust_tests(
     project: &PreparedRustProject,
     command: &[String],
     run_id: &str,
     generated_at: &str,
+    rust_workers: Option<&crate::rust_worker::CargoTestWorkers>,
     diagnostics: &mut dyn Write,
 ) -> Result<RustFrontendRun, RustTestRunnerError> {
     let invocation = cargo_invocation(&project.workspace_root, command)?;
@@ -1737,22 +1940,8 @@ pub fn run_prepared_rust_tests(
     // The denominator is what the compiler built, not what the module tree
     // resolves: a module behind a `#[cfg]` that is off is resolved, never
     // compiled, and could never be covered.
-    let (manifest, declined) = decline_uncompiled_sources(project);
-    if !declined.is_empty() {
-        writeln!(
-            diagnostics,
-            "[supercov] {} source file(s) this build did not compile are outside the denominator: {}{}",
-            declined.len(),
-            declined
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", "),
-            if declined.len() > 3 { ", ..." } else { "" }
-        )
-        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-    }
+    let (manifest, declined) = decline_uncompiled_sources(project, &BTreeSet::new());
+    let original = project;
     let project = &PreparedRustProject {
         manifest,
         ..project.clone()
@@ -1774,6 +1963,7 @@ pub fn run_prepared_rust_tests(
     if invocation.kind == RustCargoCommandKind::NextestRun {
         // nextest builds, schedules and retries on its own; this program is
         // its target runner and records every attempt it launches.
+        report_declined(&declined, diagnostics)?;
         let outcome = crate::rust_owned_nextest::run_nextest(
             project,
             &invocation,
@@ -1833,6 +2023,9 @@ pub fn run_prepared_rust_tests(
         .cloned()
         .collect::<Vec<_>>();
     let mut tasks = Vec::new();
+    // Through the target runner the user configured, when there is one.
+    let launcher =
+        ArtifactLauncher::for_invocation(project, &invocation, &evidence_root.join("hooks"))?;
     let target_libdir = if artifacts.is_empty() {
         PathBuf::new()
     } else {
@@ -1842,12 +2035,14 @@ pub fn run_prepared_rust_tests(
     let mut unasked = Vec::new();
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
         let tests = list_tests(
+            &launcher,
             &artifact.executable,
             &libtest_selection.list_arguments,
             &dynamic_library_environment(&target_libdir, &artifact.executable),
         )?;
         if tests.is_empty() {
             let all = list_tests(
+                &launcher,
                 &artifact.executable,
                 &["--include-ignored".to_owned()],
                 &dynamic_library_environment(&target_libdir, &artifact.executable),
@@ -1886,7 +2081,8 @@ pub fn run_prepared_rust_tests(
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     let Some(task) = tasks.get(index) else { break };
                     let result = crate::child_signal_guard::output(
-                        Command::new(&task.artifact.executable)
+                        launcher
+                            .command(&task.artifact.executable, Some(&task.directory))
                             // No --nocapture: libtest's in-memory capture is what
                             // plain `cargo test` gives users, and it re-emits a
                             // failing test's output, which `.output()` still
@@ -1904,7 +2100,12 @@ pub fn run_prepared_rust_tests(
                                 &target_libdir,
                                 &task.artifact.executable,
                             ))
-                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory),
+                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
+                            .envs(
+                                rust_workers
+                                    .iter()
+                                    .flat_map(|workers| workers.environment()),
+                            ),
                     )
                     .map(|output| ProcessOutcome {
                         task: ProcessTask {
@@ -1934,6 +2135,39 @@ pub fn run_prepared_rust_tests(
         .map(|result| result.map_err(RustTestRunnerError::Launch))
         .collect::<Result<Vec<_>, _>>()?;
     outcomes.sort_by_key(|outcome| outcome.task.ordinal);
+    // What each test's Worker ran, as region files of its own evidence; and
+    // the crates `wrangler dev` built for them, whose files count though the
+    // run's own build never compiled them.
+    let mut built_crates = BTreeSet::new();
+    if rust_workers.is_some() {
+        for outcome in &outcomes {
+            built_crates.extend(
+                crate::rust_worker::materialize_worker_windows(
+                    &outcome.task.directory,
+                    &project.probes.token,
+                )
+                .map_err(RustTestRunnerError::Io)?,
+            );
+        }
+    }
+    let redeclined;
+    let (project, declined) = if built_crates.is_empty() {
+        (project, declined)
+    } else {
+        let built = built_crates
+            .iter()
+            .filter_map(|key| original.probes.crates.get(key))
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let (manifest, declined) = decline_uncompiled_sources(original, &built);
+        redeclined = PreparedRustProject {
+            manifest,
+            ..project.clone()
+        };
+        (&redeclined, declined)
+    };
+    report_declined(&declined, diagnostics)?;
     // What `cargo test` prints for each binary: every test, the failures
     // together, one result.
     // Cargo's `-q` drops its own line for the binary and asks libtest for
@@ -2026,6 +2260,7 @@ pub fn run_prepared_rust_tests(
         }
         let evidence = snapshot(&project.manifest, &project.probes, &directory, &attempt_id)?;
         results.push(RawTestResult {
+            span: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
                 version: 1,
@@ -2130,6 +2365,25 @@ pub fn run_prepared_rust_tests(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn node_takes_a_hook_by_a_file_url_with_its_bytes_encoded() {
+        assert_eq!(
+            file_url(Path::new("/tmp/a b/#hook.mjs")),
+            "file:///tmp/a%20b/%23hook.mjs"
+        );
+        assert_eq!(file_url(Path::new("/srv/hook.mjs")), "file:///srv/hook.mjs");
+    }
+
+    #[test]
+    fn a_wasi_runtime_is_known_by_its_name() {
+        assert!(is_wasi_runtime(Path::new("wasmtime")));
+        assert!(is_wasi_runtime(Path::new("/opt/homebrew/bin/wasmtime")));
+        assert!(is_wasi_runtime(Path::new("wasmer")));
+        assert!(!is_wasi_runtime(Path::new("wasm-bindgen-test-runner")));
+        assert!(!is_wasi_runtime(Path::new("qemu-aarch64")));
+    }
+
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -2710,6 +2964,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture-cfg",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -2801,6 +3056,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture-assert",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -2892,6 +3148,7 @@ mod tests {
                     .collect::<Vec<String>>(),
                 run,
                 "2026-08-26T00:00:00.000Z",
+                None,
                 &mut Vec::new(),
             )
             .unwrap();
@@ -2991,6 +3248,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture-cwd",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -3096,6 +3354,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();

@@ -1,0 +1,19 @@
+name: Stop on a failure
+description: >-
+  A pull request's job failed: cancel every other unfinished run of the same
+  commit, then this run, so the failure is the answer at once instead of after
+  the slowest leg of every workflow.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        echo "A job failed: stopping the other runs of $SHA."
+        for id in $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$SHA" --limit 50 \
+            --json databaseId,status --jq '.[] | select(.status != "completed") | .databaseId'); do
+          [ "$id" = "$GITHUB_RUN_ID" ] || gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
+        done
+        gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" || true

@@ -67,6 +67,14 @@ const ROOT_INPUT_EXCLUSIONS: &[&str] = &[
     "test-results",
 ];
 
+/// An LLVM profile, written to the working directory by default: what a
+/// binary built for coverage leaves, never what a build reads. Counted as
+/// configuration, writing one -- to import its lines -- made every run stale.
+fn is_coverage_output(name: &str) -> bool {
+    let extension = Path::new(name).extension().and_then(|value| value.to_str());
+    matches!(extension, Some("profraw" | "profdata"))
+}
+
 fn collect_project_inputs(
     root: &Path,
     directory: &Path,
@@ -86,12 +94,21 @@ fn collect_project_inputs(
             .into_string()
             .map_err(|_| format!("Rust project contains a non-UTF-8 path: {}", path.display()))?;
         if (root_level && ROOT_INPUT_EXCLUSIONS.contains(&name.as_str()))
-            || matches!(name.as_str(), ".supercov" | ".mcdc-pool")
+            // wrangler's local state (`.wrangler/`), which `wrangler dev`
+            // writes beside a Worker: what it served, never what Cargo reads.
+            || matches!(name.as_str(), ".supercov" | ".mcdc-pool" | ".wrangler")
+            || is_coverage_output(&name)
         {
             continue;
         }
         let file_type = entry.file_type().map_err(|error| error.to_string())?;
         if file_type.is_dir() {
+            // What a build wrote, wherever it lies: a Cargo target directory
+            // of a crate in a subdirectory, the wasm wasm-bindgen generated.
+            // Rebuilding is not a change to the project.
+            if build_output_directory(&path) {
+                continue;
+            }
             collect_project_inputs(root, &path, false, regular, links)?;
         } else if file_type.is_file() {
             let relative = path
@@ -116,6 +133,26 @@ fn collect_project_inputs(
         }
     }
     Ok(())
+}
+
+/// A Cargo target directory, told by what Cargo keeps in it, or the output
+/// of wasm-bindgen, told by its `<name>_bg.wasm`.
+fn build_output_directory(path: &Path) -> bool {
+    if path.join(".rustc_info.json").is_file()
+        || path.join(".cargo-lock").is_file()
+        || fs::read(path.join("CACHEDIR.TAG"))
+            .is_ok_and(|tag| tag.windows(5).any(|window| window == b"cargo"))
+    {
+        return true;
+    }
+    fs::read_dir(path).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with("_bg.wasm"))
+        })
+    })
 }
 
 pub(crate) fn collect_integrity_inputs(
@@ -334,6 +371,17 @@ pub fn run_direct_rust(
         .map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
+        // A test that starts a Rust Worker with `wrangler dev` finds
+        // Supercov's `wrangler` first, which reads what the Worker ran into
+        // that test's evidence. Prepared before the copy is taken stock of:
+        // the configurations it points at Supercov's entry are Supercov's.
+        let rust_workers = crate::rust_worker::CargoTestWorkers::prepare(
+            &workspace,
+            &workspace
+                .join(".supercov/rust-evidence")
+                .join(&request.run_id)
+                .join("wrangler"),
+        )?;
         let before = crate::workspace::workspace_output_baseline(&workspace)
             .map_err(|error| error.to_string())?;
         let run = run_prepared_rust_tests(
@@ -341,6 +389,7 @@ pub fn run_direct_rust(
             &request.command,
             &request.run_id,
             &request.started_at,
+            rust_workers.as_ref(),
             diagnostics,
         )
         .map_err(|error| error.to_string())?;

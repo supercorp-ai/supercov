@@ -504,6 +504,7 @@ function nextUnscopedRequest() {
 function beginBufferedServerEvidence(scope) {
   if (isBrowser)
     return;
+  switchWasmOwner(scope);
   const key = attemptKey(scope);
   state.bufferedAttempts.add(key);
   if (!state.serverBuffers.has(key))
@@ -517,6 +518,7 @@ function beginBufferedServerEvidence(scope) {
 function flushBufferedServerEvidence(scope) {
   if (isBrowser)
     return void 0;
+  switchWasmOwner(void 0);
   const key = attemptKey(scope);
   state.bufferedAttempts.delete(key);
   const buffered = state.serverBuffers.get(key);
@@ -727,6 +729,19 @@ function flushOnTermination(flush) {
     process.on("exit", drain);
   } catch (e) {
   }
+  // `process.execve` replaces the process with another program: no "exit"
+  // runs, and what this one buffered would go with it. A cache front end
+  // that hands itself over to the runner's Node lost every line it ran.
+  try {
+    const execve = process.execve;
+    if (typeof execve === "function") {
+      process.execve = function supercovExecve() {
+        drain();
+        return execve.apply(this, arguments);
+      };
+    }
+  } catch (e) {
+  }
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK"]) {
     try {
       process.on(signal, () => {
@@ -740,10 +755,153 @@ function flushOnTermination(flush) {
     }
   }
 }
+// Rust compiled to wasm and measured by the Rust frontend keeps what it ran
+// in the module's memory, behind `__supercov_region_<crate>`. When the run
+// measures such a crate (SUPERCOV_WASM_REGIONS, or the page flag the
+// Playwright fixture sets), every instance the process or page creates is
+// remembered, and its regions are taken -- copied and cleared -- at each
+// test's edges: what was taken belongs to the test that just ended, or to no
+// test. The Rust run reads the takes and credits each to its test.
+var WASM_REGION_PREFIX = "__supercov_region_";
+function wasmRegionsWanted() {
+  if (runtimeGlobal.__SUPERCOV_WASM_REGIONS__ === true)
+    return true;
+  return typeof process !== "undefined" && process.env != null && process.env.SUPERCOV_WASM_REGIONS === "1";
+}
+function installWasmRegistry() {
+  if (runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || typeof WebAssembly === "undefined" || !wasmRegionsWanted())
+    return;
+  runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ = true;
+  if (!runtimeGlobal.__supercovWasm)
+    runtimeGlobal.__supercovWasm = [];
+  registerWasmRealm(runtimeGlobal);
+}
+/** Remember the instances another realm creates too: Jest runs each test file in a context with a `WebAssembly` of its own. */
+function registerWasmRealm(realm) {
+  if (!runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || !realm || !realm.WebAssembly)
+    return;
+  // By the `WebAssembly` itself: a flag on the realm's global would show
+  // through in a context that exposes the outer globals, as Jest's does.
+  if (!runtimeGlobal.__supercovWasmRealms)
+    runtimeGlobal.__supercovWasmRealms = new WeakSet();
+  const wasm = realm.WebAssembly;
+  if (runtimeGlobal.__supercovWasmRealms.has(wasm))
+    return;
+  runtimeGlobal.__supercovWasmRealms.add(wasm);
+  const instances = runtimeGlobal.__supercovWasm;
+  const Instance = wasm.Instance;
+  function Recorded(module, imports) {
+    const instance = new Instance(module, imports);
+    instances.push(instance);
+    return instance;
+  }
+  Recorded.prototype = Instance.prototype;
+  try {
+    wasm.Instance = Recorded;
+  } catch (e) {
+  }
+  ["instantiate", "instantiateStreaming"].forEach(function(name) {
+    const original = wasm[name];
+    if (typeof original !== "function")
+      return;
+    try {
+      wasm[name] = function() {
+        return original.apply(wasm, arguments).then(function(result) {
+          instances.push(result instanceof Instance ? result : result.instance);
+          return result;
+        });
+      };
+    } catch (e) {
+    }
+  });
+}
+installWasmRegistry();
+function wasmBase64(bytes) {
+  if (typeof Buffer !== "undefined")
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+  let text = "";
+  for (let index = 0; index < bytes.length; index += 32768)
+    text += String.fromCharCode.apply(null, bytes.subarray(index, Math.min(bytes.length, index + 32768)));
+  return btoa(text);
+}
+/** Each instrumented crate's region: its header and the pages a probe touched since the last take, then cleared. A region with nothing new is left out, but for the first take, which carries what `cfg!` said of the crate's gates. */
+function takeWasmRegions() {
+  const out = [];
+  const instances = runtimeGlobal.__supercovWasm;
+  if (!instances)
+    return out;
+  if (!runtimeGlobal.__supercovWasmTaken)
+    runtimeGlobal.__supercovWasmTaken = new WeakSet();
+  const seen = runtimeGlobal.__supercovWasmTaken;
+  for (const instance of instances) {
+    const exports = instance && instance.exports;
+    if (!exports || !exports.memory)
+      continue;
+    for (const name of Object.keys(exports)) {
+      if (name.indexOf(WASM_REGION_PREFIX) !== 0)
+        continue;
+      try {
+        const crate = name.slice(WASM_REGION_PREFIX.length);
+        const packed = BigInt.asUintN(64, BigInt(exports[name]()));
+        const at = Number(packed >> BigInt(32));
+        const length = Number(packed & BigInt(4294967295));
+        if (!length)
+          continue;
+        const view = new DataView(exports.memory.buffer, at, length);
+        const first = !seen.has(exports);
+        if (!first && view.getUint32(40, true) === 0 && view.getUint32(44, true) === 0)
+          continue;
+        seen.add(exports);
+        const bytes = new Uint8Array(exports.memory.buffer, at, length);
+        const bodyAt = view.getUint32(32, true);
+        const segments = [[0, wasmBase64(bytes.subarray(0, bodyAt))]];
+        for (let page = 0; bodyAt + page * 4096 < length; page++) {
+          if (bytes[128 + (page >> 3)] & 1 << (page & 7)) {
+            const from = bodyAt + page * 4096;
+            segments.push([from, wasmBase64(bytes.subarray(from, Math.min(length, from + 4096)))]);
+          }
+        }
+        out.push([crate, length, segments]);
+        const clear = exports["__supercov_clear_" + crate];
+        if (typeof clear === "function")
+          clear();
+      } catch (e) {
+      }
+    }
+  }
+  return out;
+}
+/** Write a take, owned by an attempt or by no test, where the Rust run reads it. */
+function appendWasmRecord(attemptId, regions) {
+  if (isBrowser || !regions || regions.length === 0)
+    return;
+  const fs = getFs();
+  if (!fs)
+    return;
+  try {
+    const directory = configuredServerEvidenceRoot() + "/wasm";
+    makeEvidenceDirectory(fs, directory);
+    if (!state.wasmFile)
+      state.wasmFile = directory + "/" + process.pid + "-" + Math.random().toString(36).slice(2) + ".jsonl";
+    fs.appendFileSync(state.wasmFile, JSON.stringify({ owner: attemptId || null, regions }) + "\n");
+  } catch (e) {
+  }
+}
+/** The test whose wasm work is being recorded changes: what was recorded until now is the previous owner's. */
+function switchWasmOwner(scope) {
+  if (!runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || isBrowser)
+    return;
+  const owner = state.wasmOwner || null;
+  state.wasmOwner = scope && scope.attemptId ? scope.attemptId : null;
+  appendWasmRecord(owner, takeWasmRegions());
+}
 if (!isBrowser) {
   const flushers = (_a7 = runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__) != null ? _a7 : /* @__PURE__ */ new Set();
   runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__ = flushers;
   flushers.add(flushAllBufferedServerEvidence);
+  flushers.add(function() {
+    switchWasmOwner(void 0);
+  });
   if (!runtimeGlobal.__SUPERCOV_BUFFER_EXIT_INSTALLED__) {
     flushOnTermination(() => {
       var _a8;
@@ -913,6 +1071,7 @@ function currentRequestContext() {
   return runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ ? { scope: runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ } : {};
 }
 function activateCoverageScope(scope) {
+  switchWasmOwner(scope);
   if (scope)
     runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = scope;
   else
@@ -2155,6 +2314,9 @@ const directRuntimeApi = {
   selectEndV2,
   selectNextV2,
   takeNodeAssertionPhases,
+  takeWasmRegions,
+  appendWasmRecord,
+  registerWasmRealm,
   tryBegin,
   tryCatch,
   tryEnd,
@@ -2221,6 +2383,9 @@ export {
   selectEndV2,
   selectNextV2,
   takeNodeAssertionPhases,
+  takeWasmRegions,
+  appendWasmRecord,
+  registerWasmRealm,
   tryBegin,
   tryCatch,
   tryEnd,

@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.18.0
+
+**Added**
+
+- Rust Workers are measured. A Playwright suite that starts one with `wrangler dev` credits each test the Worker work done while it ran. A `cargo test` test that starts `wrangler dev --local` itself is credited exactly what its Worker ran, and the Worker crate counts though `cargo test` never compiles it.
+- Rust compiled to wasm is measured: `cargo test --target wasm32-unknown-unknown` under `wasm-bindgen-test-runner`, `--target wasm32-wasip1` under `wasmtime` or `wasmer`, and wasm-bindgen crates that node:test, Vitest, Jest or a Playwright page load, each test credited its own lines and decisions.
+- Containers started by any Docker client are measured, not only Compose's: `docker run`, Testcontainers (Ryuk included) and Docker SDKs go through a relay Supercov puts on `DOCKER_HOST`.
+- `supercov import <tracefile> --test <name>` adds line coverage recorded where Supercov cannot run (an LCOV file) to a run, as a new run. It is credited by line only, to a test of its own or to the background. An LLVM profile is exported as LCOV with LLVM's tools first.
+
+**Changed**
+
+- Rust code a `#[cfg]` leaves out of every build (a feature that is off, `cfg(loom)`, a build script's `--cfg`) is outside the denominator instead of counted uncovered. Rust probes record into one mapped region per process, and covered counts are unchanged.
+- Assessment answers survive dependency and configuration changes. A changed lockfile, `package.json` or test configuration asked the whole suite again; now only questions whose text changed are asked. Answers saved by earlier releases are asked once more.
+- A multi-location `line` query answers every location it can and lists the rest under "Not answered" instead of failing.
+- `line`, `file`, `decision` and `source` warn only about files they read that changed since the run, and name them. A page cut to fit one reply says where the rest start. `patch` on a failed suite still shows the change's coverage.
+
+**Fixed**
+
+- A JavaScript program that hands itself over with `process.execve`, or a Ruby one with `exec`, lost everything it had run; it is kept now.
+- `cargo test` failed in a workspace with a `cdylib`-only or binary-only crate.
+- Supercov returned the instrumented Worker that `wrangler dev` built in its copy to the project's `build/`, where a build that embeds it would ship it. It stays in the copy.
+- wrangler's `.wrangler/` state and LLVM profiles (`default.profraw`) in the project no longer make Rust runs stale.
+- The file view of a file the run never measured said "every line is covered and measured"; it now says nothing was measured.
+- A filtered `assertions` reading counted statements none of the picked tests was asked about as not asserted, and showed 0% for test files whose tests assert. They are now counted apart.
+- The judge misread Jest and Vitest null checks: `toBeNull()` fails on `undefined`, so a `return null` changed to `undefined` is caught.
+
 ## 4.17.2
 
 **Fixed**

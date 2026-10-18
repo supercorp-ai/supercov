@@ -107,7 +107,7 @@ pub(crate) fn run_nextest(
             .args(arguments)
             .current_dir(&project.workspace_root)
             .env("CARGO_TARGET_DIR", &project.target_directory)
-            .env("RUSTFLAGS", capped_rustflags());
+            .env("RUSTFLAGS", capped_rustflags(project, invocation));
         command
     };
 
@@ -265,6 +265,7 @@ pub(crate) fn run_nextest(
             &attempt_id,
         )?;
         results.push(RawTestResult {
+            span: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
                 version: 1,

@@ -144,6 +144,12 @@ signal exactly as it would unmeasured, and one with its own handler keeps
 it. `SIGKILL` cannot be caught by anything and is the one stop that loses
 whatever was still buffered.
 
+A program that hands its process over to another with `exec` keeps what it
+ran: a cache front end that restores a key and then `process.execve`s the
+runner's Node, or a Ruby script that calls `exec`, writes its evidence before
+the new program starts. Python and Rust write as they run, so an `exec`
+loses nothing there either.
+
 ## Rust
 
 | Runner | Attribution | Current requirement |
@@ -188,6 +194,100 @@ npx supercov -- cargo nextest run --workspace
 `cross` is not supported yet. Unsupported command shapes fail with an
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
+
+### Rust compiled to wasm in JavaScript tests
+
+A crate wasm-bindgen exposes to JavaScript (a `cdylib` that depends on
+`wasm-bindgen`) is measured when JavaScript tests load it: a Node suite
+(Vitest, Jest, node:test, Mocha) through the `nodejs` or bundler glue, or a
+Playwright suite whose page loads the `web` glue. Build the wasm in the test
+command, as the suite already does when it tests the crate it ships
+(`wasm-pack build && vitest`, or `cargo build --target wasm32-unknown-unknown`
+and `wasm-bindgen`), so the module the tests load is built from Supercov's
+copy:
+
+```sh
+npx supercov -- npm test
+npx supercov -- npx playwright test
+```
+
+The JavaScript runtime remembers each wasm instance, in the test process and
+in each page, and reads what the module ran at every test's end, so each test
+is credited exactly with its own lines and decisions. The crate's coverage is
+a Rust run beside the JavaScript run. What the copy built (`target/`, and the
+generated `pkg/` with its instrumented wasm) stays in the copy.
+
+### A Rust Worker under browser tests
+
+A Playwright suite that starts a Cloudflare Worker written in Rust with
+`wrangler dev`, built by `worker-build`, measures the Worker:
+
+```sh
+npx supercov -- npx playwright test
+```
+
+The crate is rewritten with probes in the copy the suite runs in, and
+`wrangler dev` builds it there as usual. The copy's wrangler configuration
+(`wrangler.toml`, `wrangler.json` or `wrangler.jsonc`) points `main` at a
+small entry of Supercov's that remembers the Worker's wasm instances and then
+is your entry, and gives `[dev]` an inspector port unless you set one; your
+own configuration and command are not changed. While the suite runs,
+Supercov reads what the Worker ran through that inspector every 5 ms, and
+each read is credited to the browser test that was running then, if only one
+was, as for a [Go server](#a-go-server-under-browser-tests). The Worker's
+coverage is a Rust run of its own, published as the run or beside the browser
+run. Requests made before the first test, such as the readiness check
+`webServer` waits on, are the run's and no test's.
+
+The build runs with `--cap-lints=warn`, so a crate that denies warnings still
+builds with the probes in it.
+
+### A Rust Worker that `cargo test` starts
+
+Integration tests that start `wrangler dev` themselves -- to test a Worker in
+Cloudflare's own runtime -- measure the Worker too:
+
+```sh
+npx supercov -- cargo test
+```
+
+The Worker crate is instrumented with the rest of the workspace, and `wrangler
+dev` builds it in the copy as usual. The tests find a `wrangler` of
+Supercov's first on `PATH`: for `wrangler dev` it picks an inspector port,
+starts a reader of the Worker through it, and then runs your `wrangler` with
+the test's own arguments, process and signals. What the Worker ran is
+credited to the test that started it, exactly, as its own coverage. The
+Worker crate counts though `cargo test` never compiles it, once a test has
+run it. This needs a `wrangler` on `PATH` when the run starts; without one,
+nothing is put in front of it.
+
+The Worker built with probes stays in the copy: its `build/` output is never
+returned to the project, and neither is the copy's configuration, which
+points `main` at Supercov's entry. wrangler's `.wrangler/` state is not a
+build input, so writing it does not make the run stale.
+
+### Rust tests compiled to wasm
+
+`cargo test --target <wasm target>` runs each test through the target runner
+Cargo is configured with, and so does Supercov, one test per process:
+
+```sh
+npx supercov -- cargo test --target wasm32-unknown-unknown
+npx supercov -- cargo test --target wasm32-wasip1
+```
+
+- `wasm32-unknown-unknown` with `wasm-bindgen-test-runner` (what
+  `wasm-pack test --node` sets up) runs each test module in Node. Supercov
+  gives Node a hook that writes what the module ran, which lives in its
+  memory, to the run as the test's process ends.
+- `wasm32-wasip1` with `wasmtime` or `wasmer` as the runner: Supercov opens
+  the test's evidence directory to the module (`--dir`) and names it in the
+  module's environment (`--env`), and the module writes what it runs to a
+  file there as it runs.
+
+Each test is credited exactly, assertions included, as for a native test.
+Tests that run in a browser through `wasm-bindgen-test-runner`'s headless
+mode are not covered yet.
 
 ## Python
 
@@ -455,28 +555,40 @@ is not the one Supercov instruments.
 npx supercov -- npx playwright test
 ```
 
-### A server Docker Compose builds
+### A server in a container
 
-A Playwright suite whose server `docker compose up` builds (`build:` in the
-compose file) measures it in any of these languages: Node, Python, Ruby, Go,
-Java or Kotlin. The image is built from Supercov's copy, so it holds the
-copy's code. Supercov's `docker` on the suite's PATH gives each service
-built from the copy the run's settings, and mounts the project's `.supercov`
-into it at the same path, so the server writes its coverage where the run
-reads it. Each request or window is credited to its test as for a server
-started directly. Supercov builds those services before starting them, so
-an image left over from an earlier run is never used. When the command ends
-it stops the containers it started; it never removes them.
+A Playwright suite whose server runs in a container it builds measures it in
+any of these languages: Node, Python, Ruby, Go, Java or Kotlin, whichever
+client starts it: `docker compose up` with `build:` in the compose file,
+`docker build` and `docker run` in `webServer`, testcontainers building from
+a Dockerfile in a test, or a Docker SDK. The suite's `DOCKER_HOST` points at
+a relay of Supercov's that passes every request to your Docker daemon and
+gives each container whose image holds the copy's code the run's settings,
+with the project's `.supercov` mounted at the same path, so the server
+writes its coverage where the run reads it. Each request or window is
+credited to its test as for a server started directly. When the command
+ends, the run stops the containers it measured and the rest of their compose
+projects; it never removes them.
 
-- Services that pull an image (`image:` with no `build:`) run code nobody
-  instrumented, and are left as they are.
+An image holds the copy's code when it was built during the run, when an
+earlier run recorded it as built from the same source (a build that finds
+every layer cached returns it unchanged), or when it is a compose service
+whose build context is in the copy: Supercov builds that service from the
+copy before its container starts, so an image left over from an earlier run
+is never used. An image built from an earlier copy, by a command outside the
+run, is left as it is, and the run says to build it in the test command.
+
+- Images pulled from a registry (`image:` with no `build:`, `postgres:16`)
+  run code nobody instrumented, and are left as they are.
+- testcontainers' reaper, Ryuk, is pointed at the daemon's own socket
+  (`TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`) unless you set one.
 - A Python or Ruby image may keep the code at a path of its own
   (`COPY backend/ /srv/`): the runtime matches the image's files to the
   copy's by their paths' common ending, and only when several of them match.
 - A Go image needs Supercov's runtime package, `_supercov_runtime/` at the
   module root: copy the whole module (`COPY . .`), not chosen directories.
-- `docker run` and a `docker build` the command makes itself are not
-  covered; neither is Windows.
+- A daemon reached over TCP or SSH (`DOCKER_HOST=tcp://...`), and Windows,
+  are not covered: there the containers run as written.
 
 ```sh
 npx supercov -- npx playwright test

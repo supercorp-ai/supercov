@@ -1329,6 +1329,43 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
 }
 
 #[test]
+fn a_crate_with_no_library_runs_its_tests_and_no_doctests() {
+    // A Worker or a plugin: `cargo test` runs its unit tests and, since a
+    // cdylib cannot have doctests, none of those. `--doc` alone is Cargo's
+    // own error.
+    let project = Project::empty("cdylib");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"plugin\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn double(value: u32) -> u32 {\n    value * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let output = project.supercov(&["--", "cargo", "test"]).succeeds();
+    assert!(output.contains("1 passed"), "{output}");
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Lines      100.00% (2/2)", "Passed      1"]);
+    let doc = project.supercov(&["--", "cargo", "test", "--doc"]).exits(1);
+    assert!(doc.contains("no library targets found"), "{doc}");
+
+    // A crate that is only a binary has no library to doctest either.
+    let binary = Project::empty("bin-only");
+    binary.write(
+        "Cargo.toml",
+        "[package]\nname = \"tool\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    binary.write(
+        "src/main.rs",
+        "fn double(value: u32) -> u32 {\n    value * 2\n}\n\nfn main() {\n    println!(\"{}\", double(2));\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    binary.git(&["init", "-q"]);
+    let output = binary.supercov(&["--", "cargo", "test"]).succeeds();
+    assert!(output.contains("1 passed"), "{output}");
+}
+
+#[test]
 fn a_run_of_two_test_kinds_narrows_pages_and_groups() {
     let project = Project::cart("views");
     project.write(

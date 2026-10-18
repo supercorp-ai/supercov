@@ -5,10 +5,16 @@ on:
     branches: [main]
     paths:
       - examples/checkout-verification/**
+      # The guide quotes the recorded run, and the check holds it to it.
+      - docs/agent-loop.md
+      - crates/supercov-cli/assets/docs/agent-loop.md
       - .github/workflows/checkout-example.yml
   pull_request:
     paths:
       - examples/checkout-verification/**
+      # The guide quotes the recorded run, and the check holds it to it.
+      - docs/agent-loop.md
+      - crates/supercov-cli/assets/docs/agent-loop.md
       - .github/workflows/checkout-example.yml
   workflow_dispatch:
 
