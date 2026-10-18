@@ -449,26 +449,18 @@ data does not count.";
         }
     }
 
-    /// One Choice per node: which check, if any, does this line show. Keys are
-    /// `n{offset+i}`, so chunks of one file can share a key space.
-    pub fn classify_questions(
-        nodes: &[super::super::candidates::Node],
-        offset: usize,
-    ) -> Map<String, Value> {
-        classify_among(nodes, offset, None)
-    }
-
-    /// The same Choice per node over only the checks the file question fired
-    /// on, when `among` names them: four options instead of thirteen, so a
-    /// hundred nodes fit beside the file where thirty did.
+    /// One Choice per node over only the checks the file question fired on:
+    /// four options instead of thirteen, so a hundred nodes fit beside the
+    /// file where thirty did. Keys are `n{offset+i}`, so chunks of one file
+    /// can share a key space.
     pub fn classify_among(
         nodes: &[super::super::candidates::Node],
         offset: usize,
-        among: Option<&[String]>,
+        among: &[String],
     ) -> Map<String, Value> {
         let mut criteria = Map::new();
         for c in checks() {
-            if among.is_none_or(|fired| fired.contains(&c.id)) {
+            if among.contains(&c.id) {
                 criteria.insert(c.id.clone(), Value::String(short(&c.id).to_owned()));
             }
         }
@@ -499,7 +491,7 @@ data does not count.";
         source: &str,
         nodes: &[super::super::candidates::Node],
         offset: usize,
-        among: Option<&[String]>,
+        among: &[String],
     ) -> Value {
         json!({
             "model": super::super::model(),

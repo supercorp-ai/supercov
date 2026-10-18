@@ -686,7 +686,6 @@ fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
         lines: Vec::new(),
         labels: Vec::new(),
 
-        classified: BTreeMap::new(),
         path: path.to_owned(),
         bytes: 100,
         // Every window of one file carries that file's digest, which is what
@@ -2508,7 +2507,6 @@ fn a_security_answer_is_never_scored_and_sorts_by_what_fired() {
         lines: Vec::new(),
         labels: Vec::new(),
 
-        classified: BTreeMap::new(),
         path: "src/b.ts".into(),
         sha256: "test-source".into(),
         bytes: 10,
@@ -2712,7 +2710,6 @@ fn security_totals_include_a_check_only_the_line_pass_found() {
             json!({"line": 5, "check": "sensitive_data_exposure", "value": 0.9, "text": "log(token)"}),
         ],
         labels: Vec::new(),
-        classified: BTreeMap::new(),
         note: None,
         values: Some(values(&[("sensitive_data_exposure", 0.1)])),
         cached: false,

@@ -1627,9 +1627,6 @@ struct Answers {
     /// The graph stage's labels for this file's functions, in declaration
     /// order: `{takes_outside, reaches_sink, sanitises, sink_kind}`.
     labels: Vec<FunctionLabel>,
-    /// Lines pass one already classified, when the first chunk of nodes rode
-    /// on its request: node index to check.
-    classified: BTreeMap<usize, String>,
     path: String,
     bytes: u64,
     sha256: String,
@@ -1790,7 +1787,6 @@ fn ask_smells(
         out.push(Answers {
             lines: Vec::new(),
             labels: Vec::new(),
-            classified: BTreeMap::new(),
             path: subject.path.clone(),
             bytes: subject.bytes,
             sha256: subject.sha256.clone(),
@@ -1844,7 +1840,6 @@ fn ask_smells(
                         .collect(),
                 );
                 out[index].labels = function_labels(&entry.response);
-                out[index].classified = classifications(&entry.response);
                 out[index].cached = hit;
                 out[index].error = warning;
             }
@@ -1908,14 +1903,6 @@ fn present_for(values: &BTreeMap<String, f64>, instrument: Instrument) -> Vec<(S
 /// nodes fit beside the file), then confirmation. On fifteen held-out
 /// repositories: F1 0.47 at $0.33, against 0.46 at $0.66 for a thirteen-way
 /// Choice on every node of every file.
-fn enumerate_lines() -> bool {
-    true
-}
-
-fn narrow_nodes() -> bool {
-    true
-}
-
 /// A file question at or above this sends the check into the narrowing
 /// tier. Lower than the 0.6 that flags a file, because the exhaustive tier
 /// found lines in files whose file question had not fired.
@@ -2057,11 +2044,10 @@ fn ask_lines(
     };
     let (mut usage, mut reused) = (zero(), zero());
     let agent = client();
-    // Round one: the parser lists every node, the model says which check, if
-    // any, each shows. Whatever pass one already classified on its own
-    // request is kept; the rest is asked in chunks sized to the budget, per
-    // view. Files no parser knows keep their pattern candidates and skip to
-    // round two.
+    // Round one: the parser lists every node, the model says which of the
+    // checks the file question fired on, if any, each shows, in chunks sized
+    // to the budget, per view. Files no parser knows keep their pattern
+    // candidates and skip to round two.
     let mut views_by_index: BTreeMap<usize, Vec<View>> = BTreeMap::new();
     let mut pairs: BTreeMap<usize, Vec<candidates::Candidate>> = BTreeMap::new();
     // Each pending request names its job: which file and which view.
@@ -2086,26 +2072,14 @@ fn ask_lines(
                     })
                     .map(|(check, _)| check.clone())
                     .collect();
-                if narrow_nodes() && fired.is_empty() {
+                // Only the checks the file question fired on are asked
+                // line by line.
+                if fired.is_empty() {
                     continue;
                 }
-                let among = narrow_nodes().then_some(fired.as_slice());
-                for (i, check) in &answer.classified {
-                    if let Some(node) = nodes.get(*i) {
-                        pairs.entry(index).or_default().push(candidates::Candidate {
-                            line: node.line,
-                            check: check.clone(),
-                            text: node.text.clone(),
-                        });
-                    }
-                }
-                let asked = pass_one_asked(&answer.path, &nodes, answer);
                 let views = line_views(&answer.path, &source, &nodes);
                 for (v, view) in views.iter().enumerate() {
-                    // Pass one answers every node it was given, so the first
-                    // key it did not carry is where the remaining chunks
-                    // start. A windowed file was never given any.
-                    let mut offset = if views.len() == 1 { asked } else { 0 };
+                    let mut offset = 0;
                     while offset < view.nodes.len() {
                         let left = view.nodes.len() - offset;
                         let mut took = 0;
@@ -2121,7 +2095,7 @@ fn ask_lines(
                                 &view.text,
                                 &view.nodes[offset..offset + take],
                                 offset,
-                                among,
+                                &fired,
                             );
                             if let Ok(Some(bytes)) = within_budget(&request) {
                                 jobs.push((index, v));
@@ -2342,24 +2316,6 @@ fn ask_lines(
         answers[index].lines = kept;
     }
     (confirmed, usage, reused)
-}
-
-/// How many nodes pass one's request carried for this file: the largest
-/// classified index plus one when any were classified, otherwise what the
-/// same sizing would have chosen. Recomputed rather than stored, because the
-/// choice is deterministic on the same file.
-fn pass_one_asked(path: &str, nodes: &[candidates::Node], answer: &Answers) -> usize {
-    if let Some(max) = answer.classified.keys().max() {
-        // Every node asked was answered, so the keys reach at least this far;
-        // the chunk sizes are the same three, so the smallest that covers it.
-        return [nodes.len(), 60, 30]
-            .into_iter()
-            .filter(|take| *take > *max && *take <= nodes.len())
-            .min()
-            .unwrap_or(nodes.len());
-    }
-    let _ = path;
-    0
 }
 
 /// A Choice below this confidence is read as `none`.
@@ -3046,31 +3002,6 @@ fn run_health(
                         if matches!(within_budget(&labelled), Ok(Some(_))) {
                             whole = labelled;
                             structures.insert(relative.clone(), (structure, source.clone()));
-                        }
-                    }
-                    // The first chunk of line classifications rides here too,
-                    // as many as fit: the state is already being sent. Only
-                    // when the line tier enumerates; the narrowing tier asks
-                    // per function after the file questions have answered.
-                    if enumerate_lines()
-                        && !narrow_nodes()
-                        && let Some(nodes) = candidates::nodes(Path::new(&relative), &source)
-                    {
-                        for take in [nodes.len(), 60, 30] {
-                            if take == 0 || take > nodes.len() {
-                                continue;
-                            }
-                            let mut with = whole.clone();
-                            if let Some(questions) = with["questions"].as_object_mut() {
-                                questions.extend(catalog::security::classify_questions(
-                                    &nodes[..take],
-                                    0,
-                                ));
-                            }
-                            if matches!(within_budget(&with), Ok(Some(_))) {
-                                whole = with;
-                                break;
-                            }
                         }
                     }
                 }
