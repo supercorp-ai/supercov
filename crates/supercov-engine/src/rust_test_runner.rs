@@ -3183,6 +3183,106 @@ mod tests {
         assert!(!libtest_skipped(0, "running 1 test\n"));
     }
 
+    /// A record naming a probe the manifest does not have, or a decision
+    /// with the wrong number of conditions, is refused; a branch outcome's
+    /// hit and an assertion with what its thread wrote before it are kept.
+    #[test]
+    fn probe_records_are_read_against_the_manifest() {
+        use crate::coverage_analysis::PointKind;
+        use crate::coverage_report::{
+            BranchAlternativeMeta, BranchMeta, CoverageManifest, DecisionMeta, PointMeta,
+        };
+        use crate::rust_runtime::{RustProbeEntry, RustProbeObservation as O};
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![DecisionMeta {
+                id: "d".into(),
+                file: "src/lib.rs".into(),
+                line: 2,
+                column: 4,
+                source: "a && b".into(),
+                conditions: vec!["a".into(), "b".into()],
+                kind: "if".into(),
+            }],
+            points: vec![PointMeta {
+                id: "p".into(),
+                kind: PointKind::Statement,
+                file: "src/lib.rs".into(),
+                line: 1,
+                column: 1,
+                source: "assert!(a)".into(),
+                label: None,
+            }],
+            branches: vec![BranchMeta {
+                id: "b".into(),
+                kind: "if".into(),
+                file: "src/lib.rs".into(),
+                line: 2,
+                column: 4,
+                source: "a && b".into(),
+                alternatives: vec![BranchAlternativeMeta {
+                    id: "alt".into(),
+                    label: "true".into(),
+                }],
+            }],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let entry = |thread: u64, observation: O| RustProbeEntry {
+            thread,
+            observation,
+        };
+        let read = |entries: Vec<RustProbeEntry>| snapshot_regions(&manifest, [entries], "attempt");
+        for (entries, expected) in [
+            (vec![entry(1, O::Hit { id: "zzz".into() })], "zzz"),
+            (
+                vec![entry(
+                    1,
+                    O::Decision {
+                        id: "zzz".into(),
+                        values: vec![],
+                        outcome: true,
+                    },
+                )],
+                "zzz",
+            ),
+            (vec![entry(1, O::Assertion { id: "zzz".into() })], "zzz"),
+        ] {
+            assert!(
+                matches!(read(entries), Err(RustTestRunnerError::UnknownProbe(id)) if id == expected)
+            );
+        }
+        assert!(matches!(
+            read(vec![entry(
+                1,
+                O::Decision {
+                    id: "d".into(),
+                    values: vec![Some(true)],
+                    outcome: true
+                }
+            )]),
+            Err(RustTestRunnerError::InvalidVector {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        let evidence = read(vec![
+            entry(1, O::Hit { id: "alt".into() }),
+            entry(
+                2,
+                O::Decision {
+                    id: "d".into(),
+                    values: vec![Some(true), Some(false)],
+                    outcome: false,
+                },
+            ),
+            entry(1, O::Assertion { id: "p".into() }),
+        ]);
+        assert_eq!(evidence.err().map(|error| error.to_string()), None);
+    }
+
     #[test]
     fn invalid_or_duplicate_libtest_thread_counts_fail_closed() {
         for arguments in [
