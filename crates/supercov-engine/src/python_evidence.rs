@@ -2526,6 +2526,171 @@ mod tests {
     }
 
     /// One transport in memory, a frame per payload.
+    /// The slot layout a Python process maps is checked rule by rule, and so
+    /// is every slot and harvest read against it.
+    #[test]
+    fn a_slot_layout_that_breaks_one_rule_is_refused_for_it() {
+        use serde_json::{Value, json};
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-slot-layout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("layout.json");
+        // A 16-byte header, two obligations at 16 and 17, then one decision of
+        // two conditions whose 18 region bytes end the slot at 36.
+        let valid = json!({
+            "version": 1,
+            "digest": "0123456789abcdef",
+            "header": 16,
+            "bytes": 36,
+            "ids": ["a", "b"],
+            "decisions": [{
+                "start": 18, "width": 2, "id": "d",
+                "outcomeTrue": "d:true", "outcomeFalse": "d:false",
+                "logical": [{"evaluated": "l:e", "shortCircuit": "l:s", "previousLeaves": [0], "operandLeaves": [1]}]
+            }],
+            "implied": [[16, [18]]]
+        });
+        let read = |edit: &dyn Fn(&mut Value)| {
+            let mut layout = valid.clone();
+            edit(&mut layout);
+            fs::write(&path, layout.to_string()).unwrap();
+            match SlotLayout::read(&path) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => error.to_string(),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        type Edit = Box<dyn Fn(&mut Value)>;
+        let cases: Vec<(&str, Edit)> = vec![
+            (
+                "digest is not hex",
+                Box::new(|l| l["digest"] = json!("abc")),
+            ),
+            (
+                "digest is not hex",
+                Box::new(|l| l["digest"] = json!("0123456789abcdez")),
+            ),
+            (
+                "has no valid region",
+                Box::new(|l| l["decisions"][0]["start"] = json!(19)),
+            ),
+            (
+                "has no valid region",
+                Box::new(|l| l["decisions"][0]["width"] = json!(0)),
+            ),
+            (
+                "has no valid region",
+                Box::new(|l| l["decisions"][0]["width"] = json!(7)),
+            ),
+            (
+                "names a condition it lacks",
+                Box::new(|l| l["decisions"][0]["logical"][0]["operandLeaves"] = json!([2])),
+            ),
+            ("do not fill the slot", Box::new(|l| l["bytes"] = json!(40))),
+            (
+                "do not fill the slot",
+                Box::new(|l| {
+                    l["header"] = json!(8);
+                    l["decisions"][0]["start"] = json!(10);
+                    l["bytes"] = json!(28);
+                    l["implied"] = json!([]);
+                }),
+            ),
+            (
+                "implies bytes outside the slot",
+                Box::new(|l| l["implied"] = json!([[15, [18]]])),
+            ),
+            (
+                "implies bytes outside the slot",
+                Box::new(|l| l["implied"] = json!([[18, [19]]])),
+            ),
+            (
+                "implies bytes outside the slot",
+                Box::new(|l| l["implied"] = json!([[16, [15]]])),
+            ),
+            (
+                "implies bytes outside the slot",
+                Box::new(|l| l["implied"] = json!([[16, [36]]])),
+            ),
+            (
+                "implies bytes outside the slot",
+                Box::new(|l| l["implied"] = json!([[16, [16]]])),
+            ),
+            (
+                "implies others",
+                Box::new(|l| l["implied"] = json!([[16, [17]], [17, [18]]])),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+        // Slots and harvests read against the valid layout.
+        fs::write(&path, valid.to_string()).unwrap();
+        let layout = SlotLayout::read(&path).unwrap();
+        let mut slot = vec![0u8; 36];
+        assert!(
+            layout.records("s", &slot).unwrap().is_empty(),
+            "a closed slot"
+        );
+        slot[8..16].copy_from_slice(&layout.tag());
+        assert!(
+            layout
+                .records("s", &slot[..20])
+                .unwrap_err()
+                .to_string()
+                .contains("slot size does not match")
+        );
+        let mut other = slot.clone();
+        other[8] ^= 1;
+        assert!(
+            layout
+                .records("s", &other)
+                .unwrap_err()
+                .to_string()
+                .contains("another layout")
+        );
+        let mut wrong = slot.clone();
+        wrong[16] = 2;
+        assert!(
+            layout
+                .records("s", &wrong)
+                .unwrap_err()
+                .to_string()
+                .contains("neither 0 nor 1")
+        );
+        assert!(
+            layout
+                .records("s", &slot[..4])
+                .unwrap_err()
+                .to_string()
+                .contains("slot header is missing")
+        );
+        assert!(
+            layout
+                .runs(1, &[16])
+                .unwrap_err()
+                .contains("pair a first byte")
+        );
+        for runs in [[16, 0], [8, 2], [30, 10]] {
+            assert!(
+                layout
+                    .runs(1, &runs)
+                    .unwrap_err()
+                    .contains("outside the layout"),
+                "{runs:?}"
+            );
+        }
+        assert!(layout.runs(1, &[16, 2]).is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn transport_bytes(payloads: &[&[u8]]) -> Vec<u8> {
         let capacity = payloads
             .iter()
