@@ -2576,6 +2576,38 @@ mod tests {
     }
 
     #[test]
+    fn what_is_not_a_function_with_a_body_is_no_addition() {
+        let before = code("h.ts", "export function open() {\n  return 1;\n}\n").unwrap();
+        let with = |tail: &str| {
+            only_added(
+                &before,
+                "h.ts",
+                &format!("export function open() {{\n  return 1;\n}}\n{tail}"),
+            )
+        };
+        // Functions, by declaration or bound to a name, are additions.
+        assert_eq!(
+            with("export function two() {\n  return 2;\n}\n"),
+            Some(vec!["two".to_owned()])
+        );
+        assert_eq!(
+            with("const three = function () {\n  return 3;\n};\n"),
+            Some(vec!["three".to_owned()])
+        );
+        for tail in [
+            // ambient: declared, never defined here
+            "export declare function ambient(): void;\n",
+            "declare const typed: number;\n",
+            // a value that is no function runs at load
+            "export const limit = 10;\n",
+            // not parseable as the file's language
+            "export function broken( {\n",
+        ] {
+            assert_eq!(with(tail), None, "{tail}");
+        }
+    }
+
+    #[test]
     fn functions_added_to_a_python_helper_are_only_additions() {
         let before = code(
             "tests/helpers.py",
