@@ -1847,6 +1847,62 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Evidence goes with its run: an orphan's always, a kept run's never.
+    /// A full clean takes kept evidence and the build cache only once no
+    /// run is active.
+    #[test]
+    fn evidence_goes_with_its_run_and_a_clean_waits_for_active_runs() {
+        let root = project();
+        let (old, new, orphan, active) = (
+            "2026-01-01T00-00-00-000Z",
+            "2026-01-02T00-00-00-000Z",
+            "2026-01-03T00-00-00-000Z",
+            "2026-01-04T00-00-00-000Z",
+        );
+        for id in [old, new] {
+            fs::create_dir_all(root.join(".supercov/runs").join(id)).unwrap();
+        }
+        for id in [old, new, orphan] {
+            fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+        }
+        write_run_state(
+            &root,
+            &state(&root, active, RunStateStatus::Testing, std::process::id()),
+        )
+        .unwrap();
+        kept_evidence(&root, "2025-12-31T00-00-00-000Z");
+        fs::create_dir_all(root.join(".supercov/cache")).unwrap();
+        let clean = |keep: usize| {
+            cleanup_storage_locked(
+                &root,
+                CleanupOptions {
+                    keep,
+                    dry_run: true,
+                },
+                true,
+            )
+            .unwrap()
+        };
+        let trim = clean(1);
+        assert_eq!(trim.removed_runs, [old]);
+        assert_eq!(trim.removed_evidence, [orphan, old]);
+        assert!(trim.removed_failed_evidence.is_empty());
+        assert!(!trim.removed_build_cache, "a run is active");
+        let full = clean(0);
+        assert!(full.removed_failed_evidence.is_empty(), "a run is active");
+        assert!(!full.removed_build_cache);
+        write_run_state(
+            &root,
+            &state(&root, active, RunStateStatus::Complete, std::process::id()),
+        )
+        .unwrap();
+        let idle = clean(0);
+        assert_eq!(idle.removed_failed_evidence, ["2025-12-31T00-00-00-000Z"]);
+        assert!(idle.removed_build_cache);
+        assert!(idle.removed_workspaces.contains(&active.to_owned()));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn retention_is_deterministic_dry_run_safe_and_preserves_active_work() {
         let root = project();
