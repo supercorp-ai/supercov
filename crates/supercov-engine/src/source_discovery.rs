@@ -2068,4 +2068,48 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn declared_workspace_patterns_name_only_real_package_directories() {
+        let root = repository(
+            "workspace-patterns",
+            &[
+                (
+                    "package.json",
+                    r#"{"workspaces":{"packages":["apps/*","./libs/core/","!apps/skip","deep/**","../up","a//b","x*/y","/*","plain-file"]}}"#,
+                ),
+                (
+                    "pnpm-workspace.yaml",
+                    "packages:\n  # the tools\n\n  - 'tools/cli'\n  - \"tools/missing\"\ncatalog:\n  - not/a/package\n",
+                ),
+                ("apps/web/package.json", "{}"),
+                ("apps/nopkg/index.js", ""),
+                ("apps/readme.txt", ""),
+                ("libs/core/package.json", "{}"),
+                ("tools/cli/package.json", "{}"),
+                ("not/a/package/package.json", "{}"),
+                ("plain-file", ""),
+            ],
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("libs/core"), root.join("apps/linked")).unwrap();
+        let mut found = declared_workspace_packages(&root)
+            .unwrap()
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, ["apps/web", "libs/core", "tools/cli"]);
+        // A workspaces list, rather than an object, is read the same way.
+        fs::write(root.join("package.json"), r#"{"workspaces":["apps/*"]}"#).unwrap();
+        fs::remove_file(root.join("pnpm-workspace.yaml")).unwrap();
+        let listed = declared_workspace_packages(&root).unwrap();
+        assert_eq!(listed, [root.join("apps/web")]);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
