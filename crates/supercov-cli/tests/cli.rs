@@ -8383,3 +8383,76 @@ fn words_and_flags_a_command_does_not_take_are_refused() {
     let named = project.supercov(&["runs", "latest", "test", "-x"]).exits(2);
     assert!(named.contains("Test not found: -x"), "{named}");
 }
+
+/// An import of nothing the run measures makes no run; a line past a file's
+/// end, evidence of no project file, a name already imported and both ways
+/// of crediting at once are each refused by what is wrong.
+#[test]
+fn imports_that_cannot_add_anything_are_refused() {
+    let project = Project::cart("import-refusals");
+    project.write("lib/extra.js", "export const x = 1;\nexport const y = 2;\n");
+    project.commit("extra");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.write(
+        "excluded.info",
+        "SF:test/cart.test.js\nDA:1,1\nend_of_record\n",
+    );
+    project.write(
+        "extra.info",
+        "SF:lib/extra.js\nDA:1,1\nDA:2,0\nend_of_record\n",
+    );
+    project.write("beyond.info", "SF:src/cart.js\nDA:99,1\nend_of_record\n");
+    project.write(
+        "nothing.info",
+        "SF:/elsewhere/a.js\nDA:1,1\nend_of_record\n",
+    );
+    let before = project.latest();
+    for (args, expected) in [
+        (
+            vec!["import", "excluded.info", "--test", "t"],
+            "Nothing in excluded.info is a file the run measures: test/cart.test.js (the run leaves it out: test or fixture source)",
+        ),
+        (
+            vec!["import", "beyond.info", "--test", "t"],
+            "records line 99 of src/cart.js, which has 21 lines",
+        ),
+        (
+            vec!["import", "nothing.info", "--test", "t"],
+            "Nothing in nothing.info is a file of this project: /elsewhere/a.js (outside the project)",
+        ),
+        (
+            vec!["import", "extra.info", "--test", "t", "--background"],
+            "--test and --background each name who the lines are credited to",
+        ),
+        (
+            vec!["import", "extra.info", "--test", "t", "--run", "nope"],
+            "coverage run not found: nope",
+        ),
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(refused.contains(expected), "{args:?}: {refused}");
+    }
+    assert_eq!(project.latest(), before, "a refused import makes no run");
+    project
+        .supercov(&["import", "extra.info", "--background"])
+        .succeeds();
+    project
+        .supercov(&["import", "extra.info", "--test", "again"])
+        .succeeds();
+    let twice = project
+        .supercov(&["import", "extra.info", "--test", "again"])
+        .exits(2);
+    assert!(
+        twice.contains("already holds an imported test named again"),
+        "{twice}"
+    );
+    let runners = project.supercov(&["runs", "latest", "runners"]).succeeds();
+    contains_all(
+        &runners,
+        &[
+            "background  0 test(s)",
+            "lines  1 test(s)",
+            "node:test  3 test(s)",
+        ],
+    );
+}

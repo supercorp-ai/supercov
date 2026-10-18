@@ -549,7 +549,13 @@ fn import_command(arguments: Vec<String>) -> ExitCode {
     let credit = match (test, background) {
         (Some(name), false) => supercov_engine::outside_evidence::Credit::Test(name),
         (None, true) => supercov_engine::outside_evidence::Credit::Background,
-        _ => {
+        (Some(_), true) => {
+            eprintln!(
+                "[supercov] --test and --background each name who the lines are credited to; give one\n\n{IMPORT_USAGE}"
+            );
+            return ExitCode::from(2);
+        }
+        (None, false) => {
             eprintln!(
                 "[supercov] name who the lines are credited to: --test <name> or --background\n\n{IMPORT_USAGE}"
             );

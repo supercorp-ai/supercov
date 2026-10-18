@@ -439,6 +439,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
         }
     }
 
+    let skipped_paths = skipped.len();
     let mut hits = BTreeSet::<String>::new();
     let mut lines_run = 0;
     let mut added_files = Vec::new();
@@ -551,6 +552,20 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                 .insert(file.clone(), FileFingerprint::read(file, &text));
         }
         added_files.push(file.clone());
+    }
+    // Every file the run leaves out, or that is gone: a run made of
+    // nothing would be a run all the same.
+    if !by_file.is_empty() && skipped.len() == by_file.len() + skipped_paths {
+        return Err(format!(
+            "Nothing in {} is a file the run measures: {}",
+            request.evidence.display(),
+            crate::run_merge::listed(
+                &skipped
+                    .iter()
+                    .map(|(file, reason)| format!("{file} ({reason})"))
+                    .collect::<Vec<_>>()
+            )
+        ));
     }
     if by_file.is_empty() {
         return Err(format!(
