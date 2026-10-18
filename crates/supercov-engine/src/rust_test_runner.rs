@@ -3077,6 +3077,112 @@ mod tests {
         }
     }
 
+    /// Each libtest option that needs a value refuses to go without one,
+    /// an attached value is kept or dropped by what it does, and a second
+    /// `--` is the runner's own argument.
+    #[test]
+    fn libtest_options_keep_or_drop_their_values_by_what_they_do() {
+        let select = |runner: &[&str]| {
+            rust_libtest_selection(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::CargoTest,
+                arguments: vec!["test".into()],
+                runner_arguments: runner.iter().map(|argument| argument.to_string()).collect(),
+            })
+            .map(|selection| selection.list_arguments)
+            .map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            select(&[
+                "--skip=slow",
+                "-Zflag",
+                "--format=terse",
+                "--color",
+                "always"
+            ]),
+            Ok(vec!["--skip=slow".to_owned(), "-Zflag".to_owned()])
+        );
+        for (runner, refusal) in [
+            (&["--skip"][..], "libtest --skip has no filter value"),
+            (&["-Z"][..], "libtest -Z has no feature value"),
+            (&["--logfile"][..], "libtest --logfile has no value"),
+            (&["--skip="][..], "does not recognize option --skip="),
+            (&["--format="][..], "does not recognize option --format="),
+            (&["--list"][..], "does not execute a test suite"),
+        ] {
+            let error = select(runner).unwrap_err();
+            assert!(error.contains(refusal), "{runner:?}: {error}");
+        }
+        let words = |command: &str| {
+            cargo_invocation(
+                Path::new("."),
+                &command.split(' ').map(str::to_owned).collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .runner_arguments
+        };
+        assert_eq!(words("cargo test -- a -- b"), ["a", "--", "b"]);
+        // A nextest option that is refused says so before it says its value is missing.
+        let list = |arguments: &[&str]| {
+            nextest_list_invocation(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::NextestRun,
+                arguments: ["nextest", "run"]
+                    .iter()
+                    .chain(arguments)
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+                runner_arguments: Vec::new(),
+            })
+            .map_err(|error| error.to_string())
+        };
+        for (arguments, refusal) in [
+            (
+                &["--stress-count"][..],
+                "nextest option --stress-count has no value",
+            ),
+            (
+                &["--stress-count", "3"][..],
+                "cannot yet be assigned exact selected-test identity",
+            ),
+            (
+                &["--stress-count=3"][..],
+                "cannot yet be assigned exact selected-test identity",
+            ),
+            (
+                &["--no-run"][..],
+                "cannot yet be assigned exact selected-test identity",
+            ),
+        ] {
+            let error = list(arguments).unwrap_err();
+            assert!(error.contains(refusal), "{arguments:?}: {error}");
+        }
+    }
+
+    /// libtest is quiet with `-q`, `--quiet` or terse output in either
+    /// spelling; a run that ran nothing is a skip only when it passed.
+    #[test]
+    fn libtest_quiet_and_skipped_runs_are_read_from_their_arguments_and_output() {
+        let quiet = |runner: &[&str]| {
+            libtest_quiet(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::CargoTest,
+                arguments: vec!["test".into()],
+                runner_arguments: runner.iter().map(|argument| argument.to_string()).collect(),
+            })
+        };
+        assert!(quiet(&["-q"]) && quiet(&["--quiet"]) && quiet(&["--format=terse"]));
+        assert!(quiet(&["--format", "terse"]));
+        assert!(!quiet(&["--format", "json"]) && !quiet(&["terse"]) && !quiet(&[]));
+        assert!(libtest_skipped(0, "running 0 tests\n"));
+        assert!(libtest_skipped(
+            0,
+            "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured"
+        ));
+        assert!(!libtest_skipped(101, "running 0 tests\n"));
+        assert!(!libtest_skipped(0, "running 1 test\n"));
+    }
+
     #[test]
     fn invalid_or_duplicate_libtest_thread_counts_fail_closed() {
         for arguments in [
