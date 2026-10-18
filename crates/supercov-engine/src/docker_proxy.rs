@@ -580,6 +580,13 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
         }
         if let Some(context) = created_context {
             let body = read_body(&response, &mut upstream_reader)?;
+            // Recorded before the client hears of it: a client that has its
+            // answer may end the run, and the run's end reads the record.
+            if let Ok(created) = serde_json::from_slice::<Value>(&body)
+                && let Some(id) = created.get("Id").and_then(Value::as_str)
+            {
+                shared.record(id, context);
+            }
             // Sent as it came: chunked re-framed as one chunk.
             if response.chunked() {
                 write!(client_writer, "{:x}\r\n", body.len())?;
@@ -589,11 +596,6 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
                 client_writer.write_all(&body)?;
             }
             client_writer.flush()?;
-            if let Ok(created) = serde_json::from_slice::<Value>(&body)
-                && let Some(id) = created.get("Id").and_then(Value::as_str)
-            {
-                shared.record(id, context);
-            }
             continue;
         }
         if !response.chunked() && response.content_length().is_none() {
