@@ -869,6 +869,20 @@ fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
     }
 }
 
+/// `3 lines, 1 hit, 0 decisions, 1 phase`.
+fn test_totals(totals: &supercov_engine::coverage_query::CoverageTestTotals) -> String {
+    let counted = |value: usize, one: &str, many: &str| {
+        format!("{} {}", count(value), if value == 1 { one } else { many })
+    };
+    format!(
+        "{}, {}, {}, {}",
+        counted(totals.lines, "line", "lines"),
+        counted(totals.hits, "hit", "hits"),
+        counted(totals.decisions, "decision", "decisions"),
+        counted(totals.phases, "phase", "phases")
+    )
+}
+
 fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
     // Several lines: each as one line reads, one after another.
     if let IndexedQueryData::Lines(data) = &output.data {
@@ -1898,31 +1912,19 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             // it, so a later test that runs the same line is
                             // recorded against none of it.
                             format!(
-                                "at least {} lines, {} hits, {} decisions, {} phases (a line already recorded for an earlier test is not recorded again)",
-                                test.totals.lines,
-                                test.totals.hits,
-                                test.totals.decisions,
-                                test.totals.phases
+                                "at least {} (a line already recorded for an earlier test is not recorded again)",
+                                test_totals(&test.totals)
                             )
                         } else if test.attribution == "by-time" {
                             // Server work no test could be read from -- a
                             // webhook a mock sent, a Go server's window -- that
                             // ran while this test, and only this test, was.
                             format!(
-                                "{} lines, {} hits, {} decisions, {} phases (with server work credited by time: it ran while only this test was running)",
-                                test.totals.lines,
-                                test.totals.hits,
-                                test.totals.decisions,
-                                test.totals.phases
+                                "{} (with server work credited by time: it ran while only this test was running)",
+                                test_totals(&test.totals)
                             )
                         } else {
-                            format!(
-                                "{} lines, {} hits, {} decisions, {} phases",
-                                test.totals.lines,
-                                test.totals.hits,
-                                test.totals.decisions,
-                                test.totals.phases
-                            )
+                            test_totals(&test.totals)
                         },
                     ];
                     lines.extend(
@@ -2012,6 +2014,9 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 }
             )];
             if data.tests.is_empty() {
+                if page.total > 0 {
+                    lines.extend([String::new(), page_label(page)]);
+                }
                 return lines.join("\n");
             }
             lines.push(String::new());

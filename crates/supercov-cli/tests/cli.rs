@@ -8116,3 +8116,127 @@ fn odd_pages_and_empty_views_read_as_what_they_are() {
         ],
     );
 }
+
+/// The run list pages with its filter and marks a run with no exit status;
+/// a line with no code, one that never ran and one past the end each say
+/// so; a test that asserted without reaching measured source is listed with
+/// why, and counts read in the singular where there is one.
+#[test]
+fn run_lists_lines_and_tests_read_as_what_they_are() {
+    let project = Project::cart("more-views");
+    project.write(
+        "test/none.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\ntest(\"asserts nothing measured\", () => {\n  assert.ok(true);\n});\n",
+    );
+    project.commit("none");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let listed = project
+        .supercov(&["runs", "--filter", "passed", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &listed,
+        &[
+            "showing 1-1 of 2",
+            "runs --filter passed --offset 1 --limit 1",
+            "all 2 at once",
+        ],
+    );
+    let blank = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:11"])
+        .succeeds();
+    contains_all(
+        &blank,
+        &[
+            "NOT MEASURED",
+            "Nothing on this line is code the run measures",
+        ],
+    );
+    let unrun = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:20"])
+        .succeeds();
+    contains_all(
+        &unrun,
+        &[
+            "NOT COVERED",
+            "function not called",
+            "Function at column 20",
+        ],
+    );
+    let beyond = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:40"])
+        .exits(2);
+    assert!(
+        beyond.contains("src/cart.js has 21 lines; there is no line 40"),
+        "{beyond}"
+    );
+    let without = project
+        .supercov(&["runs", "latest", "tests", "without-evidence"])
+        .succeeds();
+    assert!(
+        without.contains("test/none.test.js > asserts nothing measured [")
+            && without.contains("passed, 1 assertion; its file imports no measured source"),
+        "{without}"
+    );
+    let past = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "without-evidence",
+            "--offset",
+            "1",
+        ])
+        .succeeds();
+    assert!(
+        past.contains("recorded no coverage: 1\n\nshowing none of 1: --offset 1 is past the end"),
+        "{past}"
+    );
+    let test = project
+        .supercov(&["runs", "latest", "test", "asserts nothing measured"])
+        .succeeds();
+    contains_all(
+        &test,
+        &[
+            "0 lines, 0 hits, 0 decisions, 1 phase\n",
+            "node:assert/strict.ok at test/none.test.js:5:3",
+        ],
+    );
+    let unknown = project
+        .supercov(&["runs", "latest", "test", "nonexistent"])
+        .exits(2);
+    assert!(unknown.contains("Test not found: nonexistent"), "{unknown}");
+    let minimum = project
+        .supercov(&["runs", "latest", "minimize", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &minimum,
+        &[
+            "exact minimum 3/4 test(s)",
+            "showing 1-1 of 3",
+            "minimize --offset 1 --limit 1",
+        ],
+    );
+    let impossible = project
+        .supercov(&["runs", "latest", "minimize", "--target", "50"])
+        .exits(2);
+    assert!(
+        impossible.contains("target 50% is impossible"),
+        "{impossible}"
+    );
+    let run = project.latest();
+    let path = project
+        .root
+        .join(".supercov/runs")
+        .join(&run)
+        .join("run.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    metadata["testExitCode"] = serde_json::Value::Null;
+    std::fs::write(&path, metadata.to_string()).unwrap();
+    let listed = project.supercov(&["runs"]).succeeds();
+    assert!(
+        listed.contains("INVALID (exit status unavailable)"),
+        "{listed}"
+    );
+}
