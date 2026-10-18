@@ -1201,6 +1201,54 @@ pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The poller takes only a pid and a port; once that process is gone it
+    /// stops, and what it wrote is renamed to say the run is whole.
+    #[cfg(unix)]
+    #[test]
+    fn the_wrangler_poller_stops_with_its_process_and_names_its_file_whole() {
+        assert_eq!(poll_wrangler(Vec::new()), 2);
+        assert_eq!(poll_wrangler(vec!["x".into(), "1".into(), "w".into()]), 2);
+        assert_eq!(
+            poll_wrangler(vec!["1".into(), "port".into(), "w".into()]),
+            2
+        );
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        assert!(!process_alive(dead));
+        assert!(process_alive(std::process::id()));
+        // Another user's process answers that it exists.
+        assert!(process_alive(1));
+        assert!(!process_alive(u32::MAX));
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-wrangler-poller-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let windows = directory.join("windows");
+        assert_eq!(partial(&windows), directory.join("windows.part"));
+        assert_eq!(
+            poll_wrangler(vec![
+                dead.to_string().into(),
+                port.to_string().into(),
+                windows.clone().into_os_string(),
+            ]),
+            0
+        );
+        assert!(windows.is_file());
+        assert!(!partial(&windows).exists());
+        fs::remove_dir_all(directory).ok();
+    }
+
     #[test]
     fn jsonc_comments_and_trailing_commas_are_dropped_and_strings_kept() {
         let text = r#"{
