@@ -585,8 +585,17 @@ fn read_framed_entries<R: Read>(
             usize::try_from(header.bytes).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
         previous = Some(header.path.clone());
         if retain(&header.path) {
-            let mut contents = vec![0; payload_size];
-            read_exact_or_truncated(reader, &mut contents, "payload")?;
+            // Read as the bytes arrive: a damaged header's size is never
+            // allocated up front.
+            let mut contents = Vec::with_capacity(payload_size.min(64 << 20));
+            reader
+                .by_ref()
+                .take(header.bytes)
+                .read_to_end(&mut contents)
+                .map_err(EvidenceArchiveError::Io)?;
+            if contents.len() != payload_size {
+                return Err(EvidenceArchiveError::Truncated("payload"));
+            }
             visit(EvidenceArchiveEntry {
                 path: header.path,
                 contents,
@@ -881,6 +890,24 @@ mod tests {
                 "skipped {label}"
             );
         }
+
+        // A header claiming more than any memory holds is truncated, not
+        // allocated.
+        let huge = b"{\"path\":\"manifest.json\",\"bytes\":1000000000000000000}\n";
+        let path = write_compressed(
+            &root,
+            &[
+                EVIDENCE_ARCHIVE_MAGIC.as_bytes(),
+                &(huge.len() as u32).to_be_bytes(),
+                huge,
+                b"{}",
+            ]
+            .concat(),
+        );
+        assert!(matches!(
+            read_archive(&path),
+            Err(EvidenceArchiveError::Truncated("payload"))
+        ));
 
         let duplicate = frame(&[
             entry("coverage-model.json", b"{}"),
