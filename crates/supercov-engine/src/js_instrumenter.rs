@@ -10356,6 +10356,32 @@ mod tests {
         }
     }
 
+    /// Text edits are refused where they overlap, run past the source,
+    /// are reversed, or would add or remove a line.
+    #[test]
+    fn text_edits_that_overlap_or_move_a_line_are_refused() {
+        let edit = |start: usize, end: usize, text: &str| TextEdit {
+            start,
+            end,
+            rank: 0,
+            text: text.into(),
+        };
+        let source = "a(1);\nb(2);\n";
+        let apply = |edits: Vec<TextEdit>| match apply_text_edits(source, edits, "a.test.js") {
+            Ok((code, _)) => code,
+            Err(CandidateError::Parse(reasons)) => reasons.join("; "),
+            Err(error) => format!("{error:?}"),
+        };
+        assert_eq!(apply(vec![edit(0, 4, "x(9)")]), "x(9);\nb(2);\n");
+        assert!(
+            apply(vec![edit(0, 4, "x"), edit(2, 5, "y")]).contains("overlapping assertion edits")
+        );
+        assert!(apply(vec![edit(5, 99, "x")]).contains("overlapping assertion edits"));
+        assert!(apply(vec![edit(4, 2, "x")]).contains("overlapping assertion edits"));
+        assert!(apply(vec![edit(0, 4, "x(\n9)")]).contains("would move a line"));
+        assert!(apply(vec![edit(4, 7, ";")]).contains("would move a line"));
+    }
+
     #[test]
     fn line_index_lookups_agree_with_walking_the_line() {
         let long = "é🚀x".repeat(700);
