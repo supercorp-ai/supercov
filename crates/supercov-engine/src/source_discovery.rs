@@ -1421,6 +1421,37 @@ mod tests {
 
     use super::*;
 
+    /// A bundler's output is a script under an asset directory with an
+    /// eight-character hash that has a digit or both cases.
+    #[test]
+    fn built_assets_are_known_by_directory_and_hash() {
+        for (file, built) in [
+            ("dist/assets/index-BxY3kQ9a.js", true),
+            ("public/app-AbCdEfGh.mjs", true),
+            ("static/x-ab_c-d9e.cjs", true),
+            ("public/app-abcdefgh.js", false),
+            ("public/app-ab.cd_e9.js", false),
+            ("src/app-Ab3dEfGh.js", false),
+            ("app-Ab3dEfGh.js", false),
+            ("static/a.css", false),
+            ("static/short.js", false),
+            ("static/abcdefghij.js", false),
+        ] {
+            assert_eq!(built_asset(file), built, "{file}");
+        }
+        for (path, normal) in [
+            ("a/./b/../c", "a/c"),
+            ("../a", "../a"),
+            ("a/../../b", "../b"),
+        ] {
+            assert_eq!(
+                lexical_normalize(Path::new(path)),
+                Path::new(normal),
+                "{path}"
+            );
+        }
+    }
+
     fn repository(label: &str, files: &[(&str, &str)]) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
