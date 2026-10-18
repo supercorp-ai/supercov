@@ -7795,3 +7795,50 @@ fn check_patch_and_affected_tests_answer_or_say_what_is_missing() {
         "test/cart.test.js\n"
     );
 }
+
+#[test]
+fn a_changed_helper_reaches_the_tests_that_load_it_and_an_unplaced_one_reaches_all() {
+    let project = Project::cart("affected-helpers");
+    project.write(
+        "test/helpers.js",
+        "export function sample() {\n  return [{ price: 10, quantity: 2 }];\n}\n",
+    );
+    project.write("test/unplaced.js", "export const unused = 1;\n");
+    project.write(
+        "src/extra.js",
+        "export function extra() {\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/helped.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\nimport { sample } from \"./helpers.js\";\n// mentions extra by name\ntest(\"helped\", () => {\n  assert.equal(total(sample()), 20);\n});\n",
+    );
+    project.commit("helpers");
+    project.measure(&[]);
+    project.write(
+        "test/helpers.js",
+        "export function sample() {\n  return [{ price: 10, quantity: 3 }];\n}\n",
+    );
+    project.write("test/unplaced.js", "export const unused = 2;\n");
+    project.write(
+        "src/extra.js",
+        "export function extra() {\n  return 2;\n}\nexport function added() {}\n",
+    );
+    let said = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &said,
+        &[
+            "4 of 4 tests affected by changes since the run",
+            "test/helpers.js changed: sample (line 1) (this test's file loads it)",
+            "test/unplaced.js changed: top level (a file tests may load)",
+        ],
+    );
+    // Only the test that imports the helper is reached through it.
+    assert_eq!(said.matches("test/helpers.js changed").count(), 1, "{said}");
+    assert_eq!(
+        said.matches("test/unplaced.js changed").count(),
+        4,
+        "{said}"
+    );
+}
