@@ -1564,4 +1564,135 @@ fn integration_choice() {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Depinfo names every source of every rule, a space escaped; only
+    /// workspace `.rs` files count, and a directory with no depinfo says
+    /// nothing at all.
+    #[test]
+    fn depinfo_names_the_workspace_sources_each_rule_read() {
+        let workspace = Path::new("/w");
+        let mut compiled = BTreeSet::new();
+        collect_depinfo_sources(
+            "/w/target/debug/deps/a.d: src/lib.rs src/my\\ mod.rs /w/src/abs.rs /home/.cargo/registry/dep.rs build.toml\nsrc/lib.rs:\nnot a rule\n",
+            workspace,
+            &mut compiled,
+        );
+        assert_eq!(
+            compiled.into_iter().collect::<Vec<_>>(),
+            ["src/abs.rs", "src/lib.rs", "src/my mod.rs"]
+        );
+        let root = std::env::temp_dir().join(format!(
+            "supercov-depinfo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+        assert_eq!(compiled_source_files(&root, &root.join("target")), None);
+        fs::write(root.join("target/debug/deps/x.d"), "x: src/main.rs\n").unwrap();
+        fs::write(root.join("target/debug/deps/x.rlib"), "").unwrap();
+        assert_eq!(
+            compiled_source_files(&root, &root.join("target")),
+            Some(["src/main.rs".to_owned()].into_iter().collect())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The files a crate compiles, as rustc finds them: `name.rs` and
+    /// `name/mod.rs`, `#[path]` from the file and from an inline module,
+    /// literal `include!`s and the modules they declare, both arms of a
+    /// `cfg_if!`; not a computed include, a path out of the workspace or a
+    /// module whose file is missing. What only tests reach is test code.
+    #[test]
+    fn the_module_tree_is_resolved_the_way_rustc_resolves_it() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-module-tree-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = base.join("w");
+        for (file, text) in [
+            (
+                "src/lib.rs",
+                "mod a;\nmod b;\n#[path = \"other/c_impl.rs\"]\nmod c;\nmod inline {\n    #[path = \"deep.rs\"]\n    mod d;\n    mod e;\n}\n#[cfg(test)]\nmod tests;\ninclude!(\"gen.rs\");\ninclude!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\nconst DATA: &str = include_str!(\"data.txt\");\n#[path = \"../../outside.rs\"]\nmod out;\ncfg_if::cfg_if! {\n    if #[cfg(unix)] {\n        mod unix_impl;\n    } else {\n        mod other_impl;\n    }\n}\nmod missing;\n",
+            ),
+            ("src/a.rs", "mod a_child;\n"),
+            ("src/a/a_child.rs", ""),
+            ("src/b/mod.rs", ""),
+            ("src/other/c_impl.rs", ""),
+            ("src/inline/deep.rs", ""),
+            ("src/inline/e.rs", ""),
+            ("src/tests.rs", ""),
+            ("src/gen.rs", "mod generated_child;\n"),
+            ("src/generated_child.rs", ""),
+            ("src/unix_impl.rs", ""),
+            ("src/data.txt", ""),
+            ("tests/it.rs", "mod common;\n"),
+            ("tests/common/mod.rs", ""),
+            ("../outside.rs", ""),
+        ] {
+            let path = workspace.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let roots = [workspace.join("src/lib.rs"), workspace.join("tests/it.rs")]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let test_roots = [workspace.join("tests/it.rs")]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let (mut files, mut tests, mut owners) =
+            (BTreeSet::new(), BTreeSet::new(), BTreeMap::new());
+        resolve_module_tree(
+            &workspace,
+            &roots,
+            &test_roots,
+            &mut files,
+            &mut tests,
+            &mut owners,
+        )
+        .unwrap();
+        let names = |set: &BTreeSet<PathBuf>| {
+            set.iter()
+                .map(|p| {
+                    p.strip_prefix(&workspace)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&files),
+            [
+                "src/a/a_child.rs",
+                "src/a.rs",
+                "src/b/mod.rs",
+                "src/gen.rs",
+                "src/generated_child.rs",
+                "src/inline/deep.rs",
+                "src/inline/e.rs",
+                "src/lib.rs",
+                "src/other/c_impl.rs",
+                "src/tests.rs",
+                "src/unix_impl.rs",
+                "tests/common/mod.rs",
+                "tests/it.rs",
+            ]
+        );
+        assert_eq!(
+            names(&tests),
+            ["src/tests.rs", "tests/common/mod.rs", "tests/it.rs"]
+        );
+        assert_eq!(
+            owners[&workspace.join("src/a.rs")],
+            [workspace.join("src/lib.rs")].into_iter().collect()
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
 }
