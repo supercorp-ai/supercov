@@ -155,6 +155,32 @@ fn build_output_directory(path: &Path) -> bool {
     })
 }
 
+/// The files the project's `.gitignore` files leave in, relative to `root`;
+/// None outside a git repository, where nothing is ignored.
+fn kept_by_gitignore(root: &Path) -> Option<BTreeSet<PathBuf>> {
+    if !root
+        .ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
+    {
+        return None;
+    }
+    let walker = ignore::WalkBuilder::new(root)
+        .standard_filters(false)
+        .git_ignore(true)
+        .parents(!crate::source_discovery::ignored_by_enclosing_repository(
+            root,
+        ))
+        .require_git(true)
+        .follow_links(false)
+        .build();
+    Some(
+        walker
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_owned))
+            .collect(),
+    )
+}
+
 pub(crate) fn collect_integrity_inputs(
     root: &Path,
     command: &[String],
@@ -162,6 +188,13 @@ pub(crate) fn collect_integrity_inputs(
     let mut files = Vec::new();
     let mut links = Vec::new();
     collect_project_inputs(root, root, true, &mut files, &mut links)?;
+    // What the project's own `.gitignore` excludes is no input a checkout
+    // carries: a `.zig-cache/` cargo-zigbuild leaves, a local `.env`. Counted
+    // as configuration, it made a run copied to CI read as stale. Only the
+    // project's `.gitignore` files decide, inside a git repository, as for
+    // source discovery: global excludes differ between machines.
+    let tracked = kept_by_gitignore(root);
+    files.retain(|file| tracked.as_ref().is_none_or(|kept| kept.contains(file)));
     files.sort();
     files.dedup();
     links.sort();
@@ -538,5 +571,70 @@ pub fn run_direct_rust(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(name: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-inputs-{}-{}-{name}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".zig-cache/o")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("rust-toolchain.toml"), "").unwrap();
+        fs::write(root.join(".zig-cache/o/build.o"), "x").unwrap();
+        fs::write(root.join(".gitignore"), ".zig-cache/\n").unwrap();
+        root
+    }
+
+    /// A build cache the project's `.gitignore` excludes is no configuration:
+    /// a run copied to CI, where it is absent, read as stale. Outside a git
+    /// repository nothing is ignored.
+    #[test]
+    fn what_the_project_ignores_in_git_is_no_input() {
+        let inside = project("git");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&inside)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let inputs = collect_integrity_inputs(&inside, &["cargo".into(), "test".into()]).unwrap();
+        let configuration = inputs
+            .configuration_files
+            .iter()
+            .map(|file| file.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+        assert!(
+            configuration.contains(&"rust-toolchain.toml".to_owned()),
+            "{configuration:?}"
+        );
+        assert!(
+            !configuration
+                .iter()
+                .any(|file| file.starts_with(".zig-cache")),
+            "{configuration:?}"
+        );
+        let outside = project("plain");
+        let inputs = collect_integrity_inputs(&outside, &["cargo".into(), "test".into()]).unwrap();
+        assert!(
+            inputs
+                .configuration_files
+                .iter()
+                .any(|file| file.starts_with(".zig-cache")),
+            "outside git nothing is ignored"
+        );
+        fs::remove_dir_all(&inside).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
     }
 }

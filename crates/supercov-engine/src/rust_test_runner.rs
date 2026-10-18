@@ -1962,6 +1962,85 @@ pub(crate) fn structural_limitations(manifest: &CoverageManifest) -> Vec<String>
         .collect()
 }
 
+/// The project to report against once the tests have run: where a test's
+/// Worker returned a region, `wrangler dev` built that crate, and its files
+/// count though the run's own build never compiled them.
+fn redecline_for_workers(
+    original: &PreparedRustProject,
+    project: &PreparedRustProject,
+    declined: BTreeSet<String>,
+    built_crates: &BTreeSet<String>,
+) -> (PreparedRustProject, BTreeSet<String>) {
+    if built_crates.is_empty() {
+        return (project.clone(), declined);
+    }
+    let built = built_crates
+        .iter()
+        .filter_map(|key| original.probes.crates.get(key))
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let (manifest, declined) = decline_uncompiled_sources(original, &built);
+    (
+        PreparedRustProject {
+            manifest,
+            ..project.clone()
+        },
+        declined,
+    )
+}
+
+/// A Rust Worker's code runs in Cloudflare's runtime, and only when a test
+/// starts it with `wrangler dev`; plain `cargo test` compiles the crate and
+/// never runs it. Where no test of the run did, each of its files says so,
+/// rather than reading as code the tests missed.
+fn note_unrun_workers(
+    project: &mut PreparedRustProject,
+    original: &PreparedRustProject,
+    declined: &BTreeSet<String>,
+    built_crates: &BTreeSet<String>,
+    remote: bool,
+) {
+    let directories = crate::rust_worker::worker_crate_directories(&project.workspace_root);
+    let reason = if remote {
+        "A Rust Worker started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector, so what it ran cannot be read; a test that starts it with `wrangler dev` measures it"
+    } else {
+        "A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`, and no test of this run did"
+    };
+    if directories.is_empty() {
+        return;
+    }
+    let ran = built_crates
+        .iter()
+        .filter_map(|key| original.probes.crates.get(key))
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    for file in &project.source_files {
+        let in_worker = directories
+            .iter()
+            .any(|directory| directory.is_empty() || file.starts_with(&format!("{directory}/")));
+        if !in_worker || declined.contains(file) || ran.contains(file) {
+            continue;
+        }
+        let id = format!("rust-worker-not-run#{file}");
+        if project.manifest.limitations.iter().any(|limitation| {
+            limitation.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())
+        }) {
+            continue;
+        }
+        project.manifest.limitations.push(serde_json::json!({
+            "id": id,
+            "kind": "source-scope",
+            "file": file,
+            "line": 1,
+            "column": 0,
+            "source": "",
+            "reason": reason,
+            "blocking": false,
+        }));
+    }
+}
+
 /// Says which files the build left out of the denominator.
 fn report_declined(
     declined: &BTreeSet<String>,
@@ -2035,14 +2114,25 @@ pub fn run_prepared_rust_tests(
     if invocation.kind == RustCargoCommandKind::NextestRun {
         // nextest builds, schedules and retries on its own; this program is
         // its target runner and records every attempt it launches.
-        report_declined(&declined, diagnostics)?;
         let outcome = crate::rust_owned_nextest::run_nextest(
             project,
             &invocation,
             &evidence_root.join("nextest"),
             run_id,
+            rust_workers,
             diagnostics,
         )?;
+        let (mut project, declined) =
+            redecline_for_workers(original, project, declined, &outcome.built_crates);
+        note_unrun_workers(
+            &mut project,
+            original,
+            &declined,
+            &outcome.built_crates,
+            outcome.remote_workers,
+        );
+        report_declined(&declined, diagnostics)?;
+        let project = &project;
         let artifact_count = outcome.artifact_files.len();
         let project = &PreparedRustProject {
             manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
@@ -2219,8 +2309,10 @@ pub fn run_prepared_rust_tests(
     // the crates `wrangler dev` built for them, whose files count though the
     // run's own build never compiled them.
     let mut built_crates = BTreeSet::new();
+    let mut remote = false;
     if rust_workers.is_some() {
         for outcome in &outcomes {
+            remote |= crate::rust_worker::started_remote(&outcome.task.directory);
             built_crates.extend(
                 crate::rust_worker::materialize_worker_windows(
                     &outcome.task.directory,
@@ -2230,24 +2322,10 @@ pub fn run_prepared_rust_tests(
             );
         }
     }
-    let redeclined;
-    let (project, declined) = if built_crates.is_empty() {
-        (project, declined)
-    } else {
-        let built = built_crates
-            .iter()
-            .filter_map(|key| original.probes.crates.get(key))
-            .flatten()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let (manifest, declined) = decline_uncompiled_sources(original, &built);
-        redeclined = PreparedRustProject {
-            manifest,
-            ..project.clone()
-        };
-        (&redeclined, declined)
-    };
+    let (mut project, declined) = redecline_for_workers(original, project, declined, &built_crates);
+    note_unrun_workers(&mut project, original, &declined, &built_crates, remote);
     report_declined(&declined, diagnostics)?;
+    let project = &project;
     // What `cargo test` prints for each binary: every test, the failures
     // together, one result.
     // Cargo's `-q` drops its own line for the binary and asks libtest for

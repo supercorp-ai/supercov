@@ -156,6 +156,10 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
       - run: cargo install worker-build --version 0.8.7 --locked
+      # The cargo-test gate runs its Worker under `cargo nextest run` too.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       - run: npm ci
       - run: cargo build -p supercov
       - run: node scripts/rust-worker-playwright.mjs
