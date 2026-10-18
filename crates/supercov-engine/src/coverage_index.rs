@@ -4696,4 +4696,418 @@ mod tests {
         assert!(index.scope_entries(CoverageViewId::All).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// A real index with one section's bytes changed, written with digests
+    /// that match: what the record readers alone must refuse.
+    fn index_with(
+        edit: &dyn Fn(&mut Vec<QueryIndexSection>),
+    ) -> (crate::test_directory::TestDirectory, QueryIndex) {
+        index_of(&report(), edit)
+    }
+
+    /// The test report with a source-discovery scope of one included file.
+    fn scoped_report() -> CoverageReport {
+        let mut report = report();
+        let scope = serde_json::json!({
+            "version": 1,
+            "mode": "automatic",
+            "roots": ["."],
+            "entries": [{"file": "src/a.py", "status": "included", "reason": "python source", "packageRoot": "."}]
+        });
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            view.scope = Some(scope.clone());
+            view.model.language = "python".into();
+            view.model.name = "python-probes-v1".into();
+        }
+        report
+    }
+
+    fn index_of(
+        report: &CoverageReport,
+        edit: &dyn Fn(&mut Vec<QueryIndexSection>),
+    ) -> (crate::test_directory::TestDirectory, QueryIndex) {
+        let root = root();
+        let path = root.join("query-index.v1.bin");
+        let mut sections = coverage_index_sections(report).unwrap();
+        edit(&mut sections);
+        write_query_index(&sections, &identity(), &path).unwrap();
+        let container = QueryIndex::open(&path, &identity()).unwrap();
+        (root, container)
+    }
+
+    type Edit = Box<dyn Fn(&mut Vec<QueryIndexSection>)>;
+
+    fn patch(
+        sections: &mut [QueryIndexSection],
+        kind: u32,
+        record: usize,
+        size: usize,
+        at: usize,
+        bytes: &[u8],
+    ) {
+        let section = sections
+            .iter_mut()
+            .find(|section| section.kind == kind)
+            .unwrap();
+        let start = record * size + at;
+        section.bytes[start..start + bytes.len()].copy_from_slice(bytes);
+    }
+
+    fn u64_at(
+        sections: &[QueryIndexSection],
+        kind: u32,
+        record: usize,
+        size: usize,
+        at: usize,
+    ) -> u64 {
+        let section = sections
+            .iter()
+            .find(|section| section.kind == kind)
+            .unwrap();
+        let start = record * size + at;
+        u64::from_le_bytes(section.bytes[start..start + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn a_summary_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_VIEW_SUMMARIES, SUMMARY_RECORD_SIZE);
+        let all = move |sections: &[QueryIndexSection]| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..3)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                .unwrap()
+        };
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            match CoverageIndex::new(&container)
+                .unwrap()
+                .summary(CoverageViewId::All)
+            {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let at = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = all(s);
+                patch(s, kind, record, size, offset, &bytes);
+            })
+        };
+        let above = |covered_at: usize, total_at: usize| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = all(s);
+                let total = u64_at(s, kind, record, size, total_at);
+                patch(
+                    s,
+                    kind,
+                    record,
+                    size,
+                    covered_at,
+                    &(total + 1).to_le_bytes(),
+                );
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("summary reserved bytes", at(3, vec![1])),
+            ("summary reserved bytes", at(12, vec![1])),
+            ("optional boolean", at(2, vec![3])),
+            ("covered exceeds total", above(56, 64)),
+            ("covered conditions exceed total", above(48, 40)),
+            ("decision count ordering", above(32, 24)),
+            ("decision count ordering", above(24, 16)),
+            (
+                "duplicate coverage view",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = (all(s) + 1) % 3;
+                    patch(s, kind, record, size, 0, &[CoverageViewId::All as u8]);
+                }),
+            ),
+            (
+                "summary view count",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let section = s.iter_mut().find(|section| section.kind == kind).unwrap();
+                    section.count = 2;
+                    section.bytes.truncate(2 * size);
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    #[test]
+    fn a_file_gap_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_FILE_GAPS, FILE_GAP_RECORD_SIZE);
+        let first = move |sections: &[QueryIndexSection]| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                .unwrap()
+        };
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            match CoverageIndex::new(&container)
+                .unwrap()
+                .file_gaps(CoverageViewId::All, None, None)
+            {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let at = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                patch(s, kind, record, size, offset, &bytes);
+            })
+        };
+        let bump = |offset: usize| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                let value = u64_at(s, kind, record, size, offset);
+                patch(s, kind, record, size, offset, &(value + 1).to_le_bytes());
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("file-gap reserved bytes", at(1, vec![1])),
+            ("file-gap reserved bytes", at(60, vec![1])),
+            ("limitation mask", at(56, 16u32.to_le_bytes().to_vec())),
+            // A limitation counted with no kind, or a kind with none counted.
+            (
+                "limitation count and kinds disagree",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    let count = u64_at(s, kind, record, size, 48);
+                    let mask: u32 = if count == 0 { 1 } else { 0 };
+                    patch(s, kind, record, size, 56, &mask.to_le_bytes());
+                }),
+            ),
+            ("file-gap score", bump(64)),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    #[test]
+    fn a_projection_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_PROJECTIONS, PROJECTION_RECORD_SIZE);
+        // The run-wide projection of the whole view: no kind, no runner.
+        let first = move |sections: &[QueryIndexSection]| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..section.count as usize)
+                .find(|record| {
+                    let bytes = &section.bytes[record * size..(record + 1) * size];
+                    bytes[0] == CoverageViewId::All as u8
+                        && bytes[4..8] == NO_STRING.to_le_bytes()
+                        && bytes[8..12] == NO_STRING.to_le_bytes()
+                })
+                .unwrap()
+        };
+        let byte = move |sections: &[QueryIndexSection], at: usize| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            section.bytes[first(sections) * size + at]
+        };
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            match CoverageIndex::new(&container).unwrap().projection(
+                CoverageViewId::All,
+                None,
+                None,
+            ) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = |pairs: Vec<(usize, Vec<u8>)>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                for (offset, bytes) in &pairs {
+                    patch(s, kind, record, size, *offset, bytes);
+                }
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("projection reserved bytes", set(vec![(38, vec![1])])),
+            ("projection reserved bytes", set(vec![(518, vec![1])])),
+            (
+                "measurement blocking count",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    let blocking = u64_at(s, kind, record, size, 208);
+                    patch(s, kind, record, size, 208, &(blocking + 1).to_le_bytes());
+                }),
+            ),
+            (
+                "transport presence flag",
+                set(vec![(1, vec![0]), (408, 1u64.to_le_bytes().to_vec())]),
+            ),
+            ("coverage scope kind", set(vec![(3, vec![3])])),
+            (
+                "scope measurement completeness flag",
+                set(vec![(516, vec![0]), (517, vec![1])]),
+            ),
+            (
+                "scope presence flag",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    let flipped = 1 - byte(s, 2);
+                    patch(s, kind, record, size, 2, &[flipped]);
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+        // The scope's own shape, on a run that declared a source-discovery scope.
+        let scoped = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_of(&scoped_report(), edit);
+            match CoverageIndex::new(&container).unwrap().projection(
+                CoverageViewId::All,
+                None,
+                None,
+            ) {
+                Ok(projection) => format!(
+                    "accepted {:?}",
+                    projection.source_scope.map(|scope| scope.kind)
+                ),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(scoped(&|_| {}), "accepted Some(\"source-discovery\")");
+        assert!(
+            scoped(set(vec![(516, vec![1])]).as_ref()).contains("source-discovery scope shape")
+        );
+        assert!(scoped(set(vec![(3, vec![2])]).as_ref()).contains("compiler scope shape"));
+        assert!(scoped(set(vec![(2, vec![0])]).as_ref()).contains("scope presence flag"));
+    }
+
+    /// The first record of `kind` in the whole view, for the tables below.
+    fn first_of(sections: &[QueryIndexSection], kind: u32, size: usize) -> Option<usize> {
+        let section = sections.iter().find(|section| section.kind == kind)?;
+        (0..section.count as usize).find(|record| {
+            let bytes = &section.bytes[record * size..(record + 1) * size];
+            bytes[0] == CoverageViewId::All as u8
+                && bytes[4..8] == NO_STRING.to_le_bytes()
+                && bytes[8..12] == NO_STRING.to_le_bytes()
+        })
+    }
+
+    #[test]
+    fn a_decision_gap_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_DECISION_GAPS, DECISION_GAP_RECORD_SIZE);
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            let files = index.file_gaps(CoverageViewId::All, None, None).unwrap();
+            for file in files {
+                if let Err(error) = index.decision_gaps(CoverageViewId::All, None, None, &file.file)
+                {
+                    return format!("{error:?}");
+                }
+            }
+            "accepted".to_owned()
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        assert!(first_of(&coverage_index_sections(&report()).unwrap(), kind, size).is_some());
+        let set = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first_of(s, kind, size).unwrap();
+                patch(s, kind, record, size, offset, &bytes);
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("decision-gap reserved bytes", set(1, vec![1])),
+            ("decision-gap reserved bytes", set(28, vec![1])),
+            ("decision-gap reserved bytes", set(64, vec![1])),
+            (
+                "decision condition counts",
+                set(48, 0u64.to_le_bytes().to_vec()),
+            ),
+            (
+                "decision condition counts",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first_of(s, kind, size).unwrap();
+                    let conditions = u64_at(s, kind, record, size, 48);
+                    patch(s, kind, record, size, 56, &(conditions + 1).to_le_bytes());
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    #[test]
+    fn a_scope_entry_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_SCOPE_ENTRIES, SCOPE_ENTRY_RECORD_SIZE);
+        let first = move |sections: &[QueryIndexSection]| {
+            let section = sections.iter().find(|section| section.kind == kind)?;
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+        };
+        assert!(first(&coverage_index_sections(&scoped_report()).unwrap()).is_some());
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_of(&scoped_report(), edit);
+            match CoverageIndex::new(&container)
+                .unwrap()
+                .scope_entries(CoverageViewId::All)
+            {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s).unwrap();
+                patch(s, kind, record, size, offset, &bytes);
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("source-scope reserved bytes", set(2, vec![1])),
+            ("source-scope reserved bytes", set(28, vec![1])),
+            ("source-scope status", set(1, vec![3])),
+            (
+                "source-scope limitation annotation",
+                set(24, 16u32.to_le_bytes().to_vec()),
+            ),
+            (
+                "source-scope limitation annotation",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s).unwrap();
+                    let count = u64_at(s, kind, record, size, 16);
+                    let mask: u32 = if count == 0 { 1 } else { 0 };
+                    patch(s, kind, record, size, 24, &mask.to_le_bytes());
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
 }
