@@ -931,6 +931,7 @@ pub fn prepare_rust_project_for(
     let token = manifest_token(&manifest);
     probes.token = token.clone();
     let mut crate_roots = Vec::new();
+    let mut crate_files = Vec::new();
     for root in roots {
         let relative = confined_relative(&workspace, &root)?;
         // The crate answers `cfg!` for the gates in the files it compiles.
@@ -945,14 +946,18 @@ pub fn prepare_rust_project_for(
             })
             .map(|(ordinal, _)| ordinal)
             .collect::<Vec<_>>();
-        let runtime = render_rust_region_runtime(
-            &runtime_module,
-            &token,
-            &crate_key(&token, &relative),
-            &probes,
-            &crate_cfgs,
-        )
-        .map_err(RustProjectError::Runtime)?;
+        let key = crate_key(&token, &relative);
+        let runtime =
+            render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs)
+                .map_err(RustProjectError::Runtime)?;
+        crate_files.push((
+            key,
+            owners
+                .iter()
+                .filter(|(_, roots)| roots.contains(&root))
+                .map(|(file, _)| file.clone())
+                .collect::<Vec<_>>(),
+        ));
         let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
             path: root.clone(),
             reason: error.to_string(),
@@ -966,6 +971,7 @@ pub fn prepare_rust_project_for(
         crate_roots.push(relative);
     }
     preparation.runtime_ms = elapsed(started);
+    probes.crates = crate_files.into_iter().collect();
 
     manifest
         .points

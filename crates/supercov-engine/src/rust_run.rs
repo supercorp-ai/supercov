@@ -86,7 +86,9 @@ fn collect_project_inputs(
             .into_string()
             .map_err(|_| format!("Rust project contains a non-UTF-8 path: {}", path.display()))?;
         if (root_level && ROOT_INPUT_EXCLUSIONS.contains(&name.as_str()))
-            || matches!(name.as_str(), ".supercov" | ".mcdc-pool")
+            // wrangler's local state (`.wrangler/`), which `wrangler dev`
+            // writes beside a Worker: what it served, never what Cargo reads.
+            || matches!(name.as_str(), ".supercov" | ".mcdc-pool" | ".wrangler")
         {
             continue;
         }
@@ -360,6 +362,17 @@ pub fn run_direct_rust(
         .map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
+        // A test that starts a Rust Worker with `wrangler dev` finds
+        // Supercov's `wrangler` first, which reads what the Worker ran into
+        // that test's evidence. Prepared before the copy is taken stock of:
+        // the configurations it points at Supercov's entry are Supercov's.
+        let rust_workers = crate::rust_worker::CargoTestWorkers::prepare(
+            &workspace,
+            &workspace
+                .join(".supercov/rust-evidence")
+                .join(&request.run_id)
+                .join("wrangler"),
+        )?;
         let before = crate::workspace::workspace_output_baseline(&workspace)
             .map_err(|error| error.to_string())?;
         let run = run_prepared_rust_tests(
@@ -367,6 +380,7 @@ pub fn run_direct_rust(
             &request.command,
             &request.run_id,
             &request.started_at,
+            rust_workers.as_ref(),
             diagnostics,
         )
         .map_err(|error| error.to_string())?;

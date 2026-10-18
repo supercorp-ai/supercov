@@ -92,6 +92,9 @@ jobs:
       - run: node scripts/rust-worker-playwright.mjs
         env:
           SUPERCOV_REQUIRE_RUST_WORKER: "1"
+      - run: node scripts/rust-worker-cargo-test.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WORKER: "1"
 
   # Rust compiled to wasm that JavaScript tests load: node:test through the
   # nodejs glue, Playwright from a web page.

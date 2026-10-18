@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{coverage_report::CoverageManifest, lifecycle::atomic_write, run_store::RunIntegrity};
 
-pub const RUST_BUILD_CACHE_SCHEMA_VERSION: u32 = 3;
+pub const RUST_BUILD_CACHE_SCHEMA_VERSION: u32 = 4;
 const CACHE_FILE: &str = ".supercov/rust-build-cache.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

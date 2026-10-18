@@ -1530,6 +1530,7 @@ pub(crate) fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration
 /// was never there.
 fn decline_uncompiled_sources(
     project: &PreparedRustProject,
+    also_compiled: &BTreeSet<String>,
 ) -> (CoverageManifest, BTreeSet<String>) {
     let mut manifest = project.manifest.clone();
     let Some(compiled) = crate::rust_project::compiled_source_files(
@@ -1541,7 +1542,7 @@ fn decline_uncompiled_sources(
     let declined = project
         .source_files
         .iter()
-        .filter(|file| !compiled.contains(*file))
+        .filter(|file| !compiled.contains(*file) && !also_compiled.contains(*file))
         .cloned()
         .collect::<BTreeSet<_>>();
     // Depinfo that accounts for no crate root at all is depinfo this run did
@@ -1737,11 +1738,37 @@ pub(crate) fn structural_limitations(manifest: &CoverageManifest) -> Vec<String>
         .collect()
 }
 
+/// Says which files the build left out of the denominator.
+fn report_declined(
+    declined: &BTreeSet<String>,
+    diagnostics: &mut dyn Write,
+) -> Result<(), RustTestRunnerError> {
+    if declined.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        diagnostics,
+        "[supercov] {} source file(s) this build did not compile are outside the denominator: {}{}",
+        declined.len(),
+        declined
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        if declined.len() > 3 { ", ..." } else { "" }
+    )
+    .map_err(|error| RustTestRunnerError::Io(error.to_string()))
+}
+
+/// `rust_workers`: the stand-in for `wrangler` the test processes find
+/// first, when the workspace has a Rust Worker a test may start.
 pub fn run_prepared_rust_tests(
     project: &PreparedRustProject,
     command: &[String],
     run_id: &str,
     generated_at: &str,
+    rust_workers: Option<&crate::rust_worker::CargoTestWorkers>,
     diagnostics: &mut dyn Write,
 ) -> Result<RustFrontendRun, RustTestRunnerError> {
     let invocation = cargo_invocation(&project.workspace_root, command)?;
@@ -1760,22 +1787,8 @@ pub fn run_prepared_rust_tests(
     // The denominator is what the compiler built, not what the module tree
     // resolves: a module behind a `#[cfg]` that is off is resolved, never
     // compiled, and could never be covered.
-    let (manifest, declined) = decline_uncompiled_sources(project);
-    if !declined.is_empty() {
-        writeln!(
-            diagnostics,
-            "[supercov] {} source file(s) this build did not compile are outside the denominator: {}{}",
-            declined.len(),
-            declined
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", "),
-            if declined.len() > 3 { ", ..." } else { "" }
-        )
-        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-    }
+    let (manifest, declined) = decline_uncompiled_sources(project, &BTreeSet::new());
+    let original = project;
     let project = &PreparedRustProject {
         manifest,
         ..project.clone()
@@ -1797,6 +1810,7 @@ pub fn run_prepared_rust_tests(
     if invocation.kind == RustCargoCommandKind::NextestRun {
         // nextest builds, schedules and retries on its own; this program is
         // its target runner and records every attempt it launches.
+        report_declined(&declined, diagnostics)?;
         let outcome = crate::rust_owned_nextest::run_nextest(
             project,
             &invocation,
@@ -1927,7 +1941,12 @@ pub fn run_prepared_rust_tests(
                                 &target_libdir,
                                 &task.artifact.executable,
                             ))
-                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory),
+                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
+                            .envs(
+                                rust_workers
+                                    .iter()
+                                    .flat_map(|workers| workers.environment()),
+                            ),
                     )
                     .map(|output| ProcessOutcome {
                         task: ProcessTask {
@@ -1957,6 +1976,39 @@ pub fn run_prepared_rust_tests(
         .map(|result| result.map_err(RustTestRunnerError::Launch))
         .collect::<Result<Vec<_>, _>>()?;
     outcomes.sort_by_key(|outcome| outcome.task.ordinal);
+    // What each test's Worker ran, as region files of its own evidence; and
+    // the crates `wrangler dev` built for them, whose files count though the
+    // run's own build never compiled them.
+    let mut built_crates = BTreeSet::new();
+    if rust_workers.is_some() {
+        for outcome in &outcomes {
+            built_crates.extend(
+                crate::rust_worker::materialize_worker_windows(
+                    &outcome.task.directory,
+                    &project.probes.token,
+                )
+                .map_err(RustTestRunnerError::Io)?,
+            );
+        }
+    }
+    let redeclined;
+    let (project, declined) = if built_crates.is_empty() {
+        (project, declined)
+    } else {
+        let built = built_crates
+            .iter()
+            .filter_map(|key| original.probes.crates.get(key))
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let (manifest, declined) = decline_uncompiled_sources(original, &built);
+        redeclined = PreparedRustProject {
+            manifest,
+            ..project.clone()
+        };
+        (&redeclined, declined)
+    };
+    report_declined(&declined, diagnostics)?;
     // What `cargo test` prints for each binary: every test, the failures
     // together, one result.
     // Cargo's `-q` drops its own line for the binary and asks libtest for
@@ -2733,6 +2785,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture-cfg",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -2824,6 +2877,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture-assert",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -2915,6 +2969,7 @@ mod tests {
                     .collect::<Vec<String>>(),
                 run,
                 "2026-08-26T00:00:00.000Z",
+                None,
                 &mut Vec::new(),
             )
             .unwrap();
@@ -3014,6 +3069,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture-cwd",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();
@@ -3119,6 +3175,7 @@ mod tests {
             &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture",
             "2026-08-26T00:00:00.000Z",
+            None,
             &mut Vec::new(),
         )
         .unwrap();

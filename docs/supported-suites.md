@@ -236,6 +236,30 @@ run. Requests made before the first test, such as the readiness check
 The build runs with `--cap-lints=warn`, so a crate that denies warnings still
 builds with the probes in it.
 
+### A Rust Worker that `cargo test` starts
+
+Integration tests that start `wrangler dev` themselves -- to test a Worker in
+Cloudflare's own runtime -- measure the Worker too:
+
+```sh
+npx supercov -- cargo test
+```
+
+The Worker crate is instrumented with the rest of the workspace, and `wrangler
+dev` builds it in the copy as usual. The tests find a `wrangler` of
+Supercov's first on `PATH`: for `wrangler dev` it picks an inspector port,
+starts a reader of the Worker through it, and then runs your `wrangler` with
+the test's own arguments, process and signals. What the Worker ran is
+credited to the test that started it, exactly, as its own coverage. The
+Worker crate counts though `cargo test` never compiles it, once a test has
+run it. This needs a `wrangler` on `PATH` when the run starts; without one,
+nothing is put in front of it.
+
+The Worker built with probes stays in the copy: its `build/` output is never
+returned to the project, and neither is the copy's configuration, which
+points `main` at Supercov's entry. wrangler's `.wrangler/` state is not a
+build input, so writing it does not make the run stale.
+
 ## Python
 
 | Runner | Attribution | Current requirement |

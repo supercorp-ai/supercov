@@ -1875,6 +1875,13 @@ pub fn sync_outputs_of(
                         || cargo_targets.hold(relative)
                     {
                         built.insert(relative.clone());
+                    } else if instrumented_wasm(&workspace.join(relative)) {
+                        // A Worker a test started had `wrangler dev` build
+                        // it from the rewritten crate: returned, its `build/`
+                        // put a module that records coverage in the project,
+                        // where a build that embeds it would ship it.
+                        built.insert(relative.clone());
+                        built_directories.add(relative);
                     }
                 }
             }
