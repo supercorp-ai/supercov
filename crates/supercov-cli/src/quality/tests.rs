@@ -3112,3 +3112,27 @@ fn a_dense_run_counts_a_token_a_byte_and_an_oversized_declaration_splits_at_its_
     assert_eq!(outline.as_array().unwrap().len(), 4);
     assert!(split_units("notes.txt", "plain\n").is_none());
 }
+
+#[test]
+fn line_windows_cut_a_long_declaration_and_merge_what_fits() {
+    let ranges = |source: &str| {
+        line_windows("src/a.js", source)
+            .unwrap()
+            .into_iter()
+            .map(|(window, _)| (window.start_line, window.end_line))
+            .collect::<Vec<_>>()
+    };
+    // 450 lines of 120 bytes: cut at 200, the short tail joined to the second.
+    let line = format!("  x = '{}';\n", "y".repeat(110));
+    let long = format!("export function huge() {{\n{}}}\n", line.repeat(450));
+    assert_eq!(ranges(&long), [(1, 200), (201, 452)]);
+    // Over the budget in fewer than 200 lines: sent whole.
+    let wide_line = format!("  x = '{}';\n", "y".repeat(390));
+    let wide = format!("export function wide() {{\n{}}}\n", wide_line.repeat(150));
+    assert_eq!(ranges(&wide), [(1, 152)]);
+    // Small declarations share one window.
+    assert_eq!(
+        ranges("export function a() {\n  return 1;\n}\nexport function b() {\n  return 2;\n}\n"),
+        [(1, 6)]
+    );
+}
