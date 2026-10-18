@@ -1382,17 +1382,16 @@ pub fn cleanup_storage_locked(
         }
     }
     let container = crate::workspace::workspace_container(root);
-    let legacy = [root.join(".supercov/.cache"), root.join(".supercov/cache")];
+    // What runs keep between them: the Docker image registry, among others.
+    let shared = root.join(".supercov/cache");
     let mut caches = Vec::new();
     if remove_build_cache && active.is_empty() {
         if owned_workspace_container(root) {
             caches.push(container);
         }
-        caches.extend(
-            legacy
-                .into_iter()
-                .filter(|path| fs::symlink_metadata(path).is_ok()),
-        );
+        if fs::symlink_metadata(&shared).is_ok() {
+            caches.push(shared);
+        }
     }
     result.removed_build_cache = !caches.is_empty();
     if !options.dry_run {
@@ -1976,7 +1975,7 @@ mod tests {
         let stored = [
             root.join(".supercov/evidence/run_orphaned"),
             root.join(FAILED_EVIDENCE).join("run_failed"),
-            root.join(".supercov/.cache/build"),
+            root.join(".supercov/cache/docker-images"),
         ];
         for directory in &stored {
             fs::create_dir_all(directory).unwrap();
