@@ -10644,6 +10644,65 @@ mod tests {
     }
 
     #[test]
+    fn type_only_imports_are_never_wrapped_as_capabilities() {
+        let source = concat!(
+            "import type { Options } from './sdk';\n",
+            "import { type Shape, ImageBuilder } from './sdk';\n",
+            "const shape: Shape = { mounts: [{ source: process.cwd(), target: '/workspace' }] } as Options;\n",
+            "await ImageBuilder.build(shape);\n",
+        );
+        // In a test file, as text edits.
+        let test = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.ts",
+            &[],
+            Some("../.supercov/launchSupervisor.mjs"),
+        )
+        .unwrap();
+        assert_eq!(test.capability_imports, 1);
+        assert!(
+            test.code.contains("__supercovRawImageBuilder"),
+            "{}",
+            test.code
+        );
+        assert!(!test.code.contains("__supercovRawShape"), "{}", test.code);
+        assert!(!test.code.contains("__supercovRawOptions"), "{}", test.code);
+        // In a source file, through the syntax tree.
+        let candidate = instrument_with_import_policy(
+            source,
+            "src/launch.ts",
+            "../.supercov/launchSupervisor.mjs",
+            false,
+        )
+        .unwrap();
+        assert!(
+            candidate.code.contains("__supercovRawImageBuilder"),
+            "{}",
+            candidate.code
+        );
+        assert!(
+            !candidate.code.contains("__supercovRawShape"),
+            "{}",
+            candidate.code
+        );
+        assert!(
+            !candidate.code.contains("__supercovRawOptions"),
+            "{}",
+            candidate.code
+        );
+    }
+
+    #[test]
+    fn the_expect_package_s_default_export_is_an_assertion() {
+        let source = concat!(
+            "import expect from 'expect';\n",
+            "test('value', () => { expect(value()).toBe(1); });\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+    }
+
+    #[test]
     fn ordinary_imports_remain_byte_identical_without_a_capability_shape() {
         let source = "import { format } from './format.mjs';\nconsole.log(format('value'));";
         let output = instrument_node_assertion_phases_with_runtime_hooks(
