@@ -236,9 +236,17 @@ pub fn parse_rust_region(
             })
             .collect()
     };
+    // A slot past the end of the file holds nothing, so only the slots the
+    // file has are read: a damaged header naming billions of entries per
+    // decision reads as what is there instead of looping through them.
+    let slots = bytes.len().saturating_sub(decisions_at) / ENTRY;
     for (ordinal, id) in layout.decisions.iter().enumerate() {
-        for entry in 0..entries_per_decision {
-            let at = decisions_at + (ordinal * entries_per_decision + entry) * ENTRY;
+        let first_slot = ordinal.saturating_mul(entries_per_decision);
+        if first_slot >= slots {
+            break;
+        }
+        for entry in 0..entries_per_decision.min(slots - first_slot) {
+            let at = decisions_at + (first_slot + entry) * ENTRY;
             if !touched(at) || bytes.get(at) != Some(&2) {
                 continue;
             }
@@ -1491,6 +1499,18 @@ fn main() {
         wrong_magic[0] ^= 1;
         let mut wrong_token = header.clone();
         wrong_token[56] = b'z';
+        // A header that names billions of entries per decision is read as
+        // the slots the file has, at once.
+        let mut huge = header.clone();
+        put(&mut huge, 28, u32::MAX as usize);
+        put(&mut huge, 32, 128);
+        let started = std::time::Instant::now();
+        assert!(
+            parse_rust_region(&huge, None, TOKEN, &probes)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         for bytes in [
             wrong_magic,
             broken(8, 999),

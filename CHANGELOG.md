@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A damaged Rust region file whose header named billions of entries per decision made reading it run for a very long time; only the slots the file holds are read.
 - The assertion assessment showed a JUnit or Kotlin test whose annotation spans lines (`@Tag(` ... `)`) with only its closing `)`; the whole annotation is shown.
 - A damaged run index with a huge uncovered count overflowed the file-gap score check, which could let the damaged record read as valid; it is refused.
 - `quality` and `security` read a Gradle Kotlin build script (`build.gradle.kts`, `settings.gradle.kts`) as unclassified first-party source; it is build configuration.
