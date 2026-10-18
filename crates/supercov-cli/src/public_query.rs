@@ -152,7 +152,7 @@ struct QueryOptions {
     limit: usize,
     offset: usize,
     json: bool,
-    target: f64,
+    target: Option<f64>,
     metric: MinimizeMetric,
     group_decision: bool,
     /// `scope --files`: the scope file by file.
@@ -180,7 +180,7 @@ impl Default for QueryOptions {
             limit: DEFAULT_LIMIT,
             offset: 0,
             json: false,
-            target: 100.0,
+            target: None,
             metric: MinimizeMetric::All,
             group_decision: false,
             scope_files: false,
@@ -304,7 +304,7 @@ fn parse_options(
                         "--target must be between 0 and 100",
                     ));
                 }
-                options.target = target.expect("validated minimization target");
+                options.target = target;
             }
             "--metric" => {
                 index += 1;
@@ -606,7 +606,7 @@ fn coverage_invocation(
             request.selector = Some(options.positional.join(" ").to_lowercase());
         }
         "minimize" => {
-            request.target = Some(options.target);
+            request.target = options.target;
             request.max_states = Some(DEFAULT_MAX_STATES);
         }
         _ => unreachable!("coverage hierarchy validates child commands"),

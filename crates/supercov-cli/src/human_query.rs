@@ -1956,14 +1956,21 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             } else {
                 metric_name(data.metric)
             };
+            let goal = match data.target {
+                Some(target) => format!("for {}% {target_label}", number(target)),
+                None if data.metric == MinimizeMetric::All => format!(
+                    "keeping the coverage of all {} tests in every measured metric",
+                    data.total_candidate_tests
+                ),
+                None => format!(
+                    "keeping the {target_label} coverage of all {} tests",
+                    data.total_candidate_tests
+                ),
+            };
             let mut lines = vec![
                 format!(
-                    "exact minimum {}/{} test(s) for {}% {}; explored {} state(s)",
-                    data.selected_count,
-                    data.total_candidate_tests,
-                    number(data.target),
-                    target_label,
-                    data.explored_states
+                    "exact minimum {}/{} test(s) {goal}; explored {} state(s)",
+                    data.selected_count, data.total_candidate_tests, data.explored_states
                 ),
                 summary_line(&data.summary),
             ];
@@ -1978,11 +1985,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 )
             }));
             lines.push(page_label(page));
-            let base = format!(
-                "{} --target {}",
-                coverage_command(&data.run, request, "minimize"),
-                number(data.target)
-            );
+            let mut base = coverage_command(&data.run, request, "minimize");
+            if let Some(target) = data.target {
+                base.push_str(&format!(" --target {}", number(target)));
+            }
             if let Some(next) = next_page(&base, page) {
                 lines.push(format!("next page: {next}"));
             }

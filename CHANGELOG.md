@@ -4,6 +4,8 @@
 
 **Fixed**
 
+- `minimize` with no `--target` asked for 100% and so failed on any run its tests do not fully cover, although the CLI guide shows it first; it now keeps everything the tests together cover, and `--target` still asks for a percentage.
+- `line` listed a branch's unrun outcomes in an order that changed from call to call (`true; false`, then `false; true`); they are listed in the order the run recorded them.
 - A damaged run evidence file whose count or length was enormous made Supercov overflow or try to allocate it and abort; it is reported as truncated.
 - A browser driver reply or request claiming an enormous `Content-Length` was allocated up front; the body is read as it arrives and a short one is refused.
 - A damaged evidence archive entry claiming an enormous size made Supercov try to allocate it and abort; the entry is read as its bytes arrive and reported as truncated.

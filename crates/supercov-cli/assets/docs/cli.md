@@ -625,7 +625,9 @@ npx supercov runs latest minimize --metric branches --target 90
 ```
 
 `minimize` finds a small set of tests that preserves the selected coverage
-target. It does not edit, delete, or skip tests for you. Treat the result as an
+target. Without `--target` it keeps everything the tests together cover, so
+it works on a run that is not fully covered; `--target 90` asks for 90% of
+each selected metric instead. It does not edit, delete, or skip tests for you. Treat the result as an
 analysis aid, not permission to remove tests that protect behavior outside the
 selected metric.
 

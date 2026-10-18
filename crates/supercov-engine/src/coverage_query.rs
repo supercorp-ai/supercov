@@ -40,8 +40,9 @@ pub enum MinimizeMetric {
 #[serde(rename_all = "camelCase")]
 pub struct MinimumTestSetResult {
     pub optimal: bool,
-    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
-    pub target: f64,
+    /// The percentage asked for; none keeps everything the tests cover.
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_optional_javascript_number")]
+    pub target: Option<f64>,
     pub metric: MinimizeMetric,
     pub selected: Vec<String>,
     pub expanded: Vec<String>,
@@ -65,8 +66,8 @@ pub struct CoverageMinimizeData {
     pub run: String,
     pub filters: CoverageQueryFilters,
     pub optimal: bool,
-    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
-    pub target: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_optional_javascript_number")]
+    pub target: Option<f64>,
     pub metric: MinimizeMetric,
     pub selected: Vec<String>,
     pub expanded: Vec<String>,
@@ -83,7 +84,7 @@ pub struct CoverageMinimizeQueryOptions<'a> {
     pub view_id: CoverageViewId,
     pub kind: Option<&'a str>,
     pub runner: Option<&'a str>,
-    pub target: f64,
+    pub target: Option<f64>,
     pub metric: MinimizeMetric,
     pub max_states: usize,
     pub offset: usize,
@@ -193,7 +194,7 @@ pub enum QueryError {
         obligations: usize,
         explored_states: usize,
         max_states: usize,
-        target: f64,
+        target: Option<f64>,
         metric: MinimizeMetric,
     },
     Analysis(ReportError),
@@ -749,6 +750,8 @@ pub struct CoversCache {
 
 struct CoversFile {
     metadata: HashMap<String, IndexedHitMetadata>,
+    /// Each branch's outcomes, in the order the run recorded them.
+    alternatives: HashMap<String, Vec<IndexedHitMetadata>>,
     decisions: HashMap<String, crate::coverage_report::DecisionResult>,
     gap_lines: Vec<CoverageFileGapLine>,
 }
@@ -773,8 +776,19 @@ impl CoversCache {
             return Ok(());
         }
         // A line's points, branches and decisions are all of its own file.
-        let metadata = index
-            .hit_metadata_in_file(options.view, options.file)?
+        let recorded = index.hit_metadata_in_file(options.view, options.file)?;
+        let mut alternatives = HashMap::<String, Vec<IndexedHitMetadata>>::new();
+        for value in &recorded {
+            if value.obligation == "branch"
+                && let Some(parent) = &value.parent_id
+            {
+                alternatives
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(value.clone());
+            }
+        }
+        let metadata = recorded
             .into_iter()
             .map(|value| (value.id.clone(), value))
             .collect();
@@ -800,6 +814,7 @@ impl CoversCache {
             options.file.into(),
             CoversFile {
                 metadata,
+                alternatives,
                 decisions,
                 gap_lines: detail.gap_lines,
             },
@@ -837,6 +852,7 @@ pub fn coverage_covers_query_cached(
     };
     let file = &cache.files[options.file];
     let (metadata, decisions) = (&file.metadata, &file.decisions);
+    let no_alternatives = Vec::new();
     let anchors = index.anchors(options.view, options.file, options.line)?;
     let tests_by_id = tests
         .iter()
@@ -879,12 +895,10 @@ pub fn coverage_covers_query_cached(
         .collect::<Vec<_>>();
     let render_anchor = |anchor: crate::coverage_index::IndexedAnchor| {
         let branch_alternatives = if anchor.kind == "branch" {
-            metadata
-                .values()
-                .filter(|detail| {
-                    detail.obligation == "branch"
-                        && detail.parent_id.as_deref() == Some(anchor.id.as_str())
-                })
+            file.alternatives
+                .get(&anchor.id)
+                .unwrap_or(&no_alternatives)
+                .iter()
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -4304,7 +4318,7 @@ struct Search<'a> {
     max_states: usize,
     seen: BTreeSet<String>,
     candidate_tests: usize,
-    target: f64,
+    target: Option<f64>,
     metric: MinimizeMetric,
 }
 
@@ -4403,14 +4417,18 @@ impl Search<'_> {
     }
 }
 
+/// The smallest set of tests that reaches `target` percent of each selected
+/// metric, or, with no target, that covers everything the tests together do.
 pub fn minimum_test_set(
     view: &CoverageView,
-    target: f64,
+    target: Option<f64>,
     metric: MinimizeMetric,
     max_states: usize,
 ) -> Result<MinimumTestSetResult, QueryError> {
     use crate::coverage_report::coverage_is_complete;
-    if !target.is_finite() || !(0.0..=100.0).contains(&target) {
+    if let Some(target) = target
+        && (!target.is_finite() || !(0.0..=100.0).contains(&target))
+    {
         return Err(QueryError::InvalidTarget(target));
     }
     if view.tests.iter().any(|test| {
@@ -4461,21 +4479,36 @@ pub fn minimum_test_set(
     let skip_limits = metrics
         .iter()
         .map(|selected_metric| {
-            let total = totals.get(selected_metric).copied().unwrap_or(0);
-            let required = ((total as f64 * target) / 100.0).ceil() as usize;
-            (*selected_metric, total.saturating_sub(required))
+            let skippable = match target {
+                Some(target) => {
+                    let total = totals.get(selected_metric).copied().unwrap_or(0);
+                    let required = ((total as f64 * target) / 100.0).ceil() as usize;
+                    total.saturating_sub(required)
+                }
+                // Only what no test covers may go uncovered.
+                None => obligations
+                    .iter()
+                    .filter(|obligation| {
+                        obligation.metric == *selected_metric
+                            && !obligation_satisfied(obligation, &candidate_tests)
+                    })
+                    .count(),
+            };
+            (*selected_metric, skippable)
         })
         .collect::<BTreeMap<_, _>>();
-    let full_expanded = model.expand(&candidate_tests);
-    let full_summary = coverage_summary_for_tests(view, &full_expanded)?;
-    for selected_metric in &metrics {
-        let reachable = percentage(*selected_metric, &full_summary);
-        if reachable + 1e-9 < target {
-            return Err(QueryError::TargetUnreachable {
-                metric: selected_metric.public(),
-                target,
-                reachable,
-            });
+    if let Some(target) = target {
+        let full_expanded = model.expand(&candidate_tests);
+        let full_summary = coverage_summary_for_tests(view, &full_expanded)?;
+        for selected_metric in &metrics {
+            let reachable = percentage(*selected_metric, &full_summary);
+            if reachable + 1e-9 < target {
+                return Err(QueryError::TargetUnreachable {
+                    metric: selected_metric.public(),
+                    target,
+                    reachable,
+                });
+            }
         }
     }
     let mut search = Search {
@@ -4800,11 +4833,47 @@ mod tests {
                 },
             ),
         ]);
-        let minimized = minimum_test_set(&report.view, 100.0, MinimizeMetric::Mcdc, 5_000).unwrap();
+        let minimized =
+            minimum_test_set(&report.view, Some(100.0), MinimizeMetric::Mcdc, 5_000).unwrap();
         assert_eq!(minimized.selected.len(), 3);
         assert!(minimized.selected.contains(&"owner".into()));
         assert!(minimized.selected.contains(&"neither".into()));
         assert_eq!(minimized.summary.condition_coverage_pct, 100.0);
+    }
+
+    /// With no target the smallest set keeps what every test together
+    /// covers, which here is less than all of it: 100% is unreachable,
+    /// yet a smaller set still exists.
+    #[test]
+    fn no_target_keeps_what_the_tests_together_cover() {
+        let vector = |values: Vec<Option<bool>>, outcome| McdcVector { values, outcome };
+        let report = report(vec![
+            result("admin", vector(vec![Some(true), None], true)),
+            result("also-admin", vector(vec![Some(true), None], true)),
+            result("neither", vector(vec![Some(false), Some(false)], false)),
+        ]);
+        let all = minimum_test_set(&report.view, None, MinimizeMetric::All, 5_000).unwrap();
+        assert!(matches!(
+            minimum_test_set(&report.view, Some(100.0), MinimizeMetric::Mcdc, 5_000),
+            Err(QueryError::TargetUnreachable { .. })
+        ));
+        let kept = minimum_test_set(&report.view, None, MinimizeMetric::Mcdc, 5_000).unwrap();
+        assert_eq!(kept.target, None);
+        assert_eq!(kept.selected.len(), 2, "{:?}", kept.selected);
+        assert!(kept.selected.contains(&"neither".into()));
+        assert_eq!(
+            kept.summary.condition_coverage_pct,
+            report.view.summary.condition_coverage_pct
+        );
+        assert_eq!(all.summary, report.view.summary);
+        assert_eq!(
+            serde_json::to_value(&kept).unwrap()["target"],
+            serde_json::Value::Null
+        );
+        assert!(matches!(
+            minimum_test_set(&report.view, Some(f64::NAN), MinimizeMetric::Mcdc, 5_000),
+            Err(QueryError::InvalidTarget(_))
+        ));
     }
 
     #[test]
@@ -4826,7 +4895,7 @@ mod tests {
         assert!(matches!(
             minimum_test_set(
                 &report(vec![parallel]).view,
-                100.0,
+                Some(100.0),
                 MinimizeMetric::Mcdc,
                 5_000,
             ),
@@ -4913,7 +4982,7 @@ mod tests {
         assert!(matches!(
             minimum_test_set(
                 &report(vec![aggregate]).view,
-                100.0,
+                Some(100.0),
                 MinimizeMetric::Mcdc,
                 5_000,
             ),
@@ -4947,7 +5016,7 @@ mod tests {
             ),
         ]);
         assert!(matches!(
-            minimum_test_set(&report.view, 100.0, MinimizeMetric::Mcdc, 1),
+            minimum_test_set(&report.view, Some(100.0), MinimizeMetric::Mcdc, 1),
             Err(QueryError::ComplexityLimit { .. })
         ));
     }

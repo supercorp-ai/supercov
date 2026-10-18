@@ -7481,3 +7481,50 @@ fn tests_affected_lists_files_names_and_why_and_says_when_it_cannot_narrow() {
         ],
     );
 }
+
+#[test]
+fn minimize_without_a_target_keeps_what_the_tests_cover() {
+    let project = Project::cart("minimize-default");
+    project.measure(&[]);
+    // The cart's tests cover 76.92% of its lines: no target, no 100% to miss.
+    let said = project.supercov(&["runs", "latest", "minimize"]).succeeds();
+    contains_all(
+        &said,
+        &[
+            "exact minimum 3/3 test(s) keeping the coverage of all 3 tests in every measured metric",
+            "lines 76.92%",
+        ],
+    );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "minimize", "--metric", "lines"])
+            .succeeds(),
+        &["keeping the lines coverage of all 3 tests", "lines 76.92%"],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "minimize", "--json"])
+        .json();
+    assert_eq!(json["data"]["target"], serde_json::Value::Null, "{json}");
+    // An explicit target is still held to.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "minimize", "--target", "100"])
+            .exits(2)
+            .contains("target 100% is impossible")
+    );
+}
+
+#[test]
+fn a_branch_lists_its_unrun_outcomes_in_one_order() {
+    let project = Project::cart("branch-order");
+    project.measure(&[]);
+    // Each call is a new process, with its own hash order.
+    for _ in 0..8 {
+        contains_all(
+            &project
+                .supercov(&["runs", "latest", "line", "src/cart.js:14"])
+                .succeeds(),
+            &["Unobserved: true; false"],
+        );
+    }
+}

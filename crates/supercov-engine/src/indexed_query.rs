@@ -591,7 +591,7 @@ pub fn query_indexed(
                 view_id: view,
                 kind: request.kind.as_deref(),
                 runner: request.runner.as_deref(),
-                target: request.target.unwrap_or(100.0),
+                target: request.target,
                 metric: request.metric,
                 max_states: request.max_states.unwrap_or(5_000),
                 offset: request.offset,
@@ -1045,7 +1045,7 @@ mod tests {
             obligations: 900,
             explored_states: 5_001,
             max_states: 5_000,
-            target: 100.0,
+            target: Some(100.0),
             metric: MinimizeMetric::All,
         })
         .agent_error();
