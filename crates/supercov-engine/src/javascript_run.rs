@@ -1545,6 +1545,8 @@ impl Server {
             Self::Ruby(server) => server.source_fingerprint(),
             Self::Go(server) => server.source_fingerprint(),
             Self::Jvm(server) => server.source_fingerprint(),
+            Self::RustWorker(server) => server.source_fingerprint(),
+            Self::RustWasm(server) => server.source_fingerprint(),
         }
     }
 

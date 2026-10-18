@@ -231,6 +231,7 @@ pub(crate) fn publish(
             status: Some(test.status.clone()),
             expected_status: Some(test.expected_status.clone()),
             flaky: false,
+            span: None,
             provenance: test.provenance.clone(),
             role: "test".into(),
             attribution: if attributed && by_time {
@@ -279,6 +280,7 @@ pub(crate) fn publish(
             status: Some(status.into()),
             expected_status: None,
             flaky: false,
+            span: None,
             provenance: TestProvenance {
                 runner: background_runner.clone(),
                 kind: "background".into(),

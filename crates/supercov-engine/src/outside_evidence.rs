@@ -596,6 +596,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                 status: Some(request.status.unwrap_or("unknown").into()),
                 expected_status: None,
                 flaky: false,
+                span: None,
                 provenance: TestProvenance {
                     runner: IMPORTED_RUNNER.into(),
                     kind: IMPORTED_KIND.into(),

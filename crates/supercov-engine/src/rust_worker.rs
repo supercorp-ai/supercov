@@ -701,6 +701,12 @@ impl RustWorkerServer {
         self.project.source_files.len()
     }
 
+    /// The source this Worker was instrumented from: an image built from an
+    /// earlier copy holds probes placed in other source.
+    pub fn source_fingerprint(&self) -> String {
+        self.integrity.fingerprint.source.clone()
+    }
+
     /// What the suite's environment needs: a lint on the rewritten source
     /// must not fail the Worker's build under the crate's own lint policy.
     ///
