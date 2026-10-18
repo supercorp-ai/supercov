@@ -7172,3 +7172,13 @@ fn a_line_that_is_not_in_the_file_is_refused_not_read_as_unmeasured() {
         ])
         .succeeds();
 }
+
+#[test]
+fn diff_refuses_a_third_run() {
+    let project = Project::cart("diff-extra");
+    project.measure(&[]);
+    let id = project.latest();
+    let said = project.supercov(&["diff", &id, &id, "extra"]).exits(2);
+    assert!(said.contains("unexpected argument extra"), "{said}");
+    project.supercov(&["diff", &id, &id]).succeeds();
+}

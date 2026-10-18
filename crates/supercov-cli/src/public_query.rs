@@ -640,6 +640,15 @@ pub fn parse_public_query(
                 "Usage: supercov diff <older-run> <newer-run>",
             ));
         };
+        if let Some(extra) = options.positional.get(2) {
+            return Err(PublicQueryError::invalid(
+                Some("diff"),
+                json_output,
+                format!(
+                    "unexpected argument {extra}\n\nUsage: supercov diff <older-run> <newer-run>"
+                ),
+            ));
+        }
         return Ok(PublicQueryInvocation::Coverage {
             request: Box::new(IndexedQueryRequest {
                 run_id: older.clone(),
