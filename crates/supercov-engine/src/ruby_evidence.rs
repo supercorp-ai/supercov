@@ -1837,6 +1837,156 @@ mod tests {
         }
     }
 
+    /// Each record a Ruby process writes is checked field by field: a
+    /// transport whose process is sound but one record is not is refused for
+    /// that record.
+    #[test]
+    fn a_record_that_breaks_one_rule_is_refused_for_it() {
+        use serde_json::json;
+        let process = |ruby: &str, v: u32| json!({"t":"process","v":v,"run":"run-1","pid":7,"worker":"main","ruby":ruby,"executable":"ruby","argv":["x.rb"]});
+        let read = |records: &[serde_json::Value]| match read_evidence_file(
+            "main.7.a.mmap",
+            &transport(records),
+            "run-1",
+            &mut Evidence::default(),
+        ) {
+            Ok(()) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let ok = process("3.4.1", 1);
+        assert_eq!(read(&[ok.clone()]), "accepted");
+        let phase = |ctx: u64, phase: &str, worker: &str, test: &str| json!({"t":"phase","ctx":ctx,"at":1,"worker":worker,"test":test,"retry":0,"phase":phase});
+        let outcome = |phase: &str, outcome: &str, runner: &str| json!({"t":"outcome","worker":"main","test":"T","retry":0,"phase":phase,"outcome":outcome,"xfail":false,"runner":runner});
+        for (records, said) in [
+            (
+                vec![process("3.4.1", 2)],
+                "unsupported Ruby evidence version 2",
+            ),
+            (vec![process("3.2.9", 1)], "the test command ran Ruby 3.2.9"),
+            (vec![process("3", 1)], "the test command ran Ruby 3"),
+            (vec![process("x.y", 1)], "the test command ran Ruby x.y"),
+            (
+                vec![ok.clone(), phase(0, "call", "main", "T")],
+                "phase context 0 is reserved",
+            ),
+            (
+                vec![ok.clone(), phase(1, "before", "main", "T")],
+                "unknown test phase",
+            ),
+            (
+                vec![ok.clone(), phase(1, "call", "main", " ")],
+                "must name a worker and test",
+            ),
+            (
+                vec![ok.clone(), phase(1, "call", " ", "T")],
+                "must name a worker and test",
+            ),
+            (
+                vec![ok.clone(), outcome("after", "passed", "rspec")],
+                "unknown test outcome phase",
+            ),
+            (
+                vec![ok.clone(), outcome("call", "pending", "rspec")],
+                "unknown test outcome",
+            ),
+            (
+                vec![ok.clone(), outcome("call", "passed", "bacon")],
+                "unknown Ruby test runner",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    outcome("call", "passed", "rspec"),
+                    outcome("call", "passed", "minitest"),
+                ],
+                "reported by two runners",
+            ),
+            (
+                vec![ok.clone(), json!({"t":"ids","first":3,"names":["a"]})],
+                "continue where the last ones ended",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"ids","first":0,"names":["a"]}),
+                    json!({"t":"hits","ctx":0,"n":[5]}),
+                ],
+                "hit number has no name",
+            ),
+            (
+                vec![ok.clone(), json!({"t":"dec","ctx":0,"id":"d","v":"","o":0})],
+                "digits must be 0, 1 or 2",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"dec","ctx":0,"id":"d","v":"13","o":0}),
+                ],
+                "digits must be 0, 1 or 2",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"dec","ctx":0,"id":"d","v":"12","o":2}),
+                ],
+                "outcome must be 0 or 1",
+            ),
+        ] {
+            let got = read(&records);
+            assert!(got.contains(said), "{said}: {got}");
+        }
+        // The same runner reporting an attempt twice is one attempt.
+        assert_eq!(
+            read(&[
+                ok.clone(),
+                outcome("setup", "passed", "rspec"),
+                outcome("call", "passed", "rspec")
+            ]),
+            "accepted"
+        );
+    }
+
+    #[test]
+    fn a_transport_too_short_or_with_bad_frame_bytes_is_refused() {
+        let valid = transport(&[
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+        ]);
+        let read = |bytes: &[u8]| match read_evidence_file(
+            "main.7.a.mmap",
+            bytes,
+            "run-1",
+            &mut Evidence::default(),
+        ) {
+            Ok(()) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let set = |at: usize, value: &[u8]| {
+            let mut bytes = valid.clone();
+            bytes[at..at + value.len()].copy_from_slice(value);
+            bytes
+        };
+        for (bytes, reason) in [
+            (valid[..10].to_vec(), "header or version does not match"),
+            (
+                set(8, &99_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(16, &(TRANSPORT_HEADER_SIZE as u64 - 1).to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (set(65, &[1]), "commit marker or reserved bytes are invalid"),
+            (set(76, &[1]), "commit marker or reserved bytes are invalid"),
+            (
+                set(68, &((TRANSPORT_MAX_RECORD_SIZE + 1) as u32).to_le_bytes()),
+                "payload length is outside the transport bound",
+            ),
+        ] {
+            let said = read(&bytes);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
+    }
+
     fn temporary(name: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
