@@ -22,8 +22,10 @@ for (const name of ['react-native', 'react-expo']) {
     return result.stdout;
   }
   run('npm', ['ci', '--no-audit', '--no-fund']);
-  run('npm', ['test']);
-  run(binary, ['--', 'npm', 'test']);
+  // Watchman recrawls under load and fails the run; Jest crawls the
+  // fixture itself just as well.
+  run('npm', ['test', '--', '--no-watchman']);
+  run(binary, ['--', 'npm', 'test', '--', '--no-watchman']);
   const summary = JSON.parse(run(binary, ['runs', 'latest', '--json'])).data;
   assert.equal(summary.tests, 4, name);
   assert.equal(summary.testOutcomes.failed, 0, name);
