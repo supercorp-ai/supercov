@@ -1783,6 +1783,58 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Only Supercov's own stored trees are removed: a path in the project,
+    /// in the trash, or the store itself is refused; a missing one is done.
+    /// What is copied or hashed is a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn only_stored_trees_are_removed_and_only_files_copied() {
+        let root = project();
+        fs::create_dir_all(root.join(".supercov/runs/r1")).unwrap();
+        let moved = remove_stored_tree_deferred(&root, Path::new(".supercov/runs/r1")).unwrap();
+        assert!(moved.is_some_and(|path| path.starts_with(root.join(TRASH))));
+        assert_eq!(
+            remove_stored_tree_deferred(&root, Path::new(".supercov/runs/gone")).unwrap(),
+            None
+        );
+        fs::create_dir_all(root.join(TRASH).join("old")).unwrap();
+        for target in [
+            root.join("src"),
+            root.join(TRASH).join("old"),
+            root.join(".supercov"),
+        ] {
+            assert!(
+                matches!(
+                    remove_stored_tree_deferred(&root, &target),
+                    Err(LifecycleError::UnsafePath(_))
+                ),
+                "{}",
+                target.display()
+            );
+        }
+        assert!(!lexical_descendant(&root, &root));
+        assert!(!lexical_descendant(&root, &root.join("a/../b")));
+        assert!(lexical_descendant(&root, &root.join("a/b")));
+        assert_eq!(
+            absolute_root(Path::new("relative")).unwrap(),
+            std::env::current_dir().unwrap().join("relative")
+        );
+        assert!(process_exists(std::process::id()));
+        assert!(!process_exists(0));
+        assert!(!process_exists(u32::MAX));
+        let directory = root.join("src");
+        assert!(matches!(
+            copy_regular_file(&directory, &root.join("copy")),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            file_sha256(&directory),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn final_rename_failure_exposes_no_run_and_removes_staging() {
         let root = project();
