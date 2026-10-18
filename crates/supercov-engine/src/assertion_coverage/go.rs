@@ -416,4 +416,78 @@ mod tests {
         assert_eq!(locate(&lines, "TestFormat/case").unwrap().start, 2);
         assert!(locate(&lines, "TestMissing").is_none());
     }
+
+    /// Zero values by declared type and by a value's shape, conditions as
+    /// written, and the package's helper files a test's file calls into.
+    #[test]
+    fn zeros_conditions_and_helpers_read_the_way_go_writes_them() {
+        for (ty, zero) in [
+            ("error", "nil"),
+            ("any", "nil"),
+            ("*T", "nil"),
+            ("<-chan int", "nil"),
+            ("interface{}", "nil"),
+            ("bool", "false"),
+            ("string", "\"\""),
+            ("uint8", "0"),
+            (" Point ", "Point{}"),
+        ] {
+            assert_eq!(zero_of_type(ty), zero, "{ty}");
+        }
+        for (value, zero) in [
+            ("nil", Some("nil")),
+            ("make([]int, 0)", Some("nil")),
+            ("errors.New(\"x\")", Some("nil")),
+            ("fmt.Errorf(\"x\")", Some("nil")),
+            ("true", Some("false")),
+            ("false", Some("false")),
+            ("`raw`", Some("\"\"")),
+            ("7", Some("0")),
+            ("pkg.Point{X: 1}", Some("pkg.Point{}")),
+            ("f(x){}", None),
+            ("Point{X: 1}.Scale(2)", None),
+            ("compute(n)", None),
+        ] {
+            assert_eq!(zero_of_value(value).as_deref(), zero, "{value}");
+        }
+        assert_eq!(condition("} else if x := f(); x > 1 {"), "x := f(); x > 1");
+        assert_eq!(condition("if ok {"), "ok");
+        assert_eq!(condition("ok"), "ok");
+        assert!(locate(&["package a", "func TestX(t *testing.T) {", "}"], "TestY").is_none());
+        let root = std::env::temp_dir().join(format!(
+            "supercov-go-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        for (file, body) in [
+            (
+                "pkg/a_test.go",
+                "package pkg\nfunc TestA(t *testing.T) { build(); (&fixture{}).reset() }\n",
+            ),
+            ("pkg/build_test.go", "package pkg\nfunc build() {}\n"),
+            (
+                "pkg/fixture_test.go",
+                "package pkg\nfunc (f *fixture) reset() {}\n",
+            ),
+            (
+                "pkg/tests_test.go",
+                "package pkg\nfunc TestOther(t *testing.T) {}\nfunc unused() {}\n",
+            ),
+            ("pkg/odd_test.go", "package pkg\nfunc (broken\n"),
+            ("pkg/lib.go", "package pkg\nfunc build2() {}\n"),
+        ] {
+            std::fs::write(root.join(file), body).unwrap();
+        }
+        let text = std::fs::read_to_string(root.join("pkg/a_test.go")).unwrap();
+        assert_eq!(
+            helpers(&root, "pkg/a_test.go", &text),
+            ["pkg/build_test.go", "pkg/fixture_test.go"]
+        );
+        assert!(helpers(&root, "missing/a_test.go", &text).is_empty());
+    }
 }
