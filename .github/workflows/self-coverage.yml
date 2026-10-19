@@ -95,6 +95,10 @@ jobs:
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v7
+      # The versions CI's wasm and worker jobs use.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0,cargo-nextest@0.9.140,worker-build@0.8.7
       - name: Install wasmtime 49.0.3
         run: |
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
@@ -131,6 +135,10 @@ jobs:
       - name: Measure
         env:
           TEST262_DIR: ${{ runner.temp }}/test262
+          # Their tools are installed above: a gate may not skip for want of
+          # them, where locally it says so and passes.
+          SUPERCOV_REQUIRE_RUST_WASM: "1"
+          SUPERCOV_REQUIRE_RUST_WORKER: "1"
         run: |
           chmod +x "$RUNNER_TEMP/self/supercov"
           echo "${{ steps.tests.outputs.command }}"
