@@ -9876,3 +9876,70 @@ fn a_line_past_the_end_of_its_file_fails_among_several_as_it_does_alone() {
         "{none}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_with_nested_dependencies_and_their_links_runs_in_the_copy_as_it_does_in_place() {
+    let project = Project::empty("probe-nested-modules");
+    project.write("package.json", r#"{ "name": "mono", "private": true, "type": "module", "workspaces": ["packages/*"], "scripts": { "test": "node --test packages/a/test/a.test.js" } }"#);
+    project.write(
+        "node_modules/dep/package.json",
+        r#"{ "name": "dep", "type": "module", "main": "index.js" }"#,
+    );
+    project.write(
+        "node_modules/dep/index.js",
+        "export const dep = (x) => x + 1;\n",
+    );
+    project.write(
+        "node_modules/dep/cli.js",
+        "#!/usr/bin/env node\nconsole.log('dep');\n",
+    );
+    project.write(
+        "packages/a/package.json",
+        r#"{ "name": "a", "type": "module", "main": "src/index.js" }"#,
+    );
+    project.write(
+        "packages/a/node_modules/local-dep/package.json",
+        r#"{ "name": "local-dep", "type": "module", "main": "index.js" }"#,
+    );
+    project.write(
+        "packages/a/node_modules/local-dep/index.js",
+        "export const local = (x) => x * 2;\n",
+    );
+    project.write(
+        "packages/a/node_modules/local-dep/bin.js",
+        "#!/usr/bin/env node\nconsole.log('local');\n",
+    );
+    project.write("packages/a/src/index.js", "import { dep } from 'dep';\nimport { local } from 'local-dep';\nexport const both = (x) => (x > 0 ? local(dep(x)) : 0);\n");
+    project.write("packages/a/test/a.test.js", "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { both } from '../src/index.js';\ntest('both', () => { assert.equal(both(1), 4); assert.equal(both(0), 0); });\n");
+    // Links a package manager makes: commands in `.bin` at the root and in a
+    // workspace package, and the package itself linked into the root.
+    {
+        std::fs::create_dir_all(project.root.join("node_modules/.bin")).unwrap();
+        std::os::unix::fs::symlink("../dep/cli.js", project.root.join("node_modules/.bin/dep"))
+            .unwrap();
+        std::fs::create_dir_all(project.root.join("packages/a/node_modules/.bin")).unwrap();
+        std::os::unix::fs::symlink(
+            "../local-dep/bin.js",
+            project.root.join("packages/a/node_modules/.bin/local"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../../packages/a", project.root.join("node_modules/a"))
+            .unwrap();
+    }
+    project.write(".gitignore", "node_modules\n");
+    project.git(&["init", "-q"]);
+    let plain = std::process::Command::new("npm")
+        .arg("test")
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(plain.status.success());
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    let files = project.supercov(&["runs", "latest", "files"]).succeeds();
+    assert!(
+        files.contains("packages/a/src/index.js\n  covered in this projection"),
+        "{files}"
+    );
+    assert!(!files.contains("node_modules"), "{files}");
+}
