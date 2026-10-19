@@ -2532,6 +2532,36 @@ mod tests {
         assert_eq!((f.end_line, f.end_column), (1, 30), "end is exclusive");
     }
 
+    /// A unit holds the positions from its start up to its end; a change is
+    /// narrow only when it touched nothing but the bodies of probed code.
+    #[test]
+    fn a_unit_holds_its_span_and_a_change_is_narrow_only_inside_probed_bodies() {
+        let base = "function a() {\n  return 1;\n}\nclass K {}\n";
+        let before = code("a.js", base).unwrap();
+        let a = before.units.iter().position(|u| u.path == "a").unwrap();
+        let unit = &before.units[a];
+        assert!(unit.contains(unit.line, unit.column));
+        assert!(!unit.contains(unit.line.saturating_sub(1), 0));
+        assert!(!unit.contains(unit.end_line, unit.end_column));
+        let narrow = |after: &str, probed: &[usize]| {
+            let after = code("a.js", after).unwrap();
+            before.diff(&after).narrow(&before, probed)
+        };
+        let body = base.replace("return 1;", "return 2;");
+        assert!(narrow(&body, &[a]));
+        assert!(!narrow(&body, &[]), "a body nothing probed");
+        assert!(
+            !narrow(&format!("{base}function b() {{}}\n"), &[a]),
+            "an addition"
+        );
+        assert!(!narrow("class K {}\n", &[a]), "a removal");
+        let k = before.units.iter().position(|u| u.path == "K").unwrap();
+        assert!(
+            !narrow(&base.replace("class K {}", "class K { x = 1 }"), &[a, k]),
+            "a class is data as well as code"
+        );
+    }
+
     /// A comment that owns its line takes the line; one after code takes
     /// the space before it; one between words leaves a space.
     #[test]
