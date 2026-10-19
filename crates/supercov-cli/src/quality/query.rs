@@ -616,8 +616,11 @@ fn render_scope(view: &Value) -> String {
             roots.join(", ")
         }
     ));
-    if let Some(reasons) = summary["reasons"].as_object() {
-        out.push('\n');
+    if let Some(reasons) = summary["reasons"]
+        .as_object()
+        .filter(|reasons| !reasons.is_empty())
+    {
+        out.push_str("\nFiles left out, by reason:\n");
         for (reason, count) in reasons {
             out.push_str(&format!("  {:>5}  {reason}\n", count.as_u64().unwrap_or(0)));
         }

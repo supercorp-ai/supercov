@@ -8978,5 +8978,9 @@ fn a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for() {
         .succeeds();
     assert!(written.contains(output.to_str().unwrap()), "{written}");
     let html = std::fs::read_to_string(&output).unwrap();
-    assert!(html.to_ascii_lowercase().starts_with("<!doctype html"), "{}", &html[..80]);
+    assert!(
+        html.to_ascii_lowercase().starts_with("<!doctype html"),
+        "{}",
+        &html[..80]
+    );
 }

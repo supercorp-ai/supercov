@@ -2540,3 +2540,48 @@ fn filtered_assertions_read_the_share_of_the_tests_a_filter_picks() {
         &["src/cart.js: 0 asserted statement(s) rest on an answer under 75%"],
     );
 }
+
+/// An assessment where nothing fires says so in every view: the summary
+/// pages its files, gaps has nothing to list, a file shows every check as
+/// a judgment, and scope names what was left out under a heading.
+#[test]
+fn an_assessment_where_nothing_fires_reads_as_such_in_every_view() {
+    let project = Project::cart("quality-quiet");
+    for name in ["a", "b", "c"] {
+        project.write(
+            &format!("src/{name}.js"),
+            &format!("export const {name} = (x) => x ? 1 : 2;\n"),
+        );
+    }
+    project.commit("more");
+    let (base, _) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["quality"], &through(&base))
+        .succeeds();
+    let shown = project
+        .supercov(&["quality", "show", "--limit", "1"])
+        .succeeds();
+    contains_all(&shown, &["over 4 files.", "... and 3 more"]);
+    let gaps = project
+        .supercov(&["quality", "gaps", "--limit", "1"])
+        .succeeds();
+    assert!(
+        gaps.contains("Nothing fired on any assessed file."),
+        "{gaps}"
+    );
+    let file = project
+        .supercov(&["quality", "file", "src/a.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &["no  0.10  complex_conditional", "a model judgment"],
+    );
+    let scope = project.supercov(&["quality", "scope"]).succeeds();
+    contains_all(
+        &scope,
+        &[
+            "Files left out, by reason:\n      1  test\n",
+            "excluded   test/cart.test.js  (test)",
+        ],
+    );
+}
