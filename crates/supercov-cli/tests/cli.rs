@@ -11188,3 +11188,56 @@ fn settings_a_suite_chose_for_docker_and_playwright_reach_it_unchanged() {
     assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
     assert!(run.stdout().contains("pass 4"), "{}", run.stdout());
 }
+
+#[test]
+fn a_direct_javascript_run_with_no_command_is_refused() {
+    let project = Project::cart("empty-direct-command");
+    let input = project.root.join("input.json");
+    std::fs::write(
+        &input,
+        serde_json::json!({ "root": project.root, "command": [] }).to_string(),
+    )
+    .unwrap();
+    let refused = project
+        .supercov_with(
+            &["__run-js-direct"],
+            &[("SUPERCOV_INTERNAL_INPUT_FILE", input.to_str().unwrap())],
+        )
+        .exits(2);
+    assert!(
+        refused.contains("direct JavaScript run failed: test command must not be empty"),
+        "{refused}"
+    );
+    assert!(!project.root.join(".supercov").exists());
+}
+
+#[test]
+fn a_browser_suite_beside_servers_with_nothing_to_measure_measures_its_javascript() {
+    // A Go workspace and a Maven build with no source: each server language
+    // is looked for, and neither has anything to measure.
+    let project = Project::cart("servers-unmeasured");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write("go.work", "go 1.22\n\nuse ./svc\n");
+    project.write("svc/go.mod", "module example.com/svc\n\ngo 1.22\n");
+    project.write("pom.xml", "<project></project>\n");
+    let run = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(
+        !run.stderr().contains("server the tests start"),
+        "{}",
+        run.stderr()
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("76.92%"), "{summary}");
+    // Without JavaScript source there is nothing left to measure.
+    std::fs::remove_dir_all(project.root.join("src")).unwrap();
+    project.write(
+        "test/cart.test.js",
+        "import { test } from 'node:test';\ntest('nothing', () => {});\n",
+    );
+    let empty = project.supercov(&["--", "node", "--test"]).exits(1);
+    assert!(
+        empty.contains("No application source files were discovered"),
+        "{empty}"
+    );
+}
