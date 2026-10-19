@@ -1703,7 +1703,9 @@ fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
         fs::read_to_string(root.join(file))
             .ok()
             .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
-    });
+    })
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
     // Added files are in no record: git names them, of the kinds of file the
     // run measured.
     let extensions = recorded
@@ -1738,16 +1740,14 @@ fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
     for file in added {
         if !file.is_empty()
             && !recorded.contains_key(&file)
-            && !changed.contains(&file)
             && Path::new(&file)
                 .extension()
                 .is_some_and(|extension| extensions.contains(extension))
         {
-            changed.push(file);
+            changed.insert(file);
         }
     }
-    changed.sort();
-    changed
+    changed.into_iter().collect()
 }
 
 /// A run's query index, or, when a filter picks tests, the index of only

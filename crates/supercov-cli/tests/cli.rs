@@ -10492,3 +10492,186 @@ fn a_patch_names_new_source_it_did_not_measure_and_not_new_tests() {
     );
     assert!(!patch.contains("helper.spec.js"), "{patch}");
 }
+
+#[test]
+fn a_run_left_out_of_a_merge_or_read_stale_says_what_moved() {
+    // A source file added and a test file edited: the source is said to
+    // have changed by the file it gained, and the test file is not named.
+    let project = Project::cart("merge-moved");
+    let run = project.measure(&[]);
+    project.write("src/extra.js", "export const extra = 1;\n");
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total sums prices",
+    );
+    let said = project.supercov(&["merge"]).exits(2);
+    assert!(
+        said.contains(&format!(
+            "left out {run} (node --test): the source has changed (1 file(s) added). Measure it again"
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("test/cart.test.js"), "{said}");
+
+    // A measured file removed whose name reads as configuration.
+    let project = Project::cart("merge-config-named");
+    project.write("src/app.config.js", "export const rate = 1;\n");
+    project.commit("config-named source");
+    let run = project.measure(&[]);
+    std::fs::remove_file(project.root.join("src/app.config.js")).unwrap();
+    let said = project.supercov(&["merge"]).exits(2);
+    assert!(
+        said.contains(&format!(
+            "left out {run} (node --test): the source has changed. Measure it again"
+        )),
+        "{said}"
+    );
+
+    // Only configuration added: stale for it, no file to name; a diff with
+    // a run after it says what it compared.
+    let project = Project::cart("stale-configuration");
+    let older = project.measure(&[]);
+    project.write(".npmrc", "fund=false\n");
+    project.commit("npmrc");
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert!(
+        files.stderr().contains(&format!(
+            "[supercov] stale run {older}: test/build configuration changed\n"
+        )),
+        "{}",
+        files.stderr()
+    );
+    let newer = project.measure(&[]);
+    let diff = project.supercov(&["diff", &older, &newer, "--json"]).json();
+    assert_eq!(
+        diff["data"]["inputs"],
+        serde_json::json!({"sourceChanged": true, "testsChanged": false})
+    );
+
+    // Without the run's history, or without any repository, what changed is
+    // still named from the run's own record.
+    let project = Project::cart("stale-without-history");
+    let run = project.measure(&[]);
+    project.edit("src/cart.js", "return 0;", "return 0; // free");
+    project.write("src/new.js", "export const n = 1;\n");
+    std::fs::rename(project.root.join(".git"), project.root.join("away.git")).unwrap();
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert!(
+        files.stderr().contains(&format!(
+            "stale run {run}: instrumented source changed; changed since the run: src/cart.js\n"
+        )),
+        "{}",
+        files.stderr()
+    );
+    project.git(&["init", "-q"]);
+    project.git(&["add", "package.json", "src/cart.js"]);
+    project.git(&["commit", "-q", "-m", "fresh"]);
+    assert!(
+        project
+            .supercov(&["runs", "latest", "files"])
+            .stderr()
+            .contains("changed since the run: src/cart.js, src/new.js")
+    );
+}
+
+#[test]
+fn tests_without_evidence_are_explained_by_what_they_load() {
+    let noop = "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\ntest(\"asserts a constant\", () => { assert.equal(1, 1); });\n";
+    let project = Project::cart("without-evidence");
+    project.write("test/noop.test.js", noop);
+    project.write("test/plain", noop);
+    project.write(
+        "test/dyn.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nconst name = \"node:\" + \"path\";\nconst path = await import(name);\ntest(\"dyn import\", () => { assert.equal(typeof path.join, \"function\"); });\n",
+    );
+    project.commit("tests");
+    let without = |command: &[&str], env: &[(&str, &str)]| {
+        let mut args = vec!["--"];
+        args.extend_from_slice(command);
+        project.supercov_with(&args, env).succeeds();
+        project
+            .supercov(&["runs", "latest", "tests", "without-evidence", "--json"])
+            .json()["data"]["tests"][0]
+            .clone()
+    };
+    // A unit test that imports no source says so.
+    let unit = without(&["node", "--test", "test/noop.test.js"], &[]);
+    assert_eq!(unit["importsMeasured"], false, "{unit}");
+    // An end-to-end test reaches source by other means than imports, a file
+    // with no extension cannot be read for them, and a computed import names
+    // no module: none of them is said to import nothing.
+    let e2e = without(
+        &["node", "--test", "test/noop.test.js"],
+        &[("SUPERCOV_TEST_KIND", "e2e")],
+    );
+    assert_eq!(e2e["kind"], "e2e");
+    assert!(e2e.get("importsMeasured").is_none(), "{e2e}");
+    let plain = without(&["node", "--test", "test/plain"], &[]);
+    assert_eq!(plain["file"], "test/plain");
+    assert!(plain.get("importsMeasured").is_none(), "{plain}");
+    let dynamic = without(&["node", "--test", "test/dyn.test.js"], &[]);
+    assert!(dynamic.get("importsMeasured").is_none(), "{dynamic}");
+}
+
+#[test]
+fn line_queries_and_commands_at_their_edges() {
+    // A command that only mentions another language's runner, and runs node.
+    let project = Project::cart("command-edges");
+    let ran = project.supercov(&["--", "sh", "-c", "echo phpunit && node --test"]);
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    // Several lines from past their end: none, and none failed.
+    let lines = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:2",
+            "src/cart.js:3",
+            "--offset",
+            "5",
+            "--json",
+        ])
+        .json();
+    assert_eq!(lines["data"]["lines"], serde_json::json!([]));
+    assert_eq!(lines["pagination"]["total"], 2);
+    // A script of a package manager other than npm, and the others it has.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test", "test:unit": "node --test", "test:e2e": "node --test" } }"#,
+    );
+    project.write_script("bin/pnpm", "#!/bin/sh\nexec node --test\n");
+    project.commit("scripts");
+    project
+        .supercov(&["--", "bin/pnpm", "test:unit"])
+        .succeeds();
+    assert!(project.supercov(&["runs", "latest"]).succeeds().contains(
+        "wrapped `bin/pnpm test:unit`. Other test scripts include test:e2e. For whole-project"
+    ));
+    // One line whose tests alone outgrow a reply.
+    let mut tests = String::from(
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\n",
+    );
+    for name in ["a", "b", "c", "d", "e", "f"] {
+        tests.push_str(&format!(
+            "test(\"{}\", () => assert.equal(total([]), 0));\n",
+            name.repeat(30_000)
+        ));
+    }
+    project.write("test/long.test.js", &tests);
+    project.commit("long names");
+    project.measure(&[]);
+    assert!(
+        project
+            .supercov(&[
+                "runs",
+                "latest",
+                "line",
+                "src/cart.js:2",
+                "src/cart.js:3",
+                "--json"
+            ])
+            .exits(2)
+            .contains("\"code\":\"RESPONSE_TOO_LARGE\"")
+    );
+}
