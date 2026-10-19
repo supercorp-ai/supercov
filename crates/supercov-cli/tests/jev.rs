@@ -3185,3 +3185,86 @@ fn source_reads_a_file_as_the_run_saw_it_until_that_file_changes() {
         "Nothing fired on any assessed file.\n"
     );
 }
+
+/// Labels by a function's name: `take*` reads outside data, `sink*`
+/// reaches an injection sink, `clean*` reaches one but sanitises, `quiet*`
+/// reaches something that is no sink.
+fn answer_by_name(id: &str, question: &serde_json::Value) -> serde_json::Value {
+    let task = question["instructions"]["task"]
+        .as_str()
+        .unwrap_or_default();
+    let function = task.split('`').nth(1).unwrap_or_default();
+    let yes = serde_json::json!({ "type": "noul", "noul": 0.9 });
+    let no = serde_json::json!({ "type": "noul", "noul": 0.1 });
+    if id == "path" {
+        return yes;
+    }
+    let Some((_, label)) = id.split_once('_').filter(|_| id.starts_with('f')) else {
+        return common::answer_reviewer(id, question);
+    };
+    let reaches = ["sink", "clean", "quiet"]
+        .iter()
+        .any(|p| function.starts_with(p));
+    match label {
+        "takes_outside" => {
+            if function.starts_with("take") {
+                yes
+            } else {
+                no
+            }
+        }
+        "reaches_sink" => {
+            if reaches {
+                yes
+            } else {
+                no
+            }
+        }
+        "sanitises" => {
+            if function.starts_with("clean") {
+                yes
+            } else {
+                no
+            }
+        }
+        "sink_kind" => common::choose(
+            question,
+            if function.starts_with("sink") || function.starts_with("clean") {
+                "injection_sink"
+            } else {
+                "none"
+            },
+        ),
+        _ => common::answer_reviewer(id, question),
+    }
+}
+
+#[test]
+fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
+    let project = Project::empty("probe-paths");
+    project.write("package.json", r#"{"name":"paths","type":"module"}"#);
+    project.write("src/db.js", "export default function sinkDefault(db, v) {\n  return db.query(\"x\" + v);\n}\nexport function sinkNamed(db, v) {\n  return db.query(\"y\" + v);\n}\nexport function cleanQuery(db, v) {\n  return db.query(\"z\", [v]);\n}\nexport function quietLog(db, v) {\n  return console.log(v);\n}\nexport function plain(v) {\n  return v;\n}\n");
+    project.write("src/a.js", "import sinkDefault from \"./db.js\";\nexport function takeA(req, db) {\n  return sinkDefault(db, req.q);\n}\n");
+    project.write("src/b.js", "import * as store from \"./db.js\";\nexport function takeB(req, db) {\n  return store.sinkNamed(db, req.q);\n}\n");
+    project.write("src/c.js", "import { sinkNamed as run } from \"./db.js\";\nexport function takeC(req, db) {\n  return run(db, req.q);\n}\n");
+    project.write("src/d.js", "import { cleanQuery, quietLog, plain } from \"./db.js\";\nexport function takeD(req, db) {\n  cleanQuery(db, req.q);\n  quietLog(db, req.q);\n  return plain(req.q);\n}\n");
+    project.write("src/e.js", "import { sinkNamed } from \"./db.js\";\nexport function takeE1(req, db) {\n  return sinkNamed(db, req.a);\n}\nexport function takeE2(req, db) {\n  return sinkNamed(db, req.b);\n}\nexport function inner(db) {\n  return sinkNamed(db, 1);\n}\n");
+    project.write("src/f.js", "import { sinkNamed } from \"./db.js\";\nexport function takeF(req, db) {\n  return sinkNamed(db, req.f);\n}\n");
+    project.git(&["init", "-q"]);
+    let (base, _) = gateway(MODEL, answer_by_name);
+    let report = project
+        .supercov_with(&["security", "src/"], &through(&base))
+        .succeeds();
+    let paths = report
+        .split_once("Cross-file paths confirmed: ")
+        .map(|(_, rest)| rest.split("\n\n").next().unwrap_or_default())
+        .unwrap_or_default();
+    // A default import is the default export alone; a namespace or an alias
+    // reaches the function called; a callee that sanitises, reaches no sink
+    // or is no sink, and a caller reading no outside data, make no path.
+    assert_eq!(
+        paths,
+        "6\n  0.90  injection_sink  src/a.js:3 takeA -> src/db.js:1 sinkDefault\n  0.90  injection_sink  src/b.js:3 takeB -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/c.js:3 takeC -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:3 takeE1 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:6 takeE2 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/f.js:3 takeF -> src/db.js:4 sinkNamed",
+        "{report}"
+    );
+}

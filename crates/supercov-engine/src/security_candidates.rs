@@ -14,7 +14,8 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, Expression, Function,
+    Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class,
+    ExportDefaultDeclaration, ExportDefaultDeclarationKind, Expression, Function,
     ImportDeclaration, ImportDeclarationSpecifier, JSXAttribute, MethodDefinition, NewExpression,
     ObjectProperty, PropertyKey, SpreadElement, StringLiteral, TemplateLiteral, VariableDeclarator,
 };
@@ -67,6 +68,9 @@ pub struct Import {
 pub struct Structure {
     pub functions: Vec<FunctionSpan>,
     pub imports: Vec<Import>,
+    /// The function `export default` names, where it names one: what an
+    /// import of `default` refers to, whatever the importer calls it.
+    pub default_export: Option<String>,
 }
 
 struct Collector<'s> {
@@ -274,6 +278,19 @@ impl<'a> Visit<'a> for Collector<'_> {
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
         walk::walk_arrow_function_expression(self, arrow);
     }
+    fn visit_export_default_declaration(&mut self, export: &ExportDefaultDeclaration<'a>) {
+        let named = match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                function.id.as_ref().map(|id| id.name.to_string())
+            }
+            ExportDefaultDeclarationKind::Identifier(id) => Some(id.name.to_string()),
+            _ => None,
+        };
+        if named.is_some() {
+            self.structure.default_export = named;
+        }
+        walk::walk_export_default_declaration(self, export);
+    }
     fn visit_import_declaration(&mut self, import: &ImportDeclaration<'a>) {
         let specifier = import.source.value.to_string();
         if let Some(specifiers) = &import.specifiers {
@@ -348,6 +365,22 @@ fn parse(file: &Path, source: &str) -> Result<(Vec<Node>, Structure), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_default_export_is_named_where_the_module_names_it() {
+        let named = |source: &str| structure(Path::new("m.js"), source).unwrap().default_export;
+        assert_eq!(
+            named("export default function run() {}\n").as_deref(),
+            Some("run")
+        );
+        assert_eq!(
+            named("function go() {}\nexport default go;\n").as_deref(),
+            Some("go")
+        );
+        assert_eq!(named("export default () => 1;\n"), None);
+        assert_eq!(named("export function only() {}\n"), None);
+    }
+
     use super::*;
 
     /// A fake key in a live-key shape, assembled so no source line holds the

@@ -482,7 +482,7 @@ pub fn answer_taint(id: &str, question: &Value) -> Value {
     answer_reviewer(id, question)
 }
 
-fn choose(question: &Value, preferred: &str) -> Value {
+pub fn choose(question: &Value, preferred: &str) -> Value {
     let options: Vec<&String> = question["criteria"].as_object().unwrap().keys().collect();
     let chosen = options
         .iter()

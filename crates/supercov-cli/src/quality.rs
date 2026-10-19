@@ -1966,6 +1966,7 @@ fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View>
                         })
                         .collect(),
                     imports: structure.imports.clone(),
+                    default_export: structure.default_export.clone(),
                 },
             }
         })
@@ -2397,10 +2398,16 @@ fn confirm_paths(
                     .take(callee_answer.labels.len())
                 {
                     let label = &callee_answer.labels[j];
-                    let named = import.exported == "*"
-                        || import.exported == "default"
-                        || callee.name == import.exported
-                        || callee.name == import.local;
+                    // A default import names the function the module
+                    // exports as default, not every function in it.
+                    let named = match import.exported.as_str() {
+                        "*" => true,
+                        "default" => match &callee_structure.default_export {
+                            Some(exported) => callee.name == *exported,
+                            None => callee.name == import.local,
+                        },
+                        exported => callee.name == exported || callee.name == import.local,
+                    };
                     if !named
                         || label.reaches_sink < cut
                         || label.sanitises >= cut

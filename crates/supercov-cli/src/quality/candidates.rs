@@ -603,6 +603,7 @@ pub fn structure(path: &Path, source: &str) -> Structure {
                         specifier: i.specifier,
                     })
                     .collect(),
+                default_export: None,
             })
             .unwrap_or_default(),
         _ => Structure::default(),
