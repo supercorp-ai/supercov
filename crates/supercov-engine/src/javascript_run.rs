@@ -1755,7 +1755,6 @@ mod tests {
             workspace: None,
             state_written: false,
             terminal_recorded: false,
-            keep_workspace: false,
         };
         cleanup.mark_state_written();
         drop(cleanup);
