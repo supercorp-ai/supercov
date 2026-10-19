@@ -1245,6 +1245,7 @@ fn render_check(
             }
         }
     }
+    out.push_str(&uncounted_note(view));
     out
 }
 
@@ -1572,6 +1573,43 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The files no floor covered because discovery could not tell whether they
+/// are source and nothing loaded them. Said, never failed on: the suite
+/// passes without Supercov, so a gate must not fail for what it cannot tell.
+fn uncounted_note(view: &supercov_engine::run_view::RunView) -> String {
+    let files = view
+        .limitations
+        .iter()
+        .filter_map(|limitation| serde_json::from_str::<serde_json::Value>(limitation).ok())
+        .filter(|limitation| limitation["kind"] == "source-scope")
+        .filter_map(|limitation| limitation["file"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    if files.is_empty() {
+        return String::new();
+    }
+    let shown = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    let more = files.len().saturating_sub(5);
+    format!(
+        "{} {} outside the source roots that nothing loads {} not counted: {shown}{}. \
+         If {} your code, name the roots with SUPERCOV_SOURCE_ROOTS; `{} runs {} scope` lists them.\n",
+        files.len(),
+        if files.len() == 1 { "file" } else { "files" },
+        if files.len() == 1 { "is" } else { "are" },
+        if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        },
+        if files.len() == 1 {
+            "it is"
+        } else {
+            "they are"
+        },
+        launcher_command(),
+        view.run
+    )
 }
 
 fn render_patch(

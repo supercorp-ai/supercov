@@ -4860,7 +4860,9 @@ fn source_roots_named_after_a_first_run_take_effect() {
     );
     project.write(
         "test/tax.test.js",
-        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { tax } from \"../extra/tax.js\";\ntest(\"tax applies over a hundred\", () => {\n  assert.equal(tax(200), 20);\n});\n",
+        // Loaded by a computed path, which no reading of the imports can
+        // follow: only a named root says it is source.
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nconst { tax } = await import(\"../extra/\" + \"tax.js\");\ntest(\"tax applies over a hundred\", () => {\n  assert.equal(tax(200), 20);\n});\n",
     );
     project.commit("tax");
     project.supercov(&["--", "node", "--test"]).succeeds();
@@ -8911,7 +8913,7 @@ fn code_outside_the_source_roots_is_named_with_the_roots_to_give() {
         "package.json",
         r#"{ "name": "spread", "private": true, "type": "module" }"#,
     );
-    let mut imports = String::new();
+    // Code nothing the tests load reaches: a file a test imports is source.
     for dir in [
         "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
     ] {
@@ -8919,11 +8921,10 @@ fn code_outside_the_source_roots_is_named_with_the_roots_to_give() {
             &format!("{dir}/index.js"),
             &format!("export const {dir} = (x) => x ? 1 : 2;\n"),
         );
-        imports.push_str(&format!("import {{ {dir} }} from \"../{dir}/index.js\";\n"));
     }
     project.write(
         "test/all.test.js",
-        &format!("import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n{imports}\ntest(\"alpha\", () => {{ assert.equal(alpha(true), 1); }});\n"),
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { main } from \"../src/main.js\";\n\ntest(\"main\", () => { assert.equal(main, 1); });\n",
     );
     project.write("src/main.js", "export const main = 1;\n");
     project.git(&["init", "-q"]);
@@ -9669,4 +9670,55 @@ fn query_numbers_and_shapes_are_checked_before_anything_is_read() {
         picked.lines().all(|line| line.contains(r#""kind":"mcdc""#)) && picked.lines().count() > 0,
         "{picked}"
     );
+}
+
+#[test]
+fn code_outside_the_roots_counts_when_loaded_and_is_named_by_check_when_not() {
+    let project = Project::cart("loaded-outside");
+    project.write(
+        "shared/round.js",
+        "export function round(value) {\n  if (value < 0) return 0;\n  return Math.round(value);\n}\n",
+    );
+    project.write("extra/unused.js", "export const unused = 1;\n");
+    project.write(
+        "test/round.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { round } from \"../shared/round.js\";\n\ntest(\"rounds\", () => assert.equal(round(1.4), 1));\n",
+    );
+    project.commit("outside");
+    project.measure(&[]);
+    // A test loads it, so it is source: measured, with its gap.
+    let scope = project
+        .supercov(&["runs", "latest", "scope", "--files"])
+        .succeeds();
+    contains_all(
+        &scope,
+        &[
+            "INCLUDED  shared/round.js  loaded by first-party source or tests",
+            "AMBIGUOUS  extra/unused.js  unclassified first-party source",
+        ],
+    );
+    let file = project
+        .supercov(&["runs", "latest", "file", "shared/round.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "Statements not executed         1",
+            "Tests touching this file: 1",
+        ],
+    );
+    // Nothing loads the other: check passes as the suite does, and says so.
+    let check = project
+        .supercov(&["runs", "latest", "check", "--min-lines", "10"])
+        .succeeds();
+    assert!(
+        check.contains(
+            "PASS: every floor is met.\n1 file outside the source roots that nothing loads is not counted: extra/unused.js."
+        ),
+        "{check}"
+    );
+    let json = project
+        .supercov(&["runs", "latest", "check", "--min-lines", "10", "--json"])
+        .json();
+    assert_eq!(json["data"]["view"]["complete"], false);
 }

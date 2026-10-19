@@ -189,6 +189,14 @@ Files  Status     Directory   Reason
   311  EXCLUDED   tests       test or fixture source
 ```
 
+A file under no source root that a test or first-party source imports is
+source: Supercov follows the imports of the tests and of the source it found,
+through what those load in turn, before anything runs, and counts what they
+reach with the reason `loaded by first-party source or tests`. What stays
+ambiguous is what nothing loads by a path Supercov can read. It counts in no
+percentage, and `runs check` names it under its result without failing, since
+the suite passes without Supercov.
+
 When first-party source lives in unusual directories, declare it explicitly:
 
 ```sh supercov

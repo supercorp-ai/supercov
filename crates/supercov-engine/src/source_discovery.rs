@@ -1190,6 +1190,52 @@ fn nearest_package_root<'a>(path: &Path, packages: &'a [PathBuf]) -> Option<&'a 
         .max_by_key(|directory| directory.components().count())
 }
 
+/// Reason for a file under no root that first-party source or a test loads.
+pub const LOADED_REASON: &str = "loaded by first-party source or tests";
+
+/// A file under no source root that first-party source or a test imports is
+/// code the product runs: a `shared/` folder beside `src/`, a helper under
+/// `docs/` a test loads. It is followed from what is known to be source and
+/// tests, before anything runs, so nobody has to name a root for a project
+/// whose tests pass without Supercov. What nothing loads stays ambiguous.
+fn promote_loaded(
+    root: &Path,
+    entries: &mut [SourceScopeEntry],
+    included: &mut Vec<PathBuf>,
+    limitations: &mut Vec<SourceLimitation>,
+) {
+    if !entries
+        .iter()
+        .any(|entry| entry.status == SourceScopeStatus::Ambiguous)
+    {
+        return;
+    }
+    let starts = entries
+        .iter()
+        .filter(|entry| {
+            entry.status == SourceScopeStatus::Included
+                || (entry.status == SourceScopeStatus::Excluded
+                    && matches!(
+                        entry.reason.as_str(),
+                        "test or fixture source" | "declared test setup"
+                    ))
+        })
+        .map(|entry| entry.file.clone())
+        .collect::<Vec<_>>();
+    let loaded = crate::test_loads::Imports::new(root)
+        .loads(starts.iter().map(String::as_str))
+        .files;
+    for entry in entries.iter_mut().filter(|entry| {
+        entry.status == SourceScopeStatus::Ambiguous && loaded.contains(&entry.file)
+    }) {
+        entry.status = SourceScopeStatus::Included;
+        entry.reason = LOADED_REASON.into();
+        included.push(root.join(&entry.file));
+        limitations.retain(|limitation| limitation.file != entry.file);
+    }
+    included.sort();
+}
+
 fn scope_limitation(file: &str) -> SourceLimitation {
     let digest = Sha256::digest(file.as_bytes());
     let id = digest[..10]
@@ -1387,6 +1433,7 @@ pub fn discover_source_scope(
             limitations.push(scope_limitation(&file));
         }
     }
+    promote_loaded(&root, &mut entries, &mut included, &mut limitations);
     let source_files = included
         .iter()
         .map(|path| local_path(&root, path))
@@ -1450,6 +1497,59 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn a_file_under_no_root_that_source_or_a_test_loads_is_source() {
+        let root = repository(
+            "loaded",
+            &[
+                ("package.json", r#"{"name":"loaded","type":"module"}"#),
+                (
+                    "src/a.js",
+                    "import { y } from '../shared/y.js';\nexport const a = y;\n",
+                ),
+                (
+                    "shared/y.js",
+                    "import { deep } from './deep';\nexport const y = deep;\n",
+                ),
+                ("shared/deep.ts", "export const deep = 1;\n"),
+                ("docs/x.js", "export const x = 1;\n"),
+                ("extra/z.js", "export const z = 1;\n"),
+                (
+                    "test/a.test.js",
+                    "import '../src/a.js';\nimport { x } from '../docs/x.js';\n",
+                ),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        // Through source, through a test, and through what those load.
+        for file in ["shared/y.js", "shared/deep.ts", "docs/x.js"] {
+            let found = entry(&discovered, file);
+            assert_eq!(found.status, SourceScopeStatus::Included, "{file}");
+            assert_eq!(found.reason, LOADED_REASON, "{file}");
+            assert!(discovered.source_files.contains(&file.to_owned()), "{file}");
+        }
+        // Nothing loads it: still a question, and still said.
+        assert_eq!(
+            entry(&discovered, "extra/z.js").status,
+            SourceScopeStatus::Ambiguous
+        );
+        assert_eq!(
+            discovered
+                .limitations
+                .iter()
+                .map(|limitation| limitation.file.as_str())
+                .collect::<Vec<_>>(),
+            ["extra/z.js"]
+        );
+        // Named roots settle it: nothing is promoted past them.
+        let named = discover_source_scope(&root, Some(&["src".to_owned()])).unwrap();
+        assert_eq!(
+            entry(&named, "docs/x.js").status,
+            SourceScopeStatus::Excluded
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn repository(label: &str, files: &[(&str, &str)]) -> PathBuf {
