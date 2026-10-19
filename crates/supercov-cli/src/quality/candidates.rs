@@ -911,21 +911,18 @@ pub fn candidates(path: &Path, source: &str) -> Vec<Candidate> {
             .or_default()
             .push(candidate);
     }
+    // Round by round, one of each check: there are more candidates than
+    // the cap, so the cap is reached before every list runs out.
     let mut picked = Vec::new();
     let mut round = 0;
     while picked.len() < MAX_CANDIDATES {
-        let mut progressed = false;
         for list in by_check.values() {
             if let Some(candidate) = list.get(round) {
                 picked.push(candidate.clone());
-                progressed = true;
                 if picked.len() == MAX_CANDIDATES {
                     break;
                 }
             }
-        }
-        if !progressed {
-            break;
         }
         round += 1;
     }
@@ -973,6 +970,29 @@ mod tests {
         );
         assert!(!secret_assignment("password = ''"));
         assert!(!secret_assignment("const path = '/api/users'"));
+    }
+
+    /// A Python assignment is a candidate for each thing it shows: a CSRF
+    /// exemption, a session write, a secret, and debug switched on.
+    #[test]
+    fn python_assignments_are_candidates_for_what_they_show() {
+        let found = candidates(
+            Path::new("app/settings.py"),
+            "view = csrf_exempt(handler)\nsession[\"user\"] = name\nDEBUG = True\napi_key = \"abc123secretvalue\"\ndebug = False\ntotal = 1\n",
+        );
+        let checks = |line: usize| {
+            found
+                .iter()
+                .filter(|c| c.line == line)
+                .map(|c| c.check.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(checks(1).contains(&"insecure_configuration"), "{found:?}");
+        assert!(checks(2).contains(&"weak_authentication"), "{found:?}");
+        assert!(checks(3).contains(&"sensitive_data_exposure"), "{found:?}");
+        assert!(checks(4).contains(&"secret_in_source"), "{found:?}");
+        assert!(!checks(5).contains(&"sensitive_data_exposure"), "{found:?}");
+        assert!(checks(6).is_empty(), "{found:?}");
     }
 
     #[test]
