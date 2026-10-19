@@ -397,10 +397,9 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     cuts.sort_by_key(|(start, _, _)| *start);
     let mut earlier = String::with_capacity(source.len());
     let mut cursor = 0;
+    // Each cut is a whole statement of the top level, so none overlaps the
+    // next.
     for (start, end, replacement) in cuts {
-        if start < cursor {
-            return None;
-        }
         earlier.push_str(&source[cursor..start]);
         earlier.push_str(&replacement);
         cursor = end;
@@ -582,10 +581,9 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
     cuts.sort_by_key(|(start, _, _)| *start);
     let mut earlier = String::with_capacity(source.len());
     let mut cursor = 0;
+    // Each cut is a whole statement of the top level, so none overlaps the
+    // next.
     for (start, end, replacement) in cuts {
-        if start < cursor {
-            return None;
-        }
         earlier.push_str(&source[cursor..start]);
         earlier.push_str(&replacement);
         cursor = end;
@@ -667,8 +665,10 @@ fn erasure(source: &str, start: usize, end: usize) -> (usize, usize, &'static st
             };
             return (line_start, stop, "");
         }
+        // Code stands before the comment on its line, so the walk back stops
+        // at it before the line's start.
         let mut before = start;
-        while before > line_start && blank(bytes[before - 1]) {
+        while blank(bytes[before - 1]) {
             before -= 1;
         }
         return (before, after, "");
@@ -1128,10 +1128,10 @@ fn javascript(path: &str, source: &str) -> Option<Outline> {
             if let Some((span, kind, inert)) = bound {
                 let target =
                     &self.source[it.left.span().start as usize..it.left.span().end as usize];
-                if !target.is_empty()
-                    && target
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '#'))
+                // An assignment's target is never empty text.
+                if target
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '#'))
                 {
                     self.record(target.to_owned(), kind, span.start, span.end, inert);
                 }
@@ -3285,5 +3285,82 @@ mod edge_unit_tests {
             let (a, b) = (code(file, plain).unwrap(), code(file, other).unwrap());
             assert_eq!(a.semantic == b.semantic, same, "{file}: {other:?}");
         }
+    }
+
+    /// A change narrows to the bodies a test ran only when it adds and
+    /// removes nothing.
+    #[test]
+    fn a_change_that_adds_or_removes_a_declaration_is_never_narrow() {
+        let old = code("a.js", "function a() { return 1 }\n").unwrap();
+        let diff = |added: Vec<usize>, removed: Vec<usize>| Diff {
+            changed: Vec::new(),
+            removed,
+            added,
+            structural: false,
+        };
+        assert!(diff(Vec::new(), Vec::new()).narrow(&old, &[]));
+        assert!(!diff(vec![1], Vec::new()).narrow(&old, &[]));
+        assert!(!diff(Vec::new(), vec![1]).narrow(&old, &[]));
+    }
+
+    /// Source a parser reads with errors, or not at all, has no units: it is
+    /// compared by its bytes instead.
+    #[test]
+    fn source_that_does_not_parse_has_no_units() {
+        assert!(code("a.js", "const x = ;\n").is_none());
+        assert!(code("a.rb", "def (\n").is_none());
+        assert!(code("a.js", "let a = 1;\n").is_some());
+    }
+
+    #[test]
+    fn declarations_are_named_as_each_language_names_them() {
+        let paths = |path: &str, source: &str| {
+            code(path, source)
+                .unwrap_or_else(|| panic!("{path} parses"))
+                .units
+                .into_iter()
+                .map(|unit| unit.path)
+                .collect::<Vec<_>>()
+        };
+        // A function expression with a name of its own is a unit still.
+        assert!(
+            paths("a.js", "export const f = function g() { return 1 }\n").len() > 1,
+            "a named function expression is a declaration"
+        );
+        // A Go method is named by its receiver's type, underscores and all.
+        assert!(
+            paths(
+                "a.go",
+                "package a\n\ntype my_server struct{}\n\nfunc (s *my_server) Run() {}\n"
+            )
+            .contains(&"my_server.Run".to_owned())
+        );
+        // An attribute before an `impl` is not part of its name.
+        assert!(
+            paths(
+                "a.rs",
+                "struct Foo;\n#[allow(dead_code)]\nimpl Foo {\n    fn a() {}\n}\n"
+            )
+            .iter()
+            .any(|path| path.ends_with("a")),
+        );
+    }
+
+    /// A `-*- ... -*-` line is read by editors and, for its coding, by
+    /// Python: it is not erased as a comment, so changing it is a change.
+    #[test]
+    fn an_emacs_mode_line_in_python_is_significant() {
+        let digest = |mode: &str| {
+            code("a.py", &format!("# -*- mode: {mode} -*-\nx = 1\n"))
+                .unwrap()
+                .semantic
+        };
+        assert_ne!(digest("python"), digest("ruby"));
+        let plain = |text: &str| {
+            code("a.py", &format!("# {text}\nx = 1\n"))
+                .unwrap()
+                .semantic
+        };
+        assert_eq!(plain("one"), plain("two"));
     }
 }
