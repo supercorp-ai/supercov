@@ -10675,3 +10675,22 @@ fn line_queries_and_commands_at_their_edges() {
             .contains("\"code\":\"RESPONSE_TOO_LARGE\"")
     );
 }
+
+/// The trash a run starts emptying is empty when the run is over, however
+/// long the sweep it started with takes: the end waits for that sweep rather
+/// than starting another that finds the trash locked and leaves at once.
+#[test]
+fn the_trash_is_empty_when_a_run_ends() {
+    let project = Project::cart("trash-at-end");
+    let trash = project.root.join(".supercov/.trash/old-workspace");
+    std::fs::create_dir_all(&trash).unwrap();
+    for directory in 0..200 {
+        let directory = trash.join(directory.to_string());
+        std::fs::create_dir(&directory).unwrap();
+        for file in 0..400 {
+            std::fs::write(directory.join(file.to_string()), "").unwrap();
+        }
+    }
+    project.measure(&[]);
+    assert!(!project.root.join(".supercov/.trash/old-workspace").exists());
+}

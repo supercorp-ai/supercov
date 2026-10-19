@@ -3571,23 +3571,38 @@ const TRASH_PATIENCE_AT_START: Duration = Duration::from_millis(100);
 const TRASH_PATIENCE_AT_END: Duration = Duration::from_secs(10);
 
 fn spawn_trash_sweeper(root: &Path) {
-    sweep_trash_within(root, TRASH_PATIENCE_AT_START);
+    let still_sweeping = sweep_trash_within(root, TRASH_PATIENCE_AT_START);
+    *START_SWEEP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = still_sweeping;
 }
+
+/// The sweep started with the command, while it may still be running. It
+/// holds the trash's lock, so a sweep started at the end would find it held
+/// and leave at once: the end waits for this one instead.
+static START_SWEEP: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 
 /// Empty the trash before the command's own process ends.
 fn finish_trash_sweep(root: &Path) {
-    let started = std::time::Instant::now();
+    let deadline = Instant::now() + TRASH_PATIENCE_AT_END;
     supercov_engine::lifecycle::finish_background_sweep(TRASH_PATIENCE_AT_END);
-    sweep_trash_within(
-        root,
-        TRASH_PATIENCE_AT_END.saturating_sub(started.elapsed()),
-    );
+    let start = START_SWEEP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(child) = start
+        && wait_until(child, deadline).is_some()
+    {
+        // Still at it: it goes on by itself, as a sweep given up on does.
+        return;
+    }
+    sweep_trash_within(root, deadline.saturating_duration_since(Instant::now()));
 }
 
-fn sweep_trash_within(root: &Path, patience: Duration) {
-    let Ok(executable) = std::env::current_exe() else {
-        return;
-    };
+/// Starts a sweep and gives it until `patience` runs out; the sweep, if it
+/// is still running then.
+fn sweep_trash_within(root: &Path, patience: Duration) -> Option<std::process::Child> {
+    let executable = std::env::current_exe().ok()?;
     let mut command = Command::new(executable);
     command
         .arg("__sweep-trash")
@@ -3604,18 +3619,20 @@ fn sweep_trash_within(root: &Path, patience: Duration) {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let Ok(mut child) = command.spawn() else {
-        return;
-    };
+    let child = command.spawn().ok()?;
     // The sweep is given until `patience` runs out to finish, so that a
     // command launched right after Supercov does not find the trash on its
     // way out. Past that it goes on by itself: the independent process group
     // lets the child survive the parent CLI exiting on Unix.
-    let deadline = std::time::Instant::now() + patience;
+    wait_until(child, Instant::now() + patience)
+}
+
+/// The child, if it is still running at `deadline`.
+fn wait_until(mut child: std::process::Child, deadline: Instant) -> Option<std::process::Child> {
     loop {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) if std::time::Instant::now() >= deadline => return,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => return Some(child),
             Ok(None) => std::thread::sleep(Duration::from_millis(5)),
         }
     }

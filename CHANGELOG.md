@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- The trash a run starts emptying is empty when the run ends, however long that takes within the end's ten seconds: the sweep at the end waits for the one started with the run instead of finding the trash locked and leaving, which left files and a `__sweep-trash` process behind after Supercov exited.
 - `runs <run> patch` no longer lists a new test named as one beside the source (`src/helper.spec.js`, `test_cart.py`) under "Changed but not measured by this run"; new product source is still listed.
 - `runs <run> patch` counts a changed file whose name is not ASCII (`src/é.js`) instead of reporting no executable changes, and a stale run's warning names such a file added since the run. A name with leading or trailing spaces is no longer trimmed into another.
 - A run whose measured source cannot be fingerprinted now -- its files deleted or moved -- is stale: `runs <run> check` and `patch` fail on it, and queries, `diff` and the run list say `its source cannot be measured as it is now`, as `merge` already did. Before, `check` passed it.
