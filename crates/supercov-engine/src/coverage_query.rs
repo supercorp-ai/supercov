@@ -4214,9 +4214,9 @@ fn evidence_choices(
         let Some(test) = tests.get(id.as_str()) else {
             continue;
         };
-        if test.role == "background" {
-            choices.push(Vec::new());
-        } else if test.role == "setup" {
+        // A background record covers nothing here: `minimum_test_set`
+        // refuses a run whose background holds any evidence.
+        if test.role == "setup" {
             if let Some(file) = &test.file {
                 choices.extend(
                     tests_by_file
@@ -4778,6 +4778,14 @@ mod tests {
         assert!(has_gap_for_metric(&gap, MinimizeMetric::All));
         assert!(has_gap_for_metric(&gap, MinimizeMetric::Statements));
         assert!(!has_gap_for_metric(&gap, MinimizeMetric::Lines));
+        // A function never called is a gap under `all` on its own too.
+        let functions = IndexedFileGap {
+            uncovered_statements: 0,
+            uncovered_functions: 1,
+            ..gap
+        };
+        assert!(has_gap_for_metric(&functions, MinimizeMetric::All));
+        assert!(!has_gap_for_metric(&functions, MinimizeMetric::Statements));
     }
 
     fn result(id: &str, vector: McdcVector) -> RawTestResult {
@@ -5754,6 +5762,94 @@ mod tests {
             .map(|kind| kind.kind.as_str())
             .collect::<Vec<_>>();
         assert_eq!(kinds, ["e2e", "unit"], "{data:?}");
+    }
+
+    /// A setup without a file of its own credits no test with what it ran,
+    /// and narrowed to a kind, the tests of the other kind are not chosen
+    /// though they cover something.
+    #[test]
+    fn a_minimum_set_chooses_among_its_candidates_and_a_files_setup() {
+        let mut request = two_runner_request();
+        let mut setup = result(
+            "setup",
+            McdcVector {
+                values: vec![None, None],
+                outcome: false,
+            },
+        );
+        setup.runtime[0].decisions.clear();
+        setup.runtime[0].hits.push("two".into());
+        setup.role = "setup".into();
+        setup.test_file = None;
+        request.raw_results.push(setup);
+        let report = analyze_coverage_results(&request).unwrap();
+        let minimize = |kind| {
+            coverage_minimize_query(
+                &report.view,
+                CoverageMinimizeQueryOptions {
+                    run: "run",
+                    view_id: CoverageViewId::All,
+                    kind,
+                    runner: None,
+                    target: None,
+                    metric: MinimizeMetric::All,
+                    max_states: 1_000,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .unwrap()
+            .0
+        };
+        let all = minimize(None);
+        assert!(!all.selected.contains(&"setup".to_owned()), "{all:?}");
+        let units = minimize(Some("unit"));
+        assert!(!units.selected.contains(&"e2e-b".to_owned()), "{units:?}");
+    }
+
+    /// A file left out of scope is left out on every line, though its
+    /// limitation is recorded on the first; another line's limitation stays
+    /// on that line.
+    #[test]
+    fn a_scope_limitation_reaches_every_line_of_its_file() {
+        let mut request = two_runner_request();
+        for (kind, line) in [("source-scope", 1), ("semantic-safety", 5)] {
+            request.manifest.limitations.push(serde_json::json!({
+                "id": kind,
+                "kind": kind,
+                "file": "src/a/one.js",
+                "line": line,
+                "column": 1,
+                "source": "",
+                "reason": "left out"
+            }));
+        }
+        let report = analyze_coverage_results(&request).unwrap();
+        let (_root, container) = index_of(&report);
+        let index = CoverageIndex::new(&container).unwrap();
+        let (covers, _) = coverage_covers_query(
+            &index,
+            CoverageCoversQueryOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                kind: None,
+                runner: None,
+                file: "src/a/one.js",
+                line: 2,
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        let limitations = match &covers {
+            CoverageCoversData::Line(line) => &line.limitations,
+            CoverageCoversData::Anchors(anchors) => &anchors.limitations,
+        };
+        let kinds = limitations
+            .iter()
+            .map(|limitation| limitation.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["source-scope"], "{covers:?}");
     }
 
     #[test]
