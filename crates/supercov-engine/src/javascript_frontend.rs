@@ -1926,6 +1926,126 @@ pub fn prepare_javascript_frontend(
 #[cfg(test)]
 mod tests {
 
+    /// A cached frontend is reused only when its schema, key and every
+    /// artifact check out: a safe path, a cache file named by its digest, a
+    /// well-formed digest, and contents that still have it. Restoring over a
+    /// directory is refused.
+    #[test]
+    fn a_frontend_cache_is_reused_only_when_every_artifact_checks_out() {
+        use super::*;
+        let workspace = std::env::temp_dir().join(format!(
+            "supercov-frontend-cache-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        fs::create_dir_all(workspace.join(FRONTEND_CACHE_DIRECTORY)).unwrap();
+        let workspace = crate::test_directory::TestDirectory::adopt(workspace);
+        let contents = b"export const a = 1;\n";
+        let sha = format!("{:x}", Sha256::digest(contents));
+        fs::write(
+            workspace.join(FRONTEND_CACHE_DIRECTORY).join(&sha),
+            contents,
+        )
+        .unwrap();
+        let artifact = |path: &str, cache_file: String, sha256: String| serde_json::json!({ "path": path, "cacheFile": cache_file, "sha256": sha256 });
+        let good = artifact(
+            "src/a.js",
+            format!("{FRONTEND_CACHE_DIRECTORY}/{sha}"),
+            sha.clone(),
+        );
+        let write = |schema: u32, key: &str, artifacts: Vec<serde_json::Value>| {
+            fs::write(
+                workspace.join(FRONTEND_CACHE_FILE),
+                serde_json::json!({
+                    "schemaVersion": schema,
+                    "key": key,
+                    "assertionCalls": 0,
+                    "artifacts": artifacts,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            read_javascript_frontend_cache(&workspace, "k").is_some()
+        };
+        assert!(write(
+            FRONTEND_CACHE_SCHEMA_VERSION,
+            "k",
+            vec![good.clone()]
+        ));
+        assert!(!write(
+            FRONTEND_CACHE_SCHEMA_VERSION + 1,
+            "k",
+            vec![good.clone()]
+        ));
+        assert!(!write(
+            FRONTEND_CACHE_SCHEMA_VERSION,
+            "other",
+            vec![good.clone()]
+        ));
+        assert!(!write(FRONTEND_CACHE_SCHEMA_VERSION, "k", vec![]));
+        let wrong = "0".repeat(64);
+        for bad in [
+            artifact(
+                "../a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{sha}"),
+                sha.clone(),
+            ),
+            artifact("src/a.js", format!("../{sha}"), sha.clone()),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/other"),
+                sha.clone(),
+            ),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/abc"),
+                "abc".into(),
+            ),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{}", sha.to_uppercase()),
+                sha.to_uppercase(),
+            ),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{wrong}"),
+                wrong.clone(),
+            ),
+        ] {
+            assert!(
+                !write(
+                    FRONTEND_CACHE_SCHEMA_VERSION,
+                    "k",
+                    vec![good.clone(), bad.clone()]
+                ),
+                "{bad}"
+            );
+        }
+        fs::write(
+            workspace.join(FRONTEND_CACHE_DIRECTORY).join(&wrong),
+            b"other",
+        )
+        .unwrap();
+        assert!(!write(
+            FRONTEND_CACHE_SCHEMA_VERSION,
+            "k",
+            vec![artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{wrong}"),
+                wrong
+            )]
+        ));
+        assert!(read_javascript_frontend_cache(&workspace.join("absent"), "k").is_none());
+        fs::create_dir_all(workspace.join("src/dir")).unwrap();
+        assert!(matches!(
+            restore_cached_file(&workspace.join("src/dir"), contents),
+            Err(JavascriptFrontendError::UnsafeSourcePath(_))
+        ));
+        restore_cached_file(&workspace.join("src/new.js"), contents).unwrap();
+        restore_cached_file(&workspace.join("src/new.js"), b"again").unwrap();
+        assert_eq!(fs::read(workspace.join("src/new.js")).unwrap(), b"again");
+    }
+
     // Sprockets reads directives only from the comments a file opens with.
     #[test]
     fn sprockets_directives_stay_where_sprockets_reads_them() {
