@@ -2200,12 +2200,21 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             };
             let (lost, gained) = (listed(&data.lost, "-"), listed(&data.gained, "+"));
             if !differs {
-                lines.push("Nothing was gained or lost.".into());
+                // A file added or removed moves the percentages with nothing
+                // changing state in the code both runs measured.
+                let moved = [data.delta.lines, data.delta.branches, data.delta.mcdc]
+                    .iter()
+                    .any(|delta| *delta != 0.0);
+                lines.push(if moved {
+                    "Nothing covered in one run is uncovered in the other: the percentages moved because the runs measure different code.".into()
+                } else {
+                    "Nothing was gained or lost.".into()
+                });
             } else {
                 lines.extend(lost);
                 lines.extend(gained);
+                lines.push(format!("{} per category", page_label(page)));
             }
-            lines.push(format!("{} per category", page_label(page)));
             let mut base = format!(
                 "{} diff {} {}",
                 crate::launcher_command(),

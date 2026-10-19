@@ -12,6 +12,8 @@
 
 **Fixed**
 
+- `diff` of two runs that measure different code, where nothing changed state but the percentages moved, says so instead of `Nothing was gained or lost.` beside a percentage change, and prints no empty page line.
+- `diff` names the files changed since the newer run when it is stale, as it does for the older one.
 - A test whose coverage counts run-wide (a Go `t.Parallel` test, for one) is no longer reported as a test that made assertions with no coverage evidence, in the run summary or in `tests without-evidence`.
 - `quality` with every file failing says no file was assessed instead of `Quality — (0.0/10) over 0 files`.
 - `quality patch` and `security patch` open with how many checks the change introduced, no longer claim a health score the review does not give, and say `1 changed file`.

@@ -1050,6 +1050,27 @@ fn public_run_identity() -> Result<(String, String), String> {
     Ok((run_id, started_at))
 }
 
+/// The warning for a run the checkout no longer matches, naming the first
+/// ten files that changed since it.
+fn stale_run_warning(run: &str, reasons: &[String], changed: &[String]) -> String {
+    let named = if changed.is_empty() {
+        String::new()
+    } else {
+        let shown = changed.iter().take(10).cloned().collect::<Vec<_>>();
+        let more = changed.len().saturating_sub(shown.len());
+        format!(
+            "; changed since the run: {}{}",
+            shown.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        )
+    };
+    format!("[supercov] stale run {run}: {}{named}", reasons.join(", "))
+}
+
 fn public_run_id(value: &str) -> bool {
     value.len() == 20
         && value.starts_with("run_")
@@ -2951,26 +2972,7 @@ fn execute_public_query(
                         });
                     }
                 } else if comparison.stale {
-                    let named = if changed.is_empty() {
-                        String::new()
-                    } else {
-                        let shown = changed.iter().take(10).cloned().collect::<Vec<_>>();
-                        let more = changed.len().saturating_sub(shown.len());
-                        format!(
-                            "; changed since the run: {}{}",
-                            shown.join(", "),
-                            if more > 0 {
-                                format!(" and {more} more")
-                            } else {
-                                String::new()
-                            }
-                        )
-                    };
-                    warnings.push(format!(
-                        "[supercov] stale run {}: {}{named}",
-                        run.id,
-                        comparison.reasons.join(", ")
-                    ));
+                    warnings.push(stale_run_warning(&run.id, &comparison.reasons, &changed));
                 }
             }
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
@@ -3047,10 +3049,10 @@ fn execute_public_query(
                         let comparison =
                             compare_run_integrity(Some(&newer_run.metadata.integrity), current);
                         if comparison.stale {
-                            warnings.push(format!(
-                                "[supercov] stale run {}: {}",
-                                newer_run.id,
-                                comparison.reasons.join(", ")
+                            warnings.push(stale_run_warning(
+                                &newer_run.id,
+                                &comparison.reasons,
+                                &changed_since_run(root, newer_run),
                             ));
                         }
                     }

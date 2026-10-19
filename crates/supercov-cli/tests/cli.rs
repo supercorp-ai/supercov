@@ -8275,7 +8275,7 @@ fn comparisons_and_their_mistakes_read_as_what_they_are() {
     );
     let same = ran.succeeds();
     assert!(
-        same.contains("Nothing was gained or lost.\nshowing 0-0 of 0 per category"),
+        same.contains("Nothing was gained or lost.\n") && !same.contains("showing"),
         "{same}"
     );
     let half = project.supercov(&["diff", &first]).exits(2);
@@ -9506,5 +9506,38 @@ fn a_long_decision_is_shortened_in_its_file_and_whole_on_its_own() {
     assert!(
         decision.contains("\nalpha.someLongPropertyName > 10 && beta.anotherLongPropertyName < 20 && gamma.yetAnotherLongPropertyName !== 30\n"),
         "{decision}"
+    );
+}
+
+#[test]
+fn a_comparison_of_runs_that_measure_different_code_says_why_the_percentages_moved() {
+    let project = Project::cart("diff-moved");
+    let first = project.measure(&[]);
+    project.write("src/added.js", "export const added = 1;\n");
+    let second = project.measure(&[]);
+    let moved = project.supercov(&["diff", &first, &second]);
+    let said = moved.succeeds();
+    contains_all(
+        &said,
+        &[
+            "lines -5.49pp, branches +0pp, MC/DC +0pp",
+            "gained: 0 lines, 0 branches, 0 MC/DC conditions",
+            "Nothing covered in one run is uncovered in the other: the percentages moved because the runs measure different code.",
+        ],
+    );
+    assert!(!said.contains("showing"), "{said}");
+    // Each stale run of the two names what changed since it.
+    project.write("src/added.js", "export const added = 2;\n");
+    let stale = project.supercov(&["diff", &first, &second]).stderr();
+    contains_all(
+        &stale,
+        &[
+            &format!(
+                "[supercov] stale run {first}: instrumented source changed; changed since the run: src/added.js"
+            ),
+            &format!(
+                "[supercov] stale run {second}: instrumented source changed; changed since the run: src/added.js"
+            ),
+        ],
     );
 }
