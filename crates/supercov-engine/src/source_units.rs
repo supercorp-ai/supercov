@@ -2562,6 +2562,37 @@ mod tests {
         );
     }
 
+    /// A property is a unit when its value is an anonymous function or
+    /// class and its key has a name; a computed key or a plain value is not;
+    /// a named function expression is a unit by its own name. A Python
+    /// encoding declaration and a Supercov comment are never erased.
+    #[test]
+    fn properties_become_units_by_name_and_python_keeps_its_declarations() {
+        let js = "class C {\n  handle = () => 1;\n  named = function n() { return 2; };\n  [computed] = () => 3;\n  plain = 4;\n}\nconst o = {\n  m() { return 1; },\n  f: () => 2,\n  K: class {},\n  [x]: () => 3,\n  plain: 4,\n};\nconst D = class {};\n";
+        let units = code("a.js", js).unwrap();
+        let shapes = units
+            .units
+            .iter()
+            .map(|unit| (unit.path.as_str(), unit.kind.as_str(), unit.line))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shapes,
+            [
+                ("", "file", 1),
+                ("C", "class", 1),
+                ("C.handle", "function", 2),
+                ("C.n", "function", 3),
+                ("o", "object", 7),
+                ("o.m", "method", 8),
+                ("o.f", "method", 9),
+                ("o.K", "class", 10),
+                ("D", "class", 14),
+            ]
+        );
+        let py = "# -*- coding: utf-8 -*-\n# a note\nimport os\n# supercov: keep\n";
+        assert_eq!(code("a.py", py).unwrap().erased, [2]);
+    }
+
     /// A comment that owns its line takes the line; one after code takes
     /// the space before it; one between words leaves a space.
     #[test]
