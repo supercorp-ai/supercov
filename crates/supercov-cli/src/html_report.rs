@@ -1133,6 +1133,38 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
 mod tests {
     use super::*;
 
+    /// A report is titled by the package's name when it has a usable one,
+    /// and by its directory otherwise.
+    #[test]
+    fn a_report_is_titled_by_the_package_or_its_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let directory = root.file_name().unwrap().to_str().unwrap().to_owned();
+        assert_eq!(project_name(&root), directory);
+        for (package, name) in [
+            (r#"{"name":"shop"}"#.to_owned(), "shop".to_owned()),
+            (r#"{"name":"  "}"#.to_owned(), directory.clone()),
+            (
+                format!(r#"{{"name":"{}"}}"#, "n".repeat(201)),
+                directory.clone(),
+            ),
+            (r#"{"name":1}"#.to_owned(), directory.clone()),
+            ("not json".to_owned(), directory.clone()),
+        ] {
+            fs::write(root.join("package.json"), &package).unwrap();
+            assert_eq!(project_name(&root), name, "{package}");
+        }
+        assert_eq!(project_name(Path::new("/")), "project");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn parses_portable_report_options() {
         assert_eq!(parse_options(&[]).unwrap().runs, 5);

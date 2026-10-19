@@ -8949,3 +8949,34 @@ fn code_outside_the_source_roots_is_named_with_the_roots_to_give() {
         ],
     );
 }
+
+/// A report written to an absolute path, narrowed to tests only the newest
+/// run has, leaves the older run out of the comparison.
+#[test]
+fn a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for() {
+    let project = Project::cart("report-filter");
+    project
+        .supercov(&["--", "node", "--test", "test/cart.test.js"])
+        .succeeds();
+    project.write(
+        "test/extra.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"describes\", () => {\n  assert.equal(describe([{ name: \"a\" }]), \"a\");\n});\n",
+    );
+    project.commit("extra");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let output = project.root.join("out/report.html");
+    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+    let written = project
+        .supercov(&[
+            "report",
+            "--no-open",
+            "--output",
+            output.to_str().unwrap(),
+            "--test-file",
+            "test/extra.test.js",
+        ])
+        .succeeds();
+    assert!(written.contains(output.to_str().unwrap()), "{written}");
+    let html = std::fs::read_to_string(&output).unwrap();
+    assert!(html.to_ascii_lowercase().starts_with("<!doctype html"), "{}", &html[..80]);
+}
