@@ -2845,3 +2845,91 @@ fn a_statement_many_test_files_run_names_the_first_few_left_unasked() {
         .exits(2);
     contains_all(&unknown, &["The assessed tests include:", "  and 8 more"]);
 }
+
+#[test]
+fn each_affected_test_says_how_it_meets_the_change_as_the_change_grows() {
+    let project = Project::cart("affected-verdicts");
+    let (base, _) = gateway(MODEL, answer_all_but_the_sum);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let affected = || {
+        project
+            .supercov(&["runs", &run, "tests", "affected"])
+            .succeeds()
+    };
+    let names = |narrow: &str| {
+        project
+            .supercov(&["runs", &run, "tests", "affected", "--names", narrow])
+            .succeeds()
+    };
+    let changed = || {
+        project
+            .supercov_with(
+                &["runs", &run, "assertions", "assess", "--changed"],
+                &through(&base),
+            )
+            .succeeds()
+    };
+
+    // A line only the coupon test runs. The other test that runs `total` was
+    // never asked about it, until `--changed` asks every test that ran it.
+    project.edit(
+        "src/cart.js",
+        "sum = sum - (sum * coupon.percent) / 100;",
+        "sum = sum - (sum * coupon.percent) / 50;",
+    );
+    contains_all(
+        &affected(),
+        &[
+            "Assertions: 1 of 1 changed statements the run assessed are asserted by a test; 1 affected test(s) catch the change.",
+            "    catches a change to src/cart.js:7 (0.90)",
+            "  test/cart.test.js › total adds prices\n    src/cart.js: total (line 1) changed (this test ran it)\n    not assessed against the changed code",
+        ],
+    );
+    assert_eq!(
+        names("--asserting"),
+        "total applies a coupon\ntotal adds prices\n"
+    );
+    changed();
+    assert!(affected().contains(
+        "  test/cart.test.js › total adds prices\n    src/cart.js: total (line 1) changed (this test ran it)\n    ran the changed declaration, not the statements that changed"
+    ));
+    assert_eq!(names("--ran-changed"), "total applies a coupon\n");
+
+    // A line both run, which neither is judged to catch.
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    changed();
+    contains_all(
+        &affected(),
+        &[
+            "Assertions: 1 of 2 changed statements the run assessed are asserted by a test",
+            "  not asserted: src/cart.js:2  let sum = 0;",
+            "    runs the changed code; not judged to catch a change to it",
+        ],
+    );
+    assert_eq!(
+        names("--ran-changed"),
+        "total applies a coupon\ntotal adds prices\n"
+    );
+    assert_eq!(names("--asserting"), "total applies a coupon\n");
+
+    // A test whose own file changed must run, whatever it was judged.
+    project.edit("test/cart.test.js", "free over fifty", "free over 50");
+    let json = project
+        .supercov(&["runs", &run, "tests", "affected", "--json"])
+        .json();
+    let verdicts = json["data"]["affected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| test["assertion"]["verdict"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(verdicts, ["must run", "must run", "must run"], "{json}");
+    assert_eq!(json["data"]["assertions"]["tests"]["mustRun"], 3);
+    assert_eq!(
+        names("--asserting"),
+        "total applies a coupon\ntotal adds prices\nshipping is free over fifty\n"
+    );
+}
