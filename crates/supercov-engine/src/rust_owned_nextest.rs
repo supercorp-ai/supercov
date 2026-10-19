@@ -962,4 +962,404 @@ mod tests {
         assert_eq!(decoded.test_name, "passes_on_retry");
         assert_eq!(decoded.evidence, PathBuf::from("/r/attempts/00000003"));
     }
+
+    #[test]
+    fn a_plan_with_no_targets_configures_no_runner() {
+        let error = runner_configuration_arguments(
+            Path::new("/s"),
+            Path::new("/r"),
+            &RunnerPlan {
+                targets: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("selected no targets"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_ended_by_a_signal_exits_as_a_shell_reports_it() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(exit_code(&std::process::ExitStatus::from_raw(3 << 8)), 3);
+        // SIGKILL, as a test killed by the kernel's out-of-memory killer.
+        assert_eq!(exit_code(&std::process::ExitStatus::from_raw(9)), 137);
+        // Stopped by SIGSTOP: neither an exit code nor a terminating signal.
+        assert_eq!(exit_code(&std::process::ExitStatus::from_raw(0x137f)), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_claim_that_cannot_be_created_is_an_error_not_a_retry() {
+        // Nothing can create a file in procfs, so the first claim fails with
+        // an error other than an existing claim.
+        let error = claim_sequence(Path::new("/proc/self")).unwrap_err();
+        assert!(matches!(error, RustTestRunnerError::Io(_)), "{error}");
+    }
+
+    #[test]
+    fn metadata_keeps_the_options_that_choose_the_workspace() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: crate::rust_test_runner::RustCargoCommandKind::NextestRun,
+            arguments: [
+                "+nightly",
+                "nextest",
+                "run",
+                "--manifest-path",
+                "member/Cargo.toml",
+                "--config=net.offline=true",
+                "--locked",
+                "--retries",
+                "2",
+                "-Z",
+                "unstable-options",
+            ]
+            .map(String::from)
+            .to_vec(),
+            runner_arguments: Vec::new(),
+        };
+        assert_eq!(
+            cargo_metadata_arguments(&invocation).unwrap(),
+            [
+                "+nightly",
+                "metadata",
+                "--format-version=1",
+                "--no-deps",
+                "--manifest-path",
+                "member/Cargo.toml",
+                "--config=net.offline=true",
+                "--locked",
+                "-Z",
+                "unstable-options",
+            ]
+        );
+        let missing = CargoTestInvocation {
+            arguments: ["nextest", "run", "--config"].map(String::from).to_vec(),
+            ..invocation
+        };
+        assert_eq!(
+            cargo_metadata_arguments(&missing).unwrap_err(),
+            "Cargo option --config has no value"
+        );
+    }
+
+    /// A one-crate workspace and a script standing in for Cargo that answers
+    /// `nextest --version`, `nextest list`, `metadata` and `nextest run` from
+    /// files the test writes: `<step>.out` is printed, `<step>.status` is the
+    /// exit status, and `run.sh` is what `nextest run` does in place of
+    /// running tests through the runner.
+    #[cfg(unix)]
+    struct FakeNextest {
+        root: PathBuf,
+        project: PreparedRustProject,
+        cargo: PathBuf,
+        evidence: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakeNextest {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "supercov-fake-nextest-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname='fixture'\nversion='0.0.0'\nedition='2024'\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("src/lib.rs"),
+                "pub fn one() -> i32 { 1 }\n#[cfg(test)]\nmod tests {\n    #[test] fn alpha() { assert_eq!(super::one(), 1); }\n    #[test] fn beta() {}\n}\n",
+            )
+            .unwrap();
+            let root = fs::canonicalize(&root).unwrap();
+            let project = crate::rust_project::prepare_rust_project(&root, None).unwrap();
+            let binary = project.target_directory.join("debug/deps/fixture-0123");
+            fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            fs::write(&binary, "").unwrap();
+            let fake = root.join("fake");
+            fs::create_dir_all(&fake).unwrap();
+            let cargo = fake.join("cargo");
+            fs::write(
+                &cargo,
+                format!(
+                    r#"#!/bin/sh
+fake='{fake}'
+printf '%s\n' "$*" >> "$fake/calls"
+case "$*" in
+  *"nextest --version"*) step=version ;;
+  *"nextest list"*) step=list ;;
+  *"nextest run"*) step=run ;;
+  *metadata*) step=metadata ;;
+esac
+[ -f "$fake/$step.out" ] && cat "$fake/$step.out"
+[ -f "$fake/$step.sh" ] && . "$fake/$step.sh"
+exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
+"#,
+                    fake = fake.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+            let fixture = Self {
+                evidence: root.join(".supercov/nextest"),
+                root,
+                project,
+                cargo,
+            };
+            fixture.answer(
+                "version",
+                "cargo-nextest 0.9.140\nrelease: 0.9.140\nhost: x86_64-unknown-linux-gnu\n",
+            );
+            fixture.list(&binary);
+            fixture.answer(
+                "metadata",
+                &serde_json::json!({"packages": [{
+                    "id": "path+file:///fixture#0.0.0",
+                    "name": "fixture",
+                    "targets": [
+                        // A binary of the same name is not the library's
+                        // test binary.
+                        {"name": "fixture", "kind": ["bin"], "src_path": fixture.root.join("src/lib.rs")},
+                        {"name": "fixture", "kind": ["lib"], "src_path": fixture.root.join("src/lib.rs")},
+                    ],
+                }]})
+                .to_string(),
+            );
+            fixture
+        }
+
+        fn answer(&self, step: &str, output: &str) {
+            fs::write(self.root.join("fake").join(format!("{step}.out")), output).unwrap();
+        }
+
+        fn fail(&self, step: &str, status: i32) {
+            fs::write(
+                self.root.join("fake").join(format!("{step}.status")),
+                status.to_string(),
+            )
+            .unwrap();
+        }
+
+        /// The listing: `alpha` is selected and `beta` is filtered out.
+        fn list(&self, binary: &Path) {
+            self.answer(
+                "list",
+                &serde_json::json!({
+                    "rust-build-meta": {
+                        "target-directory": self.project.target_directory,
+                        "base-output-directories": [],
+                        "non-test-binaries": {},
+                        "linked-paths": [],
+                    },
+                    "test-count": 2,
+                    "rust-suites": {"fixture": {
+                        "package-name": "fixture",
+                        "binary-id": "fixture",
+                        "binary-name": "fixture",
+                        "package-id": "path+file:///fixture#0.0.0",
+                        "kind": "lib",
+                        "binary-path": binary,
+                        "build-platform": "target",
+                        "cwd": self.root,
+                        "testcases": {
+                            "tests::alpha": {"kind": "test", "ignored": false, "filter-match": {"status": "matches"}},
+                            "tests::beta": {"kind": "test", "ignored": false, "filter-match": {"status": "mismatch", "reason": "string"}},
+                        },
+                    }},
+                })
+                .to_string(),
+            );
+        }
+
+        /// `nextest run` records these attempts, as the runner would, and
+        /// exits with `status`.
+        fn runs(&self, attempts: &[(&str, usize, i32)], status: i32) {
+            let mut script = String::new();
+            for (index, (test, attempt, code)) in attempts.iter().enumerate() {
+                let record = AttemptRecord {
+                    binary_id: "fixture".into(),
+                    test_name: (*test).into(),
+                    attempt: *attempt,
+                    total_attempts: 2,
+                    runner_attempt_id: format!("fixture${test}"),
+                    exit_code: *code,
+                    evidence: self.evidence.join(format!("attempts/{index:08}")),
+                };
+                script.push_str(&format!(
+                    "printf '%s' '{}' > '{}'\n",
+                    serde_json::to_string(&record).unwrap(),
+                    self.evidence
+                        .join(format!("attempts/{index:08}.json"))
+                        .display()
+                ));
+            }
+            fs::write(self.root.join("fake/run.sh"), script).unwrap();
+            self.fail("run", status);
+        }
+
+        fn calls(&self) -> String {
+            fs::read_to_string(self.root.join("fake/calls")).unwrap_or_default()
+        }
+
+        fn run(&self, arguments: &[&str]) -> (Result<NextestOutcome, RustTestRunnerError>, String) {
+            let mut command = vec![self.cargo.display().to_string()];
+            command.extend(arguments.iter().map(|argument| (*argument).to_owned()));
+            let invocation =
+                crate::rust_test_runner::cargo_invocation(&self.root, &command).unwrap();
+            let mut diagnostics = Vec::new();
+            let outcome = run_nextest(
+                &self.project,
+                &invocation,
+                &self.evidence,
+                "run",
+                None,
+                &mut diagnostics,
+            );
+            (outcome, String::from_utf8(diagnostics).unwrap())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeNextest {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nextest_attempts_are_read_back_against_its_listing() {
+        let fake = FakeNextest::new();
+        fake.runs(&[("tests::alpha", 1, 101), ("tests::alpha", 2, 0)], 0);
+        let (outcome, diagnostics) = fake.run(&["nextest", "run", "--", "--exact"]);
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        let results = outcome
+            .results
+            .iter()
+            .map(|result| (result.test.as_str(), result.status.as_deref(), result.flaky))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results,
+            [
+                ("src/lib.rs::tests::alpha", Some("failed"), false),
+                ("src/lib.rs::tests::alpha", Some("passed"), true),
+            ]
+        );
+        assert!(
+            diagnostics.contains("Rust test failed on attempt 1: src/lib.rs::tests::alpha"),
+            "{diagnostics}"
+        );
+        // The arguments after `--` reach the binaries in the listing and in
+        // the run alike.
+        let calls = fake.calls();
+        let list = calls
+            .lines()
+            .find(|line| line.contains("nextest list"))
+            .unwrap();
+        let run = calls
+            .lines()
+            .find(|line| line.contains("nextest run"))
+            .unwrap();
+        assert!(list.ends_with("-- --exact"), "{list}");
+        assert!(run.ends_with("-- --exact"), "{run}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_selected_test_nextest_never_ran_fails_a_passing_run_only() {
+        let fake = FakeNextest::new();
+        fake.runs(&[], 0);
+        let error = fake.run(&["nextest", "run"]).0.err().unwrap();
+        assert!(
+            error.to_string().contains(
+                "nextest listed 1 test(s) it never ran through the runner: fixture tests::alpha"
+            ),
+            "{error}"
+        );
+        // A run that stopped early on a failure leaves listed tests unrun.
+        fake.runs(&[], 100);
+        let outcome = fake.run(&["nextest", "run"]).0.unwrap();
+        assert_eq!(outcome.exit_code, 100);
+        assert!(outcome.results.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_attempt_the_listing_cannot_account_for_fails_the_run() {
+        let fake = FakeNextest::new();
+        fake.runs(&[("tests::beta", 1, 0)], 0);
+        let error = fake.run(&["nextest", "run"]).0.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("nextest ran a test its listing did not select: fixture tests::beta"),
+            "{error}"
+        );
+        fake.runs(&[("tests::alpha", 1, 0), ("tests::alpha", 1, 0)], 0);
+        let error = fake.run(&["nextest", "run"]).0.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("nextest attempt 1 of fixture tests::alpha was recorded twice"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_nextest_step_stops_the_run_with_its_output() {
+        for step in ["version", "list", "metadata"] {
+            let fake = FakeNextest::new();
+            fake.answer(step, &format!("{step} went wrong"));
+            fake.fail(step, 101);
+            let error = fake.run(&["nextest", "run"]).0.err().unwrap();
+            assert!(
+                matches!(&error, RustTestRunnerError::CargoFailed(output) if output == &format!("{step} went wrong")),
+                "{step}: {error:?}"
+            );
+            assert!(!fake.calls().contains("nextest run"), "{step}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nextest_newer_than_the_checked_releases_is_named() {
+        let fake = FakeNextest::new();
+        fake.answer(
+            "version",
+            "cargo-nextest 9.0.0\nrelease: 9.0.0\nhost: x86_64-unknown-linux-gnu\n",
+        );
+        fake.runs(&[("tests::alpha", 1, 0)], 0);
+        let (outcome, diagnostics) = fake.run(&["nextest", "run"]);
+        assert_eq!(outcome.unwrap().results.len(), 1);
+        assert!(
+            diagnostics
+                .contains("cargo-nextest 9.0.0 is newer than the releases Supercov is tested with"),
+            "{diagnostics}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_binary_outside_a_file_is_refused() {
+        let fake = FakeNextest::new();
+        // A directory inside the target directory is no test binary.
+        let directory = fake.project.target_directory.join("debug/deps/not-a-file");
+        fs::create_dir_all(&directory).unwrap();
+        fake.list(&directory);
+        let error = fake.run(&["nextest", "run"]).0.err().unwrap();
+        assert!(
+            matches!(&error, RustTestRunnerError::UnsafeArtifact(path) if path.ends_with("not-a-file")),
+            "{error:?}"
+        );
+    }
 }
