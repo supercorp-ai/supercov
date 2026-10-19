@@ -3106,3 +3106,82 @@ fn an_assessment_read_for_some_tests_says_what_those_tests_ran_and_were_asked() 
         ],
     );
 }
+
+#[test]
+fn source_reads_a_file_as_the_run_saw_it_until_that_file_changes() {
+    let project = Project::cart("source-views");
+    project.write("src/empty.js", "");
+    project.commit("empty");
+    project.measure(&[]);
+    let source = |args: &[&str]| {
+        let mut full = vec!["runs", "latest", "source"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    assert!(
+        source(&["--help"])
+            .succeeds()
+            .starts_with("Usage: supercov runs <run> source <path>")
+    );
+    assert!(
+        source(&["src/empty.js"])
+            .succeeds()
+            .ends_with("\nThe file is empty.\n")
+    );
+    for limit in ["0", "1001"] {
+        assert!(
+            source(&["src/cart.js", "--limit", limit])
+                .exits(2)
+                .contains("limit must be 1..1000")
+        );
+    }
+    assert!(
+        source(&["src/cart.js", "--limit", "2", "--limit", "3"])
+            .exits(2)
+            .contains("Duplicate option: --limit")
+    );
+    assert!(
+        source(&["src/cart.js", "--offset", "500"])
+            .succeeds()
+            .contains("Showing none of 21: --offset 500 is past the end")
+    );
+    // Another file changing leaves this one as the run saw it.
+    project.edit("test/cart.test.js", "free over fifty", "free over 50");
+    assert!(
+        source(&["src/cart.js", "--limit", "1"])
+            .succeeds()
+            .contains(" 1 │ export function total")
+    );
+    // This one changing does not.
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    assert!(
+        source(&["src/cart.js"])
+            .exits(2)
+            .contains("Current source differs from the run or is unavailable: src/cart.js")
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&source(&["src/cart.js", "--json"]).stdout()).unwrap();
+    assert_eq!(json["command"], "coverage.source");
+
+    // One snapshot is one, and a bad id is named.
+    let (base, _) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["quality", "src/"], &through(&base))
+        .succeeds();
+    assert!(
+        project
+            .supercov(&["quality", "snapshots"])
+            .succeeds()
+            .starts_with("1 quality snapshot, most recent first (showing 1).")
+    );
+    assert!(
+        project
+            .supercov(&["quality", "show", "q_zzzzzzzzzzzzzzzz"])
+            .exits(2)
+            .contains("not a snapshot id: q_zzzzzzzzzzzzzzzz")
+    );
+    assert_eq!(
+        project.supercov(&["quality", "gaps"]).succeeds(),
+        "Nothing fired on any assessed file.\n"
+    );
+}

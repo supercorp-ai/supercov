@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `source <path>` reads a file that still matches the run when other files have changed since; only the file read has to match. An empty file says it is empty. `quality snapshots` says `1 quality snapshot`.
 - `assertions --test <name>` matching one name in several test files says to add `--test-file`, since the full name cannot tell them apart. `assertions` read for tests that ran no assessed statement says so instead of `nothing asserted (0 of 0 executed statements)`.
 - `diff` of two runs that measure different code, where nothing changed state but the percentages moved, says so instead of `Nothing was gained or lost.` beside a percentage change, and prints no empty page line.
 - `diff` names the files changed since the newer run when it is stale, as it does for the older one.

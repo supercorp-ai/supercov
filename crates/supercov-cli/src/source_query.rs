@@ -23,10 +23,9 @@ pub fn command(args: &[String]) -> ExitCode {
         let runs = discover_runs(&root).map_err(|e| e.to_string())?;
         let run = select_run(&runs, Some(&args[0])).map_err(|e| e.to_string())?;
         let working_tree = working_tree(&root, run);
-        if working_tree["stale"] != false {
-            return Err("Current checkout differs from the run or cannot be verified; rerun tests to read current files".into());
-        }
-        let input = source_manifest::load_inputs(&root, run)?;
+        // Only this file has to match the run: another file changing does
+        // not make it any less the file the run measured.
+        let input = source_manifest::load_inputs_for(&root, run, |name| name == file)?;
         let text = input
             .inputs
             .files
@@ -147,18 +146,20 @@ fn render(data: &Value) -> String {
     let offset = page["offset"].as_u64().unwrap_or(0);
     let returned = page["returned"].as_u64().unwrap_or(0);
     let total = page["total"].as_u64().unwrap_or(0);
-    if returned == 0 && total > 0 {
+    if total == 0 {
+        let _ = writeln!(out, "\nThe file is empty.");
+    } else if returned == 0 {
         let _ = writeln!(
             out,
             "\nShowing none of {total}: --offset {offset} is past the end"
         );
     } else {
-        let (start, end) = if returned == 0 {
-            (0, 0)
-        } else {
-            (offset + 1, offset + returned)
-        };
-        let _ = writeln!(out, "\nShowing {start}-{end} of {total}");
+        let _ = writeln!(
+            out,
+            "\nShowing {}-{} of {total}",
+            offset + 1,
+            offset + returned
+        );
     }
     if let Some(next) = page["nextOffset"].as_u64() {
         let _ = writeln!(

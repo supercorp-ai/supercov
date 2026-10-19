@@ -820,8 +820,10 @@ fn render_snapshots(view: &Value) -> String {
         );
     }
     let mut text = format!(
-        "{} {lane} snapshots, most recent first (showing {}).\n",
-        view["total"], view["shown"]
+        "{} {lane} snapshot{}, most recent first (showing {}).\n",
+        view["total"],
+        if view["total"] == 1 { "" } else { "s" },
+        view["shown"]
     );
     for row in rows {
         let counts = &row["counts"];
