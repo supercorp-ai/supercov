@@ -10352,3 +10352,47 @@ fn filters_selectors_and_stray_entries_on_the_run_commands() {
         "{patch}"
     );
 }
+
+/// The `wrangler` a measured Rust test starts, outside `wrangler dev`: it
+/// refuses without the real one to hand over to, and otherwise becomes it
+/// with the test's arguments untouched.
+#[cfg(unix)]
+#[test]
+fn the_wrangler_shim_hands_over_or_says_why_it_cannot() {
+    let project = Project::empty("wrangler-shim");
+    let refused = project.supercov(&["__wrangler", "--version"]);
+    assert_eq!(refused.code(), 127);
+    assert!(
+        refused
+            .stderr()
+            .contains("__wrangler runs only as the wrangler of a measured test"),
+        "{}",
+        refused.stderr()
+    );
+    project.write_script("real-wrangler", "#!/bin/sh\necho \"wrangler $*\"\nexit 3\n");
+    let real = project.root.join("real-wrangler");
+    let real = real.to_str().unwrap();
+    let handed = project.supercov_with(
+        &["__wrangler", "deploy", "--name", "it"],
+        &[("SUPERCOV_WRANGLER", real)],
+    );
+    assert_eq!(handed.code(), 3, "{}", handed.stderr());
+    assert_eq!(handed.stdout(), "wrangler deploy --name it\n");
+    // The poller wants a process, a port and where to write; given a
+    // process already gone, it ends.
+    assert_eq!(project.supercov(&["__wrangler-poll"]).code(), 2);
+    assert_eq!(
+        project
+            .supercov(&["__wrangler-poll", "nobody", "port", "windows"])
+            .code(),
+        2
+    );
+    let windows = project.root.join("worker.windows");
+    let polled = project.supercov(&[
+        "__wrangler-poll",
+        "2147483646",
+        "9",
+        windows.to_str().unwrap(),
+    ]);
+    assert_eq!(polled.code(), 0, "{}", polled.stderr());
+}
