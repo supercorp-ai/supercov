@@ -21,6 +21,9 @@ concurrency:
 
 env:
   SLICES: 8
+  # Gates whose toolchain is another platform's: the clang oracle's golden
+  # file comes from Apple's clang, and CI runs it on macOS.
+  ELSEWHERE: clang_mcdc_oracle
 
 jobs:
   build:
@@ -97,7 +100,14 @@ jobs:
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/wasmtime-v49.0.3-x86_64-linux" >> "$GITHUB_PATH"
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      # Each fixture pins its own Playwright, and each version launches its
+      # own browser builds: install them for every version a lockfile names.
+      - name: Install every pinned Playwright's browsers
+        run: |
+          versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -u)
+          for version in $versions; do
+            npx -y "playwright@$version" install --with-deps
+          done
       - uses: actions/download-artifact@v5
         with:
           name: supercov-self
@@ -105,15 +115,18 @@ jobs:
       - name: Choose this slice's tests
         id: tests
         run: |
-          gates=$(sed -n '/^gates! {/,/^}/p' crates/supercov-cli/tests/e2e_gates.rs \
+          all=$(sed -n '/^gates! {/,/^}/p' crates/supercov-cli/tests/e2e_gates.rs \
             | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
+          gates=$(echo "$all" | grep -vxF -f <(echo "$ELSEWHERE" | tr ' ' '\n'))
           slice=${{ matrix.slice }}
           if [ "$slice" = 0 ]; then
-            skips=$(printf -- '--skip %s ' $gates)
+            skips=$(printf -- '--skip %s ' $all)
             echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
           else
             picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '(NR - 1) % n == s - 1' | tr '\n' ' ')
-            echo "command=cargo test -p supercov --test e2e_gates -- --include-ignored --exact $picked" >> "$GITHUB_OUTPUT"
+            # The whole workspace builds in every slice, so every run counts
+            # the same files; only the named gates run.
+            echo "command=cargo test --workspace -- --include-ignored --exact $picked" >> "$GITHUB_OUTPUT"
           fi
       - name: Measure
         env:
@@ -121,22 +134,24 @@ jobs:
         run: |
           chmod +x "$RUNNER_TEMP/self/supercov"
           echo "${{ steps.tests.outputs.command }}"
+          mkdir -p "$RUNNER_TEMP/out"
+          log="$RUNNER_TEMP/out/measure.log"
           # A failing test still leaves a run to merge; the merge says it failed.
-          "$RUNNER_TEMP/self/supercov" -- ${{ steps.tests.outputs.command }} 2>&1 | tee measure.log
-          echo "exit ${PIPESTATUS[0]}" | tee -a measure.log
+          "$RUNNER_TEMP/self/supercov" -- ${{ steps.tests.outputs.command }} 2>&1 | tee "$log"
+          echo "exit ${PIPESTATUS[0]}" | tee -a "$log"
       - name: Keep the run
         if: always()
         run: |
           run=$(ls -t .supercov/runs | head -1)
-          mkdir -p "$RUNNER_TEMP/out"
           tar -C .supercov/runs -czf "$RUNNER_TEMP/out/run.tar.gz" "$run"
-          cp measure.log "$RUNNER_TEMP/out/"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: run-${{ matrix.slice }}
           path: ${{ runner.temp }}/out
           retention-days: 7
+      - name: Fail the slice when a test failed
+        run: grep -qx 'exit 0' <(tail -1 "$RUNNER_TEMP/out/measure.log")
 
   merge:
     needs: measure
@@ -157,31 +172,29 @@ jobs:
         run: |
           supercov="$RUNNER_TEMP/self/supercov"
           chmod +x "$supercov"
-          mkdir -p .supercov/runs
-          ids=()
+          out="$RUNNER_TEMP/out"
+          mkdir -p .supercov/runs "$out"
           for slice in "$RUNNER_TEMP"/runs/run-*; do
             tar -C .supercov/runs -xzf "$slice/run.tar.gz"
             echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
           done
           ids=$(ls .supercov/runs)
-          "$supercov" merge $ids | tee merge.log
-          merged=$(ls -t .supercov/runs | head -1)
-          "$supercov" runs "$merged" > summary.txt
-          "$supercov" runs "$merged" gaps --format jsonl --metric mcdc --output mcdc-gaps.jsonl
+          "$supercov" merge $ids 2>&1 | tee "$out/merge.log"
+          merged=$(grep -oE 'merged run run_[0-9a-f]{16}' "$out/merge.log" | awk '{print $3}')
+          if [ -z "$merged" ]; then echo "the slices did not merge"; exit 1; fi
+          "$supercov" runs "$merged" > "$out/summary.txt"
+          "$supercov" runs "$merged" gaps --format jsonl --metric mcdc --output "$out/mcdc-gaps.jsonl"
           {
             echo '```'
             for slice in "$RUNNER_TEMP"/runs/run-*; do
               echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
             done
             echo
-            cat summary.txt
+            cat "$out/summary.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: self-coverage
-          path: |
-            summary.txt
-            mcdc-gaps.jsonl
-            merge.log
+          path: ${{ runner.temp }}/out
           retention-days: 30
