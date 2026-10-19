@@ -550,6 +550,13 @@ fn render_gaps(view: &Value) -> String {
             ));
         }
     }
+    let total = view["total"].as_u64().unwrap_or(0) as usize;
+    if total > files.len() {
+        out.push_str(&format!(
+            "... and {} more; --limit 0 lists every one\n",
+            total - files.len()
+        ));
+    }
     out
 }
 
@@ -696,7 +703,17 @@ fn render_quality_diff(view: &Value) -> String {
         ));
     }
     let none: Vec<Value> = Vec::new();
-    let section = |out: &mut String, title: &str, rows: &Vec<Value>| {
+    // A section --limit cut short says how many more it holds.
+    let more = |out: &mut String, key: &str, shown: usize| {
+        let total = view["counts"][key].as_u64().unwrap_or(0) as usize;
+        if total > shown {
+            out.push_str(&format!(
+                "  ... and {} more; --limit 0 lists every one\n",
+                total - shown
+            ));
+        }
+    };
+    let section = |out: &mut String, title: &str, key: &str, rows: &Vec<Value>| {
         if rows.is_empty() {
             return;
         }
@@ -727,15 +744,18 @@ fn render_quality_diff(view: &Value) -> String {
                 );
             }
         }
+        more(out, key, rows.len());
     };
     section(
         &mut out,
         "Declined:",
+        "declined",
         view["declined"].as_array().unwrap_or(&empty),
     );
     section(
         &mut out,
         "Improved:",
+        "improved",
         view["improved"].as_array().unwrap_or(&empty),
     );
     // A refactor that extracts code lands in new files, so they are listed
@@ -767,6 +787,7 @@ fn render_quality_diff(view: &Value) -> String {
                 }
             ));
         }
+        more(&mut out, "added", added.len());
     }
     let removed = view["removed"].as_array().unwrap_or(&empty);
     if !removed.is_empty() {
@@ -774,6 +795,7 @@ fn render_quality_diff(view: &Value) -> String {
         for row in removed {
             out.push_str(&format!("  {}\n", row["path"].as_str().unwrap_or("?")));
         }
+        more(&mut out, "removed", removed.len());
     }
     out
 }

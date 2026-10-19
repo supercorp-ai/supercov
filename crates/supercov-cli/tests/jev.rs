@@ -3427,3 +3427,51 @@ fn only_checks_a_file_question_fired_on_are_asked_line_by_line() {
     );
     assert!(requests > 3, "{fired}");
 }
+
+#[test]
+fn saved_assessments_say_what_a_limit_left_out_and_which_lane_holds_a_snapshot() {
+    let project = Project::cart("quality-views");
+    project.write("src/b.js", "export const b = (x) => x * 2;\n");
+    project.commit("b");
+    let (yes, _) = gateway(MODEL, answer_yes);
+    let (no, _) = gateway(MODEL, answer_no);
+    let assess = |args: &[&str], base: &str| -> String {
+        project.supercov_with(args, &through(base)).json()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let calm = assess(&["quality", "src/", "--json"], &no);
+    let fired = assess(&["quality", "src/", "--refresh", "--json"], &yes);
+    let security = assess(&["security", "src/", "--json"], &yes);
+    // One of two files shown, the other counted.
+    for lane in ["quality", "security"] {
+        let gaps = project.supercov(&[lane, "gaps", "--limit", "1"]).succeeds();
+        assert!(
+            gaps.starts_with("2 files with findings, 0 clean.")
+                && gaps.ends_with("... and 1 more; --limit 0 lists every one\n"),
+            "{lane}: {gaps}"
+        );
+    }
+    let diff = project
+        .supercov(&["quality", "diff", &calm, &fired, "--limit", "1"])
+        .succeeds();
+    assert!(
+        diff.contains("2 declined, 0 improved")
+            && diff.contains("  ... and 1 more; --limit 0 lists every one\n"),
+        "{diff}"
+    );
+    // A security snapshot asked of quality is named as security's.
+    for args in [
+        vec!["quality", "file", "src/b.js", security.as_str()],
+        vec!["quality", "diff", calm.as_str(), security.as_str()],
+    ] {
+        let wrong = project.supercov(&args).exits(2);
+        assert!(
+            wrong.contains(&format!(
+                "{security} is a security snapshot, not a quality one; read it with `supercov security`"
+            )),
+            "{wrong}"
+        );
+    }
+}

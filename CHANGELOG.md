@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `quality gaps`, `security gaps` and `quality diff` cut short by `--limit` say how many more files there are. A snapshot of the other lane, asked of `quality` or `security`, is named as that lane's instead of "no snapshot here".
 - The run summary narrowed with `--kind` or `--runner` lists only the kinds and runners the filter keeps, as its totals do, instead of every kind in the run.
 - `line` with several locations reports one past the end of its file as not answered, with how many lines the file has, instead of reading it as a line that holds no code; all of them past the end fails the call, as one does.
 - `minimize` refusing a run with background evidence names the way through, `--kind` or `--runner`, instead of "select a fully attributed coverage view".

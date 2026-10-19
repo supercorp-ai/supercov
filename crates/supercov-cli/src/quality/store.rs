@@ -154,6 +154,18 @@ pub fn read(project_root: &Path, lane: &str, id: &str) -> Result<(Value, Value),
     }
     let directory = snapshots(project_root, lane).join(id);
     if !directory.is_dir() {
+        // The same id under the other lane is that lane's assessment: say
+        // which command reads it.
+        let other = if lane == "security" {
+            "quality"
+        } else {
+            "security"
+        };
+        if snapshots(project_root, other).join(id).is_dir() {
+            return Err(format!(
+                "{id} is a {other} snapshot, not a {lane} one; read it with `supercov {other}`"
+            ));
+        }
         return Err(format!(
             "no {lane} snapshot {id} here; list them with: supercov {lane} snapshots"
         ));
