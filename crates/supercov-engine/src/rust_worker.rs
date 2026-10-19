@@ -716,12 +716,10 @@ impl RustWorkerServer {
     /// every lint allowed it cannot read the answer and stops the build. The
     /// probes' parentheses, the one lint they raise, are allowed by name.
     pub fn environment(&self) -> BTreeMap<String, String> {
-        let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-        if !rustflags.is_empty() {
-            rustflags.push(' ');
-        }
-        rustflags.push_str("--cap-lints=warn -A unused_parens");
-        BTreeMap::from([("RUSTFLAGS".into(), rustflags)])
+        BTreeMap::from([(
+            "RUSTFLAGS".into(),
+            worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default()),
+        )])
     }
 
     /// Publish what the Workers ran as a Rust run of its own: each window
@@ -848,15 +846,14 @@ impl CargoTestWorkers {
 /// A program on `path`: a file of that name, or on Windows one with a
 /// PATHEXT extension.
 fn on_path(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
-    let names = if cfg!(windows) {
-        vec![
-            format!("{name}.cmd"),
-            format!("{name}.exe"),
-            name.to_owned(),
-        ]
-    } else {
-        vec![name.to_owned()]
-    };
+    #[cfg(windows)]
+    let names = [
+        format!("{name}.cmd"),
+        format!("{name}.exe"),
+        name.to_owned(),
+    ];
+    #[cfg(not(windows))]
+    let names = [name.to_owned()];
     std::env::split_paths(path).find_map(|directory| {
         names
             .iter()
@@ -1578,5 +1575,190 @@ mod tests {
         // A segment past the region is a malformed window, not a panic.
         let bad = json!({"start": 0, "end": 1, "regions": [["a", 4, [[2, encode(&[1, 2, 3])]]]]});
         assert!(window_from(&bad).is_none());
+    }
+
+    #[test]
+    fn a_line_that_is_no_window_is_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-worker-windows-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("worker-1.windows"),
+            "{\"start\": 1}\n{\"start\": 2, \"end\": 3, \"regions\": []}\n{\"start\": 4, \"end\"\n",
+        )
+        .unwrap();
+        let windows = read_windows(&root).unwrap();
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.start, window.end))
+                .collect::<Vec<_>>(),
+            [(2, 3)]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_directory_outside_any_cargo_project_has_no_workspace_root() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-no-cargo-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(cargo_workspace_root(&root), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_poller_that_cannot_write_its_windows_leaves_none() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-worker-poll-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let windows = root.join("missing/worker-1.windows");
+        // No process has this id, so the poller stops at once.
+        let code = poll_wrangler(vec![
+            u32::MAX.to_string().into(),
+            free_port().unwrap().to_string().into(),
+            windows.clone().into(),
+        ]);
+        assert_eq!(code, 0);
+        assert!(!windows.exists());
+        assert!(!partial(&windows).exists());
+    }
+
+    /// An inspector standing in for wrangler's: it plays `script` against
+    /// one connection, each step receiving the message the session sent
+    /// (or none) and answering with messages of its own.
+    fn inspect_with(
+        stop: Arc<AtomicBool>,
+        script: impl FnOnce(&mut tungstenite::WebSocket<TcpStream>, &AtomicBool) + Send + 'static,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            script(&mut socket, &server_stop);
+        });
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let (mut socket, _) =
+            tungstenite::client::client(format!("ws://127.0.0.1:{port}/ws"), stream).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "supercov-inspector-{}-{}-{port}.windows",
+            std::process::id(),
+            now_ms()
+        ));
+        let mut file = fs::File::create(&path).unwrap();
+        session(&mut socket, &mut file, &stop);
+        // As the poller does once a session ends.
+        let _ = socket.close(None);
+        drop(socket);
+        server.join().unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        written
+    }
+
+    fn receive(socket: &mut tungstenite::WebSocket<TcpStream>) -> Value {
+        loop {
+            match socket.read() {
+                Ok(tungstenite::Message::Text(text)) => {
+                    return serde_json::from_str(text.as_str()).unwrap();
+                }
+                Ok(_) => {}
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+
+    fn answer(socket: &mut tungstenite::WebSocket<TcpStream>, message: Value) {
+        socket
+            .send(tungstenite::Message::text(message.to_string()))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_session_takes_the_last_context_and_once_more_when_told_to_stop() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let regions = json!([["key", 4, [[0, encode(&[1, 2])]]]]);
+        let written = inspect_with(Arc::new(AtomicBool::new(false)), move |socket, stop| {
+            assert_eq!(receive(socket)["method"], "Runtime.enable");
+            // Notices without the id they are about change nothing.
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextCreated", "params": {"context": {}}}),
+            );
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+            );
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 8}}}),
+            );
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextDestroyed", "params": {}}),
+            );
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextDestroyed", "params": {"executionContextId": 8}}),
+            );
+            let take = receive(socket);
+            assert_eq!(take["method"], "Runtime.evaluate");
+            assert_eq!(take["params"]["contextId"], 7);
+            // The run ends while this take is unanswered: the session waits
+            // for it, then takes once more.
+            stop.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(100));
+            answer(
+                socket,
+                json!({"id": take["id"], "result": {"result": {"value": regions}}}),
+            );
+            let last = receive(socket);
+            assert_eq!(last["method"], "Runtime.evaluate");
+            answer(
+                socket,
+                json!({"id": last["id"], "result": {"result": {"value": []}}}),
+            );
+            // Nothing more is asked before the connection closes.
+            while let Ok(message) = socket.read() {
+                assert!(message.is_close(), "{message}");
+            }
+        });
+        let lines = written.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "{written}");
+        let window = window_from(&serde_json::from_str(lines[0]).unwrap()).unwrap();
+        assert_eq!(window.regions, [("key".to_owned(), vec![1, 2, 0, 0])]);
+    }
+
+    #[test]
+    fn a_session_with_no_worker_left_ends_without_a_take() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let written = inspect_with(Arc::clone(&stop), |socket, stop| {
+            assert_eq!(receive(socket)["method"], "Runtime.enable");
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextsCleared"}),
+            );
+            stop.store(true, Ordering::Release);
+            while let Ok(message) = socket.read() {
+                assert!(
+                    !message.to_text().unwrap_or_default().contains("evaluate"),
+                    "{message}"
+                );
+            }
+        });
+        assert_eq!(written, "");
     }
 }

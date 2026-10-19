@@ -1689,6 +1689,15 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sequence_that_cannot_be_claimed_is_an_error_not_a_retry() {
+        // Nothing can create a file in procfs, so the first claim fails with
+        // an error other than an existing claim.
+        let error = next_sequence(Path::new("/proc/self"), "").unwrap_err();
+        assert!(matches!(error, RustTestRunnerError::Io(_)), "{error}");
+    }
+
     #[test]
     fn a_rustdoc_the_user_configured_is_the_one_run() {
         let project = PreparedRustProject::empty(std::env::temp_dir());
