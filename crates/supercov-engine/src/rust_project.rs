@@ -245,9 +245,8 @@ fn push_workspace_source(path: &str, workspace: &Path, compiled: &mut BTreeSet<S
     } else {
         candidate
     };
-    if let Some(text) = relative.to_str() {
-        compiled.insert(text.replace('\\', "/"));
-    }
+    // A part of a `str` cut at a separator is still UTF-8: nothing is lost.
+    compiled.insert(relative.to_string_lossy().replace('\\', "/"));
 }
 
 /// The files rustc compiles for the given crate roots: each root and,
@@ -517,9 +516,9 @@ fn string_literal(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
 /// The crate roots of proc-macro targets. What they compile to is a compiler
 /// plugin: rustc loads it while building the crate under test and runs it
 /// there, so no test process ever executes it and the owned probes see
-/// nothing.
+/// nothing. `crate_roots` has already confined every one of them to the
+/// workspace.
 fn proc_macro_crate_roots(
-    workspace: &Path,
     packages: &[CargoPackage],
 ) -> Result<BTreeSet<PathBuf>, RustProjectError> {
     let mut roots = BTreeSet::new();
@@ -533,9 +532,7 @@ fn proc_macro_crate_roots(
                     path: target.src_path.clone(),
                     reason: error.to_string(),
                 })?;
-            if confined_relative(workspace, &root).is_ok() {
-                roots.insert(root);
-            }
+            roots.insert(root);
         }
     }
     Ok(roots)
@@ -629,15 +626,11 @@ fn decline_proc_macro_obligations(
         &mut BTreeSet::new(),
         &mut BTreeMap::new(),
     )?;
-    let mut files = BTreeSet::new();
-    for path in reached {
-        if let Ok(relative) = confined_relative(workspace, &path) {
-            files.insert(relative);
-        }
-    }
-    if files.is_empty() {
-        return Ok(());
-    }
+    // The module tree reaches files inside the workspace alone.
+    let files = reached
+        .iter()
+        .map(|path| confined_relative(workspace, path))
+        .collect::<Result<BTreeSet<_>, _>>()?;
     let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
     unmeasured.extend(
         manifest
@@ -832,7 +825,7 @@ pub fn prepare_rust_project_for(
 
     let started = std::time::Instant::now();
     let roots = crate_roots(&workspace, &packages)?;
-    let proc_macro_roots = proc_macro_crate_roots(&workspace, &packages)?;
+    let proc_macro_roots = proc_macro_crate_roots(&packages)?;
     let mut files = BTreeSet::new();
     let mut tests = BTreeSet::new();
     let mut owners = BTreeMap::new();
@@ -990,12 +983,8 @@ pub fn prepare_rust_project_for(
             .and_then(|value| value.as_str())
             .cmp(&right.get("id").and_then(|value| value.as_str()))
     });
+    // Cargo reports the target directory as an absolute path.
     let target_directory = metadata.target_directory;
-    let target_directory = if target_directory.is_absolute() {
-        target_directory
-    } else {
-        workspace.join(target_directory)
-    };
     if !target_directory.starts_with(&workspace) {
         return Err(RustProjectError::UnsafePath(
             target_directory.display().to_string(),
@@ -1647,6 +1636,35 @@ fn integration_choice() {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn depinfo_is_read_from_regular_utf8_files_alone() {
+        let root = fixture();
+        let target = root.join("target/debug/deps");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            target.join("fixture.d"),
+            format!(
+                "{0}/lib: src/lib.rs {0}/src/with\\ space.rs\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        // Not UTF-8, so not depinfo rustc wrote.
+        fs::write(target.join("garbled.d"), [0xff, 0xfe, b':']).unwrap();
+        // A symlink is neither walked nor read.
+        std::os::unix::fs::symlink(target.join("fixture.d"), target.join("linked.d")).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("target/loop")).unwrap();
+        assert_eq!(
+            compiled_source_files(&root, &root.join("target")),
+            Some(BTreeSet::from([
+                "src/lib.rs".to_owned(),
+                "src/with space.rs".to_owned()
+            ]))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// The files a crate compiles, as rustc finds them: `name.rs` and
     /// `name/mod.rs`, `#[path]` from the file and from an inline module,
     /// literal `include!`s and the modules they declare, both arms of a
@@ -1741,5 +1759,159 @@ fn integration_choice() {
             [workspace.join("src/lib.rs")].into_iter().collect()
         );
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_module_must_be_a_file_inside_the_workspace() {
+        let outside = fixture();
+        for target in [outside.join("src/lib.rs"), PathBuf::from("../tests")] {
+            let root = fixture();
+            fs::write(root.join("src/lib.rs"), "mod linked;\n").unwrap();
+            std::os::unix::fs::symlink(&target, root.join("src/linked.rs")).unwrap();
+            let error = prepare_rust_project(&root, None).unwrap_err();
+            assert!(
+                matches!(&error, RustProjectError::UnsafePath(path) if path.ends_with("src/linked.rs")),
+                "{target:?}: {error}"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn the_module_tree_classifies_what_it_reaches() {
+        let root = fixture();
+        fs::write(root.join("build.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(root.join("src/checks")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            concat!(
+                // One file, two modules: walked once for the crate.
+                "#[path = \"shared.rs\"] pub mod first;\n",
+                "#[path = \"shared.rs\"] pub mod second;\n",
+                // Named as test code, though no `cfg(test)` gates it.
+                "mod tests;\n",
+                // Test code, by the gate on the module that declares it.
+                "#[cfg(test)]\nmod checks {\n    mod support;\n}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("src/shared.rs"), "pub fn shared() -> i32 { 5 }\n").unwrap();
+        fs::write(root.join("src/tests.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
+        fs::write(
+            root.join("src/checks/support.rs"),
+            "fn support() -> i32 { 2 }\n",
+        )
+        .unwrap();
+        let prepared = prepare_rust_project(&root, None).unwrap();
+        // A build script is compiled and run on its own, never by a test.
+        assert_eq!(
+            prepared.source_files,
+            [
+                "src/checks/support.rs",
+                "src/lib.rs",
+                "src/shared.rs",
+                "src/tests.rs",
+                "tests/integration.rs"
+            ]
+        );
+        let measured = prepared
+            .manifest
+            .points
+            .iter()
+            .map(|point| point.file.as_str())
+            .collect::<BTreeSet<_>>();
+        // `src/tests.rs` and `src/checks/support.rs` are test code: their
+        // functions carry no probes.
+        assert_eq!(measured, BTreeSet::from(["src/shared.rs"]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_cargo_cannot_describe_as_one_with_sources_is_refused() {
+        let root = fixture();
+        fs::write(root.join("Cargo.toml"), "[package\n").unwrap();
+        assert!(matches!(
+            prepare_rust_project(&root, None),
+            Err(RustProjectError::MetadataFailed(_))
+        ));
+        // A member is not the workspace Cargo reports.
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=['member']\nresolver='3'\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("member/src")).unwrap();
+        fs::write(
+            root.join("member/Cargo.toml"),
+            "[package]\nname='member'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(root.join("member/src/lib.rs"), "").unwrap();
+        assert!(matches!(
+            prepare_rust_project(&root.join("member"), None),
+            Err(RustProjectError::UnsafePath(path)) if Path::new(&path) == root
+        ));
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=[]\nresolver='3'\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            prepare_rust_project(&root, None),
+            Err(RustProjectError::NoWorkspacePackages)
+        ));
+        // A library whose path is a directory has no source to read.
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.0.0'\nedition='2024'\nautotests=false\n[lib]\npath='src'\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            prepare_rust_project(&root, None),
+            Err(RustProjectError::NoSourceFiles)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn merging_refuses_a_repeated_obligation_and_keeps_one_limitation_per_site() {
+        let instrumented = || {
+            instrument_rust_file_numbered(
+                "src/lib.rs",
+                "pub fn one(flag: bool) -> i32 { if flag { 1 } else { 0 } }\n",
+                "crate::__supercov_runtime_v1",
+                false,
+                None,
+                &mut crate::rust_instrumenter::RustProbeLayout::default(),
+            )
+            .unwrap()
+            .manifest
+        };
+        let mut destination = instrumented();
+        let limitation =
+            serde_json::json!({"id": "note", "file": "src/lib.rs", "line": 1, "column": 0});
+        destination.limitations.push(limitation.clone());
+        let mut source = CoverageManifest {
+            points: Vec::new(),
+            decisions: Vec::new(),
+            branches: Vec::new(),
+            ..instrumented()
+        };
+        source.limitations.push(limitation.clone());
+        merge_manifest(&mut destination, source).unwrap();
+        assert_eq!(
+            destination
+                .limitations
+                .iter()
+                .filter(|existing| **existing == limitation)
+                .count(),
+            1
+        );
+        assert!(matches!(
+            merge_manifest(&mut destination, instrumented()),
+            Err(RustProjectError::DuplicateObligation(_))
+        ));
     }
 }
