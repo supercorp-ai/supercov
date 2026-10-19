@@ -3363,3 +3363,67 @@ fn a_handler_run_without_a_guard_is_counted_by_the_tests_that_ran_it() {
         ],
     );
 }
+
+fn answer_faint(_: &str, question: &serde_json::Value) -> serde_json::Value {
+    if question["type"] == "choice" {
+        common::choose(question, "none")
+    } else {
+        serde_json::json!({ "type": "noul", "noul": 0.2 })
+    }
+}
+
+fn answer_authorization_only(id: &str, question: &serde_json::Value) -> serde_json::Value {
+    let task = question["instructions"]["task"]
+        .as_str()
+        .unwrap_or_default();
+    if question["type"] == "choice" {
+        return common::choose(question, "none");
+    }
+    let yes = id.contains("missing_authorization") || task.contains("authoriz");
+    serde_json::json!({ "type": "noul", "noul": if yes { 0.9 } else { 0.1 } })
+}
+
+#[test]
+fn only_checks_a_file_question_fired_on_are_asked_line_by_line() {
+    let project = Project::empty("probe-localise");
+    project.write("package.json", r#"{"name":"loc","type":"module"}"#);
+    project.write(
+        "src/ok.js",
+        "export function run(req, db) {\n  return db.query(\"x\" + req.q);\n}\n",
+    );
+    project.write(
+        "src/broken.js",
+        "export function run(req, db) {\n  return db.query(\"x\" + req.q;\n}\neval(req.body);\n",
+    );
+    project.git(&["init", "-q"]);
+    let run = |answerer: common::Answerer| {
+        let (base, seen) = gateway(MODEL, answerer);
+        let report = project
+            .supercov_with(&["security", "src/", "--refresh"], &through(&base))
+            .succeeds();
+        let requests = seen.lock().unwrap().len();
+        (report, requests)
+    };
+    // Under the line pass's threshold: two file questions, nothing more.
+    let (faint, requests) = run(answer_faint);
+    assert!(
+        faint.starts_with("Security: 0 of 2 files flagged, 2 clean.\n"),
+        "{faint}"
+    );
+    assert_eq!(requests, 3, "{faint}");
+    // A missing authorization is the absence of a line, never asked as one.
+    let (authorization, requests) = run(answer_authorization_only);
+    assert!(
+        authorization.contains("  missing_authorization 2\n"),
+        "{authorization}"
+    );
+    assert_eq!(requests, 3, "{authorization}");
+    // Every check fired: the file that parses is asked line by line, and the
+    // one that does not is still reported.
+    let (fired, requests) = run(answer_yes);
+    assert!(
+        fired.contains("  src/broken.js\n") && fired.contains("  src/ok.js\n"),
+        "{fired}"
+    );
+    assert!(requests > 3, "{fired}");
+}
