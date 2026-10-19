@@ -443,7 +443,9 @@ fn build_run(
         .map_err(|error| format!("could not read run {}: {error:?}", run.id))?;
     for file in files
         .iter()
-        .filter(|file| file.score > 0 || file.measurement_limitations > 0)
+        // The score counts measurement limitations too, and the index
+        // refuses a record whose score is not its counts' sum.
+        .filter(|file| file.score > 0)
     {
         let (detail, _) = coverage_file_detail_from(
             &read,
@@ -1137,6 +1139,90 @@ mod tests {
     #[test]
     fn the_report_template_holds_one_payload_marker() {
         assert_eq!(REPORT_TEMPLATE.matches(PAYLOAD_MARKER).count(), 1);
+    }
+
+    /// Sixteen megabytes of source in all: a file that would take a report
+    /// past that is named as left out, however small it is itself. Through
+    /// the command this is a project of seventeen megabytes.
+    #[test]
+    fn sources_past_sixteen_megabytes_in_all_are_left_out() {
+        use supercov_engine::coverage_index::IndexedGapDimensions;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-total-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let contents = "x".repeat(1_000_000);
+        let sha256 = format!("{:x}", Sha256::digest(contents.as_bytes()));
+        let names = (0..17).map(|i| format!("f{i:02}.js")).collect::<Vec<_>>();
+        for name in &names {
+            fs::write(root.join(name), &contents).unwrap();
+        }
+        let none = IndexedGapDimensions {
+            lines: 0,
+            statements: 0,
+            functions: 0,
+            branches: 0,
+            mcdc_conditions: 0,
+        };
+        let gaps = names
+            .iter()
+            .map(|name| IndexedFileGap {
+                view: CoverageViewId::All,
+                file: name.clone(),
+                uncovered_lines: 0,
+                uncovered_statements: 0,
+                uncovered_functions: 0,
+                missing_branches: 0,
+                missing_mcdc_conditions: 0,
+                measurement_limitations: 0,
+                limitation_kinds: Vec::new(),
+                covered_by_other_tests: none.clone(),
+                uncovered_everywhere: none.clone(),
+                totals: none.clone(),
+                covered: none.clone(),
+                score: 0,
+            })
+            .collect::<Vec<_>>();
+        let (sources, omitted) = collect_sources(&root, &gaps, true);
+        assert_eq!(sources.len(), 16);
+        assert_eq!(omitted, ["f16.js"]);
+        let assessed = serde_json::json!(
+            names
+                .iter()
+                .map(|name| serde_json::json!({"path": name, "sha256": sha256}))
+                .collect::<Vec<_>>()
+        );
+        let (sources, omitted) = collect_quality_sources(&root, &assessed);
+        assert_eq!(sources.len(), 16);
+        assert_eq!(omitted, ["f16.js"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A temporary name another write of this process holds is passed over
+    /// for the next. Through the command the process's own id cannot be known
+    /// beforehand.
+    #[test]
+    fn a_temporary_name_in_use_is_passed_over() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-temporary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let held = root.join(format!(".r.html.{}.0.tmp", std::process::id()));
+        fs::write(&held, "held").unwrap();
+        write_atomic(&root.join("r.html"), b"report").unwrap();
+        assert_eq!(fs::read_to_string(root.join("r.html")).unwrap(), "report");
+        assert_eq!(fs::read_to_string(&held).unwrap(), "held");
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A report is titled by the package's name when it has a usable one,

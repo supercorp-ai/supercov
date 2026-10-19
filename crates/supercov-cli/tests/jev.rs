@@ -3988,3 +3988,52 @@ fn a_round_sends_forty_requests_and_the_next_one_the_rest() {
     assert_eq!(statements[0]["text"], "return 0;");
     assert_eq!(statements[0]["asserted"], true);
 }
+
+/// A report of a quality assessment alone carries each assessed file's
+/// source, and names the ones it cannot: a file that became a directory, and
+/// one grown past what a report embeds, before its contents are compared.
+#[test]
+fn a_quality_report_names_the_sources_it_cannot_embed() {
+    let project = Project::cart("quality-report-omitted");
+    project.write("src/tax.js", "export const tax = (sum) => sum * 0.2;\n");
+    project.commit("tax");
+    let (base, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["quality"], &through(&base))
+        .succeeds();
+    let report = |output: &str| {
+        project
+            .supercov(&["report", "--no-open", "--output", output])
+            .succeeds();
+        let html = project.read(output);
+        // The page carries its data gzipped and base64-encoded.
+        let start = html
+            .find(r#"<script id="report-data" type="application/octet-stream">"#)
+            .unwrap()
+            + r#"<script id="report-data" type="application/octet-stream">"#.len();
+        let end = start + html[start..].find("</script>").unwrap();
+        use base64::Engine as _;
+        use std::io::Read as _;
+        let compressed = base64::engine::general_purpose::STANDARD
+            .decode(&html[start..end])
+            .unwrap();
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(compressed.as_slice())
+            .read_to_string(&mut json)
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["qualities"][0].clone()
+    };
+    let whole = report("whole.html");
+    assert!(whole["sources"]["src/cart.js"].is_object(), "{whole}");
+    assert_eq!(whole["omittedSources"], serde_json::json!([]));
+    std::fs::remove_file(project.root.join("src/cart.js")).unwrap();
+    std::fs::create_dir(project.root.join("src/cart.js")).unwrap();
+    project.write("src/tax.js", &"// padding\n".repeat(100_000));
+    let omitted = report("omitted.html");
+    assert_eq!(
+        omitted["omittedSources"],
+        serde_json::json!(["src/cart.js", "src/tax.js"]),
+        "{}",
+        omitted["omittedSources"]
+    );
+}

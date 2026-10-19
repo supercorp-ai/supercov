@@ -11040,3 +11040,61 @@ fn the_report_refuses_a_run_compared_with_itself_and_opens_when_it_can() {
     assert_eq!(code, 2, "{seen}");
     assert!(seen.contains("report failed: "), "{seen}");
 }
+
+/// The report details a file whose only gap is code outside measurement,
+/// and draws a run's multi-line statements from its coverage when the run
+/// was published before their spans were saved beside it.
+#[test]
+fn the_report_details_an_unmeasured_gap_and_spans_a_run_never_saved() {
+    let project = Project::empty("report-limited");
+    project.write("package.json", r#"{ "name": "limited" }"#);
+    project.write(
+        "src/scoped.js",
+        "const scope = { value: 7 };\nfunction sloppy() {\n  with (scope) {\n    return value;\n  }\n}\nfunction sum(a, b) {\n  return [\n    a,\n    b,\n  ].reduce((x, y) => x + y, 0);\n}\nmodule.exports = { sloppy, sum };\n",
+    );
+    project.write(
+        "test/scoped.test.js",
+        "const test = require(\"node:test\");\nconst assert = require(\"node:assert/strict\");\nconst { sloppy, sum } = require(\"../src/scoped.js\");\ntest(\"sloppy reads the scope\", () => assert.equal(sloppy(), 7));\ntest(\"sum adds\", () => assert.equal(sum(1, 2), 3));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("scoped");
+    let run = project.measure(&[]);
+    let files = project
+        .supercov(&["runs", "latest", "files", "--json"])
+        .json();
+    let scoped = &files["data"]["files"][0];
+    assert_eq!(scoped["file"], "src/scoped.js", "{files}");
+    // Every line ran: what is left is the `with` body, outside measurement.
+    assert_eq!(scoped["uncoveredLines"], 0, "{scoped}");
+    assert!(
+        scoped["measurementLimitations"].as_u64() > Some(0),
+        "{scoped}"
+    );
+    let report = |output: &str| {
+        project
+            .supercov(&["report", "--no-open", "--output", output])
+            .succeeds();
+        report_data(&project.read(output))
+    };
+    let first = report("first.html");
+    assert!(
+        first["runs"][0]["fileDetails"]["src/scoped.js"].is_object(),
+        "{}",
+        first["runs"][0]["fileDetails"]
+    );
+    let spans = first["runs"][0]["statementSpans"].clone();
+    assert!(
+        spans.as_array().is_some_and(|spans| !spans.is_empty()),
+        "{spans}"
+    );
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&run)
+            .join("statement-spans.json"),
+    )
+    .unwrap();
+    let again = report("again.html");
+    assert_eq!(again["runs"][0]["statementSpans"], spans);
+}
