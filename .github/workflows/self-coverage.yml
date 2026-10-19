@@ -33,16 +33,16 @@ env:
 jobs:
   platforms:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'self-coverage')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       os: ${{ steps.os.outputs.os }}
     steps:
       - id: os
         run: |
           if [ "${{ inputs.macos }}" = true ] || [ "${{ github.event.label.name }}" = self-coverage-macos ]; then
-            echo 'os=["ubuntu-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'os=["ubuntu-24.04","macos-latest"]' >> "$GITHUB_OUTPUT"
           else
-            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'os=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
           fi
 
   build:

@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -50,7 +50,7 @@ jobs:
   # sat in main through the 1.0.1 release and was found by the 1.1.0 release
   # chain -- the worst moment to find it. They run on the change now.
   engine-integrations:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -93,7 +93,7 @@ jobs:
   # machine, where the timing gates (the watchdog's timeout exit) and the
   # fixtures on fixed ports failed for reasons of their own.
   release-gates:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -143,7 +143,7 @@ jobs:
 
   # A Rust Worker under `wrangler dev`, measured through wrangler's inspector.
   rust-worker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -175,7 +175,7 @@ jobs:
   # Rust compiled to wasm that JavaScript tests load: node:test through the
   # nodejs glue, Playwright from a web page.
   rust-wasm-js:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -201,7 +201,7 @@ jobs:
   # Rust tests compiled to wasm, run where Cargo runs them: Node through
   # wasm-bindgen-test-runner, WASI through wasmtime.
   rust-wasm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
