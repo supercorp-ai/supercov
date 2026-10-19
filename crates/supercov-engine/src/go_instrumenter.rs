@@ -1258,6 +1258,41 @@ pub fn build_go_obligations_for(
 mod tests {
     use super::*;
 
+    /// Go types a comparison, `true`, `false`, and `!`, `&&`, `||` or
+    /// parentheses over only those as an untyped boolean; anything with a
+    /// name, a call or another operator in it is typed.
+    #[test]
+    fn untyped_booleans_are_read_as_go_types_them() {
+        fn value(node: Node) -> Option<Node> {
+            if node.kind() == "expression_list"
+                && node.parent().is_some_and(|p| p.kind() == "var_spec")
+            {
+                return node.named_child(0);
+            }
+            let mut cursor = node.walk();
+            node.children(&mut cursor).find_map(value)
+        }
+        for (expression, untyped) in [
+            ("true", true),
+            ("(false)", true),
+            ("!true", true),
+            ("!x", false),
+            ("-y", false),
+            ("a == b", true),
+            ("true && (a < b)", true),
+            ("true && x", false),
+            ("x || true", false),
+            ("a + b", false),
+            ("x", false),
+            ("f()", false),
+        ] {
+            let source = format!("package p\n\nvar v = {expression}\n");
+            let tree = parse(&source).unwrap();
+            let node = value(tree.root_node()).unwrap_or_else(|| panic!("{expression}"));
+            assert_eq!(untyped_boolean(node, &source), untyped, "{expression}");
+        }
+    }
+
     /// Every field the coverage index stores for a limitation.
     ///
     /// A limitation missing one of these is written into a run that then
