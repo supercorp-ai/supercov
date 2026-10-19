@@ -126,8 +126,10 @@ fn within_limits(
             let (left, right) = asked.split_at(asked.len() / 2);
             pending.push((t, left.to_vec()));
             pending.push((t, right.to_vec()));
-        } else if let Some(&s) = asked.first() {
-            pass.refused.insert((s, t));
+        } else {
+            // A plan asks a test about something, and a split leaves each
+            // half something: this is the one statement left.
+            pass.refused.insert((asked[0], t));
         }
     }
     out
@@ -390,9 +392,11 @@ impl Cache {
         Cache { path, answers }
     }
     fn save(&self) -> Result<(), String> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
+        let dir = self
+            .path
+            .parent()
+            .expect("answers.json sits in .supercov/assertions");
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec(&json!({"version": CACHE_VERSION, "answers": self.answers}))
             .map_err(|e| e.to_string())?;
         let temp = self.path.with_extension("json.tmp");
@@ -606,9 +610,9 @@ fn run_pass(
                 Err(e) => {
                     failures += 1;
                     if failures > MAX_FAILURES {
-                        if asking.keep {
-                            cache.save()?;
-                        }
+                        // Only the pass that sends requests has one fail,
+                        // and it keeps its answers.
+                        cache.save()?;
                         return Err(format!("stopped after {failures} failed requests: {e}"));
                     }
                     continue;
@@ -849,9 +853,10 @@ fn assess_changed(
                 .map(|(i, st)| json!({"index": i, "line": st.line, "text": st.text.lines().next().unwrap_or("").trim()}))
                 .collect::<Vec<_>>();
             for statement in crate::tests_query::in_changed_code(&mut current, code, statements) {
-                if let Some(i) = statement["index"].as_u64() {
-                    changed.insert(i as usize);
-                }
+                let i = statement["index"]
+                    .as_u64()
+                    .expect("each statement carries its index");
+                changed.insert(i as usize);
             }
         }
     }
@@ -922,9 +927,8 @@ fn assess_changed(
                     .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))));
                 let Some(p) = p else { continue };
                 answers.entry(s).or_default().push((*t, p));
-                if let Some(k) = keys.get(&(s, *t)) {
-                    cache.answers.insert(k.clone(), p);
-                }
+                // Every pair planned was keyed above.
+                cache.answers.insert(keys[&(s, *t)].clone(), p);
             }
         }
         cache.save()?;
@@ -1125,9 +1129,10 @@ fn narrowed(
     Ok(narrowed)
 }
 
+/// A test by its name and file: one with only the name the same is another
+/// test.
 fn picks(picked: &BTreeSet<(String, Option<String>)>, name: &str, file: Option<&str>) -> bool {
     picked.contains(&(name.to_owned(), file.map(str::to_owned)))
-        || picked.contains(&(name.to_owned(), None))
 }
 
 /// The options that give `filter` again, for the commands a reading names.
@@ -1699,8 +1704,10 @@ fn view(
             let mut items = all
                 .iter()
                 .filter_map(|s| {
+                    // The test as `named` read it: its file, or none.
                     let answer = s["answers"].as_array()?.iter().find(|a| {
-                        a["name"] == test_name.as_str() && a["file"] == test_file.as_str()
+                        (a["file"].as_str().unwrap_or(""), a["name"].as_str())
+                            == (test_file.as_str(), Some(test_name.as_str()))
                     })?;
                     let p = answer["p"].as_f64().unwrap_or(0.0);
                     Some(json!({
@@ -1748,7 +1755,9 @@ fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> 
             Ok(output) => return Ok(output),
             Err(size) => {
                 // Only an --all listing can come to this: halve its page and
-                // say where the next one starts.
+                // say where the next one starts. A line's view lists one
+                // statement, the first on the line, which the assessment
+                // asks about alone.
                 let Some(key) = ["files", "notAsserted", "statements"]
                     .into_iter()
                     .find(|key| data[*key].as_array().is_some_and(|list| list.len() > 1))
@@ -1758,11 +1767,12 @@ fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> 
                 let listed = data[key].as_array().map_or(0, Vec::len);
                 let keep = listed / 2;
                 data[key] = json!(data[key].as_array().unwrap()[..keep]);
-                if let Some(page) = data["page"].as_object_mut() {
-                    let offset = page["offset"].as_u64().unwrap_or(0);
-                    page.insert("returned".into(), json!(keep));
-                    page.insert("nextOffset".into(), json!(offset + keep as u64));
-                }
+                let page = data["page"]
+                    .as_object_mut()
+                    .expect("every listing has a page");
+                let offset = page["offset"].as_u64().unwrap_or(0);
+                page.insert("returned".into(), json!(keep));
+                page.insert("nextOffset".into(), json!(offset + keep as u64));
                 data["truncated"] = json!(
                     "the listing was shortened to fit one response; page.nextOffset is where the rest starts"
                 );
@@ -1865,6 +1875,13 @@ fn render(data: &Value) -> String {
             s["costUsd"].as_f64().unwrap_or(0.0),
             counted(&s["answersReused"], "answer", "answers")
         ));
+        // A test whose own code is over Jev's limit is never asked: what it
+        // would catch is unknown, not missing.
+        if let Some(n) = s["pairsOverLimit"].as_u64().filter(|n| *n > 0) {
+            out.push_str(&format!(
+                "Not asked: {n} statement(s) of a test whose request is over Jev's limit even with one question; that test was not judged on them.\n"
+            ));
+        }
     }
     out
 }
@@ -2009,12 +2026,12 @@ fn render_weak(run: &str, data: &Value) -> String {
         WEAK_ANSWER * 100.0
     );
     let files = data["files"].as_array().cloned().unwrap_or_default();
-    if files.is_empty() {
+    let Some(first) = files.first() else {
         if data["page"]["total"].as_u64() > Some(0) {
             out.push_str(&page_footer(data, ""));
         }
         return out;
-    }
+    };
     out.push_str("\nAn asserted statement is one some test was judged to catch; the judgment is the test's strongest answer. Checked by applying each change, a verdict on an answer under 75% was wrong about 1 time in 20, and one on a stronger answer about 1 in 50. Files, most such statements first:\n  WEAK  ASSERTED  FILE\n");
     for file in &files {
         out.push_str(&format!(
@@ -2033,15 +2050,13 @@ fn render_weak(run: &str, data: &Value) -> String {
             flags(data)
         ),
     ));
-    if let Some(first) = files.first() {
-        out.push_str(&format!(
-            "inspect a file: {} runs {} assertions{} {} --weak\n",
-            crate::launcher_command(),
-            quote(run),
-            flags(data),
-            quote(first["file"].as_str().unwrap_or(""))
-        ));
-    }
+    out.push_str(&format!(
+        "inspect a file: {} runs {} assertions{} {} --weak\n",
+        crate::launcher_command(),
+        quote(run),
+        flags(data),
+        quote(first["file"].as_str().unwrap_or(""))
+    ));
     out
 }
 
@@ -2056,12 +2071,12 @@ fn render_weak_file(run: &str, data: &Value) -> String {
         data["page"]["total"],
         WEAK_ANSWER * 100.0
     );
-    if weak.is_empty() {
+    let Some(first) = weak.first() else {
         if data["page"]["total"].as_u64() > Some(0) {
             out.push_str(&page_footer(data, ""));
         }
         return out;
-    }
+    };
     out.push_str("\nThe least certain first. Each was settled by the test named, at the answer shown; the tests not asked were not judged.\n  LINE  STATEMENT  (change)  answer  tests asked  test\n");
     for st in &weak {
         out.push_str(&format!(
@@ -2085,15 +2100,13 @@ fn render_weak_file(run: &str, data: &Value) -> String {
             quote(file)
         ),
     ));
-    if let Some(first) = weak.first() {
-        out.push_str(&format!(
-            "inspect a statement: {} runs {} assertions{} {}\n",
-            crate::launcher_command(),
-            quote(run),
-            flags(data),
-            quote(&format!("{file}:{}", first["line"]))
-        ));
-    }
+    out.push_str(&format!(
+        "inspect a statement: {} runs {} assertions{} {}\n",
+        crate::launcher_command(),
+        quote(run),
+        flags(data),
+        quote(&format!("{file}:{}", first["line"]))
+    ));
     out
 }
 
@@ -2123,10 +2136,10 @@ fn render_file(run: &str, data: &Value) -> String {
         return out;
     }
     out.push_str(&weak);
-    if not.is_empty() {
+    let Some(first) = not.first() else {
         out.push_str(&page_footer(data, ""));
         return out;
-    }
+    };
     out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MAX_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
     for st in &not {
         let closest = st["test"]["name"]
@@ -2162,15 +2175,13 @@ fn render_file(run: &str, data: &Value) -> String {
             quote(file)
         ),
     ));
-    if let Some(first) = not.first() {
-        out.push_str(&format!(
-            "inspect a statement: {} runs {} assertions{} {}\n",
-            crate::launcher_command(),
-            quote(run),
-            flags(data),
-            quote(&format!("{file}:{}", first["line"]))
-        ));
-    }
+    out.push_str(&format!(
+        "inspect a statement: {} runs {} assertions{} {}\n",
+        crate::launcher_command(),
+        quote(run),
+        flags(data),
+        quote(&format!("{file}:{}", first["line"]))
+    ));
     out
 }
 

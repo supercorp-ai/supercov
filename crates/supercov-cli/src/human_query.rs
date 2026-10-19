@@ -673,10 +673,8 @@ fn render_needed_obligation(obligation: &CoverageFileObligation) -> String {
         CoverageFileObligation::Point(item) if item.kind == "statement" => {
             "statement not executed".into()
         }
-        CoverageFileObligation::Point(item) if item.kind == "function" => {
-            "function not called".into()
-        }
-        CoverageFileObligation::Point(item) => format!("{} not covered", item.kind),
+        // A point is a statement or a function.
+        CoverageFileObligation::Point(_) => "function not called".into(),
         CoverageFileObligation::Branch(item) => branch_need(&item.missing),
         CoverageFileObligation::Mcdc(item) => {
             condition_gap(&item.missing_condition, &item.missing_outcomes, &item.needs)
@@ -1345,11 +1343,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             lines.push(format!(
                 "mode {}; roots {}; included {}, excluded {}, ambiguous {}",
                 data.mode,
-                if data.roots.is_empty() {
-                    "none".into()
-                } else {
-                    data.roots.join(", ")
-                },
+                // `.` when found automatically, else the roots given.
+                data.roots.join(", "),
                 data.counts.included,
                 data.counts.excluded,
                 data.counts.ambiguous,
@@ -1502,6 +1497,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ),
                 String::new(),
                 format!("Tests touching this file: {}", count(data.total_tests)),
+            ];
+            // The assessment's lines go below the tests touching the file.
+            let assertions_at = lines.len();
+            lines.extend([
                 String::new(),
                 "Gaps".into(),
                 format!(
@@ -1512,7 +1511,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ""
                     }
                 ),
-            ];
+            ]);
             if page.total == 0 && data.counts.total_lines == 0 {
                 // A file the build never compiled, or one with nothing to
                 // run: nothing in it was measured, so nothing is covered.
@@ -1528,13 +1527,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             } else {
                 lines.push(" LINE  STATUS        SOURCE".into());
             }
-            if let Some(at) = lines
-                .iter()
-                .position(|line| line.starts_with("Tests touching this file"))
-            {
-                let assertions = file_assertion_lines(data.assertions.as_ref());
-                lines.splice(at + 1..at + 1, assertions);
-            }
+            lines.splice(
+                assertions_at..assertions_at,
+                file_assertion_lines(data.assertions.as_ref()),
+            );
             for gap in &data.gap_lines {
                 lines.push(format!(
                     "{:>5}  {:<12}  {}",

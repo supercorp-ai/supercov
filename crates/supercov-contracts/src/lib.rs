@@ -969,6 +969,8 @@ mod tests {
         let mut declaration = exact_frontend_declaration();
         declaration.runners[0].runner = "node:test".into();
         validate_frontend_run_declaration(&declaration).unwrap();
+        declaration.runners[0].runner = "vitest2".into();
+        validate_frontend_run_declaration(&declaration).unwrap();
     }
 
     #[test]
@@ -1387,6 +1389,16 @@ mod tests {
                 FrontendDeclarationError::InvalidToken("ID"),
                 Box::new(|d| d.frontend_id = "Java Script".into()),
             ),
+            // A token starts with a lowercase letter and holds no space; the
+            // runner's colon is not allowed in a frontend's ID either.
+            (
+                FrontendDeclarationError::InvalidToken("ID"),
+                Box::new(|d| d.frontend_id = "java script".into()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("ID"),
+                Box::new(|d| d.frontend_id = "node:test".into()),
+            ),
             (
                 FrontendDeclarationError::InvalidToken("version"),
                 Box::new(|d| d.frontend_version = String::new()),
@@ -1404,6 +1416,14 @@ mod tests {
                 Box::new(|d| d.structural_limitations = vec![String::new()]),
             ),
             (
+                FrontendDeclarationError::InvalidToken("structural limitation ID"),
+                Box::new(|d| d.structural_limitations = vec![" dynamic".into()]),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("structural limitation ID"),
+                Box::new(|d| d.structural_limitations = vec!["dyn\tamic".into()]),
+            ),
+            (
                 FrontendDeclarationError::DuplicateStructuralLimitation("dynamic".into()),
                 Box::new(|d| d.structural_limitations = vec!["dynamic".into(), "dynamic".into()]),
             ),
@@ -1417,6 +1437,14 @@ mod tests {
             (
                 FrontendDeclarationError::InvalidToken("runner"),
                 runner(|r| r.runner = "Play wright".into()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("runner"),
+                runner(|r| r.runner = "play wright".into()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("runner"),
+                runner(|r| r.runner = String::new()),
             ),
             (
                 FrontendDeclarationError::RunIdentityNotExact,
@@ -1453,6 +1481,14 @@ mod tests {
                 Box::new(move |d| {
                     let mut bad = limitation("one", &[Scope::Action]);
                     bad.reason = " padded".into();
+                    d.runners[0].limitations = vec![bad];
+                }),
+            ),
+            (
+                FrontendDeclarationError::InvalidLimitationReason("one".into()),
+                Box::new(move |d| {
+                    let mut bad = limitation("one", &[Scope::Action]);
+                    bad.reason = String::new();
                     d.runners[0].limitations = vec![bad];
                 }),
             ),
@@ -1497,6 +1533,20 @@ mod tests {
                     d.runners[0].attribution.assertion = Unavailable;
                     d.runners[0].limitations =
                         vec![limitation("p", &[Scope::Phase, Scope::Assertion])];
+                }),
+            ),
+            // An exact action needs an exact test as well, whatever the phase.
+            (
+                FrontendDeclarationError::ExactActionRequiresExactTestAndPhase,
+                Box::new(move |d| {
+                    d.runners[0].attribution.test = Aggregate;
+                    d.runners[0].attribution.retry = Aggregate;
+                    d.runners[0].attribution.phase = Aggregate;
+                    d.runners[0].attribution.assertion = Unavailable;
+                    d.runners[0].limitations = vec![limitation(
+                        "t",
+                        &[Scope::Test, Scope::Retry, Scope::Phase, Scope::Assertion],
+                    )];
                 }),
             ),
             (

@@ -10694,3 +10694,349 @@ fn the_trash_is_empty_when_a_run_ends() {
     project.measure(&[]);
     assert!(!project.root.join(".supercov/.trash/old-workspace").exists());
 }
+
+/// The read views' odd inputs and thin corners, read as a user meets them:
+/// a depth of nothing, a lone dash, a colon in a file's name, a decision
+/// line holding two, a line with nothing measured on it, and an unassessed
+/// run read through a filter.
+#[test]
+fn the_read_views_name_their_odd_inputs_and_thin_corners() {
+    let project = Project::cart("read-corners");
+    project.write("util/name.js", "export const name = (item) => item.name;\n");
+    project.write(
+        "src/pick.js",
+        "export const pick = (a, b) => ((a && b) ? 1 : (a || b) ? 2 : 3);\n",
+    );
+    project.write(
+        "test/extra.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { name } from \"../util/name.js\";\nimport { pick } from \"../src/pick.js\";\n\ntest(\"names and picks\", () => {\n  assert.equal(name({ name: \"a\" }), \"a\");\n  assert.equal(pick(true, true), 1);\n});\n",
+    );
+    project.commit("corners");
+    let run = project.measure(&[]);
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    for depth in ["0", "-0"] {
+        assert!(
+            on_run(&["files", "--group", "dir", "--depth", depth])
+                .exits(2)
+                .contains("--depth must be a positive integer")
+        );
+    }
+    // A lone dash is a file to look for, not an option.
+    let dash = on_run(&["file", "-"]).exits(2);
+    assert!(dash.contains("Source file not found: -"), "{dash}");
+    assert!(!dash.contains("Unknown option"), "{dash}");
+    // The line is after the last colon; the rest is the file.
+    assert!(
+        on_run(&["line", "no:such.js:2"])
+            .exits(2)
+            .contains("Source file not found: no:such.js")
+    );
+    assert!(
+        on_run(&["gaps", "--format", "jsonl", "--metric"])
+            .exits(2)
+            .contains("--metric must be all, lines, statements, functions, branches, or mcdc")
+    );
+    // A directory with no branch at all has no share of them.
+    let branches = on_run(&["files", "--group", "dir", "--metric", "branches"]).succeeds();
+    assert!(
+        branches
+            .lines()
+            .any(|line| line.starts_with("util ") && line.trim_end().ends_with("—")),
+        "{branches}"
+    );
+    // Two decisions on one line are listed a page at a time.
+    let decisions = on_run(&["decision", "src/pick.js:1", "--limit", "1"]).succeeds();
+    contains_all(
+        &decisions,
+        &[
+            "showing 1-1 of 2 matching decisions",
+            &format!(
+                "next page: supercov runs '{run}' decision 'src/pick.js:1' --offset 1 --limit 1"
+            ),
+        ],
+    );
+    // A line holding only the brace that closes a loop: nothing on it was
+    // measured, and its source is today's.
+    let brace = on_run(&["line", "src/cart.js:5"]).succeeds();
+    contains_all(
+        &brace,
+        &["(read from the current working tree)", "NOT MEASURED"],
+    );
+    assert!(!brace.contains("Coverage details"), "{brace}");
+    // A run never assessed, read through a filter, says how to assess
+    // those tests.
+    let unassessed = on_run(&["assertions", "--kind", "unit"]).succeeds();
+    contains_all(
+        &unassessed,
+        &[
+            "assertions not assessed for this run",
+            &format!("Assess it with `supercov runs {run} assertions assess --kind 'unit'`"),
+        ],
+    );
+}
+
+/// A line's gap is exported with the line it is on, under `--metric lines`
+/// as under every metric, and an export that cannot be written says why.
+#[cfg(target_os = "linux")]
+#[test]
+fn exported_line_gaps_quote_their_line_and_a_failed_export_says_why() {
+    let project = Project::cart("export-lines");
+    let run = project.measure(&[]);
+    let rows = |metric: &str| {
+        project
+            .supercov(&[
+                "runs", &run, "gaps", "--format", "jsonl", "--metric", metric,
+            ])
+            .succeeds()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let lines = rows("lines");
+    // `describe` never ran: its body is a line gap, quoted by what first
+    // goes unrun on it.
+    let body = lines
+        .iter()
+        .find(|row| row["line"] == 20)
+        .expect("line 20 is a gap");
+    assert_eq!(body["kind"], "line");
+    assert_eq!(body["lineSource"], "(item) => item.name");
+    assert!(
+        lines.iter().all(|row| row["lineSource"].is_string()),
+        "{lines:?}"
+    );
+    // Each line reads as `--metric all` quotes it.
+    let all = rows("all");
+    for row in &lines {
+        let same = all
+            .iter()
+            .find(|other| other["line"] == row["line"])
+            .unwrap();
+        assert_eq!(row["lineSource"], same["lineSource"], "{row}");
+    }
+    let file = project
+        .supercov(&["runs", &run, "file", "src/cart.js", "--metric", "lines"])
+        .succeeds();
+    assert!(
+        file.contains("   20  NOT COVERED   (item) => item.name"),
+        "{file}"
+    );
+    assert!(!file.contains("(source unavailable)"), "{file}");
+    // Standard output on a full disk: exit 2, and the reason.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args([
+            "runs", &run, "gaps", "--format", "jsonl", "--metric", "mcdc",
+        ])
+        .current_dir(&project.root)
+        .stdout(std::fs::File::create("/dev/full").unwrap())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("could not write the gaps to standard output: No space left on device"),
+        "{stderr}"
+    );
+}
+
+/// A runner's configuration written since the run reaches only that
+/// runner's tests, as an edit to one that was there does; a configuration
+/// any runner reads reaches every test.
+#[test]
+fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
+    let project = Project::cart("config-added");
+    project.write("playwright.config.js", "export default {};\n");
+    project.commit("playwright");
+    project.measure(&[]);
+    let affected = || {
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--json"])
+            .json()["data"]
+            .clone()
+    };
+    // node:test runs none of them under Playwright or Vitest.
+    project.write("playwright.config.js", "export default { retries: 2 };\n");
+    project.write("vitest.config.js", "export default {};\n");
+    let other = affected();
+    assert_eq!(other["summary"]["affected"], 0, "{other}");
+    assert_eq!(other["workingTree"]["runWide"], serde_json::json!([]));
+    assert_eq!(
+        other["workingTree"]["reasons"],
+        serde_json::json!(["test/build configuration changed"])
+    );
+    // A TypeScript configuration is read whatever the runner.
+    project.write("tsconfig.json", "{}\n");
+    let every = affected();
+    assert_eq!(every["summary"]["affected"], 3, "{every}");
+    assert_eq!(
+        every["workingTree"]["runWide"],
+        serde_json::json!(["test/build configuration changed"])
+    );
+    let text = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    assert!(
+        text.contains("test/build configuration changed (every test)"),
+        "{text}"
+    );
+}
+
+/// A change to hundreds of files no test ran affects no test and still
+/// lists every one of them: the JSON keeps the first files and counts the
+/// rest, rather than refusing the reply.
+#[test]
+fn tests_affected_shortens_a_long_list_of_changed_files_to_fit_one_reply() {
+    const FILES: usize = 600;
+    let project = Project::cart("affected-files");
+    let path = |index: usize| {
+        format!(
+            "src/features/a/directory/named/at/the/length/real/projects/nest/their/modules/module{index}.js"
+        )
+    };
+    for index in 0..FILES {
+        project.write(&path(index), &format!("export const value = {index};\n"));
+    }
+    project.commit("modules");
+    project.measure(&[]);
+    for index in 0..FILES {
+        project.write(
+            &path(index),
+            &format!("export const value = {};\n", index + 1),
+        );
+    }
+    let data = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json()["data"]
+        .clone();
+    assert_eq!(data["summary"]["affected"], 0, "{}", data["summary"]);
+    assert_eq!(data["changedFilesCount"], FILES, "{}", data["truncated"]);
+    let listed = data["changedFiles"].as_array().unwrap().len();
+    assert!(0 < listed && listed < FILES, "{listed}");
+    assert!(
+        data["truncated"].as_array().unwrap().iter().any(|note| note
+            == "the changed files keep their first entries; the text view lists every one"),
+        "{}",
+        data["truncated"]
+    );
+    let text = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    assert!(
+        text.contains(&path(FILES - 1)),
+        "the text view lists every file"
+    );
+}
+
+/// The report says why it will not compare a run with itself, fills its
+/// runs without repeating one, writes nothing where its file is a
+/// directory, opens in the browser, and shows its progress on a terminal.
+#[cfg(unix)]
+#[test]
+fn the_report_refuses_a_run_compared_with_itself_and_opens_when_it_can() {
+    let project = Project::cart("report-edges");
+    let oldest = project.measure(&["--test-name-pattern=total"]);
+    let middle = project.measure(&["--test-name-pattern=shipping"]);
+    let newest = project.measure(&[]);
+    let refused = project
+        .supercov(&[
+            "report",
+            "--no-open",
+            "--compare",
+            "latest",
+            "--output",
+            "r.html",
+        ])
+        .exits(2);
+    assert!(
+        refused.contains(&format!(
+            "report failed: --compare latest is {newest}, the run this report shows; compare it with another run"
+        )),
+        "{refused}"
+    );
+    assert!(!project.root.join("r.html").exists());
+    project
+        .supercov(&[
+            "report",
+            "--no-open",
+            "--compare",
+            &oldest,
+            "--output",
+            "r.html",
+        ])
+        .succeeds();
+    let data = report_data(&project.read("r.html"));
+    let ids = data["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [newest.clone(), oldest.clone(), middle],
+        "the comparison once"
+    );
+    assert_eq!(data["comparisonRunId"], oldest.as_str());
+    // A directory where the report goes: the rename fails and the
+    // temporary file goes with it.
+    std::fs::create_dir_all(project.root.join("reports/supercov-report.html")).unwrap();
+    let blocked = project
+        .supercov(&["report", "--no-open", "--output", "reports"])
+        .exits(2);
+    assert!(
+        blocked.contains(&format!(
+            "report failed: {}: ",
+            project.root.join("reports/supercov-report.html").display()
+        )),
+        "{blocked}"
+    );
+    let left = std::fs::read_dir(project.root.join("reports"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(left, ["supercov-report.html"]);
+    // Opened the way the desktop opens a file.
+    project.write_script(
+        "bin/xdg-open",
+        "#!/bin/sh\necho \"$1\" > \"$(dirname \"$0\")/../opened.txt\"\n",
+    );
+    let path = format!(
+        "{}:{}",
+        project.root.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let opened = project
+        .supercov_with(&["report", "--output", "r.html"], &[("PATH", &path)])
+        .succeeds();
+    assert!(
+        opened.contains("[supercov] opened the report in your browser"),
+        "{opened}"
+    );
+    let started = std::time::Instant::now();
+    while !project.root.join("opened.txt").exists() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let started = std::time::Instant::now();
+    while !project.read("opened.txt").contains("r.html") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // On a terminal, each run as it is prepared; a filter no test of the
+    // run passes ends it with why.
+    let shown = common::OnTerminal::start(&project, &["report", "--no-open", "--output", "t.html"]);
+    let (code, seen) = shown.finish();
+    assert_eq!(code, 0, "{seen}");
+    assert!(
+        seen.contains(&format!("[supercov] preparing report run 1/3: {newest}")),
+        "{seen}"
+    );
+    let none = common::OnTerminal::start(&project, &["report", "--no-open", "--tag", "nothing"]);
+    let (code, seen) = none.finish();
+    assert_eq!(code, 2, "{seen}");
+    assert!(seen.contains("report failed: "), "{seen}");
+}

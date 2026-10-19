@@ -1703,6 +1703,21 @@ fn a_change_more_tests_ran_than_are_asked_says_so() {
             );
         }
     }
+    // `tests affected` reads those answers beside the assessment's: the
+    // forty asked catch the change, and the five never asked are unassessed,
+    // not missing it, since not every test that ran it was asked.
+    let affected = project
+        .supercov(&["runs", &run, "tests", "affected", "--json"])
+        .json()["data"]
+        .clone();
+    assert_eq!(affected["assertions"]["changedStatements"], 1, "{affected}");
+    let tests = &affected["assertions"]["tests"];
+    assert_eq!(
+        (tests["catches"].as_u64(), tests["unassessed"].as_u64()),
+        (Some(40), Some(5)),
+        "{tests}"
+    );
+    assert_eq!(tests["misses"], 0, "{tests}");
 }
 
 #[test]
@@ -3541,4 +3556,435 @@ fn assessments_and_reviews_refuse_plainly_and_say_when_nothing_changed() {
             .exits(2)
             .contains("make sure nonexistent-ref exists locally")
     );
+}
+
+/// A node:test project of these files, committed.
+fn node_project(label: &str, files: &[(&str, &str)]) -> Project {
+    let project = Project::empty(label);
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" } }"#,
+    );
+    for (file, contents) in files {
+        project.write(file, contents);
+    }
+    project.git(&["init", "-q"]);
+    project.commit(label);
+    project
+}
+
+/// A file's statements not asserted, at the default page: the next page is
+/// named by its offset alone.
+#[test]
+fn a_file_s_statements_page_at_twenty_by_default() {
+    let mut body = String::from("  let a0 = x;\n");
+    for i in 1..=24 {
+        body.push_str(&format!("  const a{i} = a{} + {i};\n", i - 1));
+    }
+    let project = node_project(
+        "assert-default-page",
+        &[
+            (
+                "src/steps.js",
+                &format!("export function steps(x) {{\n{body}  return a24;\n}}\n"),
+            ),
+            (
+                "test/steps.test.js",
+                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { steps } from \"../src/steps.js\";\n\ntest(\"steps\", () => {\n  assert.ok(steps(1) > 0);\n});\n",
+            ),
+        ],
+    );
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let total = project
+        .supercov(&["runs", &run, "assertions", "src/steps.js", "--json"])
+        .json()["data"]["page"]["total"]
+        .as_u64()
+        .unwrap();
+    assert!(total > 20, "{total}");
+    let file = project
+        .supercov(&["runs", &run, "assertions", "src/steps.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            &format!("showing 1-20 of {total}"),
+            &format!("next page: supercov runs '{run}' assertions 'src/steps.js' --offset 20\n"),
+        ],
+    );
+}
+
+/// An assessment of a run whose tests ran none of its code asks nothing,
+/// and every reading says so.
+#[test]
+fn an_assessment_with_nothing_to_ask_reads_as_such() {
+    let project = node_project(
+        "assert-nothing",
+        &[
+            ("src/cart.js", common::CART),
+            (
+                "test/noop.test.js",
+                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\ntest(\"noop\", () => {\n  assert.ok(true);\n});\n",
+            ),
+        ],
+    );
+    let (base, seen) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    let assessed = project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    assert!(
+        assessed.contains(&format!(
+            "Run {run}: nothing asserted (0 of 0 executed statements)"
+        )),
+        "{assessed}"
+    );
+    assert!(!assessed.contains("showing "), "{assessed}");
+    assert!(seen.lock().unwrap().is_empty(), "nothing was asked");
+    let unknown = project
+        .supercov(&["runs", &run, "assertions", "--test", "foo"])
+        .exits(2);
+    assert!(
+        unknown.contains("no assessed test is named foo; this assessment asked no test"),
+        "{unknown}"
+    );
+    let file = project
+        .supercov(&["runs", &run, "file", "src/cart.js", "--json"])
+        .json();
+    assert_eq!(file["data"]["assertions"]["statements"], 0, "{file}");
+    assert!(file["data"]["assertions"]["percentage"].is_null(), "{file}");
+    let text = project
+        .supercov(&["runs", &run, "file", "src/cart.js"])
+        .succeeds();
+    assert!(!text.contains("Assertions"), "{text}");
+}
+
+/// After an assessment, a test that failed must run whatever changed, and
+/// one that ran a changed file but no statement the assessment asked about
+/// is unassessed against the change.
+#[test]
+fn an_assessed_run_says_which_affected_tests_were_never_judged_against_the_change() {
+    let project = Project::cart("affected-unassessed");
+    project.write(
+        "test/broken.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { shipping } from \"../src/cart.js\";\n\ntest(\"broken\", () => {\n  assert.equal(shipping(60, false), 1);\n});\n",
+    );
+    project.commit("broken");
+    project.supercov(&["--", "node", "--test"]).exits(1);
+    let run = project.latest();
+    let (base, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    // A declaration added: the file's shape changed, no statement did.
+    let cart = project.read("src/cart.js");
+    project.write(
+        "src/cart.js",
+        &format!("{cart}\nexport function extra() {{\n  return 1;\n}}\n"),
+    );
+    let data = project
+        .supercov(&["runs", &run, "tests", "affected", "--json"])
+        .json()["data"]
+        .clone();
+    assert_eq!(data["assertions"]["changedStatements"], 0, "{data}");
+    let verdicts = data["affected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| {
+            (
+                test["name"].as_str().unwrap().to_owned(),
+                test["assertion"]["verdict"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(verdicts[0], ("broken".to_owned(), "must run".to_owned()));
+    assert!(
+        verdicts[1..]
+            .iter()
+            .all(|(_, verdict)| verdict == "unassessed"),
+        "{verdicts:?}"
+    );
+    assert_eq!(verdicts.len(), 4, "{verdicts:?}");
+    let text = project
+        .supercov(&["runs", &run, "tests", "affected"])
+        .succeeds();
+    assert!(
+        text.contains("not assessed against the changed code"),
+        "{text}"
+    );
+    assert!(!text.contains("Assertions:"), "{text}");
+}
+
+/// On a terminal, an assessment says as it goes how many requests it has
+/// sent and how many statements are still being asked.
+#[cfg(unix)]
+#[test]
+fn an_assessment_on_a_terminal_shows_its_progress() {
+    let project = Project::cart("assert-terminal");
+    let run = project.measure(&[]);
+    let (base, seen) = gateway(MODEL, answer_no);
+    let terminal = common::OnTerminal::start_with(
+        &project,
+        &["runs", &run, "assertions", "assess"],
+        &through(&base),
+    );
+    let (code, shown) = terminal.finish();
+    assert_eq!(code, 0, "{shown}");
+    assert!(
+        shown.contains("[supercov] assertions: ")
+            && shown.contains(" statements still being asked"),
+        "{shown}"
+    );
+    assert!(!seen.lock().unwrap().is_empty());
+}
+
+/// A statement asked of an earlier test and then of a later one is judged
+/// by the stronger answer, whichever came first.
+#[test]
+fn a_later_test_s_stronger_answer_decides_a_statement() {
+    let shipping = |name: &str| {
+        format!(
+            "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ shipping }} from \"../src/cart.js\";\n\ntest(\"{name}\", () => {{\n  assert.equal(shipping(60, false), 0);\n}});\n"
+        )
+    };
+    let project = node_project(
+        "assert-later",
+        &[
+            ("src/cart.js", common::CART),
+            ("test/a.test.js", &shipping("a ships")),
+            ("test/b.test.js", &shipping("b ships")),
+        ],
+    );
+    let run = project.measure(&[]);
+    let (no, _) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(
+            &[
+                "runs",
+                &run,
+                "assertions",
+                "assess",
+                "--test-file",
+                "test/a.test.js",
+            ],
+            &through(&no),
+        )
+        .succeeds();
+    let (yes, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&yes))
+        .succeeds();
+    let statement = project
+        .supercov(&["runs", &run, "assertions", "src/cart.js:16"])
+        .succeeds();
+    let caught = statement
+        .find("90%  would fail   b ships (test/b.test.js)")
+        .unwrap_or_else(|| panic!("{statement}"));
+    let passed = statement
+        .find("10%  would pass   a ships (test/a.test.js)")
+        .unwrap_or_else(|| panic!("{statement}"));
+    assert!(caught < passed, "{statement}");
+    assert!(statement.contains("Asserted"), "{statement}");
+}
+
+/// Which files no test was asked from: every one when few, and through a
+/// filter that picks tests of one name across files, the asked test's own
+/// answer told from another file's test of that name.
+#[test]
+fn files_left_unasked_are_named_in_full_and_through_a_filter() {
+    let total = |name: &str| {
+        format!(
+            "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ total }} from \"../src/cart.js\";\n\ntest(\"{name}\", () => {{\n  assert.ok(total([{{ price: 1, quantity: 1 }}]) >= 0);\n}});\n"
+        )
+    };
+    // Twenty files: eighteen are asked, two are not, and both are named.
+    let files = (0..20)
+        .map(|i| {
+            (
+                format!("test/t{i:02}.test.js"),
+                total(&format!("sum {i:02}")),
+            )
+        })
+        .chain([("src/cart.js".to_owned(), common::CART.to_owned())])
+        .collect::<Vec<_>>();
+    let borrowed = files
+        .iter()
+        .map(|(file, contents)| (file.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let few = node_project("unasked-few", &borrowed);
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = few.measure(&[]);
+    few.supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let statement = few
+        .supercov(&["runs", &run, "assertions", "src/cart.js:2"])
+        .succeeds();
+    let named = statement
+        .lines()
+        .find(|line| line.contains("No test was asked from "))
+        .unwrap_or_else(|| panic!("{statement}"));
+    assert!(
+        named.contains("Not asked: 2 test(s). No test was asked from 2 file(s) that run it: "),
+        "{named}"
+    );
+    assert!(!named.contains(", and "), "{named}");
+
+    // Twenty-five files, twenty of whose tests share a name, read through
+    // a filter that picks them all.
+    let files = (0..25)
+        .map(|i| {
+            let name = if i < 20 {
+                "sum".to_owned()
+            } else {
+                format!("sum {i}")
+            };
+            (format!("test/t{i:02}.test.js"), total(&name))
+        })
+        .chain([("src/cart.js".to_owned(), common::CART.to_owned())])
+        .collect::<Vec<_>>();
+    let borrowed = files
+        .iter()
+        .map(|(file, contents)| (file.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let many = node_project("unasked-named", &borrowed);
+    let run = many.measure(&[]);
+    many.supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let filtered = many
+        .supercov(&[
+            "runs",
+            &run,
+            "assertions",
+            "src/cart.js:2",
+            "--title",
+            "sum",
+        ])
+        .succeeds();
+    assert!(
+        filtered.contains("Not asked: 7 test(s). No test was asked from 7 file(s) that run it: "),
+        "{filtered}"
+    );
+}
+
+/// A test whose own code is over Jev's limit is never asked: its request is
+/// split down to one question, refused, and the other tests are asked in its
+/// place. The reading says how many were left unasked, and the statement
+/// that only the small tests were asked about says those not asked were not
+/// judged.
+#[test]
+fn a_test_over_jev_s_limit_is_left_unasked_and_counted() {
+    let project = Project::cart("assert-over-limit");
+    let words = (0..30_000)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    project.write(
+        "test/fixture.test.js",
+        &format!(
+            "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ total, shipping }} from \"../src/cart.js\";\n\ntest(\"reads the fixture\", () => {{\n  const fixture = \"{words}\";\n  assert.ok(fixture.length > 0);\n  assert.equal(total([{{ price: 10, quantity: 2 }}]), 20);\n  assert.equal(shipping(60, false), 0);\n}});\n"
+        ),
+    );
+    project.commit("fixture");
+    let run = project.measure(&[]);
+    let estimate = project
+        .supercov(&["runs", &run, "assertions", "assess", "--dry-run", "--json"])
+        .json();
+    assert!(
+        estimate["data"]["firstRound"]["requests"].as_u64() > Some(0),
+        "{estimate}"
+    );
+    let (base, seen) = gateway(MODEL, answer_no);
+    let assessed = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--json"],
+            &through(&base),
+        )
+        .json();
+    let over = assessed["data"]["summary"]["pairsOverLimit"]
+        .as_u64()
+        .unwrap();
+    assert!(over > 0, "{assessed}");
+    let asked = seen.lock().unwrap();
+    assert!(!asked.is_empty());
+    assert!(
+        asked
+            .iter()
+            .all(|(_, _, request)| request["state"]["test"]["file"] != "test/fixture.test.js"),
+        "the test over the limit is never sent"
+    );
+    let overview = project.supercov(&["runs", &run, "assertions"]).succeeds();
+    assert!(
+        overview.contains(&format!(
+            "Not asked: {over} statement(s) of a test whose request is over Jev's limit even with one question; that test was not judged on them."
+        )),
+        "{overview}"
+    );
+    let statement = project
+        .supercov(&["runs", &run, "assertions", "src/cart.js:16"])
+        .succeeds();
+    assert!(
+        statement.contains("the tests not asked were not judged"),
+        "{statement}"
+    );
+}
+
+/// More tests to ask than one round sends: forty requests go in the first,
+/// the last in the next. Read back by line, a run assessed over two files
+/// gives the statement on that line of that file.
+#[test]
+fn a_round_sends_forty_requests_and_the_next_one_the_rest() {
+    let mut functions = String::new();
+    let mut files = Vec::new();
+    for i in 0..41 {
+        functions.push_str(&format!(
+            "export function f{i}(x) {{\n  return x + {i};\n}}\n"
+        ));
+        files.push((
+            format!("test/f{i:02}.test.js"),
+            format!(
+                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ f{i} }} from \"../src/many.js\";\n\ntest(\"f{i}\", () => {{\n  assert.equal(f{i}(1), {});\n}});\n",
+                i + 1
+            ),
+        ));
+    }
+    files.push(("src/many.js".to_owned(), functions));
+    files.push(("src/cart.js".to_owned(), common::CART.to_owned()));
+    files.push((
+        "test/cart.test.js".to_owned(),
+        common::CART_TESTS.to_owned(),
+    ));
+    let borrowed = files
+        .iter()
+        .map(|(file, contents)| (file.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let project = node_project("assert-rounds", &borrowed);
+    let run = project.measure(&[]);
+    let (base, seen) = gateway(MODEL, answer_yes);
+    let assessed = project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let sent = seen.lock().unwrap().len();
+    assert!(sent > 40, "{sent}");
+    assert!(
+        assessed.contains(&format!("Assessed by Jev: {sent} requests")),
+        "{assessed}"
+    );
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, _, request)| request["state"]["test"]["file"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(asked.contains("test/f40.test.js"), "{asked:?}");
+    let line = project
+        .supercov(&["runs", &run, "line", "src/cart.js:16", "--json"])
+        .json();
+    let statements = line["data"]["assertions"]["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 1, "{line}");
+    assert_eq!(statements[0]["text"], "return 0;");
+    assert_eq!(statements[0]["asserted"], true);
 }

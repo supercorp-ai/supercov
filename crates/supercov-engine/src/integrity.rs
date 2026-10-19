@@ -667,6 +667,14 @@ pub fn globally_tracked(path: &str) -> bool {
     tracked_manifest(name) || configuration_file(Path::new(name))
 }
 
+/// The configuration files below `root` as the fingerprint walks for them,
+/// without the ones a project names elsewhere.
+pub(crate) fn walked_configuration_files(root: &Path) -> Result<Vec<PathBuf>, IntegrityError> {
+    let mut files = Vec::new();
+    walk_files(root, &configuration_file, &mut files)?;
+    Ok(files)
+}
+
 fn configuration_files(
     root: &Path,
     project: &CoverageProject,

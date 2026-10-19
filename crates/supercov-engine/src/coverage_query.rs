@@ -2536,14 +2536,25 @@ pub fn coverage_file_detail_from(
         .chain(functions.iter())
         .chain(branches.iter())
         .chain(mcdc.iter())
-        .filter(|obligation| obligation_matches_metric(obligation, options.metric))
-        .cloned()
         .collect::<Vec<_>>();
     obligations.sort_by(|left, right| {
         left.line()
             .cmp(&right.line())
             .then_with(|| left.kind().cmp(right.kind()))
     });
+    // A line obligation quotes nothing of its own: under one metric its line
+    // reads as every metric quotes it.
+    let mut line_sources = BTreeMap::new();
+    for obligation in &obligations {
+        if let Some(source) = obligation_source(obligation) {
+            line_sources.entry(obligation.line()).or_insert(source);
+        }
+    }
+    let obligations = obligations
+        .into_iter()
+        .filter(|obligation| obligation_matches_metric(obligation, options.metric))
+        .cloned()
+        .collect::<Vec<_>>();
     let mut limitations = read
         .limitations
         .get(&file)
@@ -2600,11 +2611,15 @@ pub fn coverage_file_detail_from(
     let gap_lines = grouped
         .into_iter()
         .map(|(line, (obligations, limitations))| {
-            let source = obligations.iter().find_map(obligation_source).or_else(|| {
-                limitations
-                    .iter()
-                    .find_map(|value| compact_source(&value.source))
-            });
+            let source = obligations
+                .iter()
+                .find_map(obligation_source)
+                .or_else(|| {
+                    limitations
+                        .iter()
+                        .find_map(|value| compact_source(&value.source))
+                })
+                .or_else(|| line_sources.get(&line).cloned());
             // An MC/DC condition can be evaluated without anything on its own
             // line being recorded, so only branch and point gaps can say a
             // line never ran.

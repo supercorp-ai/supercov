@@ -521,6 +521,11 @@ pub struct OnTerminal {
 #[cfg(unix)]
 impl OnTerminal {
     pub fn start(project: &Project, args: &[&str]) -> Self {
+        Self::start_with(project, args, &[])
+    }
+
+    /// `start`, with these variables set as well.
+    pub fn start_with(project: &Project, args: &[&str], env: &[(&str, &str)]) -> Self {
         use std::os::{
             fd::{AsRawFd, FromRawFd},
             unix::process::CommandExt,
@@ -555,6 +560,7 @@ impl OnTerminal {
         ] {
             command.env_remove(name);
         }
+        command.envs(env.iter().copied());
         // SAFETY: both calls are safe between fork and exec. The terminal
         // becomes the new session's, and its keys go to Supercov's group.
         unsafe {

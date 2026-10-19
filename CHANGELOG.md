@@ -84,6 +84,12 @@
 - `line <file>:<n>` past the end of the file read as a line the run did not measure, and `:0` showed line 1 as line 0; both are refused now.
 - `summary` and `scope` with a `--kind` or `--runner` no test has said the coverage index was invalid; they now say no tests match, as the other queries do.
 - The assertion assessment asked whether a test catches a Rust `let Ok(x) = ... else` changing to `Default::default()`, a value a `Result` does not have; it now asks about the other variant.
+- `gaps --format jsonl` that could not write to standard output (a full disk) exited `2` without a word; it says why. A reader that stops early, as `head` does, still ends it quietly.
+- `gaps --format jsonl --metric lines` rows carried no `lineSource`, and `file --metric lines` showed `(source unavailable)` for each line, while every other metric quotes the line; a line gap quotes its line as `--metric all` does.
+- `tests affected --json` after a change to more files than one reply holds failed with `Response too large` when few tests were affected; `changedFiles` (and the changed statements not asserted) keep their first entries, `changedFilesCount` counts them all, and `truncated` says so.
+- `tests affected` read a Playwright, Vitest, Jest or AVA configuration added since the run as a change to every test, while an edit to one already there reached only that runner's tests; an added one now reaches only its runner's tests too. A configuration any runner reads, such as `tsconfig.json`, still reaches every test.
+- `report --compare latest` on the latest run compared the run with itself; it is refused, naming the run.
+- `assertions` says how many statements were never asked of a test whose request is over Jev's limit even with one question; only `--json` counted them (`pairsOverLimit`), and the statement view said only that the tests not asked were not judged.
 
 ## 4.19.0
 

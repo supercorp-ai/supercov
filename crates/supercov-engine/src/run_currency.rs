@@ -204,6 +204,17 @@ pub fn configuration_file(file: &str) -> bool {
     crate::integrity::configuration_file(Path::new(file))
 }
 
+/// The configuration files in the checkout now, relative to `root`, found as
+/// the fingerprint finds them; none when the checkout cannot be walked.
+pub fn configuration_files_in(root: &Path) -> Vec<String> {
+    crate::integrity::walked_configuration_files(root)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|file| file.strip_prefix(root).ok())
+        .map(|file| file.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
 /// A file that sits with the tests by its path, as the fingerprint's test
 /// domain finds them: in a `test`, `tests` or `__tests__` directory, or named
 /// for tests.

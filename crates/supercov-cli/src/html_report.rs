@@ -275,9 +275,14 @@ fn selected_runs<'a>(
     if let Some(selector) = options.comparison.as_deref() {
         let comparison =
             select_run(inventory, Some(selector)).map_err(|error| error.to_string())?;
-        if ids.insert(comparison.id.as_str()) {
-            runs.push(comparison);
+        // `--compare latest` on the latest run compared it with itself.
+        if !ids.insert(comparison.id.as_str()) {
+            return Err(format!(
+                "--compare {selector} is {}, the run this report shows; compare it with another run",
+                comparison.id
+            ));
         }
+        runs.push(comparison);
     }
     let selected_position = inventory
         .runs
@@ -895,9 +900,7 @@ fn render_html(bundle: &ReportBundle) -> Result<Vec<u8>, String> {
         .map_err(|error| error.to_string())?;
     let compressed = gzip.finish().map_err(|error| error.to_string())?;
     let encoded = STANDARD.encode(compressed);
-    if REPORT_TEMPLATE.matches(PAYLOAD_MARKER).count() != 1 {
-        return Err("embedded report template has an invalid payload marker".into());
-    }
+    // The template holds one marker, which a unit test checks.
     Ok(REPORT_TEMPLATE
         .replacen(PAYLOAD_MARKER, &encoded, 1)
         .into_bytes())
@@ -956,21 +959,18 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn open_report(path: &Path) -> Result<(), String> {
-    let mut command = if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(path);
-        command
-    } else if cfg!(target_os = "windows") {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
         let mut command = Command::new("cmd");
         command.args(["/C", "start", ""]);
-        command.arg(path);
-        command
-    } else {
-        let mut command = Command::new("xdg-open");
-        command.arg(path);
         command
     };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = Command::new("xdg-open");
     command
+        .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1132,6 +1132,12 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The data replaces the template's one marker.
+    #[test]
+    fn the_report_template_holds_one_payload_marker() {
+        assert_eq!(REPORT_TEMPLATE.matches(PAYLOAD_MARKER).count(), 1);
+    }
 
     /// A report is titled by the package's name when it has a usable one,
     /// and by its directory otherwise.
