@@ -41,6 +41,31 @@ pub struct PreparedRustProject {
     pub preparation: RustPreparationTimings,
 }
 
+#[cfg(test)]
+impl PreparedRustProject {
+    /// A workspace with nothing instrumented, for tests of what runs in it.
+    pub(crate) fn empty(workspace_root: PathBuf) -> Self {
+        Self {
+            target_directory: workspace_root.join("target"),
+            workspace_root,
+            source_files: Vec::new(),
+            crate_roots: Vec::new(),
+            runtime_module: String::new(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: Vec::new(),
+                points: Vec::new(),
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+            },
+            probes: Default::default(),
+            preparation: Default::default(),
+        }
+    }
+}
+
 /// Where preparing the instrumented workspace spent its time, for
 /// `SUPERCOV_PHASE_TIMING=1`.
 #[derive(Debug, Clone, Default, PartialEq)]

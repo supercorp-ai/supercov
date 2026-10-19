@@ -108,6 +108,7 @@
 - A source tool (Biome, cspell, knip and the like) that replaced a file with a directory left the workspace without it and printed "what … wrote could not be brought into the workspace"; the directory is the workspace's now, as it would have been without Supercov.
 - A browser suite run with `SUPERCOV_SOURCE_ROOTS` naming only its JavaScript (`src`) failed with `SUPERCOV_SOURCE_ROOTS=src left no Python source to measure` when the project also held Python, and likewise for Ruby; roots that leave a server language nothing mean there is no such server to measure.
 - On Linux and macOS, a Cargo target runner, `build.rustc` or compiler wrapper configured as a name holding a backslash (`tools\run`) was run from the project directory, while Cargo looks such a name up on `PATH`. Supercov now runs the program Cargo runs.
+- `cargo +<toolchain> test` compiled its doctests with the default toolchain's rustdoc, so each failed with "found crate compiled by an incompatible version of rustc" (E0514) when the two toolchains differed. The doctests now build with the toolchain the command names, as do the library paths its tests load.
 
 ## 4.19.0
 

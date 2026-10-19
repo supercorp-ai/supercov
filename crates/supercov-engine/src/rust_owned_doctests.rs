@@ -257,7 +257,7 @@ pub(crate) fn run_doctests(
     let program = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(io_error)?;
-    let real_rustdoc = real_rustdoc()?;
+    let real_rustdoc = real_rustdoc(std::env::var_os("RUSTDOC"), project, invocation)?;
     let output = crate::child_signal_guard::output(
         Command::new(&invocation.program)
             .args(&selection.doctest_arguments)
@@ -410,13 +410,17 @@ pub(crate) fn run_doctests(
     Ok(results)
 }
 
-/// The rustdoc Cargo would have run: whatever `RUSTDOC` already named, else
-/// the one beside the selected toolchain's rustc.
-fn real_rustdoc() -> Result<PathBuf, RustTestRunnerError> {
-    if let Some(configured) = std::env::var_os("RUSTDOC") {
+/// The rustdoc Cargo would have run: whatever `RUSTDOC` (`configured`)
+/// already named, else the one beside the selected toolchain's rustc.
+fn real_rustdoc(
+    configured: Option<std::ffi::OsString>,
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+) -> Result<PathBuf, RustTestRunnerError> {
+    if let Some(configured) = configured {
         return Ok(PathBuf::from(configured));
     }
-    let sysroot = rustc_sysroot()?;
+    let sysroot = rustc_sysroot(project, invocation)?;
     let rustdoc = sysroot
         .join("bin")
         .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX));
@@ -1683,5 +1687,147 @@ mod tests {
         ] {
             assert_eq!(fence_says_ignore(name, &root), ignored, "{name}");
         }
+    }
+
+    #[test]
+    fn a_rustdoc_the_user_configured_is_the_one_run() {
+        let project = PreparedRustProject::empty(std::env::temp_dir());
+        let invocation = crate::rust_test_runner::cargo_invocation(
+            &project.workspace_root,
+            &["cargo".into(), "test".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            real_rustdoc(Some("/opt/rustdoc-wrapper".into()), &project, &invocation).unwrap(),
+            PathBuf::from("/opt/rustdoc-wrapper")
+        );
+    }
+
+    /// `run_doctests` against a script standing in for Cargo, which leaves
+    /// in the wrapper's results root what `setup` writes there, prints
+    /// `stdout` and `stderr`, and exits with `status`.
+    #[cfg(unix)]
+    fn doctests_through(
+        command: &[&str],
+        setup: &str,
+        stdout: &str,
+        stderr: &str,
+        status: i32,
+    ) -> (Result<Vec<RawTestResult>, RustTestRunnerError>, String, i32) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-fake-doctests-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        fs::write(root.join("stdout"), stdout).unwrap();
+        fs::write(root.join("stderr"), stderr).unwrap();
+        fs::write(
+            root.join("cargo.draft"),
+            format!(
+                "#!/bin/sh\ncd \"$SUPERCOV_DOCTEST_WRAPPER_ROOT/packages\"\n{setup}\ncat '{0}/stdout'\ncat '{0}/stderr' >&2\nexit {status}\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        // Copied by another process, so no descriptor to it is held open
+        // here while a test thread forks.
+        assert!(
+            Command::new("cp")
+                .arg(root.join("cargo.draft"))
+                .arg(root.join("cargo"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::set_permissions(root.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+        let project = PreparedRustProject::empty(root.join("workspace"));
+        let mut words = vec![root.join("cargo").display().to_string()];
+        words.extend(command.iter().map(|word| (*word).to_owned()));
+        let invocation =
+            crate::rust_test_runner::cargo_invocation(&project.workspace_root, &words).unwrap();
+        let selection =
+            crate::rust_test_runner::rust_cargo_execution_selection(&invocation).unwrap();
+        let mut diagnostics = Vec::new();
+        let mut exit = 0;
+        let results = run_doctests(
+            &project,
+            &invocation,
+            &selection,
+            &root.join("results"),
+            "run",
+            &mut diagnostics,
+            &mut exit,
+        );
+        fs::remove_dir_all(&root).ok();
+        (results, String::from_utf8(diagnostics).unwrap(), exit)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_package_whose_doctests_could_not_be_attributed_fails_the_run() {
+        let (results, _, _) = doctests_through(
+            &["test", "--doc"],
+            "printf 'doctest x ran more than once' > 00000000.error",
+            "",
+            "",
+            101,
+        );
+        let error = results.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "doctest attribution could not be established: doctest x ran more than once"
+            ),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_library_to_document_is_no_doctests_unless_they_were_asked_for() {
+        let stderr = "error: no library targets found in package `worker`";
+        let (results, _, exit) = doctests_through(&["test"], "", "", stderr, 101);
+        assert!(results.unwrap().is_empty());
+        assert_eq!(exit, 0);
+        let (results, _, _) = doctests_through(&["test", "--doc"], "", "", stderr, 101);
+        assert!(
+            matches!(results, Err(RustTestRunnerError::CargoFailed(output)) if output == stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_doctest_the_report_does_not_name_is_named() {
+        let record = serde_json::json!({
+            "package": "fixture",
+            "manifest_dir": "/nowhere",
+            "cases": [
+                {"name": "src/lib.rs - unseen (line 1)", "status": "failed", "evidence": null},
+                {"name": "src/lib.rs - seen (line 5)", "status": "failed", "evidence": null},
+            ],
+            "listed": 2,
+            "exit_code": 101,
+        });
+        let (results, diagnostics, exit) = doctests_through(
+            &["test", "--doc"],
+            &format!("printf '%s' '{record}' > 00000000.json"),
+            "\nrunning 1 test\ntest src/lib.rs - seen (line 5) ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            "",
+            101,
+        );
+        assert_eq!(results.unwrap().len(), 2);
+        assert_eq!(exit, 101);
+        assert!(
+            diagnostics.contains("[supercov] Rust doctest failed: src/lib.rs - unseen (line 1)"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("[supercov] Rust doctest failed: src/lib.rs - seen"),
+            "{diagnostics}"
+        );
     }
 }

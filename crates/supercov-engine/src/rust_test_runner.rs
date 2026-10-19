@@ -1475,10 +1475,21 @@ pub(crate) fn instrumented_stack_environment() -> Vec<(&'static str, &'static st
     }
 }
 
-/// One path the selected toolchain reports through `rustc --print`.
-fn rustc_print_path(request: &str) -> Result<PathBuf, RustTestRunnerError> {
+/// One path the selected toolchain reports through `rustc --print`: the
+/// toolchain the command names with `+toolchain`, else the one rustup picks
+/// in the workspace, as it does for Cargo there.
+fn rustc_print_path(
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+    request: &str,
+) -> Result<PathBuf, RustTestRunnerError> {
+    let selector = invocation.arguments[..invocation.command_position()]
+        .iter()
+        .find(|argument| argument.starts_with('+'));
     let output = Command::new("rustc")
+        .args(selector)
         .args(["--print", request])
+        .current_dir(&project.workspace_root)
         .output()
         .map_err(|error| {
             RustTestRunnerError::Launch(format!("rustc --print {request}: {error}"))
@@ -1495,15 +1506,21 @@ fn rustc_print_path(request: &str) -> Result<PathBuf, RustTestRunnerError> {
 }
 
 /// The selected toolchain's sysroot, as `rustc --print sysroot` reports it.
-pub(crate) fn rustc_sysroot() -> Result<PathBuf, RustTestRunnerError> {
-    rustc_print_path("sysroot")
+pub(crate) fn rustc_sysroot(
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+) -> Result<PathBuf, RustTestRunnerError> {
+    rustc_print_path(project, invocation, "sysroot")
 }
 
 /// The directory holding the toolchain's own dynamic libraries
 /// (`<sysroot>/lib/rustlib/<host>/lib`), where libstd's dylib lives; the
 /// plain `<sysroot>/lib` no longer holds it.
-pub(crate) fn rustc_target_libdir() -> Result<PathBuf, RustTestRunnerError> {
-    rustc_print_path("target-libdir")
+pub(crate) fn rustc_target_libdir(
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+) -> Result<PathBuf, RustTestRunnerError> {
+    rustc_print_path(project, invocation, "target-libdir")
 }
 
 /// The dynamic library search path Cargo gives a test binary it runs: the
@@ -2217,7 +2234,7 @@ pub fn run_prepared_rust_tests(
     let target_libdir = if artifacts.is_empty() {
         PathBuf::new()
     } else {
-        rustc_target_libdir()?
+        rustc_target_libdir(project, &invocation)?
     };
     // A binary none of whose tests were asked for, and how many it has.
     let mut unasked = Vec::new();
@@ -2641,6 +2658,70 @@ mod tests {
         frontend_protocol::validate_frontend_report_request,
         rust_project::prepare_rust_project,
     };
+
+    /// `cargo +toolchain test` builds with that toolchain, so the rustdoc
+    /// that compiles its doctests and the dynamic libraries its tests load
+    /// must come from it too.
+    #[cfg(unix)]
+    #[test]
+    fn the_toolchain_is_the_one_the_command_selects() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-toolchain-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // A custom toolchain whose rustc reports a sysroot of its own.
+        fs::create_dir_all(root.join("toolchain/bin")).unwrap();
+        fs::write(
+            root.join("toolchain/bin/rustc.draft"),
+            "#!/bin/sh\necho /custom-toolchain-sysroot\n",
+        )
+        .unwrap();
+        let copied = Command::new("cp")
+            .arg(root.join("toolchain/bin/rustc.draft"))
+            .arg(root.join("toolchain/bin/rustc"))
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        fs::set_permissions(
+            root.join("toolchain/bin/rustc"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        let project = PreparedRustProject::empty(root.join("workspace"));
+        let invocation = |command: &[&str]| {
+            cargo_invocation(
+                &project.workspace_root,
+                &command
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        // rustup takes a toolchain's directory after `+` as well as its name.
+        let selector = format!("+{}", root.join("toolchain").display());
+        assert_eq!(
+            rustc_sysroot(
+                &project,
+                &invocation(&["cargo", &selector, "test", "--doc"])
+            )
+            .unwrap(),
+            PathBuf::from("/custom-toolchain-sysroot")
+        );
+        let default = rustc_sysroot(&project, &invocation(&["cargo", "test", "--doc"])).unwrap();
+        assert!(
+            default.join("bin/rustdoc").is_file(),
+            "{}",
+            default.display()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_test_binary_is_announced_as_cargo_announces_it() {
