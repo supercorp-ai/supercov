@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `security --run` says every line of the flagged files ran when none was left unexecuted, instead of `0 flagged files have lines no test ... executed`, and counts one file in the singular.
 - `security --run` names the callers it saw in tests but did not ask about, past three per function, instead of dropping them. A list of more than ten cross-file paths says how many more there are.
 - `security` no longer reports a cross-file path from a caller to every function of a module it imports only the default export of; a default import reaches the function the module exports as default.
 - `line` on a file left out of scope (under no source root, and loaded by nothing) gives the reason on every line, instead of saying the line holds no code.

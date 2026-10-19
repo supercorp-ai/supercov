@@ -250,7 +250,7 @@ fn security_reads_a_coverage_run_beside_its_findings() {
     contains_all(
         &with_run,
         &[
-            "have lines no test in run",
+            "1 flagged file has lines no test in run",
             "3 of its measured lines are not covered by the run",
             // Nobody asked the run's tests what they catch, which is not the
             // same as their catching nothing.
@@ -3328,5 +3328,38 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
         json["paths_not_asked"].as_array().unwrap().len(),
         1,
         "{json}"
+    );
+}
+
+#[test]
+fn a_handler_run_without_a_guard_is_counted_by_the_tests_that_ran_it() {
+    let project = Project::empty("probe-guards");
+    project.write("package.json", r#"{"name":"guards","type":"module"}"#);
+    project.write(
+        "src/guard.js",
+        "export function cleanInput(v) {\n  return String(v).replace(/[^a-z]/g, \"\");\n}\n",
+    );
+    project.write(
+        "src/one.js",
+        "export function takeOne(req) {\n  return req.q;\n}\n",
+    );
+    project.write(
+        "src/two.js",
+        "export function takeTwo(req) {\n  return req.q;\n}\n",
+    );
+    project.write("test/all.test.js", "import test from \"node:test\";\nimport { cleanInput } from \"../src/guard.js\";\nimport { takeOne } from \"../src/one.js\";\nimport { takeTwo } from \"../src/two.js\";\ntest(\"one bare\", () => { takeOne({ q: 1 }); });\ntest(\"one guarded\", () => { cleanInput(1); takeOne({ q: 1 }); });\ntest(\"two bare\", () => { takeTwo({ q: 1 }); });\ntest(\"two bare again\", () => { takeTwo({ q: 2 }); });\n");
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_by_name);
+    let report = project
+        .supercov_with(&["security", "src/", "--run", "latest"], &through(&base))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "    takeOne (line 1) ran under 1 test with no guard running, and under 1 with one\n",
+            "    takeTwo (line 1) ran under 2 tests with no guard running\n",
+            "  Every line of the flagged files was executed by a test in run ",
+        ],
     );
 }

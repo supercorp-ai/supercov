@@ -3574,10 +3574,15 @@ fn human_security(report: &Value) -> String {
         out.push_str(&format!("  {}\n", named.join(", ")));
     }
     if let Some(run) = report["run"].as_str() {
-        out.push_str(&format!(
-            "  {} flagged files have lines no test in run {run} executed",
-            report["flagged_in_untested_code"].as_u64().unwrap_or(0)
-        ));
+        out.push_str(
+            &match report["flagged_in_untested_code"].as_u64().unwrap_or(0) {
+                0 => {
+                    format!("  Every line of the flagged files was executed by a test in run {run}")
+                }
+                1 => format!("  1 flagged file has lines no test in run {run} executed"),
+                n => format!("  {n} flagged files have lines no test in run {run} executed"),
+            },
+        );
         match report["flagged_executed_unasserted"].as_u64() {
             Some(n) => out.push_str(&format!(
                 "; {n} are executed by tests that are not judged to catch any line of them.\n"
