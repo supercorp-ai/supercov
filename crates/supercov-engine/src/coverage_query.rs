@@ -991,7 +991,12 @@ pub fn coverage_covers_query_cached(
     let all_limitations = cache
         .limitations
         .iter()
-        .filter(|limitation| limitation.file == options.file && limitation.line == options.line)
+        // A file left out of scope is left out on every line, not only the
+        // first, where its limitation is recorded.
+        .filter(|limitation| {
+            limitation.file == options.file
+                && (limitation.line == options.line || limitation.kind == "source-scope")
+        })
         .cloned()
         .map(|limitation| CoverageFileLimitation {
             id: limitation.id,

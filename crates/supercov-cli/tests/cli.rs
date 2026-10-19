@@ -9721,4 +9721,16 @@ fn code_outside_the_roots_counts_when_loaded_and_is_named_by_check_when_not() {
         .supercov(&["runs", "latest", "check", "--min-lines", "10", "--json"])
         .json();
     assert_eq!(json["data"]["view"]["complete"], false);
+    // Any of its lines says why, not that the line holds no code.
+    let line = project
+        .supercov(&["runs", "latest", "line", "extra/unused.js:1"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "  NOT MEASURED\n",
+            "  - source-scope: JavaScript/TypeScript under no source root that nothing the tests or source load imports",
+        ],
+    );
+    assert!(!line.contains("Nothing on this line is code"), "{line}");
 }

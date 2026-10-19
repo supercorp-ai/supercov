@@ -1249,7 +1249,7 @@ fn scope_limitation(file: &str) -> SourceLimitation {
         line: 1,
         column: 1,
         source: file.into(),
-        reason: "First-party JavaScript/TypeScript source could not be classified automatically. Configure SUPERCOV_SOURCE_ROOTS or move it under a discovered package source root.".into(),
+        reason: "JavaScript/TypeScript under no source root that nothing the tests or source load imports, so the run did not measure it. If it is your code, name the roots with SUPERCOV_SOURCE_ROOTS.".into(),
     }
 }
 

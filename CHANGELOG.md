@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `line` on a file left out of scope (under no source root, and loaded by nothing) gives the reason on every line, instead of saying the line holds no code.
 - JavaScript and TypeScript code under no source root that a test or first-party source imports, such as a `shared/` folder beside `src/`, is now counted as source with no `SUPERCOV_SOURCE_ROOTS` needed. Before, it stayed ambiguous: unmeasured, and left out of every percentage. `runs check` names the files that are still ambiguous under its result, without failing.
 - `file src/a.js:3`, a line asked as a file, points at `line src/a.js:3` in its refusal.
 - `source <path>` reads a file that still matches the run when other files have changed since; only the file read has to match. An empty file says it is empty. `quality snapshots` says `1 quality snapshot`.
