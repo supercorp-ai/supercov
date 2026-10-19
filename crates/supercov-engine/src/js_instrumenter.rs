@@ -1750,10 +1750,12 @@ impl<'a> Visit<'a> for AssertionEdits<'_> {
 
 /// A callee that is an identifier or a qualified name (`assert`,
 /// `assert.strict.ok`), dotted and without whitespace: what `typeof` takes.
+/// No member of it is optional: an optional link puts the whole call inside
+/// a chain expression, and the callee here is a statement's own call.
 fn entity_name(callee: &Expression<'_>) -> Option<String> {
     match callee {
         Expression::Identifier(identifier) => Some(identifier.name.to_string()),
-        Expression::StaticMemberExpression(member) if !member.optional => Some(format!(
+        Expression::StaticMemberExpression(member) => Some(format!(
             "{}.{}",
             entity_name(&member.object)?,
             member.property.name
@@ -2644,11 +2646,12 @@ impl SourceReads<'_> {
                 self.read(&inner.left);
                 self.read(&inner.right);
             }
-            Expression::SequenceExpression(inner) => {
-                if let Some(last) = inner.expressions.last() {
-                    self.read(last);
-                }
-            }
+            Expression::SequenceExpression(inner) => self.read(
+                inner
+                    .expressions
+                    .last()
+                    .expect("a parsed sequence has at least two expressions"),
+            ),
             Expression::AssignmentExpression(inner) => self.read(&inner.right),
             _ => {}
         }
@@ -2673,10 +2676,13 @@ impl<'a> Visit<'a> for SourceReads<'_> {
     }
 
     fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'a>) {
-        if property.computed
-            && let Some(key) = property.key.as_expression()
-        {
-            self.read(key);
+        if property.computed {
+            self.read(
+                property
+                    .key
+                    .as_expression()
+                    .expect("a computed key is an expression"),
+            );
         }
         walk::walk_object_property(self, property);
     }
@@ -4908,10 +4914,14 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
         {
             return;
         }
-        if let Some(target) = self.targets.remove(&span_key(function.span))
-            && let Some(body) = &mut function.body
-        {
-            body.statements.insert(0, self.probe(&target));
+        // A function is given a point only where it has a body.
+        if let Some(target) = self.targets.remove(&span_key(function.span)) {
+            function
+                .body
+                .as_mut()
+                .expect("a function with a point has a body")
+                .statements
+                .insert(0, self.probe(&target));
         }
         walk_mut::walk_function(self, function, flags);
     }
@@ -5557,10 +5567,9 @@ impl<'a> DefaultTransformer<'a> {
         }
     }
 
+    /// `entries` is never empty: a declaration has entries only once one is
+    /// pushed.
     fn prepend_entries(&self, body: &mut Statement<'a>, entries: Vec<Statement<'a>>) {
-        if entries.is_empty() {
-            return;
-        }
         if let Statement::BlockStatement(block) = body {
             for (index, entry) in entries.into_iter().enumerate() {
                 block.body.insert(index, entry);
@@ -6875,13 +6884,14 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
         components[..components.len().saturating_sub(1)].contains(&"app")
     }
 
+    /// Asked only of a route module, which is a Remix route, a Next.js one,
+    /// or both.
     fn is_handler_name(&self, name: &str) -> bool {
-        (self.is_remix_route() && matches!(name, "loader" | "action"))
-            || (self.is_next_route()
-                && matches!(
-                    name,
-                    "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS"
-                ))
+        (matches!(name, "loader" | "action") && self.is_remix_route())
+            || (matches!(
+                name,
+                "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS"
+            ) && self.is_next_route())
     }
 
     fn identifier(&self, name: &str) -> Expression<'a> {
@@ -7099,13 +7109,8 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
 
     fn transform_program(&mut self, program: &mut Program<'a>) {
         let route_module = self.is_remix_route() || self.is_next_route();
-        let server_entry = self.file.starts_with("app/entry.server.")
-            && ["js", "jsx", "ts", "tsx", "mjs", "mts", "cjs", "cts"].contains(
-                &Path::new(self.file)
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or(""),
-            );
+        // Every file instrumented has a JavaScript or TypeScript extension.
+        let server_entry = self.file.starts_with("app/entry.server.");
         if !route_module && !server_entry {
             return;
         }
@@ -8076,9 +8081,11 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
             let conditional = expression.take_in(self.ast.allocator);
             *expression = self.wrap_inline_frame(conditional, &names);
         }
-        if let Some((root, plan, shape)) = value
-            && let Some(applied) = self.apply_decision(expression, plan)
-        {
+        // A value decision has at most 32 conditions, and so is applied.
+        if let Some((root, plan, shape)) = value {
+            let applied = self
+                .apply_decision(expression, plan)
+                .expect("a value decision fits the encoding");
             self.pending_values
                 .entry(root)
                 .or_default()
@@ -13113,5 +13120,174 @@ mod tests {
         );
         // An object's rest is only ever a name.
         assert!(analyze_candidate("const { ...{ a = 1 } } = x;", "a.js").is_err());
+    }
+
+    #[test]
+    fn a_required_assert_is_known_only_by_what_require_returns() {
+        let source = concat!(
+            "const helper = { strict: { equal() {} } };\n",
+            "const loose = helper.strict;\n",
+            "const strict = require('node:assert/strict').strict;\n",
+            "const vitest = require('vitest');\n",
+            "const { expect = null } = require('vitest');\n",
+            "loose.equal(1, 1);\n",
+            "strict.equal(value(), 1);\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.cjs").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+        assert!(output.code.contains("node:assert/strict.equal"));
+    }
+
+    #[test]
+    fn a_global_expect_is_the_one_named_expect() {
+        let source = concat!(
+            "test('adds', () => {\n",
+            "  expect(add(1, 1)).toBe(2);\n",
+            "  want(add(1, 1)).toBe(2);\n",
+            "});\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/add.test.js").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+    }
+
+    #[test]
+    fn a_matcher_called_through_an_optional_member_is_no_assertion() {
+        // It may short-circuit before any matcher runs, and a passed
+        // occurrence is never made up.
+        let source = concat!(
+            "import { expect } from 'vitest';\n",
+            "expect(add(1, 1))?.['toBe'](2);\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/add.test.js").unwrap();
+        assert_eq!((output.assertions, output.code.as_str()), (0, source));
+    }
+
+    #[test]
+    fn a_typescript_script_declares_the_runtime_it_asserts_with() {
+        let source = "const assert = require('node:assert');\nassert.ok(value());\n";
+        let output = instrument_node_assertion_phases(source, "tests/value.test.cts").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(analyze_candidate(&output.code, "tests/value.test.cts").is_ok());
+    }
+
+    #[test]
+    fn import_elision_is_typescripts_alone() {
+        let erased = |source: &str, file: &str| {
+            instrument_with_import_policy(source, file, "./capability.mjs", true)
+                .unwrap()
+                .excluded_statements
+                .len()
+        };
+        // JavaScript keeps every import, and TSX keeps one a JSX transform
+        // may need.
+        assert_eq!(
+            erased(
+                "import { T } from './t.js';\nexport const x = 1;\n",
+                "src/a.js"
+            ),
+            0
+        );
+        assert_eq!(
+            erased(
+                "import { T } from './t';\nexport const x: T = 1;\n",
+                "src/a.tsx"
+            ),
+            0
+        );
+        assert_eq!(
+            erased(
+                "import { T } from './t';\nexport const x: T = 1;\n",
+                "src/a.ts"
+            ),
+            1
+        );
+        assert_eq!(
+            erased(
+                "import { T } from './t';\nexport let x: typeof T;\n",
+                "src/a.ts"
+            ),
+            1
+        );
+        // An export may be of a value: only TypeScript's checker knows.
+        assert_eq!(
+            erased("import { T } from './t';\nexport { T };\n", "src/a.ts"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_rendered_optional_call_is_measured_and_an_optional_read_is_not() {
+        let source = "export const View = ({ user }) => <p>{user?.name}{user?.load()}</p>;\n";
+        let output = instrument_candidate(source, "src/view.jsx").unwrap();
+        let rendered = output
+            .points
+            .iter()
+            .filter(|point| point.label.as_deref() == Some("jsx-rendered-expression"))
+            .map(|point| point.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, ["user?.load()"]);
+    }
+
+    #[test]
+    fn route_handlers_without_a_value_are_left_alone() {
+        let source = "export let loader;\nexport const action = async () => 1;\nexport const meta = () => [];\n";
+        let output = instrument_candidate(source, "app/routes/users.ts").unwrap();
+        assert!(
+            output.code.contains("export let loader;"),
+            "{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("WithRequestPhase") && output.code.contains("action ="),
+            "{}",
+            output.code
+        );
+        // A server made from options alone has no handler to wrap.
+        let output = instrument_candidate(
+            "import http from 'node:http';\nexport const server = http.createServer({ keepAlive: true });\n",
+            "src/server.js",
+        )
+        .unwrap();
+        assert!(
+            !output.code.contains("WithRequestPhase("),
+            "{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn default_values_and_trees_in_unusual_places_behave_as_written() {
+        let source = concat!(
+            "function each(list) { const seen = []; for (const [a = 1] of list) seen.push(a); return seen.join(','); }\n",
+            "function grouped(a, b, c, x = (a || b) && c) { return x; }\n",
+            "function later(a, b, f = () => { const ok = a && b; return ok; }) { return f(); }\n",
+            "function empty(a, b) { if (a && b); else; while (a && b) b = 0; for (const [c = 1] of [[]]); return b; }\n",
+            "function made(a, b, C = class { static { const ok = a && b; this.ok = ok; } }) { return C.ok; }\n",
+            "var y; (y) = 1;\n",
+            "var user = { load() { return 'loaded'; } };\n",
+            "user?.load();\n",
+        );
+        let printed = printed_alike(
+            source,
+            "print(each([[], [2]])); print(grouped(0, 1, 2)); print(grouped(0, 0, 2)); print(later(1, 2)); print(empty(1, 1)); print(made(1, 2)); print(y);",
+        );
+        assert_eq!(printed, "1,2\n2\n0\n2\n0\n2\n1");
+    }
+
+    #[test]
+    fn an_overload_signature_keeps_its_parameters_as_written() {
+        // A default in a signature is TypeScript's error to report, and a
+        // build that only strips types runs the file: the signature has no
+        // body to measure the default in.
+        let source = "export function size(value = ''): number;\nexport function size(value = '') { return value.length; }\n";
+        let output = instrument_direct_candidate(source, "src/size.ts").unwrap();
+        assert!(
+            output
+                .code
+                .contains("export function size(value = \"\"): number;"),
+            "{}",
+            output.code
+        );
+        assert!(analyze_candidate(&output.code, "src/size.ts").is_ok());
     }
 }
