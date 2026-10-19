@@ -718,6 +718,12 @@ module Supercov
       resolved
     end
 
+    # `absolute` relative to the project when it is a file the plan measures.
+    def measured_file(absolute)
+      file = relative(absolute)
+      file if file && @files.key?(file)
+    end
+
     def relative(absolute)
       return nil unless absolute
 
@@ -1574,13 +1580,16 @@ module Supercov
     def self.ok(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.ok(key, value) : value
     def self.ok0(key) = MAIN.equal?(Ractor.current) ? $__supercov.ok0(key) : nil
 
-    # What a Ractor runs is not recorded; the first one started says so.
+    # What a Ractor runs is not recorded, and the first one each file starts
+    # says so: against that file when it is measured source, for the run when
+    # a test starts it.
     module Started
       def new(...)
         runtime = MAIN.equal?(Ractor.current) && Supercov.runtime
         runtime&.limitation(
           "ruby-ractor-unrecorded",
           "code run inside a non-main Ractor is not recorded: a Ractor cannot reach Supercov's evidence, so what only a Ractor ran reads as not executed",
+          runtime.measured_file(caller_locations(1, 1).first&.absolute_path),
         )
         super
       end
