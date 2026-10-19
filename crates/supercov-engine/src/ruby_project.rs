@@ -296,14 +296,27 @@ pub fn prepare_ruby_project(
         files: plan_files,
         probes,
         probe_obligations: Vec::new(),
+        ractors: false,
     };
     plan.probe_obligations = plan.probe_obligations();
+    if mentions_ractors(root, &files) {
+        plan.use_ractor_safe_receiver();
+    }
     Ok(PreparedRubyProject {
         root: root.to_owned(),
         plan,
         manifest,
         files,
         unparseable,
+    })
+}
+
+/// Whether any of the project's Ruby, its tests included, mentions Ractors:
+/// code a test runs inside one is called from a Ractor wherever it lives.
+fn mentions_ractors(root: &Path, files: &RubyFiles) -> bool {
+    files.sources.iter().chain(&files.tests).any(|file| {
+        fs::read(root.join(file))
+            .is_ok_and(|source| source.windows(6).any(|word| word == b"Ractor"))
     })
 }
 
@@ -428,6 +441,55 @@ mod tests {
                 .unwrap();
         assert_eq!(project.files.sources, ["third_party/dep.rb"]);
         fs::remove_dir_all(root).ok();
+    }
+
+    /// A project whose tests start a Ractor probes through the receiver a
+    /// Ractor can call, statements included; one that never mentions them
+    /// keeps the global and its line table.
+    #[test]
+    fn a_project_that_uses_ractors_probes_through_the_ractor_safe_receiver() {
+        let root = fixture("ractors");
+        write(&root, "lib/app.rb", "def f(a)\n  a && 1\nend\n");
+        write(&root, "test/app_test.rb", "def t = 1\n");
+        let plain = prepare_ruby_project(&root, None).unwrap().plan;
+        assert!(!plain.ractors);
+        assert_eq!(plain.receiver, RUBY_PROBE_RECEIVER);
+        assert!(
+            plain.files["lib/app.rb"]
+                .edits
+                .iter()
+                .any(|edit| edit.text.contains("$__supercov."))
+        );
+
+        write(
+            &root,
+            "test/app_test.rb",
+            "def t = Ractor.new { f(1) }.take\n",
+        );
+        let plan = prepare_ruby_project(&root, None).unwrap().plan;
+        assert!(plan.ractors);
+        assert_eq!(
+            plan.receiver,
+            crate::ruby_instrumenter::RUBY_RACTOR_SAFE_RECEIVER
+        );
+        let edits = &plan.files["lib/app.rb"].edits;
+        assert!(
+            edits.iter().all(|edit| !edit.text.contains("$__supercov")),
+            "{edits:?}"
+        );
+        assert!(
+            edits
+                .iter()
+                .any(|edit| edit.text.contains("::Supercov::RactorSafe."))
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["ractors"], true);
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("ractors")
+                .is_none()
+        );
     }
 
     #[test]

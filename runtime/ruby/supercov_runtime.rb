@@ -654,7 +654,9 @@ module Supercov
       file_plan = @files[relative(absolute)]
       blocked = file_plan["ractorBlocks"] || []
       refined = file_plan["refineBlocks"] || []
-      extra, probes, skipped = LoadTime.statement_probes(@receiver, @dynamic_key, lines, offsets, stub, blocked, LINE_TABLE, refined, source)
+      # The line table is a global, which a Ractor cannot store into.
+      table = @plan["ractors"] ? nil : LINE_TABLE
+      extra, probes, skipped = LoadTime.statement_probes(@receiver, @dynamic_key, lines, offsets, stub, blocked, table, refined, source)
       unless skipped.empty?
         # A statement in a Ractor block takes no probe: Coverage's one-shot
         # line reports it, phase by phase, to the first test that runs it.
@@ -1546,6 +1548,45 @@ module Supercov
     def ok0(key) = @runtime.probe_ok0(key)
   end
 
+  # The receiver of a project that uses Ractors. A non-main Ractor cannot
+  # read $__supercov, but it can call a module, and this one records only in
+  # the main Ractor; elsewhere each probe gives back what it was given, as
+  # the probe would, and records nothing. A Ractor is shareable, so MAIN can
+  # be read from any of them.
+  module RactorSafe
+    MAIN = Ractor.current
+
+    def self.c(key, index, value) = MAIN.equal?(Ractor.current) ? $__supercov.c(key, index, value) : value
+    def self.d(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.d(key, value) : value
+    def self.w(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.w(key, value) : value
+    def self.f(key, collection) = MAIN.equal?(Ractor.current) ? $__supercov.f(key, collection) : collection
+    def self.fb(key) = MAIN.equal?(Ractor.current) ? $__supercov.fb(key) : nil
+    def self.l(key, left) = MAIN.equal?(Ractor.current) ? $__supercov.l(key, left) : left
+    def self.pre(key) = MAIN.equal?(Ractor.current) ? $__supercov.pre(key) : nil
+    def self.es(key) = MAIN.equal?(Ractor.current) ? $__supercov.es(key) : nil
+    def self.s(key) = MAIN.equal?(Ractor.current) ? $__supercov.s(key) : nil
+    def self.n(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.n(key, value) : value
+    def self.hs(key) = MAIN.equal?(Ractor.current) ? $__supercov.hs(key) : nil
+    def self.h(key, index) = MAIN.equal?(Ractor.current) ? $__supercov.h(key, index) : nil
+    def self.hm(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.hm(key, value) : value
+    def self.hm0(key) = MAIN.equal?(Ractor.current) ? $__supercov.hm0(key) : nil
+    def self.p(key) = MAIN.equal?(Ractor.current) ? $__supercov.p(key) : nil
+    def self.ok(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.ok(key, value) : value
+    def self.ok0(key) = MAIN.equal?(Ractor.current) ? $__supercov.ok0(key) : nil
+
+    # What a Ractor runs is not recorded; the first one started says so.
+    module Started
+      def new(...)
+        runtime = MAIN.equal?(Ractor.current) && Supercov.runtime
+        runtime&.limitation(
+          "ruby-ractor-unrecorded",
+          "code run inside a non-main Ractor is not recorded: a Ractor cannot reach Supercov's evidence, so what only a Ractor ran reads as not executed",
+        )
+        super
+      end
+    end
+  end
+
   module Loader
     def load_iseq(path)
       runtime = Supercov.runtime
@@ -1809,6 +1850,7 @@ module Supercov
     $__supercov_lines = {}
     runtime = Runtime.new(plan_path, evidence_dir, run_id, worker)
     $__supercov = Probe.new(runtime)
+    Ractor.singleton_class.prepend(RactorSafe::Started) if runtime.plan["ractors"]
     RubyVM::InstructionSequence.singleton_class.prepend(Loader)
     @runtime = runtime
     inherited = ENV[CONTEXT_ENV]

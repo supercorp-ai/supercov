@@ -50,6 +50,12 @@ pub const RUBY_PROBE_PLAN_VERSION: u32 = 1;
 /// in application code.
 pub const RUBY_PROBE_RECEIVER: &str = "$__supercov";
 
+/// The receiver of a project that uses Ractors. A non-main Ractor cannot
+/// touch a global, so a probe of code it calls raised `Ractor::IsolationError`
+/// in the user's code; a module constant it can call, and this one records
+/// only in the main Ractor (`Supercov::RactorSafe` in the runtime).
+pub const RUBY_RACTOR_SAFE_RECEIVER: &str = "::Supercov::RactorSafe";
+
 /// Block-taking methods whose block runs once per element (or per count):
 /// the idiomatic Ruby loops. Methods that may call the block zero times on a
 /// non-empty receiver (`cycle`, `loop`, `lazy`) are deliberately absent.
@@ -413,9 +419,27 @@ pub struct RubyProbePlan {
     /// declare them without re-deriving alternative ids.
     #[serde(default)]
     pub probe_obligations: Vec<String>,
+    /// The project's code or tests mention Ractors: every probe goes through
+    /// [`RUBY_RACTOR_SAFE_RECEIVER`], statements included, which a project
+    /// without them never pays for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ractors: bool,
 }
 
 impl RubyProbePlan {
+    /// Send every probe through the Ractor-safe receiver.
+    pub fn use_ractor_safe_receiver(&mut self) {
+        let global = format!("{RUBY_PROBE_RECEIVER}.");
+        let safe = format!("{RUBY_RACTOR_SAFE_RECEIVER}.");
+        for file in self.files.values_mut() {
+            for edit in &mut file.edits {
+                edit.text = edit.text.replace(&global, &safe);
+            }
+        }
+        self.receiver = RUBY_RACTOR_SAFE_RECEIVER.into();
+        self.ractors = true;
+    }
+
     /// Manifest obligations (points, decisions, branches) that only a probe
     /// can prove: the union of each file's, which already leaves out what
     /// Ruby 3.3 still proves through Coverage's keys. An interpreter that
