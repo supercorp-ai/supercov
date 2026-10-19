@@ -1866,12 +1866,15 @@ fn decline_uncompiled_sources(
         .and_then(|scope| scope.get_mut("entries"))
         .and_then(serde_json::Value::as_array_mut)
     {
-        for entry in entries {
+        for entry in entries
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
             let named = entry
                 .get("file")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|file| declined.contains(file));
-            if named && let Some(entry) = entry.as_object_mut() {
+            if named {
                 entry.insert("status".into(), "excluded".into());
                 entry.insert(
                     "reason".into(),
@@ -2513,20 +2516,20 @@ pub fn run_prepared_rust_tests(
             server: Vec::new(),
         });
     }
-    let doctest_results =
-        if selection.run_doctests && invocation.kind == RustCargoCommandKind::CargoTest {
-            crate::rust_owned_doctests::run_doctests(
-                project,
-                &invocation,
-                &selection,
-                &evidence_root.join("doctests"),
-                run_id,
-                diagnostics,
-                &mut overall_exit,
-            )?
-        } else {
-            Vec::new()
-        };
+    // A nextest run has returned above: this is `cargo test`.
+    let doctest_results = if selection.run_doctests {
+        crate::rust_owned_doctests::run_doctests(
+            project,
+            &invocation,
+            &selection,
+            &evidence_root.join("doctests"),
+            run_id,
+            diagnostics,
+            &mut overall_exit,
+        )?
+    } else {
+        Vec::new()
+    };
     // Only observed runners may be declared. A run with no tests at all keeps
     // the libtest declaration, as it always has.
     let project = &PreparedRustProject {
@@ -2899,6 +2902,197 @@ mod tests {
         assert!(
             error.contains("several targets, one of them with a target runner"),
             "{error}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn code_no_build_compiled_leaves_the_denominator_and_unanswered_code_is_named() {
+        let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
+        let source = (0..6)
+            .map(|index| {
+                format!("#[cfg(feature = \"f{index}\")]\npub fn f{index}() -> i32 {{ {index} }}\n")
+            })
+            .collect::<String>();
+        let mut manifest = crate::rust_instrumenter::instrument_rust_file_numbered(
+            "src/lib.rs",
+            &source,
+            "crate::__supercov_runtime_v1",
+            false,
+            None,
+            &mut probes,
+        )
+        .unwrap()
+        .manifest;
+        assert_eq!(probes.cfgs.len(), 6, "{:?}", probes.cfgs);
+        let first = probes.cfgs[0].line;
+        let past_last = probes.cfgs[5].end_line + 1;
+        // A boundary inside a gate left out goes with it; one beside it, or
+        // in another file, stays.
+        let limitation = |file: &str, line: usize| serde_json::json!({"id": format!("{file}:{line}"), "file": file, "line": line});
+        manifest.limitations = vec![
+            limitation("src/lib.rs", first),
+            limitation("src/lib.rs", past_last),
+            limitation("src/other.rs", first),
+        ];
+        // The fifth gate's code is the first's again, as a gate nested in
+        // another would be: nobody answered for it, but it is gone anyway.
+        probes.cfgs[4].obligations = probes.cfgs[0].obligations.clone();
+        let mut diagnostics = Vec::new();
+        let settled =
+            settle_cfg_gates_with(&manifest, &probes, &[1, 1, 1, 1, 0, 0], &mut diagnostics)
+                .unwrap();
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains("4 item(s) behind a #[cfg] no build compiled are outside the denominator: src/lib.rs:1 cfg(feature = \"f0\"), src/lib.rs:3 cfg(feature = \"f1\"), src/lib.rs:5 cfg(feature = \"f2\"), ..."),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("1 item(s) behind a #[cfg] are counted though no test ran code of their crate to show whether it was built: src/lib.rs:11 cfg(feature = \"f5\")"),
+            "{diagnostics}"
+        );
+        assert_eq!(
+            settled
+                .limitations
+                .iter()
+                .map(|limitation| limitation["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                format!("src/lib.rs:{past_last}"),
+                format!("src/other.rs:{first}")
+            ]
+        );
+        assert!(
+            settled
+                .points
+                .iter()
+                .all(|point| !probes.cfgs[0].obligations.contains(&point.id))
+        );
+    }
+
+    #[test]
+    fn files_the_build_did_not_read_are_declined_only_on_this_builds_depinfo() {
+        let root = scratch("declined-sources");
+        fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+        fs::write(
+            root.join("target/debug/deps/fixture.d"),
+            "target/debug/deps/fixture: src/lib.rs src/kept.rs\n",
+        )
+        .unwrap();
+        let mut project = PreparedRustProject::empty(root.clone());
+        project.source_files = ["src/gone.rs", "src/kept.rs", "src/lib.rs", "src/worker.rs"]
+            .map(String::from)
+            .to_vec();
+        project.crate_roots = vec!["src/lib.rs".into()];
+        project.manifest.scope = Some(serde_json::json!({"entries": [
+            {"file": "src/gone.rs", "status": "included"},
+            {"file": "src/lib.rs", "status": "included"},
+            "not an entry",
+        ]}));
+        // A Worker's crate that `wrangler dev` built counts.
+        let also = BTreeSet::from(["src/worker.rs".to_owned()]);
+        let (manifest, declined) = decline_uncompiled_sources(&project, &also);
+        assert_eq!(declined, BTreeSet::from(["src/gone.rs".to_owned()]));
+        let entries = manifest.scope.unwrap()["entries"].clone();
+        assert_eq!(entries[0]["status"], "excluded");
+        assert_eq!(entries[1]["status"], "included");
+        // Without a scope there is nothing to mark.
+        project.manifest.scope = None;
+        assert_eq!(decline_uncompiled_sources(&project, &also).1, declined);
+        // Depinfo that names no crate root of this project is another
+        // build's.
+        project.crate_roots = vec!["src/main.rs".into()];
+        assert!(decline_uncompiled_sources(&project, &also).1.is_empty());
+        let mut diagnostics = Vec::new();
+        report_declined(
+            &["a.rs", "b.rs", "c.rs", "d.rs"].map(String::from).into(),
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(diagnostics).unwrap(),
+            "[supercov] 4 source file(s) this build did not compile are outside the denominator: a.rs, b.rs, c.rs, ...\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_worker_at_the_workspace_root_that_no_test_ran_is_noted_once_per_file() {
+        let root = scratch("unrun-worker");
+        fs::write(
+            root.join("wrangler.toml"),
+            "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
+        let mut project = PreparedRustProject::empty(root.clone());
+        project.source_files = vec!["src/gone.rs".into(), "src/lib.rs".into()];
+        let original = project.clone();
+        let declined = BTreeSet::from(["src/gone.rs".to_owned()]);
+        for _ in 0..2 {
+            note_unrun_workers(&mut project, &original, &declined, &BTreeSet::new(), false);
+        }
+        assert_eq!(
+            project
+                .manifest
+                .limitations
+                .iter()
+                .map(|limitation| limitation["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["rust-worker-not-run#src/lib.rs"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_test_artifact_must_be_a_file_cargo_built_in_the_target_directory() {
+        let root = scratch("unsafe-artifacts");
+        fs::create_dir_all(root.join("target/debug/deps/a-directory")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        let project = PreparedRustProject::empty(root.clone());
+        // Cargo, as far as its build's messages go: `messages` is printed.
+        script(
+            &root.join("cargo"),
+            &format!("#!/bin/sh\ncat '{}'\n", root.join("messages").display()),
+        );
+        let built = |executable: &Path, test: bool| {
+            fs::write(
+                root.join("messages"),
+                serde_json::json!({
+                    "reason": "compiler-artifact",
+                    "target": {"name": "fixture", "kind": ["lib"], "src_path": root.join("src/lib.rs")},
+                    "profile": {"test": test},
+                    "executable": executable,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            build_test_artifacts(
+                &project,
+                &[root.join("cargo").display().to_string(), "test".into()],
+            )
+            .map(|artifacts| artifacts.len())
+            .map_err(|error| error.to_string())
+        };
+        let outside = fs::canonicalize("/bin/sh").unwrap();
+        assert!(
+            built(&outside, true)
+                .unwrap_err()
+                .contains(&outside.display().to_string())
+        );
+        let directory = root.join("target/debug/deps/a-directory");
+        assert!(
+            built(&directory, true)
+                .unwrap_err()
+                .contains(&directory.display().to_string())
+        );
+        // A build that made no test binary has nothing to run.
+        assert!(
+            built(&outside, false)
+                .unwrap_err()
+                .contains("Cargo emitted no libtest artifacts")
         );
         fs::remove_dir_all(root).unwrap();
     }
