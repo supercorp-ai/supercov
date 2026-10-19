@@ -1372,9 +1372,13 @@ fn changed_lines_against(
         ))?
         .trim()
         .to_owned();
+    // Names as they are: git quotes one that is not ASCII, and the quoted
+    // name matched no file the run measured.
     let diff = git_output(
         root,
         &[
+            "-c",
+            "core.quotePath=false",
             "diff",
             "--unified=0",
             "--no-color",
@@ -1401,11 +1405,17 @@ fn changed_lines_against(
     // it stands, and the diff above from the top.
     for path in git_output(
         root,
-        &["ls-files", "--others", "--exclude-standard", "--full-name"],
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+        ],
     )?
-    .lines()
+    .split('\0')
     {
-        let Some(path) = relocate(path.trim().to_owned()) else {
+        let Some(path) = relocate(path.to_owned()) else {
             continue;
         };
         if let Some(file) = measured.file(&path) {
@@ -1711,6 +1721,7 @@ fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
             root,
             &[
                 "diff",
+                "-z",
                 "--name-only",
                 "--relative",
                 "--diff-filter=A",
@@ -1718,13 +1729,13 @@ fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
             ],
         )
     {
-        added.extend(listed.lines().map(str::to_owned));
+        added.extend(listed.split('\0').map(str::to_owned));
     }
-    if let Ok(listed) = git_output(root, &["ls-files", "--others", "--exclude-standard"]) {
-        added.extend(listed.lines().map(str::to_owned));
+    // NUL-separated, so a name is as it is: not quoted, not trimmed.
+    if let Ok(listed) = git_output(root, &["ls-files", "-z", "--others", "--exclude-standard"]) {
+        added.extend(listed.split('\0').map(str::to_owned));
     }
     for file in added {
-        let file = file.trim().to_owned();
         if !file.is_empty()
             && !recorded.contains_key(&file)
             && !changed.contains(&file)

@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `runs <run> patch` counts a changed file whose name is not ASCII (`src/é.js`) instead of reporting no executable changes, and a stale run's warning names such a file added since the run. A name with leading or trailing spaces is no longer trimmed into another.
 - A run whose measured source cannot be fingerprinted now -- its files deleted or moved -- is stale: `runs <run> check` and `patch` fail on it, and queries, `diff` and the run list say `its source cannot be measured as it is now`, as `merge` already did. Before, `check` passed it.
 - A test command ended by a signal exits as a shell reports it, 128 plus the signal (143 for SIGTERM), instead of 128.
 - A JavaScript or TypeScript run whose `SUPERCOV_SOURCE_ROOTS` names nothing that exists says which root does not exist, as Python, Ruby and the other languages do, instead of telling you to set the variable.

@@ -10429,3 +10429,36 @@ fn a_run_whose_source_is_gone_is_stale_and_never_passes_a_gate() {
             .contains(&format!("STALE ({reason})"))
     );
 }
+
+#[test]
+fn files_named_beyond_ascii_are_changes_like_any_other() {
+    let project = Project::cart("named-beyond-ascii");
+    let base = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    project.write(
+        "src/é.js",
+        "export function hi(a) {\n  if (a) { return 1; }\n  return 2;\n}\n",
+    );
+    project.write(
+        "test/e.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { hi } from \"../src/é.js\";\ntest(\"hi\", () => assert.equal(hi(1), 1));\n",
+    );
+    project.commit("hi");
+    let run = project.measure(&[]);
+    // git quotes such a name unless asked not to; quoted, it was no file the
+    // run measured, and the patch had no executable change.
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", &base])
+            .succeeds(),
+        &["2 of 3 changed executable line(s) covered", "src/é.js: 3"],
+    );
+    project.write("src/ü.js", "export const x = 1;\n");
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert!(
+        files.stderr().contains(&format!(
+            "[supercov] stale run {run}: instrumented source changed; changed since the run: src/ü.js"
+        )),
+        "{}",
+        files.stderr()
+    );
+}
