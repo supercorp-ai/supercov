@@ -1131,6 +1131,102 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// RSpec's `-r` and `--require=` load their files and a library name
+    /// loads none; pytest_plugins loads its module; `require` and `export`
+    /// in TypeScript load what they name unless only a type is taken; and
+    /// only a change to the load path or `sys.path` leaves the answer open.
+    #[test]
+    fn each_runner_s_way_of_loading_a_file_is_followed() {
+        let root = project(&[
+            (
+                ".rspec",
+                "-r support/a\n--require=support/b\n--require json\n",
+            ),
+            ("spec/support/a.rb", ""),
+            ("spec/support/b.rb", ""),
+            ("spec/x_spec.rb", "RSpec.describe(1) { }\n"),
+            ("spec/colon_spec.rb", "$:.unshift(\"vendor\")\n"),
+            ("spec/global_spec.rb", "$stdout.sync = true\n"),
+            (
+                "tests/conftest.py",
+                "pytest_plugins = [\"tests.plugins\"]\nother = 1\n",
+            ),
+            ("tests/__init__.py", ""),
+            ("tests/plugins.py", ""),
+            ("tests/test_a.py", "import os\n"),
+            (
+                "tests/test_path.py",
+                "import sys\nsys.path.insert(0, \"x\")\n",
+            ),
+            ("tests/test_assign.py", "import sys\nsys.path = []\n"),
+            (
+                "tests/test_other.py",
+                "import sys\nsys.argv.append(\"x\")\n",
+            ),
+            (
+                "test/a.test.ts",
+                "import helper = require(\"./helper\");\nimport type T = require(\"./types\");\nexport type { X } from \"./x\";\nexport { y } from \"./y\";\nrequire();\n",
+            ),
+            ("test/helper.ts", ""),
+            ("test/types.ts", ""),
+            ("test/x.ts", ""),
+            ("test/y.ts", ""),
+        ]);
+        let imports = Imports::new(&root);
+        let loaded = |file: &str| {
+            let loads = imports.loads([file]);
+            (loads.files.into_iter().collect::<Vec<_>>(), loads.open)
+        };
+        assert_eq!(
+            loaded("spec/x_spec.rb"),
+            (
+                vec![
+                    "spec/support/a.rb".to_owned(),
+                    "spec/support/b.rb".into(),
+                    "spec/x_spec.rb".into()
+                ],
+                None
+            )
+        );
+        assert_eq!(
+            loaded("spec/colon_spec.rb").1.as_deref(),
+            Some("spec/colon_spec.rb changes $LOAD_PATH")
+        );
+        assert_eq!(loaded("spec/global_spec.rb").1, None);
+        assert_eq!(
+            loaded("tests/test_a.py"),
+            (
+                vec![
+                    "tests/__init__.py".to_owned(),
+                    "tests/conftest.py".into(),
+                    "tests/plugins.py".into(),
+                    "tests/test_a.py".into(),
+                ],
+                None
+            )
+        );
+        for changes in ["tests/test_path.py", "tests/test_assign.py"] {
+            assert_eq!(
+                loaded(changes).1,
+                Some(format!("{changes} changes sys.path")),
+                "{changes}"
+            );
+        }
+        assert_eq!(loaded("tests/test_other.py").1, None);
+        assert_eq!(
+            loaded("test/a.test.ts"),
+            (
+                vec![
+                    "test/a.test.ts".to_owned(),
+                    "test/helper.ts".into(),
+                    "test/y.ts".into()
+                ],
+                None
+            )
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_configuration_belongs_to_its_runner() {
         assert_eq!(
