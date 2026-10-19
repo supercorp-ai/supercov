@@ -90,6 +90,18 @@
 - `tests affected` read a Playwright, Vitest, Jest or AVA configuration added since the run as a change to every test, while an edit to one already there reached only that runner's tests; an added one now reaches only its runner's tests too. A configuration any runner reads, such as `tsconfig.json`, still reaches every test.
 - `report --compare latest` on the latest run compared the run with itself; it is refused, naming the run.
 - `assertions` says how many statements were never asked of a test whose request is over Jev's limit even with one question; only `--json` counted them (`pairsOverLimit`), and the statement view said only that the tests not asked were not judged.
+- `security` no longer reports a cross-file path into a function the caller never calls because an alias happens to share its name: `import { plain as sinkNamed }` follows `plain`, not the module's own `sinkNamed`.
+- `quality`, `security` and `quality patch` with a `--run` that names no run refuse before asking anything, instead of sending every request and failing after.
+- An assessment whose snapshot could not be saved says so on standard error in the text report too, with the path that failed; when only the `latest` pointer could not be moved it says the snapshot was saved, instead of "no snapshot was saved".
+- A cached answer that cannot be read names the file and the `security` cache in the security lane, instead of "cannot read quality cache".
+- `quality` says when the question of which files under no source root ship could not be asked, instead of leaving them out without a word; the question carries the project's manifests, which it had sent empty unless one was a source file.
+- `quality show` of a snapshot that scored no file says it is not scored, instead of `Quality — (0.0/10) over 0 files`.
+- `quality scope` and the reports count one file in the singular: `1 source file sits under no recognised source root`, `1 file under no source root was read by the model`.
+- A Cargo workspace's `exclude` no longer makes the directories it names packages, every member of a one-line `members = ["a", "b"]` is read, and a single-quoted `path = '...'` is a declared path.
+- `security` asks where the outside value enters a line inside a JavaScript `#private` method, whose lines it had read as comments.
+- `quality patch` on an emptied file says it was emptied instead of calling it a deletion, and a change too large to review even as its diff names `supercov quality <path>`, which reads the file in windows, instead of speaking of a pair of versions a new file does not have.
+- A Python file that does not parse is no longer parsed a second time.
+- The `security gaps` refusal of a snapshot with no findings names `supercov security`, not `supercov quality`.
 
 ## 4.19.0
 

@@ -96,7 +96,7 @@ pub fn gaps(
     if !is_catalog(&snapshot) {
         return Err(format!(
             "snapshot {} was written by the rubric, which has no findings to narrow to; \
-             run `supercov quality` to assess with the catalog",
+             run `supercov {lane}` to assess with the catalog",
             snapshot.id
         ));
     }
@@ -430,13 +430,16 @@ fn band(health: Option<f64>) -> &'static str {
 fn render_quality(view: &Value) -> String {
     let empty = Vec::new();
     let mut out = String::new();
-    let health = view["health"].as_f64();
-    out.push_str(&format!(
-        "Quality {} ({:.1}/10) over {}.\n",
-        band(health),
-        health.unwrap_or(0.0),
-        super::files(view["counts"]["scored"].as_u64().unwrap_or(0))
-    ));
+    // As the assessment that wrote it said: with no file scored there is no
+    // health, and a 0.0 would read as the worst one.
+    match view["health"].as_f64() {
+        Some(health) => out.push_str(&format!(
+            "Quality {} ({health:.1}/10) over {}.\n",
+            band(Some(health)),
+            super::files(view["counts"]["scored"].as_u64().unwrap_or(0))
+        )),
+        None => out.push_str("Quality not scored: no file was assessed.\n"),
+    }
     out.push_str(&format!(
         "Catalog {}, model {}, snapshot {}.\n\n",
         view["catalog_version"].as_str().unwrap_or("?"),

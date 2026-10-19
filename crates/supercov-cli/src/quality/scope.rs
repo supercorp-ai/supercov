@@ -124,10 +124,15 @@ impl Scope {
     /// What a reader should be told when the scope is not confident.
     pub fn limitation(&self) -> Option<String> {
         let ambiguous = self.ambiguous();
+        let (files, sit, were, them, it) = if ambiguous == 1 {
+            ("file", "sits", "was", "it", "it is")
+        } else {
+            ("files", "sit", "were", "them", "they are")
+        };
         (ambiguous > 0).then(|| format!(
-            "{ambiguous} source files sit under no recognised source root and were not assessed. \
-             Read them with `supercov quality scope`, and declare your roots with \
-             SUPERCOV_SOURCE_ROOTS=src,app if they are first-party code."
+            "{ambiguous} source {files} {sit} under no recognised source root and {were} not assessed. \
+             Read {them} with `supercov quality scope`, and declare your roots with \
+             SUPERCOV_SOURCE_ROOTS=src,app if {it} first-party code."
         ))
     }
 }
@@ -163,7 +168,7 @@ fn declared_entry_points(directory: &Path) -> Vec<PathBuf> {
         for line in text.lines() {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("path")
-                && let Some(value) = rest.split('"').nth(1)
+                && let Some(value) = toml_strings(rest).next()
             {
                 targets.push(value.to_owned());
             }
@@ -231,8 +236,6 @@ fn variable_manifest(directory: &Path) -> Option<bool> {
     project_file.then_some(true)
 }
 
-/// Whether a directory declares a package, and whether that declaration counts
-/// at any depth.
 /// Whether a path names a file that declares a package, for the manifest list a
 /// scope question carries as context.
 pub fn declares_a_package(path: &str) -> bool {
@@ -245,11 +248,34 @@ pub fn declares_a_package(path: &str) -> bool {
         || lower.ends_with(".sln")
 }
 
+/// Every manifest of every package directory, relative to the root and
+/// sorted: the context a scope question carries. Read from the packages
+/// rather than from the source files found, which hold no manifest.
+pub fn manifests(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = package_roots(root)
+        .iter()
+        .filter_map(|directory| std::fs::read_dir(directory).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| relative(root, &entry.path()))
+        .filter(|path| declares_a_package(path))
+        .collect();
+    found.sort();
+    found
+}
+
+/// Whether a directory declares a package, and whether that declaration counts
+/// at any depth.
 fn manifest_in(directory: &Path) -> Option<bool> {
     if MANIFESTS.iter().any(|name| directory.join(name).is_file()) {
         return Some(false);
     }
     variable_manifest(directory)
+}
+
+/// The quoted strings on one line of TOML, basic (`"`) or literal (`'`).
+fn toml_strings(line: &str) -> impl Iterator<Item = &str> {
+    line.split(['"', '\'']).skip(1).step_by(2)
 }
 
 /// Package directories a root manifest declares, so a member that lives
@@ -289,23 +315,26 @@ fn declared_members(root: &Path) -> BTreeSet<PathBuf> {
         }
     }
     // Cargo's members are a TOML array of strings under [workspace]; reading
-    // them by line avoids a TOML dependency for one field.
+    // them by line avoids a TOML dependency for one field. Only `members`:
+    // every quoted string of the table was taken, so a directory `exclude`
+    // names became a package.
     if let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) {
         let mut inside = false;
+        let mut members = false;
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('[') {
                 inside = line == "[workspace]";
+                members = false;
                 continue;
             }
             if inside && line.starts_with("members") {
-                inside = true;
+                members = true;
             }
-            if inside && let Some(start) = line.find('"') {
-                let rest = &line[start + 1..];
-                if let Some(end) = rest.find('"') {
-                    add(&rest[..end]);
-                }
+            if members {
+                toml_strings(line).for_each(&mut add);
+                // The array closes on the line that holds its `]`.
+                members = !line.contains(']');
             }
         }
     }

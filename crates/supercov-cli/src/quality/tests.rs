@@ -743,18 +743,14 @@ fn an_oversized_file_is_windowed_and_every_window_fits() {
         ));
     }
     assert!(
-        within_budget(&catalog::file_request("big.ts", &source))
-            .unwrap()
-            .is_none(),
+        within_budget(&catalog::file_request("big.ts", &source)).is_none(),
         "the fixture must exceed the budget or this proves nothing"
     );
     let windows = catalog_windows("big.ts", &source, Instrument::Catalog).unwrap();
     assert!(windows.len() > 1, "an oversized file is split");
     for (window, text) in &windows {
         assert!(
-            within_budget(&catalog::file_request("big.ts", text))
-                .unwrap()
-                .is_some(),
+            within_budget(&catalog::file_request("big.ts", text)).is_some(),
             "window {} of {} is still over budget",
             window.index,
             window.of
@@ -786,18 +782,14 @@ fn a_template_with_no_parser_is_windowed_at_line_boundaries() {
     source.push_str("</body></html>\n");
     for instrument in [Instrument::Catalog, Instrument::Security] {
         assert!(
-            within_budget(&instrument.file_request("page.html", &source))
-                .unwrap()
-                .is_none(),
+            within_budget(&instrument.file_request("page.html", &source)).is_none(),
             "the fixture must exceed the budget or this proves nothing"
         );
         let windows = catalog_windows("page.html", &source, instrument).unwrap();
         assert!(windows.len() > 1);
         for (_, text) in &windows {
             assert!(
-                within_budget(&instrument.file_request("page.html", text))
-                    .unwrap()
-                    .is_some(),
+                within_budget(&instrument.file_request("page.html", text)).is_some(),
                 "a window planned for {instrument:?} is over its own budget"
             );
         }
@@ -2322,7 +2314,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
     let moved_hash = digest(&serde_json::to_vec(&moved).unwrap());
     assert_eq!(moved_hash, hash);
     assert!(
-        cached(&path, &hash, &moved).unwrap().is_some(),
+        cached(&path, "quality", &hash, &moved).unwrap().is_some(),
         "answered from cache"
     );
 
@@ -2334,6 +2326,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
     assert!(
         cached(
             &store::responses(&temp.0, "quality").join(format!("{edited_hash}.json")),
+            "quality",
             &edited_hash,
             &edited
         )
@@ -2473,7 +2466,7 @@ fn security_asks_its_own_twelve_of_a_file_and_nothing_from_the_complexity_catalo
         dry_run: true,
         ..Options::default()
     };
-    let (report, _) = run_health(&temp.0, &options, None, Instrument::Security).unwrap();
+    let (report, _) = run_health(&temp.0, &options, None, Instrument::Security, None).unwrap();
     assert_eq!(report["instrument"], "security");
     assert_eq!(report["catalog_version"], catalog::security::VERSION);
     let requests = report["requests"].as_array().unwrap();
@@ -2491,7 +2484,7 @@ fn security_asks_its_own_twelve_of_a_file_and_nothing_from_the_complexity_catalo
     assert_eq!(asked, security);
     assert!(!asked.contains("deep_nesting") && !asked.contains("weakens_tests"));
     // And the quality lane asks a file none of the security questions.
-    let (report, _) = run_health(&temp.0, &options, None, Instrument::Catalog).unwrap();
+    let (report, _) = run_health(&temp.0, &options, None, Instrument::Catalog, None).unwrap();
     let asked: BTreeSet<&str> = report["requests"][0]["questions"]
         .as_object()
         .unwrap()
@@ -2706,9 +2699,13 @@ fn security_totals_include_a_check_only_the_line_pass_found() {
         bytes: 10,
         sha256: "source".into(),
         windows: 1,
-        lines: vec![
-            json!({"line": 5, "check": "sensitive_data_exposure", "value": 0.9, "text": "log(token)"}),
-        ],
+        lines: vec![ConfirmedLine {
+            line: 5,
+            check: "sensitive_data_exposure".into(),
+            value: 0.9,
+            text: "log(token)".into(),
+            enters_at: None,
+        }],
         labels: Vec::new(),
         note: None,
         values: Some(values(&[("sensitive_data_exposure", 0.1)])),

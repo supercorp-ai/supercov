@@ -1001,6 +1001,28 @@ fn security_follows_outside_data_across_an_import() {
         .iter()
         .any(|(_, _, request)| request["questions"].get("path").is_some());
     assert!(asked_path, "the pair was confirmed with one question");
+    // A path the model does not confirm is not reported.
+    fn path_declined(id: &str, question: &serde_json::Value) -> serde_json::Value {
+        if id == "path" {
+            serde_json::json!({ "type": "noul", "noul": 0.1 })
+        } else {
+            answer_taint(id, question)
+        }
+    }
+    let (base, seen) = gateway(MODEL, path_declined);
+    let report = project
+        .supercov_with(
+            &["security", "src/", "--run", "latest", "--refresh"],
+            &through(&base),
+        )
+        .succeeds();
+    assert!(!report.contains("Cross-file paths"), "{report}");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, request)| request["questions"].get("path").is_some())
+    );
 }
 
 #[test]
@@ -1234,7 +1256,7 @@ fn a_large_assessment_reads_its_tree_and_names_every_failure() {
         &assessed,
         &[
             "Quality weak (1.0/10) over 13 files.",
-            "1 files under no source root were read by the model from the tree: 1 ship, 0 do not.",
+            "1 file under no source root was read by the model from the tree: 1 ships, 0 do not.",
         ],
     );
     let first = seen.lock().unwrap()[0].2.clone();
@@ -3265,6 +3287,7 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
     project.write("src/d.js", "import { cleanQuery, quietLog, plain } from \"./db.js\";\nexport function takeD(req, db) {\n  cleanQuery(db, req.q);\n  quietLog(db, req.q);\n  return plain(req.q);\n}\n");
     project.write("src/e.js", "import { sinkNamed } from \"./db.js\";\nexport function takeE1(req, db) {\n  return sinkNamed(db, req.a);\n}\nexport function takeE2(req, db) {\n  return sinkNamed(db, req.b);\n}\nexport function inner(db) {\n  return sinkNamed(db, 1);\n}\n");
     project.write("src/f.js", "import { sinkNamed } from \"./db.js\";\nexport function takeF(req, db) {\n  return sinkNamed(db, req.f);\n}\n");
+    project.write("src/g.js", "import { plain as sinkNamed } from \"./db.js\";\nexport function takeG(req, db) {\n  return sinkNamed(req.g);\n}\n");
     project.git(&["init", "-q"]);
     let (base, _) = gateway(MODEL, answer_by_name);
     let report = project
@@ -3275,12 +3298,27 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
         .map(|(_, rest)| rest.split("\n\n").next().unwrap_or_default())
         .unwrap_or_default();
     // A default import is the default export alone; a namespace or an alias
-    // reaches the function called; a callee that sanitises, reaches no sink
-    // or is no sink, and a caller reading no outside data, make no path.
+    // reaches the function called, and an alias named like another export
+    // reaches the one it renames; a callee that sanitises, reaches no sink or
+    // is no sink, and a caller reading no outside data, make no path.
     assert_eq!(
         paths,
         "6\n  0.90  injection_sink  src/a.js:3 takeA -> src/db.js:1 sinkDefault\n  0.90  injection_sink  src/b.js:3 takeB -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/c.js:3 takeC -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:3 takeE1 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:6 takeE2 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/f.js:3 takeF -> src/db.js:4 sinkNamed",
         "{report}"
+    );
+    // Past ten, flagged files and paths are counted rather than listed.
+    for i in 1..=11 {
+        project.write(&format!("src/h{i}.js"), &format!("import {{ sinkNamed }} from \"./db.js\";\nexport function takeH{i}(req, db) {{\n  return sinkNamed(db, req.q);\n}}\n"));
+    }
+    let many = project
+        .supercov_with(&["security", "src/"], &through(&base))
+        .succeeds();
+    contains_all(
+        &many,
+        &[
+            "  ... and 9 more\n\nCross-file paths confirmed: 17\n",
+            "src/h2.js:3 takeH2 -> src/db.js:4 sinkNamed\n  ... and 7 more\n",
+        ],
     );
 }
 
@@ -3288,24 +3326,29 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
 fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_named() {
     let project = Project::empty("probe-observed");
     project.write("package.json", r#"{"name":"observed","type":"module"}"#);
+    // A function that reaches nothing dangerous, and one no route calls.
     project.write(
         "src/db.js",
-        "export function sinkRun(db, v) {\n  return db.query(\"q\" + v);\n}\n",
+        "export function sinkRun(db, v) {\n  return db.query(\"q\" + v);\n}\nexport function quietLog(db, v) {\n  return console.log(v);\n}\n",
+    );
+    project.write(
+        "src/fmt.js",
+        "export function formatRow(v) {\n  return String(v);\n}\n",
     );
     project.write("src/handler.js", "import { sinkRun } from \"./db.js\";\nexport function takeHandler(req, db) {\n  return sinkRun(db, req.q);\n}\n");
     let mut tests = String::from(
-        "import test from \"node:test\";\nimport { sinkRun } from \"../src/db.js\";\nimport { takeHandler } from \"../src/handler.js\";\n",
+        "import test from \"node:test\";\nimport { sinkRun, quietLog } from \"../src/db.js\";\nimport { formatRow } from \"../src/fmt.js\";\nimport { takeHandler } from \"../src/handler.js\";\n",
     );
-    for i in 1..=4 {
+    for i in 1..=9 {
         project.write(&format!("src/route{i}.js"), &format!("export function takeRoute{i}(req, deps) {{\n  return deps.sinkRun(deps.db, req.p);\n}}\n"));
         tests.push_str(&format!(
             "import {{ takeRoute{i} }} from \"../src/route{i}.js\";\n"
         ));
     }
     tests.push_str("const db = { query: () => 1 };\n");
-    for i in 1..=4 {
+    for i in 1..=9 {
         tests.push_str(&format!(
-            "test(\"route {i}\", () => {{ takeRoute{i}({{ p: 1 }}, {{ db, sinkRun }}); }});\n"
+            "test(\"route {i}\", () => {{ formatRow(1); quietLog(db, 1); takeRoute{i}({{ p: 1 }}, {{ db, sinkRun }}); }});\n"
         ));
     }
     tests.push_str("test(\"route 1 again\", () => { takeRoute1({ p: 2 }, { db, sinkRun }); });\n");
@@ -3318,19 +3361,26 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
         .supercov_with(&["security", "src/", "--run", "latest"], &through(&base))
         .succeeds();
     // The handler's path is the import's, not asked again for the test that
-    // ran it; route 1, run twice, is one path; a fourth caller is named.
+    // ran it; route 1, run twice, is one path; the other callers are named,
+    // five of them listed; a function reaching no sink, and one taking no
+    // outside data, make no path.
     contains_all(
         &report,
         &[
             "Cross-file paths confirmed: 4\n  0.90  injection_sink  src/handler.js:3 takeHandler -> src/db.js:1 sinkRun\n",
             "(observed in a test)  src/route1.js:1 takeRoute1 -> src/db.js:1 sinkRun\n",
-            "1 more caller(s) ran with a flagged function in a test and were not asked, three being asked per function:\n",
+            "6 more caller(s) ran with a flagged function in a test and were not asked, three being asked per function:\n",
+            " -> src/db.js:1 sinkRun\n  ... and 1 more\n",
         ],
     );
     assert_eq!(report.matches("takeRoute1 -> ").count(), 1, "{report}");
     assert_eq!(
         report.matches(" -> src/db.js:1 sinkRun\n").count(),
-        5,
+        9,
+        "{report}"
+    );
+    assert!(
+        !report.contains("quietLog") && !report.contains("formatRow"),
         "{report}"
     );
     let json = project
@@ -3341,8 +3391,9 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
         .json();
     assert_eq!(
         json["paths_not_asked"].as_array().unwrap().len(),
-        1,
-        "{json}"
+        6,
+        "{}",
+        json["paths_not_asked"]
     );
 }
 
@@ -4035,5 +4086,857 @@ fn a_quality_report_names_the_sources_it_cannot_embed() {
         serde_json::json!(["src/cart.js", "src/tax.js"]),
         "{}",
         omitted["omittedSources"]
+    );
+}
+
+#[test]
+fn a_run_that_cannot_be_read_is_named_before_anything_is_asked() {
+    let project = Project::cart("bad-run");
+    let (base, seen) = gateway(MODEL, answer_no);
+    let jev = through(&base);
+    assert!(
+        project
+            .supercov_with(&["security", "src/", "--run", "latest"], &jev)
+            .exits(2)
+            .contains("[supercov] no local coverage runs")
+    );
+    project.measure(&[]);
+    project.edit("src/cart.js", "return 0;", "return 0; // free");
+    for args in [
+        &["quality", "--run", "r_nope"][..],
+        &["security", "src/", "--run", "r_nope"],
+        &["quality", "patch", "--run", "r_nope"],
+    ] {
+        assert!(
+            project
+                .supercov_with(args, &jev)
+                .exits(2)
+                .contains("[supercov] coverage run not found: r_nope"),
+            "{args:?}"
+        );
+    }
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a mistyped run costs nothing"
+    );
+}
+
+#[test]
+fn a_snapshot_that_could_not_be_saved_is_said_so_in_every_report() {
+    let project = Project::cart("save-fault");
+    let (base, _) = gateway(MODEL, answer_no);
+    let jev = through(&base);
+    // `latest` cannot be replaced: the snapshot is saved, the pointer is not.
+    project.write(".supercov/quality/snapshots/latest/held", "");
+    let pointed = project.supercov_with(&["quality"], &jev);
+    let id = pointed
+        .succeeds()
+        .split(", snapshot ")
+        .nth(1)
+        .and_then(|rest| rest.split('.').next())
+        .unwrap()
+        .to_owned();
+    assert!(
+        pointed.stderr().contains(&format!(
+            "[supercov] the assessment completed but snapshot {id} was saved, but `latest` does not name it: {}: ",
+            project.root.join(".supercov/quality/snapshots/latest").display()
+        )),
+        "{}",
+        pointed.stderr()
+    );
+    assert!(
+        project
+            .supercov(&["quality", "snapshots"])
+            .succeeds()
+            .contains(&id)
+    );
+    // No directory for snapshots: none is saved, and the listing says why.
+    std::fs::remove_dir_all(project.root.join(".supercov/quality/snapshots")).unwrap();
+    project.write(".supercov/quality/snapshots", "");
+    let json = project.supercov_with(&["quality", "--json"], &jev);
+    let warning = json.json()["snapshot_warning"].as_str().unwrap().to_owned();
+    assert!(
+        warning.starts_with(&format!(
+            "the assessment completed but no snapshot was saved: {}: ",
+            project.root.join(".supercov/quality/snapshots").display()
+        )),
+        "{warning}"
+    );
+    assert!(
+        json.stderr().contains(&format!("[supercov] {warning}")),
+        "{}",
+        json.stderr()
+    );
+    assert!(
+        project
+            .supercov(&["quality", "snapshots"])
+            .exits(2)
+            .contains("[supercov] cannot read quality snapshots: ")
+    );
+}
+
+#[test]
+fn a_damaged_snapshot_store_is_read_for_what_is_intact_and_a_mistyped_id_is_named() {
+    let project = Project::cart("store-edges");
+    assert_eq!(
+        project.supercov(&["quality", "clean"]).succeeds(),
+        "Removed 0 saved quality assessment(s), keeping 0.\n"
+    );
+    assert!(
+        project
+            .supercov(&["quality", "show", "abcdefghijklmnopqr"])
+            .exits(2)
+            .contains(
+                "not a snapshot id: abcdefghijklmnopqr; list them with: supercov quality snapshots"
+            )
+    );
+    assert!(
+        project
+            .supercov(&["security", "show", "q_0000000000000000"])
+            .exits(2)
+            .contains(
+                "no security snapshot q_0000000000000000 here; list them with: supercov security snapshots"
+            )
+    );
+    // A snapshot that is a file, and one with no manifest, are not listed.
+    project.write(".supercov/quality/snapshots/q_0123456789abcdef", "");
+    project.write(
+        ".supercov/quality/snapshots/q_fedcba9876543210/files.json",
+        "{}",
+    );
+    assert!(
+        project
+            .supercov(&["quality", "snapshots"])
+            .succeeds()
+            .contains("No quality snapshots here yet")
+    );
+    #[cfg(unix)]
+    {
+        let made = std::process::Command::new("mkfifo")
+            .arg(project.root.join("src/pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(
+            project
+                .supercov(&["quality", "--dry-run", "src/pipe"])
+                .exits(2)
+                .contains("[supercov] not a regular file or directory: src/pipe")
+        );
+    }
+    project.write("jsconfig.json", "{}");
+    assert!(
+        project
+            .supercov(&["security", "--dry-run", "jsconfig.json"])
+            .exits(2)
+            .contains("[supercov] unsupported source extension: jsconfig.json")
+    );
+}
+
+#[test]
+fn the_scope_reads_manifests_licences_and_checkouts_and_says_what_it_left_out() {
+    // A workspace pattern naming nothing, then a manifest that does not parse.
+    let project = Project::empty("scope-manifests");
+    project.write("package.json", r#"{"workspaces":["packages/*"]}"#);
+    project.write("src/a.js", "export const a = 1;\n");
+    for manifest in [r#"{"workspaces":["packages/*"]}"#, "{ broken"] {
+        project.write("package.json", manifest);
+        assert_eq!(
+            project.supercov(&["quality", "scope"]).succeeds(),
+            "Source scope, automatic mode: 1 included, 0 ambiguous, 0 excluded.\nRoots: src\n",
+            "{manifest}"
+        );
+    }
+    // A Cargo path in single quotes is a path, and a directory a workspace
+    // excludes is no member.
+    let cargo = Project::empty("scope-cargo");
+    cargo.write(
+        "Cargo.toml",
+        "[package]\nname = \"x\"\n[lib]\npath = 'odd/lib.rs'\n",
+    );
+    cargo.write("odd/lib.rs", "pub fn a() {}\n");
+    assert!(
+        cargo
+            .supercov(&["quality", "scope"])
+            .succeeds()
+            .starts_with(
+                "Source scope, automatic mode: 1 included, 0 ambiguous, 0 excluded.\nRoots: odd\n"
+            )
+    );
+    let excluded = Project::empty("scope-exclude");
+    excluded.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = []\nexclude = [\"sandbox\"]\n# see \"notes\nresolver = \"2\"\n",
+    );
+    excluded.write("sandbox/x.rs", "pub fn a() {}\n");
+    let scope = excluded.supercov(&["quality", "scope"]).succeeds();
+    contains_all(
+        &scope,
+        &[
+            "Source scope, automatic mode: 0 included, 1 ambiguous, 0 excluded.\nRoots: (none found)\n",
+            "  ambiguous  sandbox/x.rs  (unclassified first-party source)\n",
+            "\n1 source file sits under no recognised source root and was not assessed. Read it with `supercov quality scope`, and declare your roots with SUPERCOV_SOURCE_ROOTS=src,app if it is first-party code.\n",
+        ],
+    );
+    // Another checkout, a licence banner, a library name with nothing after
+    // it, and a Go file in no module.
+    let mixed = Project::empty("scope-mixed");
+    mixed.write("package.json", r#"{"name":"p"}"#);
+    mixed.write("nested/package.json", r#"{"name":"n"}"#);
+    mixed.write("nested/src/n.js", "export const n = 1;\n");
+    mixed.write("nested/.git", "gitdir: x\n");
+    mixed.write(
+        "public/js/w.js",
+        "// Licensed under MIT.\nexport const w = 1;\n",
+    );
+    mixed.write(
+        "public/js/v.js",
+        "// Licensed under the Apache License 2.0\nexport const v = 1;\n",
+    );
+    mixed.write("public/jqueryish.js", "export const j = 1;\n");
+    mixed.write("misc/main.go", "package main\nfunc main() {}\n");
+    assert_eq!(
+        mixed.supercov(&["quality", "scope"]).succeeds(),
+        "Source scope, automatic mode: 0 included, 3 ambiguous, 2 excluded.\n\
+         Roots: (none found)\n\n\
+         Files left out, by reason:\n      3  unclassified first-party source\n      2  vendored third-party library\n\n\
+         Not assessed:\n\
+         \x20 ambiguous  misc/main.go  (unclassified first-party source)\n\
+         \x20 ambiguous  nested/src/n.js  (unclassified first-party source)\n\
+         \x20 ambiguous  public/jqueryish.js  (unclassified first-party source)\n\
+         \x20 excluded   public/js/v.js  (vendored third-party library)\n\
+         \x20 excluded   public/js/w.js  (vendored third-party library)\n\n\
+         3 source files sit under no recognised source root and were not assessed. Read them with `supercov quality scope`, and declare your roots with SUPERCOV_SOURCE_ROOTS=src,app if they are first-party code.\n"
+    );
+    assert!(
+        mixed
+            .supercov(&["quality", "scope", "--limit", "1"])
+            .succeeds()
+            .contains(
+                "  ambiguous  misc/main.go  (unclassified first-party source)\n  ... and 4 more\n"
+            )
+    );
+}
+
+#[test]
+fn a_file_under_no_root_is_put_to_the_model_with_the_manifests_and_a_failure_is_said() {
+    let project = Project::cart("scope-question");
+    project.write("misc/main.go", "package main\nfunc main() {}\n");
+    project.write("settings.gradle", "rootProject.name = 'cart'\n");
+    project.write("App.sln", "\n");
+    project.commit("misc");
+    let (base, seen) = gateway(MODEL, answer_no);
+    let report = project
+        .supercov_with(&["quality"], &through(&base))
+        .succeeds();
+    assert!(
+        report.contains("  1 file under no source root was read by the model from the tree: 0 ship, 1 does not.\n"),
+        "{report}"
+    );
+    let first = seen.lock().unwrap()[0].2.clone();
+    assert_eq!(
+        first["state"]["manifests"], "App.sln\npackage.json\nsettings.gradle",
+        "{first}"
+    );
+    let json = project
+        .supercov_with(&["quality", "--json"], &through(&base))
+        .json();
+    assert_eq!(
+        json["skipped"][0],
+        serde_json::json!({"path": "misc/main.go", "reason": "the model reads it as not part of the product", "status": "excluded"}),
+    );
+    // The scope question is the first request; refused, the file stays out
+    // and the report says why.
+    let (refusing, _) = gateway_with(MODEL, answer_yes, |n| (n == 0).then_some((401, "{}")));
+    let refused = project
+        .supercov_with(&["quality", "--refresh"], &through(&refusing))
+        .succeeds();
+    contains_all(
+        &refused,
+        &[
+            "  The model could not be asked which files under no source root ship: 127.0.0.1 HTTP 401: the key was refused; check TYPESAFE_API_KEY\n",
+            "\n1 source file sits under no recognised source root and was not assessed.",
+        ],
+    );
+}
+
+#[test]
+fn a_snapshot_that_scored_nothing_reads_as_such_and_diffs_against_one_that_did() {
+    let project = Project::empty("generated-only");
+    project.write("package.json", r#"{"name":"gen","type":"module"}"#);
+    project.write(
+        "src/gen.js",
+        "// Code generated by x. DO NOT EDIT.\nexport const a = 1;\n",
+    );
+    project.git(&["init", "-q"]);
+    let (no, _) = gateway(MODEL, answer_no);
+    let first = project
+        .supercov_with(&["quality", "--json"], &through(&no))
+        .json();
+    let first = first["id"].as_str().unwrap().to_owned();
+    assert!(
+        project
+            .supercov(&["quality", "show"])
+            .succeeds()
+            .starts_with("Quality not scored: no file was assessed.\n")
+    );
+    project.write("src/real.js", "export const b = (x) => x + 1;\n");
+    let second = project
+        .supercov_with(&["quality", "--json"], &through(&no))
+        .json();
+    let second = second["id"].as_str().unwrap().to_owned();
+    let diff = project
+        .supercov(&["quality", "diff", &first, &second])
+        .succeeds();
+    assert!(!diff.contains("Health"), "{diff}");
+    contains_all(
+        &diff,
+        &[
+            "The snapshots assessed no file in common.",
+            "Added:",
+            "src/real.js",
+        ],
+    );
+    let (yes, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["quality", "--refresh"], &through(&yes))
+        .succeeds();
+    let shown = project.supercov(&["quality", "show"]).succeeds();
+    assert!(
+        shown.contains("   weak  src/real.js\n         complex_conditional, "),
+        "{shown}"
+    );
+    assert!(!shown.contains("... and"), "{shown}");
+}
+
+#[test]
+fn saved_security_assessments_list_flagged_files_failures_and_what_changed() {
+    let project = shop("security-views");
+    std::fs::write(project.root.join("src/bad.js"), [0xff, 0xfe]).unwrap();
+    project.git(&["init", "-q"]);
+    let (no, _) = gateway(MODEL, answer_no);
+    let (yes, _) = gateway(MODEL, answer_yes);
+    let assess = |base: &str, refresh: bool| -> String {
+        let mut args = vec!["security", "src/", "--json"];
+        if refresh {
+            args.push("--refresh");
+        }
+        project.supercov_with(&args, &through(base)).json()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let calm = assess(&no, false);
+    let shown = project.supercov(&["security", "show"]).succeeds();
+    assert!(
+        shown.starts_with("Security: 0 of 2 files flagged, 2 clean.\nCatalog "),
+        "{shown}"
+    );
+    let fired = assess(&yes, true);
+    let shown = project.supercov(&["security", "show"]).succeeds();
+    contains_all(&shown, &["Flagged:", "src/handler.js", "src/users.js"]);
+    assert!(!shown.contains("src/bad.js"), "{shown}");
+    assert!(
+        project
+            .supercov(&["security", "show", "--limit", "1"])
+            .succeeds()
+            .contains("  ... and 2 more files"),
+        "{}",
+        project
+            .supercov(&["security", "show", "--limit", "1"])
+            .stdout()
+    );
+    assert!(
+        project
+            .supercov(&["security", "gaps"])
+            .succeeds()
+            .contains("src/bad.js")
+    );
+    let diff = project
+        .supercov(&["security", "diff", &calm, &fired])
+        .succeeds();
+    assert!(!diff.contains("Health"), "{diff}");
+    contains_all(&diff, &["Declined:", "appeared"]);
+}
+
+#[test]
+fn a_line_classified_without_confidence_or_entered_nowhere_stays_as_the_file_question_left_it() {
+    let project = shop("security-confidence");
+    fn faint_lines(id: &str, question: &serde_json::Value) -> serde_json::Value {
+        let mut answer = common::answer_reviewer(id, question);
+        if id.starts_with('n') {
+            answer["confidence"] = serde_json::json!(0.2);
+        }
+        answer
+    }
+    let (base, _) = gateway(MODEL, faint_lines);
+    let report = project
+        .supercov_with(&["security", "src/handler.js"], &through(&base))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "Security: 1 of 1 file flagged, 0 clean; 0 confirmed at a line.",
+            "0.90  injection_sink  (file-level only)",
+        ],
+    );
+    assert!(!report.contains("line 9"), "{report}");
+    fn entered_nowhere(id: &str, question: &serde_json::Value) -> serde_json::Value {
+        if id
+            .strip_prefix('s')
+            .is_some_and(|n| n.parse::<usize>().is_ok())
+        {
+            common::choose(question, "same")
+        } else {
+            common::answer_reviewer(id, question)
+        }
+    }
+    let (base, _) = gateway(MODEL, entered_nowhere);
+    let report = project
+        .supercov_with(
+            &["security", "src/handler.js", "--refresh"],
+            &through(&base),
+        )
+        .succeeds();
+    assert!(report.contains("line 9  0.90  db.query("), "{report}");
+    assert!(!report.contains("(enters at line"), "{report}");
+}
+
+#[test]
+fn two_findings_of_one_check_far_apart_are_both_shown() {
+    let project = shop("security-far");
+    project.edit(
+        "src/handler.js",
+        "  res.send(",
+        "  res.send(\"\");\n  //\n  //\n  //\n  //\n  //\n  //\n  //\n  //\n  //\n  //\n  //\n  const again = await db.query(\"SELECT * FROM t WHERE x = \" + req.query.x);\n  res.send(",
+    );
+    let (base, _) = gateway(MODEL, answer_reviewer);
+    let report = project
+        .supercov_with(&["security", "src/handler.js"], &through(&base))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "line 9  0.90  db.query(\"SELECT * FROM orders",
+            "line 24  0.90  db.query(\"SELECT * FROM t WHERE x",
+        ],
+    );
+}
+
+#[test]
+fn a_file_every_window_of_which_is_refused_is_one_error() {
+    let project = Project::empty("windows-refused");
+    project.write("package.json", r#"{"name":"big","type":"module"}"#);
+    let mut source = String::new();
+    for i in 0..1600 {
+        source.push_str(&format!(
+            "export function f{i}(a, b) {{\n  if (a > {i} && b < {i}) {{\n    return a * b + {i};\n  }}\n  return eval(\"a\" + b);\n}}\n\n"
+        ));
+    }
+    project.write("src/big.js", &source);
+    let (base, _) = gateway_with(MODEL, answer_yes, |_| Some((401, "{}")));
+    let report = project
+        .supercov_with(&["quality", "src/big.js"], &through(&base))
+        .exits(2);
+    assert_eq!(
+        report.matches("  error  src/big.js  (127.0.0.1 HTTP 401: the key was refused; check TYPESAFE_API_KEY)\n").count(),
+        1,
+        "{report}"
+    );
+}
+
+#[test]
+fn an_unreadable_cache_entry_in_either_lane_is_named_with_its_place() {
+    let project = shop("cache-faults");
+    let (base, _) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["security", "src/users.js"], &through(&base))
+        .succeeds();
+    let requests = project.root.join(".supercov/security/requests");
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&requests)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    for entry in &entries {
+        std::fs::write(entry, "not json").unwrap();
+    }
+    let report = project
+        .supercov_with(&["security", "src/users.js"], &through(&base))
+        .exits(2);
+    assert!(
+        report.contains("  error  src/users.js  (invalid security cache; use --refresh)"),
+        "{report}"
+    );
+    for entry in &entries {
+        std::fs::remove_file(entry).unwrap();
+        std::fs::create_dir(entry).unwrap();
+    }
+    let report = project
+        .supercov_with(&["security", "src/users.js"], &through(&base))
+        .exits(2);
+    assert!(
+        report.contains(&format!(
+            "  error  src/users.js  (cannot read the security cache {}: ",
+            entries[0].display()
+        )) && report.contains("; use --refresh)"),
+        "{report}"
+    );
+}
+
+#[test]
+fn the_line_pass_reads_files_no_parser_knows_and_offers_only_lines_that_hold_code() {
+    let project = Project::empty("line-edges");
+    project.write("package.json", r#"{"name":"edges","type":"module"}"#);
+    project.write("src/plain.go", "package p\nfunc A() int { return 1 }\n");
+    project.write("src/routes.rb", "app.get(\"/orders\") { |req| req }\n");
+    project.write(
+        "src/q.go",
+        "package q\n\n// look up an order\nfunc Find(db DB, id string) { db.query(\"SELECT * FROM o WHERE id = \" + id) }\n",
+    );
+    project.write(
+        "src/q.rb",
+        "# find an order\ndb.query(\"SELECT md5(\" + params[:id] + \")\")\n",
+    );
+    project.write(
+        "src/top.js",
+        "db.query(\"SELECT \" + process.argv[2]);\nexport function later(req, db) {\n  return 1;\n}\n",
+    );
+    project.write(
+        "src/klass.js",
+        "export default class {\n  #run(req, db) { return db.query(\"SELECT \" + req.q); }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let (base, seen) = gateway(MODEL, answer_reviewer);
+    let report = project
+        .supercov_with(&["security", "src/"], &through(&base))
+        .succeeds();
+    let entered = |path: &str| -> Vec<String> {
+        let seen = seen.lock().unwrap();
+        let confirm = seen
+            .iter()
+            .map(|(_, _, request)| request)
+            .find(|request| {
+                request["state"]["file"]["path"] == path && request["questions"]["c0"].is_object()
+            })
+            .unwrap_or_else(|| panic!("no line asked of {path}"));
+        confirm["questions"]["s0"]["criteria"]
+            .as_object()
+            .map(|options| options.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    // Where the outside value enters: a line that holds code, never a blank
+    // line or a comment, and in JavaScript `#` starts a private member.
+    assert_eq!(entered("src/q.go"), ["L1", "L4", "same", "none"]);
+    assert_eq!(entered("src/q.rb"), ["L2", "same", "none"]);
+    assert_eq!(entered("src/top.js"), ["L1", "same", "none"]);
+    assert_eq!(entered("src/klass.js"), ["L2", "same", "none"]);
+    contains_all(
+        &report,
+        &[
+            "          line 2  0.90  db.query(\"SELECT \" + req.q)  (enters at line 2)\n",
+            "    0.90  weak_cryptography\n          line 2  0.90  db.query(\"SELECT md5(\" + params[:id] + \")\")",
+            "  src/routes.rb\n    0.90  destination_from_input  (file-level only)\n",
+            "  src/plain.go\n    0.90  destination_from_input  (file-level only)\n    0.90  injection_sink  (file-level only)\n",
+        ],
+    );
+    assert!(
+        report.contains("    0.90  missing_authorization  (file-level only)\n    0.90  path_from_input  (file-level only)\n    0.90  secret_in_source  (file-level only)\n    0.90  sensitive_data_exposure  (file-level only)\n    0.90  unchecked_mass_assignment  (file-level only)\n    0.90  unescaped_output  (file-level only)\n    0.90  unsafe_code_execution  (file-level only)\n    0.90  weak_authentication  (file-level only)\n    0.90  weak_cryptography  (file-level only)\n\nNarrow"),
+        "routes.rb, last, has no line confirmed: {report}"
+    );
+}
+
+#[test]
+fn security_beside_a_run_whose_tests_catch_nothing_counts_each_executed_flagged_file() {
+    let project = shop("security-unasserted");
+    project.write(
+        "test/handler.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { handler } from \"../src/handler.js\";\n\ntest(\"a missing page is refused\", async () => {\n  const db = { query: async () => [] };\n  const req = { query: { id: \"1\", file: \"a\", title: \"t\" }, params: { name: \"no-such-page\" } };\n  await assert.rejects(handler(req, { send() {} }, db), /ENOENT/);\n});\n",
+    );
+    project.write(
+        "src/unused.js",
+        "export function unused(a) {\n  return eval(a);\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let run = project.measure(&[]);
+    let (no, _) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&no))
+        .succeeds();
+    let (yes, _) = gateway(MODEL, answer_yes);
+    let report = project
+        .supercov_with(&["security", "src/", "--run", "latest"], &through(&yes))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "; 2 are executed by tests that are not judged to catch any line of them.\n",
+            "  src/unused.js\n",
+        ],
+    );
+    assert_eq!(
+        report
+            .matches(
+                "    executed by tests, but no test is judged to catch a change to any line of it\n"
+            )
+            .count(),
+        2,
+        "{report}"
+    );
+    let calm = project
+        .supercov_with(
+            &["security", "src/", "--run", "latest", "--refresh"],
+            &through(&no),
+        )
+        .succeeds();
+    assert!(
+        calm.starts_with("Security: 0 of 3 files flagged, 3 clean.\n"),
+        "{calm}"
+    );
+}
+
+#[test]
+fn a_patch_review_reads_a_large_change_as_its_diff_and_names_what_it_cannot_read() {
+    let project = Project::cart("patch-sizes");
+    let mut source = String::new();
+    for i in 0..1600 {
+        source.push_str(&format!(
+            "export function f{i}(a, b) {{\n  if (a > {i} && b < {i}) {{\n    return a * b + {i};\n  }}\n  return eval(\"a\" + b);\n}}\n\n"
+        ));
+    }
+    project.write("src/big.js", &source);
+    project.commit("big");
+    let (base, _) = gateway(MODEL, answer_yes);
+    let jev = through(&base);
+    // A large file changed in one line is read as the diff.
+    project.edit("src/big.js", "return a * b + 7;", "return a * b + 8;");
+    let review = project
+        .supercov_with(&["quality", "patch", "src/big.js"], &jev)
+        .succeeds();
+    assert!(
+        review.contains("(unified diff only: both versions exceed the request budget)"),
+        "{review}"
+    );
+    // A large new file has no previous version, and its diff is the file.
+    project.write("src/huge.js", &source);
+    let refused = project
+        .supercov_with(&["quality", "patch", "src/huge.js"], &jev)
+        .exits(2);
+    assert!(
+        refused.contains("over the 30000 token request budget, and so is its diff; a change cannot be split into windows, but `supercov quality src/huge.js` reads the file in them"),
+        "{refused}"
+    );
+    std::fs::remove_file(project.root.join("src/huge.js")).unwrap();
+    project.git(&["checkout", "-q", "src/big.js"]);
+    // A generated file is left out unless all are asked for.
+    project.write("src/gen.js", "// @generated\nexport const g = 1;\n");
+    project.edit("src/cart.js", "return 0;", "return 0 ;");
+    let skipped = |args: &[&str]| -> Vec<serde_json::Value> {
+        project.supercov_with(args, &jev).json()["skipped"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(
+        skipped(&["quality", "patch", "--json"])
+            .contains(&serde_json::json!({"path": "src/gen.js", "reason": "generated"}))
+    );
+    let all = project
+        .supercov_with(&["quality", "patch", "--all", "--json"], &jev)
+        .json();
+    assert!(
+        all["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"] == "src/gen.js"),
+        "{}",
+        all["files"]
+    );
+    std::fs::remove_file(project.root.join("src/gen.js")).unwrap();
+    // A file emptied is no deletion, and neither introduces anything.
+    project.write("src/cart.js", "");
+    assert_eq!(
+        skipped(&["quality", "patch", "--json"]),
+        [
+            serde_json::json!({"path": "src/cart.js", "reason": "emptied; an empty file cannot introduce anything"})
+        ]
+    );
+    assert!(
+        project
+            .supercov_with(&["quality", "patch"], &jev)
+            .succeeds()
+            .contains("No changed source files to review.")
+    );
+}
+
+#[test]
+fn a_clean_branch_is_reviewed_against_the_branch_its_remote_names() {
+    let project = Project::cart("patch-automatic");
+    project.git(&["branch", "-M", "main"]);
+    project.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+    ]);
+    // Neither a tool's hidden directory nor a blank name makes the tree dirty.
+    project.write(".notes/todo.txt", "later\n");
+    project.write(" ", "");
+    let (base, _) = gateway(MODEL, answer_no);
+    let review = project
+        .supercov_with(&["quality", "patch"], &through(&base))
+        .succeeds();
+    assert!(
+        review.starts_with("Reviewing changes since this branch left main.\n"),
+        "{review}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn python_is_read_by_its_own_parser_and_by_patterns_when_that_cannot_run() {
+    let project = Project::empty("python-lines");
+    project.write("pyproject.toml", "[project]\nname = \"app\"\n");
+    project.write(
+        "src/app.py",
+        "from flask import request\n\ndef view(db):\n    rows = db.query(\"SELECT \" + request.args[\"id\"])\n    return rows\n",
+    );
+    project.write("src/bad.py", "def broken(:\n    db.query(\"x\" + y)\n");
+    project.git(&["init", "-q"]);
+    let classified = |seen: &common::Seen, path: &str| {
+        seen.lock().unwrap().iter().any(|(_, _, request)| {
+            request["state"]["file"]["path"] == path && request["questions"]["n0"].is_object()
+        })
+    };
+    let (base, seen) = gateway(MODEL, answer_reviewer);
+    let report = project
+        .supercov_with(&["security", "src/"], &through(&base))
+        .succeeds();
+    // The parser's nodes are classified; a file it cannot parse is read by
+    // the patterns.
+    assert!(classified(&seen, "src/app.py"), "{report}");
+    assert!(!classified(&seen, "src/bad.py"), "{report}");
+    contains_all(
+        &report,
+        &[
+            "line 4  0.90  rows = db.query(\"SELECT \" + request.args[\"id\"])",
+            "line 2  0.90  db.query(\"x\" + y)",
+        ],
+    );
+    // An interpreter that fails leaves every file to the patterns.
+    project.write_script("fakebin/python3", "#!/bin/sh\nexit 1\n");
+    let path = format!(
+        "{}:{}",
+        project.root.join("fakebin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let (base, seen) = gateway(MODEL, answer_reviewer);
+    let mut env = through(&base).to_vec();
+    env.push(("PATH", &path));
+    let report = project
+        .supercov_with(&["security", "src/app.py", "--refresh"], &env)
+        .succeeds();
+    assert!(!classified(&seen, "src/app.py"), "{report}");
+    assert!(
+        report.contains("line 4  0.90  rows = db.query(\"SELECT \" + request.args[\"id\"])"),
+        "{report}"
+    );
+}
+
+#[test]
+fn snapshots_an_older_release_wrote_are_still_read() {
+    let project = Project::empty("legacy-snapshots");
+    let snapshot = |lane: &str, id: &str, manifest: &str, files: &str| {
+        project.write(
+            &format!(".supercov/{lane}/snapshots/{id}/manifest.json"),
+            manifest,
+        );
+        project.write(
+            &format!(".supercov/{lane}/snapshots/{id}/files.json"),
+            files,
+        );
+    };
+    // The rubric, before the catalog: no instrument, and a deepened scan.
+    snapshot(
+        "quality",
+        "q_aaaaaaaaaaaaaaaa",
+        r#"{"created_at":"2026-01-01T00-00-00-000000Z","paths":["src"],"counts":{"assessed":1,"errors":0,"declarations":3},"parent":"q_bbbbbbbbbbbbbbbb","deepened":["src/a.js"]}"#,
+        r#"{"files":[{"path":"src/a.js","status":"completed"}]}"#,
+    );
+    // The catalog, before a file recorded what fired.
+    snapshot(
+        "quality",
+        "q_cccccccccccccccc",
+        r#"{"created_at":"2026-02-01T00-00-00-000000Z","instrument":"catalog","catalog_version":"properties-v1","model":"m","paths":["src"],"counts":{"assessed":1,"errors":0,"scored":1},"health":5.0}"#,
+        r#"{"files":[{"path":"src/a.js","status":"completed","health":5.0,"checks":{"god_class":0.9,"dead_code":0.1}}]}"#,
+    );
+    // Security, before the totals by check.
+    snapshot(
+        "security",
+        "q_dddddddddddddddd",
+        r#"{"created_at":"2026-02-01T00-00-00-000000Z","instrument":"security","catalog_version":"security-v4","model":"m","paths":["src"],"counts":{"assessed":1,"errors":0,"flagged":1}}"#,
+        r#"{"files":[{"path":"src/a.js","status":"completed","present":[{"check":"injection_sink","value":0.9}],"checks":{"injection_sink":0.9}}]}"#,
+    );
+    assert!(
+        project
+            .supercov(&["quality", "snapshots"])
+            .succeeds()
+            .ends_with("\nq_aaaaaaaaaaaaaaaa — 2026-01-01T00-00-00-000000Z\n   1 assessed, 0 errors; scanned src\n   3 declarations assessed, deepened from q_bbbbbbbbbbbbbbbb: src/a.js\n")
+    );
+    assert!(
+        project
+            .supercov(&["quality", "gaps", "q_aaaaaaaaaaaaaaaa"])
+            .exits(2)
+            .contains("snapshot q_aaaaaaaaaaaaaaaa was written by the rubric, which has no findings to narrow to; run `supercov quality` to assess with the catalog")
+    );
+    assert!(
+        project
+            .supercov(&["quality", "file", "src/a.js", "q_cccccccccccccccc"])
+            .succeeds()
+            .starts_with("src/a.js  quality fair (5.0/10)\n\n  yes  0.90  god_class\n   no  0.10  dead_code\n")
+    );
+    assert_eq!(
+        project.supercov(&["security", "show"]).succeeds(),
+        "Security: 1 of 1 file flagged, 0 clean.\nCatalog security-v4, model m, snapshot q_dddddddddddddddd.\n\nFlagged:\n  src/a.js\n    0.90  injection_sink\n\nNarrow with `security gaps`, or read one with `security file <path>`.\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_assessment_whose_store_cannot_be_written_reports_and_says_what_was_not_saved() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: reads this process's own user id.
+    if unsafe { libc::geteuid() } == 0 {
+        // Permissions do not stop root, and nothing else can fail this way.
+        return;
+    }
+    let project = shop("store-unwritable");
+    let store = project.root.join(".supercov");
+    std::fs::create_dir_all(store.join("quality/requests")).unwrap();
+    std::fs::create_dir_all(store.join("quality/snapshots")).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (base, _) = gateway(MODEL, answer_no);
+    let ran = project.supercov_with(&["quality", "src/users.js", "--json"], &through(&base));
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = ran.json();
+    let denied = format!("{}: Permission denied", store.join(".gitignore").display());
+    assert!(
+        report["files"][0]["warning"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!(
+                "assessment completed but cache could not be saved: {denied}"
+            )),
+        "{}",
+        report["files"][0]
+    );
+    assert!(
+        report["snapshot_warning"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!(
+                "the assessment completed but no snapshot was saved: {denied}"
+            )),
+        "{}",
+        report["snapshot_warning"]
     );
 }

@@ -372,25 +372,13 @@ pub mod security {
     pub fn line_questions(
         candidates: &[super::super::candidates::Candidate],
     ) -> Map<String, Value> {
-        const HANDLER: &str = "A request handler is declared at line {n}: `{text}`. Considering only \
-that handler and what it does, does it read, change or delete a record chosen by a caller-supplied \
-identifier, or perform an administrative or privileged action, without any visible check that the \
-caller is signed in and allowed to act on it? A check applied by a decorator, middleware, guard or \
-route group visible in this file counts as a check. A handler that only serves public, non-sensitive \
-data does not count.";
+        // A missing authorisation stays file-level and is never asked here.
         candidates
             .iter()
             .enumerate()
             .filter_map(|(i, candidate)| {
                 let check = checks().iter().find(|c| c.id == candidate.check);
                 let (task, present, absent) = match check {
-                    Some(c) if c.id == "missing_authorization" => (
-                        HANDLER
-                            .replace("{n}", &candidate.line.to_string())
-                            .replace("{text}", &candidate.text),
-                        "This handler acts on a caller-chosen record or a privileged operation with no visible authorisation.".to_owned(),
-                        "This handler is guarded, or acts on nothing sensitive.".to_owned(),
-                    ),
                     Some(c) => (
                         format!(
                             "Line {} of the file reads: `{}`. Considering only what reaches that line, and how the value got there: {}{}",
@@ -517,10 +505,21 @@ data does not count.";
         // over the lines of its function, "where does the outside value
         // enter".
         let lines: Vec<&str> = source.lines().collect();
+        // A JavaScript line starting `#` declares a private member.
+        let hash_comments = !matches!(
+            std::path::Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str()),
+            Some("js" | "ts" | "tsx" | "jsx" | "mjs" | "cjs" | "mts" | "cts")
+        );
         for (i, candidate) in candidates.iter().enumerate() {
-            if let Some(question) =
-                source_question(candidate.line, &candidate.check, &lines, structure)
-            {
+            if let Some(question) = source_question(
+                candidate.line,
+                &candidate.check,
+                &lines,
+                structure,
+                hash_comments,
+            ) {
                 questions.insert(format!("s{i}"), question);
             }
         }
@@ -543,12 +542,14 @@ data does not count.";
 
     /// One Choice for one line: over the lines of the function it sits in (or
     /// thirty lines above it), "on which line does the outside value enter".
-    /// Options `L{n}`, `same`, `none`.
+    /// Options `L{n}`, `same`, `none`; a comment is never an option, and a
+    /// line starting `#` is one when `hash_comments`.
     pub fn source_question(
         line: usize,
         check: &str,
         lines: &[&str],
         structure: &super::super::candidates::Structure,
+        hash_comments: bool,
     ) -> Option<Value> {
         let (start, end) = structure
             .functions
@@ -563,7 +564,8 @@ data does not count.";
         let mut options = Map::new();
         for n in start..=end.min(lines.len()) {
             let text = lines[n - 1].trim();
-            if !text.is_empty() && !text.starts_with('#') && !text.starts_with("//") {
+            let comment = text.starts_with("//") || (hash_comments && text.starts_with('#'));
+            if !text.is_empty() && !comment {
                 let shown: String = text.chars().take(100).collect();
                 options.insert(format!("L{n}"), Value::String(format!("line {n}: {shown}")));
             }
@@ -636,9 +638,11 @@ data does not count.";
             ));
             let mut criteria = Map::new();
             for kind in SINK_KINDS {
-                if let Some(c) = checks().iter().find(|c| c.id == *kind) {
-                    criteria.insert((*kind).to_owned(), Value::String(c.present.clone()));
-                }
+                let c = checks()
+                    .iter()
+                    .find(|c| c.id == *kind)
+                    .expect("every sink kind is a security check");
+                criteria.insert((*kind).to_owned(), Value::String(c.present.clone()));
             }
             criteria.insert(
                 "none".into(),
