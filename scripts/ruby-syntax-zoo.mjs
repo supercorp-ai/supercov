@@ -375,7 +375,63 @@ end
   end
 end
 `,
+  // The long tail: a Ractor's block, \`case/in\` arms that jump, a grouped
+  // condition of two statements, assignment shapes as the last word of a
+  // branch, and a rescue whose clauses say nothing.
+  // A Ractor's block cannot reach the probes: what only a probe proves inside
+  // it is a limitation, said.
+  'lib/ractor.rb': `module InRactor
+  def self.doubled(n)
+    Ractor.new(n) { |value| value * 2 }.take
+  end
+end
+`,
+  'lib/tail.rb': `module Tail
+  def self.matched(items)
+    found = []
+    items.each do |item|
+      case item
+      in Integer if item.negative? then next
+      in Integer if item > 100 then break
+      in Integer then found << item
+      else found << :other
+      end
+    end
+    found
+  end
+
+  def self.grouped_statements(flag)
+    if (seen = flag; seen)
+      :grouped
+    else
+      :not
+    end
+  end
+
+  def self.assigned_last(flag)
+    if flag
+      first, second = 1, 2
+    else
+      first = second = 0
+    end
+    first + second
+  end
+
+  def self.quiet_rescue(kind)
+    begin
+      raise ArgumentError if kind == :raise
+      raise TypeError if kind == :type
+    rescue ArgumentError
+    else
+    ensure
+    end
+    kind
+  end
+end
+`,
   'test/zoo_test.rb': `require 'minitest/autorun'
+require 'tail'
+require 'ractor'
 require 'flow'
 require 'shapes'
 require 'more'
@@ -508,6 +564,19 @@ class ZooTest < Minitest::Test
     assert_raises(NotImplementedError) { More.retried(0) }
   end
 
+  def test_tail
+    assert_equal 4, InRactor.doubled(2)
+    assert_equal [1, :other], Tail.matched([1, -1, 'x', 200, 5])
+    assert_equal [], Tail.matched([])
+    assert_equal :grouped, Tail.grouped_statements(true)
+    assert_equal :not, Tail.grouped_statements(false)
+    assert_equal 3, Tail.assigned_last(true)
+    assert_equal 0, Tail.assigned_last(false)
+    assert_equal :raise, Tail.quiet_rescue(:raise)
+    assert_equal :calm, Tail.quiet_rescue(:calm)
+    assert_raises(TypeError) { Tail.quiet_rescue(:type) }
+  end
+
   def test_literals
     assert_equal %i[yes yes yes yes yes yes yes no no],
                  %i[true integer float rational imaginary string symbol false nil].map { |kind| Literals.constant(kind) }
@@ -534,8 +603,9 @@ try {
   const byFile = Object.fromEntries(listed.map((entry) => [entry.file, entry]));
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
+  assert.ok(byFile['lib/ractor.rb']?.measurementLimitations >= 1, `lib/ractor.rb\n${report}`);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb', 'lib/edges.rb', 'lib/more.rb']) {
+  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb', 'lib/edges.rb', 'lib/more.rb', 'lib/tail.rb']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {
