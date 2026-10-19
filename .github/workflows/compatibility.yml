@@ -34,7 +34,7 @@ jobs:
   node:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',node,')) }}
     name: Node ${{ matrix.node }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -58,7 +58,7 @@ jobs:
   runners:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,')) }}
     name: ${{ matrix.name }} runners
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -104,7 +104,7 @@ jobs:
   browsers:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,')) }}
     name: Playwright ${{ matrix.browser }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -164,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -194,11 +194,11 @@ jobs:
       # A probe's cost is the interpreter's: 3.11 specializes the stores a
       # probe compiles to and 3.9 does not, so every version is held to the
       # budget, on one host.
-      - if: matrix.os == 'ubuntu-24.04'
+      - if: matrix.os == 'ubuntu-latest'
         run: npm run benchmark:python
         env:
           SUPERCOV_PYTHON: python
-      - if: matrix.os == 'ubuntu-24.04'
+      - if: matrix.os == 'ubuntu-latest'
         run: python scripts/python-startup-benchmark.py
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
@@ -212,7 +212,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
         ruby: ["3.3", "3.4", "4.0"]
@@ -251,7 +251,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -287,7 +287,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 1.22 is the oldest the generated harness targets; the rest is what
         # projects are actually on. 1.26 earns its place on its own: it is the
         # release that let `new` take a value, which the grammar Supercov
@@ -336,7 +336,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 17 is the floor the documentation claims; 21 is the current LTS.
         java: ["17", "21"]
         exclude:
@@ -396,9 +396,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { native: cli-linux-x64-gnu, os: ubuntu-24.04 }
+          - { native: cli-linux-x64-gnu, os: ubuntu-latest }
           - { native: cli-linux-arm64-gnu, os: ubuntu-24.04-arm }
-          - { native: cli-linux-x64-musl, os: ubuntu-24.04, image: "node:22-alpine" }
+          - { native: cli-linux-x64-musl, os: ubuntu-latest, image: "node:22-alpine" }
           - { native: cli-linux-arm64-musl, os: ubuntu-24.04-arm, image: "node:22-alpine" }
           - { native: cli-darwin-arm64, os: macos-latest }
           - { native: cli-darwin-x64, os: macos-15-intel }

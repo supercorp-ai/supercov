@@ -33,16 +33,16 @@ env:
 jobs:
   platforms:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'self-coverage')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.os.outputs.os }}
     steps:
       - id: os
         run: |
           if [ "${{ inputs.macos }}" = true ] || [ "${{ github.event.label.name }}" = self-coverage-macos ]; then
-            echo 'os=["ubuntu-24.04","macos-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'os=["ubuntu-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
           else
-            echo 'os=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
           fi
 
   build:
@@ -73,6 +73,10 @@ jobs:
     name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    # A fixture pins Playwright 1.60, which predates Ubuntu 26.04: on Linux
+    # every Playwright fetches and launches the 24.04 builds, which run there.
+    env:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ${{ runner.os == 'Linux' && 'ubuntu24.04-x64' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -134,9 +138,11 @@ jobs:
       # own browser builds: install them for every version a lockfile names.
       - name: Install every pinned Playwright's browsers
         run: |
-          versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -u)
+          versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
+          # The system's libraries by the newest, which knows this system.
+          env -u PLAYWRIGHT_HOST_PLATFORM_OVERRIDE npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
           for version in $versions; do
-            npx -y "playwright@$version" install --with-deps
+            npx -y "playwright@$version" install
           done
       - uses: actions/download-artifact@v5
         with:
