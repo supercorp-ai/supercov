@@ -1350,6 +1350,20 @@ fn byte_column_in(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_shard_is_a_number_and_anything_else_is_an_entrys_own_name() {
+        assert_eq!(
+            unsharded("shards/1/shards/2/manifest.json"),
+            "manifest.json"
+        );
+        assert_eq!(unsharded("shards//manifest.json"), "shards//manifest.json");
+        assert_eq!(
+            unsharded("shards/a1/manifest.json"),
+            "shards/a1/manifest.json"
+        );
+        assert_eq!(unsharded("manifest.json"), "manifest.json");
+    }
+
     use super::*;
     use crate::evidence_archive::{read_archive, write_archive};
     use crate::run_store::discover_runs;

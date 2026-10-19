@@ -4810,6 +4810,20 @@ mod tests {
                 .as_bytes()
                 .to_vec(),
             },
+            // Files beside the evidence that are not its records are not
+            // read as records: these would be three more corrupt ones.
+            EvidenceArchiveEntry {
+                path: "server/notes.txt".into(),
+                contents: b"not a record\n".to_vec(),
+            },
+            EvidenceArchiveEntry {
+                path: "server/background/process-1.log".into(),
+                contents: b"not a record\n".to_vec(),
+            },
+            EvidenceArchiveEntry {
+                path: "execution.37360-1.txt".into(),
+                contents: b"not a record\n".to_vec(),
+            },
         ]);
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: path.clone(),
