@@ -335,7 +335,17 @@ impl IndexedQueryError {
                 ),
                 QueryError::SourceNotFound(selector) => (
                     ErrorCode::SourceNotFound,
-                    format!("Source file not found: {selector}"),
+                    // `file src/a.js:3` is most often a line asked as a file.
+                    match selector.rsplit_once(':') {
+                        Some((file, line))
+                            if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) =>
+                        {
+                            format!(
+                                "Source file not found: {selector}; one line is read with `line {file}:{line}`"
+                            )
+                        }
+                        _ => format!("Source file not found: {selector}"),
+                    },
                     Some(json!({ "selector": selector })),
                 ),
                 QueryError::NothingMeasured(file) => (

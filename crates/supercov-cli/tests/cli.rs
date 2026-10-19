@@ -9600,3 +9600,73 @@ fn a_patch_counts_new_files_and_reads_only_the_tests_a_filter_picks() {
         "{none}"
     );
 }
+
+#[test]
+fn query_numbers_and_shapes_are_checked_before_anything_is_read() {
+    let project = Project::cart("query-shapes");
+    project.measure(&[]);
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    for limit in ["1.5", "-1", "99999999999999999999"] {
+        assert!(
+            on_run(&["files", "--limit", limit])
+                .exits(2)
+                .contains("--limit must be a number of entries, or 0 for all of them")
+        );
+    }
+    assert!(
+        on_run(&["files", "--depth", "2"])
+            .exits(2)
+            .contains("--depth requires --group dir")
+    );
+    assert!(
+        on_run(&["files", "--depth", "1", "--group", "dir"])
+            .succeeds()
+            .starts_with("Coverage by directory, 1 deep\n")
+    );
+    assert!(
+        on_run(&["files", "--files"])
+            .exits(2)
+            .contains("--files is only supported by: supercov runs <run-id> scope")
+    );
+    assert!(
+        on_run(&["line", "src/cart.js"])
+            .exits(2)
+            .contains("Expected <source-file>:<line>, with lines counted from 1")
+    );
+    // A line asked of `file` points at `line`.
+    assert!(on_run(&["file", "src/cart.js:3"]).exits(2).contains(
+        "Source file not found: src/cart.js:3; one line is read with `line src/cart.js:3`"
+    ));
+    assert!(
+        on_run(&["gaps", "--metric", "all"])
+            .succeeds()
+            .contains("MC/DC conditions 4")
+    );
+    // The export writes only JSON lines, and names a place it cannot write.
+    assert!(
+        on_run(&["gaps", "--format", "csv"])
+            .exits(2)
+            .contains("gaps --format takes jsonl")
+    );
+    let unwritable = on_run(&[
+        "gaps",
+        "--format",
+        "jsonl",
+        "--output",
+        "missing/dir/x.jsonl",
+    ])
+    .exits(2);
+    assert!(unwritable.contains("missing/dir/x.jsonl: "), "{unwritable}");
+    let picked = on_run(&[
+        "gaps", "--format", "jsonl", "--metric", "mcdc", "--title", "coupon",
+    ])
+    .succeeds();
+    assert!(
+        picked.lines().all(|line| line.contains(r#""kind":"mcdc""#)) && picked.lines().count() > 0,
+        "{picked}"
+    );
+}
