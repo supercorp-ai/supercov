@@ -11627,3 +11627,44 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         "{output}"
     );
 }
+
+#[test]
+fn a_crate_builds_with_the_rustflags_its_cargo_configuration_sets() {
+    // Supercov sets `RUSTFLAGS` to cap lints, and Cargo then ignores
+    // `build.rustflags`: the crate was built without its own `--cfg`.
+    let project = Project::empty("config-rustflags");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"configured\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lints.rust]\nunexpected_cfgs = \"allow\"\n",
+    );
+    project.write(
+        ".cargo/config.toml",
+        "[build]\nrustflags = [\"--cfg\", \"configured\"]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn configured() -> bool {\n    cfg!(configured)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn sees_its_configured_flag() {\n        assert!(super::configured());\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let output = project
+        .supercov_with(&["--", "cargo", "test", "--lib"], &[("RUSTFLAGS", "")])
+        .exits(101);
+    // An empty `RUSTFLAGS` is the user's choice, and Cargo honours it.
+    assert!(output.contains("1 failed"), "{output}");
+    // Run as `supercov_with` runs it, but with no `RUSTFLAGS` of the test's.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args(["--", "cargo", "test", "--lib"])
+        .current_dir(&project.root)
+        .env_remove("RUSTFLAGS")
+        .env_remove("SUPERCOV_SOURCE_ROOTS")
+        .env_remove("SUPERCOV_TEST_KIND")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("1 passed"), "{text}");
+}

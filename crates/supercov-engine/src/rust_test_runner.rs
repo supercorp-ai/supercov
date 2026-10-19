@@ -1571,17 +1571,25 @@ pub(crate) fn capped_rustflags(
     project: &PreparedRustProject,
     invocation: &CargoTestInvocation,
 ) -> String {
-    let wasm = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
+    let plan = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
         &project.workspace_root,
         &project.workspace_root,
         invocation,
     )
-    .is_ok_and(|plan| {
+    .ok();
+    let wasm = plan.as_ref().is_some_and(|plan| {
         plan.targets
             .iter()
             .any(|target| target.target.starts_with("wasm"))
     });
-    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    // `RUSTFLAGS` replaces the flags Cargo's configuration gives rustc
+    // (`build.rustflags`, `target.<triple>.rustflags`), so where the user set
+    // none, the configuration's come first.
+    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_else(|_| {
+        plan.and_then(|plan| plan.rustflags)
+            .unwrap_or_default()
+            .join(" ")
+    });
     if !rustflags.is_empty() {
         rustflags.push(' ');
     }

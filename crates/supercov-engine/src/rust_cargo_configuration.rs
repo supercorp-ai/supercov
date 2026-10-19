@@ -99,6 +99,10 @@ pub struct RustCargoResolvedTargetRunner {
 pub struct RustCargoRunnerPlan {
     pub compiler: RustCargoCompilerCommandPlan,
     pub targets: Vec<RustCargoTargetRunnerPlan>,
+    /// The flags the configuration gives rustc where the environment sets
+    /// no `RUSTFLAGS`; none when it gives none, or its targets differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rustflags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -875,6 +879,20 @@ fn resolve_with_inputs(
         compiler,
         targets,
     } = resolve_targets(root, execution_root, invocation, &model_inputs)?;
+    let mut rustflags = targets
+        .iter()
+        .map(|target| {
+            model_rustflags(
+                &root,
+                &execution_root,
+                &model,
+                &compiler,
+                target,
+                &model_inputs,
+            )
+        })
+        .collect::<Result<Vec<_>, RustCargoConfigurationError>>()?;
+    rustflags.dedup();
     let targets = targets
         .iter()
         .map(|target| {
@@ -891,7 +909,119 @@ fn resolve_with_inputs(
             })
         })
         .collect::<Result<Vec<_>, RustCargoConfigurationError>>()?;
-    Ok(RustCargoRunnerPlan { compiler, targets })
+    Ok(RustCargoRunnerPlan {
+        compiler,
+        targets,
+        // One `RUSTFLAGS` cannot carry two targets' different flags.
+        rustflags: match rustflags.as_slice() {
+            [flags] => flags.clone(),
+            _ => None,
+        },
+    })
+}
+
+/// A configured list of flags (`name`) as Cargo reads one: a string is split
+/// on whitespace, and the words of its variable `environment_key` follow.
+fn flag_list(
+    value: Option<&CargoConfigValue>,
+    name: &str,
+    environment_key: Option<&str>,
+    inputs: &CargoModelInputs,
+) -> Result<Option<Vec<String>>, RustCargoConfigurationError> {
+    let mut flags = match value {
+        None => None,
+        Some(CargoConfigValue {
+            kind: CargoConfigKind::String(text),
+            ..
+        }) => Some(text.split_whitespace().map(str::to_owned).collect()),
+        Some(value) => Some(
+            value
+                .string_list()
+                .ok_or_else(|| {
+                    RustCargoConfigurationError::Invalid(format!(
+                        "{name} must be a string or string array"
+                    ))
+                })?
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        ),
+    };
+    if let Some((environment_key, words)) =
+        environment_key.and_then(|key| inputs.environment(key).map(|words| (key, words)))
+    {
+        let words = words.clone().into_string().map_err(|_| {
+            RustCargoConfigurationError::Invalid(format!("{environment_key} is not UTF-8"))
+        })?;
+        flags
+            .get_or_insert_with(Vec::new)
+            .extend(words.split_whitespace().map(str::to_owned));
+    }
+    Ok(flags)
+}
+
+/// The flags Cargo's configuration gives rustc for one target when the
+/// environment sets no `RUSTFLAGS`: its `target.<triple>.rustflags` and
+/// every matching `target.'cfg(..)'.rustflags` together, else
+/// `build.rustflags`. Setting `RUSTFLAGS` replaces them, so whatever sets it
+/// starts from these.
+fn model_rustflags(
+    configuration_root: &Path,
+    execution_root: &Path,
+    model: &CargoConfigValue,
+    compiler: &RustCargoCompilerCommandPlan,
+    target: &ModelTarget,
+    inputs: &CargoModelInputs,
+) -> Result<Option<Vec<String>>, RustCargoConfigurationError> {
+    let mut key = target.name.replace(['-', '.'], "_");
+    key.make_ascii_uppercase();
+    let mut flags = flag_list(
+        model_target_config(model, &target.name).and_then(|config| config.at(&["rustflags"])),
+        &format!("target.{}.rustflags", target.name),
+        Some(&format!("CARGO_TARGET_{key}_RUSTFLAGS")),
+        inputs,
+    )?
+    .unwrap_or_default();
+    let cfg_flags = model
+        .at(&["target"])
+        .and_then(CargoConfigValue::table)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| {
+            let expression = key.strip_prefix("cfg(")?.strip_suffix(')')?;
+            Some((key, expression, value.at(&["rustflags"])?))
+        })
+        .collect::<Vec<_>>();
+    if !cfg_flags.is_empty() {
+        let cfg = target_cfg(configuration_root, execution_root, compiler, target)?;
+        for (key, expression, value) in cfg_flags {
+            let expression = CfgExpr::from_str(expression).map_err(|error| {
+                RustCargoConfigurationError::Invalid(format!(
+                    "invalid Cargo target cfg key {key:?}: {error}"
+                ))
+            })?;
+            if expression.matches(&cfg) {
+                flags.extend(
+                    flag_list(
+                        Some(value),
+                        &format!("target.{key}.rustflags"),
+                        None,
+                        inputs,
+                    )?
+                    .unwrap_or_default(),
+                );
+            }
+        }
+    }
+    if !flags.is_empty() {
+        return Ok(Some(flags));
+    }
+    flag_list(
+        model.at(&["build", "rustflags"]),
+        "build.rustflags",
+        Some("CARGO_BUILD_RUSTFLAGS"),
+        inputs,
+    )
 }
 
 /// The cfg values of the one target a test command builds for: what decides
@@ -1943,6 +2073,69 @@ mod tests {
             runner_arguments: Vec::new(),
         })
         .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn rustflags_come_from_the_target_tables_else_the_build_table() {
+        let root = fixture();
+        let flags = |config: &str, command: &[&str], inputs: CargoModelInputs| {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            resolve_with_inputs(&root, &root, &invocation(command), inputs)
+                .unwrap()
+                .rustflags
+        };
+        let words = |words: &[&str]| Some(words.iter().map(|word| (*word).to_owned()).collect());
+        assert_eq!(flags("", &["test"], model_inputs()), None);
+        // A string is split on whitespace; a variable's words follow.
+        assert_eq!(
+            flags(
+                "[build]\nrustflags='--cfg configured'\n",
+                &["test"],
+                model_inputs_with([(
+                    OsString::from("CARGO_BUILD_RUSTFLAGS"),
+                    OsString::from("-C debuginfo=1"),
+                )])
+            ),
+            words(&["--cfg", "configured", "-C", "debuginfo=1"])
+        );
+        // The target tables together replace the build table.
+        assert_eq!(
+            flags(
+                concat!(
+                    "[build]\nrustflags=['--cfg', 'built']\n",
+                    "[target.aarch64-apple-darwin]\nrustflags=['--cfg', 'exact']\n",
+                    "[target.'cfg(target_vendor = \"apple\")']\nrustflags='--cfg apple'\n",
+                    "[target.'cfg(windows)']\nrustflags=['--cfg', 'windows']\n",
+                ),
+                &["test"],
+                model_inputs_with([(
+                    OsString::from("CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS"),
+                    OsString::from("--cfg environment"),
+                )])
+            ),
+            words(&["--cfg", "exact", "--cfg", "environment", "--cfg", "apple"])
+        );
+        // Two targets given different flags cannot share one `RUSTFLAGS`.
+        assert_eq!(
+            flags(
+                "[target.aarch64-apple-darwin]\nrustflags=['--cfg', 'apple']\n",
+                &[
+                    "test",
+                    "--target=aarch64-apple-darwin",
+                    "--target=x86_64-unknown-linux-gnu"
+                ],
+                model_inputs()
+            ),
+            None
+        );
+        fs::write(root.join(".cargo/config.toml"), "[build]\nrustflags=7\n").unwrap();
+        assert_eq!(
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs())
+                .unwrap_err()
+                .to_string(),
+            "invalid Cargo configuration: build.rustflags must be a string or string array"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
