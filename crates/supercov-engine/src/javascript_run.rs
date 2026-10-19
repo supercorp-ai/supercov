@@ -1615,6 +1615,86 @@ mod environment_tests {
         assert_eq!(companion_run_id("rust-1", 1), "rust-1-server-1");
     }
 
+    fn result(runner: &str, runtime: serde_json::Value) -> RawTestResult {
+        serde_json::from_value(serde_json::json!({
+            "testId": "t1",
+            "test": "adds",
+            "retry": 0,
+            "provenance": { "runner": runner, "kind": "unit", "source": "runner" },
+            "runtime": runtime,
+        }))
+        .unwrap()
+    }
+
+    fn manifest() -> crate::javascript_frontend::JavascriptManifest {
+        serde_json::from_value(serde_json::json!({
+            "decisions": [], "points": [], "branches": [], "limitations": [],
+            "scope": { "version": 1, "mode": "automatic", "roots": [], "entries": [] }
+        }))
+        .unwrap()
+    }
+
+    // A worker matters only to a result that observed something in it.
+    #[test]
+    fn a_result_that_observed_nothing_needs_no_worker() {
+        let quiet = result("vitest", serde_json::json!([{}]));
+        let declaration = javascript_runner_declaration("vitest".into(), &[&quiet]);
+        assert_eq!(
+            declaration.execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        let event = result(
+            "vitest",
+            serde_json::json!([{ "events": [{
+                "type": "hit", "id": "p1", "timestampMs": 1, "environment": "node"
+            }] }]),
+        );
+        let declaration = javascript_runner_declaration("vitest".into(), &[&event]);
+        assert_eq!(
+            declaration.execution_model,
+            ExecutionModel::ParallelUnattributed
+        );
+    }
+
+    #[test]
+    fn results_are_read_from_every_place_a_runner_writes_them() {
+        let encoded = |runner| serde_json::to_vec(&result(runner, serde_json::json!([]))).unwrap();
+        let mut lines = encoded("jest");
+        lines.push(b'\n');
+        let entries = vec![
+            EvidenceArchiveEntry {
+                path: "mcdc.json".into(),
+                contents: encoded("node:test"),
+            },
+            EvidenceArchiveEntry {
+                path: "mcdc.jsonl".into(),
+                contents: lines,
+            },
+            // Not a record of server work.
+            EvidenceArchiveEntry {
+                path: "server/background/notes.txt".into(),
+                contents: b"x".to_vec(),
+            },
+        ];
+        let entries = javascript_archive_entries(entries, &manifest(), "run_1", 0).unwrap();
+        let declaration: supercov_contracts::FrontendRunDeclaration = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|entry| entry.path == "frontend.json")
+                .unwrap()
+                .contents,
+        )
+        .unwrap();
+        assert_eq!(
+            declaration
+                .runners
+                .iter()
+                .map(|runner| runner.runner.as_str())
+                .collect::<Vec<_>>(),
+            ["jest", "node:test"]
+        );
+    }
+
     #[test]
     fn nested_npm_drops_only_pnpm_derived_environment_aliases() {
         let mut environment = BTreeMap::from([
