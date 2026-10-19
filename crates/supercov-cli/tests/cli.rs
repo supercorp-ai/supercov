@@ -9068,7 +9068,8 @@ fn unittest_outcomes_each_count_and_a_decorator_skip_is_a_test() {
     }
     let empty = make("ut-none", "# no tests\n");
     let refused = empty.supercov(&command);
-    assert_eq!(refused.code(), 1);
+    // unittest's own exit when nothing ran: 5 from Python 3.12, 1 before.
+    assert!(matches!(refused.code(), 1 | 5), "{}", refused.code());
     assert!(
         refused
             .stderr()
