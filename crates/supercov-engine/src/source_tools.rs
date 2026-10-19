@@ -661,6 +661,57 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// A workspace's source view is beside it under `source`, numbered as
+    /// the workspace is; anything not shaped as a workspace has none.
+    #[test]
+    fn a_source_view_sits_beside_its_numbered_workspace() {
+        for (workspace, view) in [
+            (
+                "/p/.supercov/workspaces/workspace/proj",
+                Some("/p/.supercov/workspaces/source/proj"),
+            ),
+            (
+                "/p/.supercov/workspaces/workspace-2/proj",
+                Some("/p/.supercov/workspaces/source-2/proj"),
+            ),
+            ("/p/.supercov/workspaces/workspace-x/proj", None),
+            ("/p/.supercov/workspaces/workspaces/proj", None),
+            ("/p/.supercov/workspaces/other/proj", None),
+            ("proj", None),
+        ] {
+            assert_eq!(
+                source_view_path(Path::new(workspace)),
+                view.map(PathBuf::from),
+                "{workspace}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_executable_file_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-executable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let directory = crate::test_directory::TestDirectory::adopt(directory);
+        let plain = directory.join("plain");
+        let tool = directory.join("tool");
+        fs::write(&plain, "").unwrap();
+        fs::write(&tool, "").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!executable(&plain));
+        assert!(executable(&tool));
+        assert!(!executable(&directory));
+        assert!(!executable(&directory.join("absent")));
+    }
+
     static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
     /// A workspace with one rewritten file, one plain file, a dependency and
