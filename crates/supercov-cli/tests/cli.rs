@@ -10396,3 +10396,36 @@ fn the_wrangler_shim_hands_over_or_says_why_it_cannot() {
     ]);
     assert_eq!(polled.code(), 0, "{}", polled.stderr());
 }
+
+#[test]
+fn a_run_whose_source_is_gone_is_stale_and_never_passes_a_gate() {
+    let project = Project::cart("source-gone");
+    let run = project.measure(&[]);
+    std::fs::rename(
+        project.root.join("src/cart.js"),
+        project.root.join("src/cart.js.bak"),
+    )
+    .unwrap();
+    let reason = "its source cannot be measured as it is now";
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "check", "--min-lines", "10"])
+            .exits(2),
+        &["ERROR: this run cannot answer the question asked.", reason],
+    );
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert_eq!(files.code(), 0, "{}", files.stderr());
+    assert!(
+        files
+            .stderr()
+            .contains(&format!("[supercov] stale run {run}: {reason}")),
+        "{}",
+        files.stderr()
+    );
+    assert!(
+        project
+            .supercov(&["runs"])
+            .succeeds()
+            .contains(&format!("STALE ({reason})"))
+    );
+}

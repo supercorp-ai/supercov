@@ -1772,8 +1772,7 @@ pub(crate) fn load_run_view_filtered(
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    let comparison = current_integrity_for_run(&root, run)
-        .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
+    let comparison = checkout_comparison(&root, run);
     let report = analyze_stored_run_filtered(run, filter)?;
     let passed = run.metadata.test_exit_code == Some(0);
     // A passing run is read whole, as its summary reads it: what passing
@@ -1791,8 +1790,8 @@ pub(crate) fn load_run_view_filtered(
         &run.metadata.started_at,
         view,
         passed,
-        comparison.as_ref().is_some_and(|c| c.stale),
-        comparison.map(|c| c.reasons).unwrap_or_default(),
+        comparison.stale,
+        comparison.reasons,
     )
     .map_err(|error| format!("{error:?}"))
 }
@@ -2663,6 +2662,17 @@ fn mark_tests_that_import_no_measured_source(
     }
 }
 
+/// A run against the checkout as it is now (`compare_with_checkout`).
+fn checkout_comparison(
+    root: &Path,
+    run: &StoredRun,
+) -> supercov_engine::run_store::IntegrityComparison {
+    supercov_engine::run_store::compare_with_checkout(
+        &run.metadata.integrity,
+        current_integrity_for_run(root, run).as_ref(),
+    )
+}
+
 fn current_integrity_for_run(
     root: &Path,
     run: &StoredRun,
@@ -2984,11 +2994,10 @@ fn execute_public_query(
                 .valid
                 .get_or_insert(run.metadata.test_exit_code == Some(0));
             request.test_exit_code = run.metadata.test_exit_code;
-            let current = current_integrity_for_run(root, run);
             let mut warnings = Vec::new();
             let mut diff_inputs = None;
-            if let Some(current) = current.as_ref() {
-                let comparison = compare_run_integrity(Some(&run.metadata.integrity), current);
+            {
+                let comparison = checkout_comparison(root, run);
                 request.stale.get_or_insert(comparison.stale);
                 request
                     .stale_reasons
@@ -3103,11 +3112,8 @@ fn execute_public_query(
                     let newer_run =
                         select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
                     // A run compared with itself was warned about above.
-                    if newer_run.id != run.id
-                        && let Some(current) = current_integrity_for_run(root, newer_run).as_ref()
-                    {
-                        let comparison =
-                            compare_run_integrity(Some(&newer_run.metadata.integrity), current);
+                    if newer_run.id != run.id {
+                        let comparison = checkout_comparison(root, newer_run);
                         if comparison.stale {
                             warnings.push(stale_run_warning(
                                 &newer_run.id,

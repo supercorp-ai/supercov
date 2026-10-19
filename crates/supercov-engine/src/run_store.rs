@@ -695,6 +695,27 @@ pub struct IntegrityComparison {
     pub reasons: Vec<String>,
 }
 
+/// Why a run whose source cannot be fingerprinted now -- its measured files
+/// deleted or moved -- is no record of the checkout.
+pub const SOURCE_UNMEASURABLE: &str = "its source cannot be measured as it is now";
+
+/// A run against the checkout as it is now, `current` being its
+/// fingerprint now if it can be taken. A run of source that cannot be
+/// measured now is as stale as one of source that changed: a gate never
+/// passes on it.
+pub fn compare_with_checkout(
+    stored: &RunIntegrity,
+    current: Option<&RunIntegrity>,
+) -> IntegrityComparison {
+    match current {
+        Some(current) => compare_run_integrity(Some(stored), current),
+        None => IntegrityComparison {
+            stale: true,
+            reasons: vec![SOURCE_UNMEASURABLE.into()],
+        },
+    }
+}
+
 pub fn compare_run_integrity(
     stored: Option<&RunIntegrity>,
     current: &RunIntegrity,
