@@ -3297,11 +3297,12 @@ pub fn coverage_summary_query(
         attribution: projection.attribution,
         test_attribution: {
             let mut counts = TestAttributionCounts::default();
-            for test in index
-                .test_summaries(options.view)?
-                .iter()
-                .filter(|test| test.role == "test")
-            {
+            // The tests the view counts: a kind or runner narrows these too.
+            for test in index.test_summaries(options.view)?.iter().filter(|test| {
+                test.role == "test"
+                    && options.kind.is_none_or(|k| test.provenance.kind == k)
+                    && options.runner.is_none_or(|r| test.provenance.runner == r)
+            }) {
                 match test.attribution.as_str() {
                     crate::coverage_report::ATTRIBUTION_RUN_WIDE => counts.run_wide += 1,
                     crate::coverage_report::ATTRIBUTION_PARTIAL => counts.partial += 1,

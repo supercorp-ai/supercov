@@ -8853,3 +8853,50 @@ fn a_wider_project_pages_groups_and_names_an_empty_included_file() {
         "{empty}"
     );
 }
+
+/// A merge of two kinds pages its kinds, counts a setup scope beside its
+/// test, and a kind's summary counts and attributes only that kind's tests.
+#[test]
+fn a_merge_of_two_kinds_pages_and_narrows_by_kind() {
+    let project = Project::cart("merged-kinds");
+    project.write(
+        "test/hooked.test.js",
+        "import { test, before } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\n\nlet base;\nbefore(() => { base = total([{ price: 1, quantity: 1 }]); });\n\ntest(\"hooked\", () => {\n  assert.equal(base, 1);\n});\n",
+    );
+    project.commit("hooked");
+    project
+        .supercov(&["--", "node", "--test", "test/cart.test.js"])
+        .succeeds();
+    let first = project.latest();
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/hooked.test.js"],
+            &[("SUPERCOV_TEST_KIND", "integration")],
+        )
+        .succeeds();
+    let second = project.latest();
+    project.supercov(&["merge", &first, &second]).succeeds();
+    let kinds = project
+        .supercov(&["runs", "latest", "kinds", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &kinds,
+        &[
+            "integration  1 test(s) + 1 setup scope(s)  lines 46.15%",
+            "showing 1-1 of 2",
+            "kinds --offset 1 --limit 1",
+        ],
+    );
+    let integration = project
+        .supercov(&["runs", "latest", "--kind", "integration"])
+        .succeeds();
+    contains_all(
+        &integration,
+        &[
+            "(kind integration)",
+            "Exact for 1 test(s)",
+            "Total       1",
+            "Setup scopes 1",
+        ],
+    );
+}
