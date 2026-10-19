@@ -479,8 +479,8 @@ pub fn unclassified_source(
         let directory = scope_directory(entry);
         *places.entry(directory.clone()).or_default() += 1;
         // A file at the top is named itself; naming `.` would take the tests
-        // and the configuration with it.
-        let root = if entry.file.contains('/') && directory != "." {
+        // and the configuration with it. A path with a folder is never in `.`.
+        let root = if entry.file.contains('/') {
             directory
         } else {
             entry.file.clone()
@@ -2149,10 +2149,9 @@ fn obligation_matches_metric(obligation: &CoverageFileObligation, metric: Minimi
 
 fn compact_source(value: &str) -> Option<String> {
     let line = value.lines().find(|line| !line.trim().is_empty())?.trim();
+    // A trimmed line that is not blank holds a word, so `compact` does too.
     let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        None
-    } else if compact.chars().count() > 120 {
+    if compact.chars().count() > 120 {
         Some(format!(
             "{}…",
             compact.chars().take(119).collect::<String>()
@@ -4717,6 +4716,13 @@ mod tests {
         assert_eq!(hint.directories[0].directory, "components");
         assert_eq!(hint.directories[0].files, 2);
         assert_eq!(unclassified_source(&[], &entries[3..6]), None);
+        // A place discovery already named is not named twice.
+        assert_eq!(
+            unclassified_source(&["components".into()], &entries)
+                .unwrap()
+                .roots,
+            ["components", "packages/ui/extra", "proxy.ts"]
+        );
     }
 
     #[test]
@@ -5340,6 +5346,440 @@ mod tests {
             !scoped_back.contains(&"REMOTE_SERVER_EVIDENCE_MISSING".to_owned()),
             "{scoped_back:?}"
         );
+    }
+
+    /// A run of two runners and two kinds: `unit-a` (node:test, unit) runs a
+    /// statement in `src/a/one.js` and the decision, `e2e-b` (playwright,
+    /// e2e) a statement in `src/b/two.js`, `quiet` makes an assertion and
+    /// reaches nothing measured, `decided` only evaluates the decision, `arm`
+    /// only takes a branch arm, which has no line of its own, and a
+    /// background record holds nothing.
+    fn two_runner_report() -> CoverageReport {
+        analyze_coverage_results(&two_runner_request()).unwrap()
+    }
+
+    fn two_runner_request() -> CoverageReportRequest {
+        use crate::coverage_analysis::PointKind;
+        let point = |id: &str, file: &str, line| crate::coverage_report::PointMeta {
+            id: id.into(),
+            kind: PointKind::Statement,
+            file: file.into(),
+            line,
+            column: 1,
+            source: "work()".into(),
+            label: None,
+        };
+        let vector = |values: Vec<Option<bool>>, outcome| McdcVector { values, outcome };
+        let mut unit = result("unit-a", vector(vec![Some(true), None], true));
+        unit.runtime[0].hits.push("one".into());
+        let mut e2e = result("e2e-b", vector(vec![Some(false), Some(false)], false));
+        e2e.runtime[0].decisions.clear();
+        e2e.runtime[0].hits.push("two".into());
+        e2e.provenance.runner = "playwright".into();
+        e2e.provenance.kind = "e2e".into();
+        e2e.test_file = Some("tests/two.spec.js".into());
+        let mut quiet = result("quiet", vector(vec![Some(false), Some(true)], true));
+        quiet.test_id = Some("t-7".into());
+        quiet.runtime[0].decisions.clear();
+        quiet.phases.push(crate::coverage_report::CoveragePhase {
+            id: "quiet-assertion".into(),
+            kind: "assertion".into(),
+            operation: "equal".into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms: 100,
+            ended_at_ms: Some(120),
+            status: Some("passed".into()),
+            error: None,
+        });
+        let decided = result("decided", vector(vec![Some(false), Some(true)], true));
+        let mut arm = result("arm", vector(vec![Some(false), Some(true)], true));
+        arm.runtime[0].decisions.clear();
+        arm.runtime[0].hits.push("arm-taken".into());
+        let mut background = result("background", vector(vec![None, None], false));
+        background.runtime[0].decisions.clear();
+        background.role = "background".into();
+        CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: vec![decision()],
+                points: vec![
+                    point("one", "src/a/one.js", 2),
+                    point("two", "src/b/two.js", 3),
+                ],
+                branches: vec![crate::coverage_report::BranchMeta {
+                    id: "ready".into(),
+                    kind: "if".into(),
+                    file: "src/a/one.js".into(),
+                    line: 4,
+                    column: 1,
+                    source: "if (ready)".into(),
+                    alternatives: vec![crate::coverage_report::BranchAlternativeMeta {
+                        id: "arm-taken".into(),
+                        label: "then".into(),
+                    }],
+                }],
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+            },
+            raw_results: vec![unit, e2e, quiet, decided, arm, background],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(0)),
+        }
+    }
+
+    /// The query index of `report`, in a directory removed with the guard.
+    fn index_of(
+        report: &CoverageReport,
+    ) -> (
+        crate::test_directory::TestDirectory,
+        crate::query_index::QueryIndex,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-query-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let path = root.join("query-index.v1.bin");
+        let identity = crate::query_index::QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        crate::query_index::write_query_index(
+            &crate::coverage_index::coverage_index_sections(report).unwrap(),
+            &identity,
+            &path,
+        )
+        .unwrap();
+        let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+        (root, container)
+    }
+
+    #[test]
+    fn a_kind_and_a_runner_together_keep_only_the_tests_both_name() {
+        let report = two_runner_report();
+        let (_root, container) = index_of(&report);
+        let index = CoverageIndex::new(&container).unwrap();
+        let summary = |kind, runner| {
+            coverage_summary_query(
+                &index,
+                CoverageSummaryQueryOptions {
+                    run: "run",
+                    view: CoverageViewId::All,
+                    kind,
+                    runner,
+                    valid: true,
+                    test_exit_code: Some(0),
+                    stale: false,
+                    stale_reasons: Vec::new(),
+                },
+            )
+        };
+        let unit = summary(Some("unit"), Some("node:test")).unwrap();
+        assert_eq!(
+            unit.test_attribution.exact, 4,
+            "{:?}",
+            unit.test_attribution
+        );
+        // A unit test of another runner is in neither.
+        assert!(matches!(
+            summary(Some("unit"), Some("playwright")),
+            Err(QueryError::TestFilterEmpty { .. })
+        ));
+
+        let without = |kind, runner| {
+            tests_without_evidence_query(
+                &index,
+                TestsWithoutEvidenceOptions {
+                    run: "run",
+                    view: CoverageViewId::All,
+                    kind,
+                    runner,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .unwrap()
+            .0
+            .tests
+            .into_iter()
+            .map(|test| test.id)
+            .collect::<Vec<_>>()
+        };
+        // Only `quiet` asserted with nothing measured: `decided` evaluated a
+        // decision and `arm` took a branch, which is evidence though neither
+        // has a line of its own.
+        assert_eq!(without(None, None), ["t-7"]);
+        assert_eq!(without(Some("e2e"), None), Vec::<String>::new());
+        assert_eq!(
+            without(Some("unit"), Some("playwright")),
+            Vec::<String>::new()
+        );
+
+        let minimize = |kind, runner| {
+            coverage_minimize_query(
+                &report.view,
+                CoverageMinimizeQueryOptions {
+                    run: "run",
+                    view_id: CoverageViewId::All,
+                    kind,
+                    runner,
+                    target: None,
+                    metric: MinimizeMetric::All,
+                    max_states: 1_000,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+        };
+        assert!(matches!(
+            minimize(Some("unit"), Some("playwright")),
+            Err(QueryError::TestFilterEmpty { .. })
+        ));
+
+        let test = |selector, runner| {
+            coverage_test_query(
+                &index,
+                CoverageTestQueryOptions {
+                    run: "run",
+                    view: CoverageViewId::All,
+                    kind: None,
+                    runner,
+                    selector,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+        };
+        // A test is found by its id, which its name does not contain, as
+        // well as by its name.
+        assert!(matches!(
+            test("t-7", None).unwrap().0,
+            CoverageTestData::Detail(data) if data.tests.len() == 1
+        ));
+        // Narrowed by runner alone, a test of the other runner is out of the
+        // view rather than missing.
+        assert!(matches!(
+            test("quiet", Some("playwright")),
+            Err(QueryError::TestNotInView(_))
+        ));
+
+        let detail = |selector, limit| {
+            let options = CoverageFileDetailOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                kind: None,
+                runner: None,
+                selector,
+                metric: MinimizeMetric::All,
+                offset: 0,
+                limit,
+            };
+            coverage_file_detail_from(
+                &FileDetailSource::read(&index, CoverageViewId::All).unwrap(),
+                options,
+            )
+        };
+        assert_eq!(detail("one.js", 10).unwrap().0.file, "src/a/one.js");
+        assert!(matches!(
+            detail("src/", 10),
+            Err(QueryError::AmbiguousSelector { matches, .. }) if matches.len() == 2
+        ));
+        assert!(matches!(
+            detail("three.js", 10),
+            Err(QueryError::SourceNotFound(_))
+        ));
+        // Called directly, as the report and the export do, an empty page
+        // is refused too.
+        assert!(matches!(
+            detail("one.js", 0),
+            Err(QueryError::InvalidPagination)
+        ));
+    }
+
+    /// A run is complete only as the passing view of a current, valid run
+    /// whose measurement is complete: stale, or measured with a limitation
+    /// that blocks, it is not.
+    #[test]
+    fn a_stale_run_or_a_blocked_measurement_is_never_complete() {
+        let summary = |request: &CoverageReportRequest, stale| {
+            let report = analyze_coverage_results(request).unwrap();
+            let (_root, container) = index_of(&report);
+            let index = CoverageIndex::new(&container).unwrap();
+            coverage_summary_query(
+                &index,
+                CoverageSummaryQueryOptions {
+                    run: "run",
+                    view: CoverageViewId::Passed,
+                    kind: None,
+                    runner: None,
+                    valid: true,
+                    test_exit_code: Some(0),
+                    stale,
+                    stale_reasons: Vec::new(),
+                },
+            )
+            .unwrap()
+        };
+        let mut request = two_runner_request();
+        let current = summary(&request, false);
+        assert!(current.measurement.complete, "{:?}", current.measurement);
+        assert!(!summary(&request, true).complete);
+        request.manifest.limitations.push(serde_json::json!({
+            "id": "probe-gap",
+            "kind": "semantic-safety",
+            "file": "src/a/one.js",
+            "line": 2,
+            "column": 1,
+            "source": "work()",
+            "reason": "a construct no probe can reach"
+        }));
+        let blocked = summary(&request, false);
+        assert!(!blocked.measurement.complete, "{:?}", blocked.measurement);
+        assert!(!blocked.complete);
+    }
+
+    #[test]
+    fn a_runner_alone_narrows_decisions_and_areas() {
+        let report = two_runner_report();
+        let (_root, container) = index_of(&report);
+        let index = CoverageIndex::new(&container).unwrap();
+        let decisions = |file, runner| {
+            coverage_file_decisions_query(
+                &index,
+                CoverageFileDecisionsOptions {
+                    run: "run",
+                    view: CoverageViewId::All,
+                    kind: None,
+                    runner: Some(runner),
+                    file,
+                    sort: DecisionSort::Location,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+        };
+        assert_eq!(
+            decisions("src/permission.js", "node:test")
+                .unwrap()
+                .0
+                .totals
+                .decisions,
+            1
+        );
+        // Playwright's test reached a file without decisions: none, and no
+        // error, since its tests are there.
+        assert_eq!(
+            decisions("src/b/two.js", "playwright")
+                .unwrap()
+                .0
+                .totals
+                .decisions,
+            0
+        );
+        assert!(matches!(
+            decisions("src/permission.js", "jest"),
+            Err(QueryError::TestFilterEmpty { .. })
+        ));
+
+        let areas = |runner| {
+            coverage_areas_query(
+                &index,
+                CoverageAreasQueryOptions {
+                    run: "run",
+                    view: CoverageViewId::All,
+                    metric: MinimizeMetric::All,
+                    kind: None,
+                    runner,
+                    depth: 1,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+        };
+        assert!(matches!(
+            areas(Some("jest")),
+            Err(QueryError::TestFilterEmpty { .. })
+        ));
+        assert!(areas(Some("playwright")).is_ok());
+    }
+
+    /// A kind all of whose tests ran in parallel holds tests but none of
+    /// its own coverage, so the areas break down by the other kinds only.
+    #[test]
+    fn areas_leave_out_a_kind_that_holds_no_coverage_of_its_own() {
+        let mut request = two_runner_request();
+        let mut smoke = result(
+            "smoke",
+            McdcVector {
+                values: vec![Some(false), Some(false)],
+                outcome: false,
+            },
+        );
+        smoke.provenance.kind = "smoke".into();
+        smoke.attribution = crate::coverage_report::ATTRIBUTION_RUN_WIDE.into();
+        request.raw_results.push(smoke);
+        let report = analyze_coverage_results(&request).unwrap();
+        let (_root, container) = index_of(&report);
+        let index = CoverageIndex::new(&container).unwrap();
+        let (data, _) = coverage_areas_query(
+            &index,
+            CoverageAreasQueryOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                metric: MinimizeMetric::All,
+                kind: None,
+                runner: None,
+                depth: 1,
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        let kinds = data.areas[0]
+            .by_kind
+            .iter()
+            .map(|kind| kind.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["e2e", "unit"], "{data:?}");
+    }
+
+    #[test]
+    fn a_location_with_a_name_part_that_is_not_a_number_ends_at_its_last_number() {
+        assert_eq!(
+            selector_location("src/a.js:3:7"),
+            Some(("src/a.js", 3, Some(7)))
+        );
+        assert_eq!(selector_location("src/a.js:3"), Some(("src/a.js", 3, None)));
+        // `x` is no line, so the file is everything before the last number.
+        assert_eq!(
+            selector_location("src/a.js:x:7"),
+            Some(("src/a.js:x", 7, None))
+        );
+        assert_eq!(selector_location("src/a.js"), None);
+    }
+
+    #[test]
+    fn a_target_outside_a_percentage_is_refused_and_an_empty_background_is_no_evidence() {
+        let report = two_runner_report();
+        assert!(matches!(
+            minimum_test_set(&report.view, Some(150.0), MinimizeMetric::All, 1_000),
+            Err(QueryError::InvalidTarget(_))
+        ));
+        // The background record here holds nothing, so nothing is unattributed.
+        assert!(minimum_test_set(&report.view, None, MinimizeMetric::All, 1_000).is_ok());
     }
 
     #[test]
