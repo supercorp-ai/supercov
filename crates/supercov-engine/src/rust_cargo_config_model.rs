@@ -171,7 +171,7 @@ impl CargoConfigValue {
                 "Cargo executable path and arguments cannot be empty".into(),
             ));
         };
-        let program = if program.contains('/') || program.contains('\\') {
+        let program = if names_a_path(program) {
             self.definition.value_root(cwd).join(program)
         } else {
             PathBuf::from(program)
@@ -188,7 +188,7 @@ impl CargoConfigValue {
         if value.is_empty() {
             return Ok(PathBuf::new());
         }
-        if value.contains('/') || value.contains('\\') {
+        if names_a_path(value) {
             Ok(self.definition.value_root(cwd).join(value))
         } else {
             Ok(PathBuf::from(value))
@@ -255,6 +255,14 @@ impl CargoConfigValue {
     }
 }
 
+/// Whether Cargo reads a configured program as a path from the
+/// configuration's root rather than a name it looks up on `PATH`: when it
+/// holds a path separator of the platform Cargo runs on. Only Windows
+/// separates paths with a backslash; elsewhere `tools\run` is a name.
+pub(crate) fn names_a_path(value: &str) -> bool {
+    value.chars().any(std::path::is_separator)
+}
+
 #[derive(Debug)]
 pub(crate) enum CargoConfigModelError {
     Io { path: PathBuf, reason: String },
@@ -279,12 +287,11 @@ fn io_error(path: &Path, error: impl std::fmt::Display) -> CargoConfigModelError
     }
 }
 
+/// A configuration document, and so every layer merged, is a table; two
+/// values cannot disagree in kind until a key has been entered, so `path` is
+/// never empty.
 fn display_key(path: &[String]) -> String {
-    if path.is_empty() {
-        "<root>".into()
-    } else {
-        path.join(".")
-    }
+    path.join(".")
 }
 
 fn key_matches(path: &[String], pattern: &[&str]) -> bool {
@@ -813,5 +820,158 @@ mod tests {
         ] {
             assert!(validate_cli_dotted_key(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_program_is_a_path_only_where_it_holds_a_separator_of_the_platform() {
+        let root = fixture();
+        let project = root.join("project");
+        fs::write(
+            project.join(".cargo/config.toml"),
+            concat!(
+                "[target.host]\nrunner='tools\\run --fast'\n",
+                "[target.other]\nrunner=['tools/run']\n",
+                "[build]\nrustc='tools\\rustc'\nrustc-wrapper=''\n",
+            ),
+        )
+        .unwrap();
+        let config = load_cargo_configuration(&project, None, &[]).unwrap();
+        let runner = |target: &str| {
+            config
+                .at(&["target", target, "runner"])
+                .unwrap()
+                .program_and_arguments(&project)
+                .unwrap()
+        };
+        let rustc = config
+            .at(&["build", "rustc"])
+            .unwrap()
+            .program_path(&project)
+            .unwrap();
+        // Cargo runs `tools\run` from `PATH` on Linux and macOS, and from the
+        // project on Windows.
+        let backslashed = |name: &str| {
+            if cfg!(windows) {
+                project.join(name)
+            } else {
+                PathBuf::from(name)
+            }
+        };
+        assert_eq!(
+            runner("host"),
+            (backslashed("tools\\run"), vec!["--fast".to_owned()])
+        );
+        assert_eq!(runner("other"), (project.join("tools/run"), Vec::new()));
+        assert_eq!(rustc, backslashed("tools\\rustc"));
+        // An empty wrapper is no program: Cargo reads it as none configured.
+        assert_eq!(
+            config
+                .at(&["build", "rustc-wrapper"])
+                .unwrap()
+                .program_path(&project)
+                .unwrap(),
+            PathBuf::new()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_nearer_runner_array_replaces_a_farther_one_and_kinds_must_agree() {
+        let root = fixture();
+        let project = root.join("project");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.host]\nrunner=['parent','--far']\n[build]\nrustflags=['parent']\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".cargo/config.toml"),
+            "[target.host]\nrunner=['project']\n",
+        )
+        .unwrap();
+        let config = load_cargo_configuration(&project, None, &[]).unwrap();
+        assert_eq!(list(config.at(&["target", "host", "runner"])), ["project"]);
+        fs::write(
+            project.join(".cargo/config.toml"),
+            "[build]\nrustflags='project'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_cargo_configuration(&project, None, &[])
+                .unwrap_err()
+                .to_string(),
+            "cannot merge string and array at build.rustflags"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn includes_must_name_a_literal_toml_file_and_optional_ones_load_when_present() {
+        let root = fixture();
+        let project = root.join("project");
+        let load = |include: &str, cli: &[String]| {
+            fs::write(
+                project.join(".cargo/config.toml"),
+                format!("include=[{include}]\n"),
+            )
+            .unwrap();
+            load_cargo_configuration(&project, None, cli).map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            load("'extra.json'", &[]).unwrap_err(),
+            "config include path must end in .toml: extra.json"
+        );
+        assert_eq!(
+            load("'extra-*.toml'", &[]).unwrap_err(),
+            "config include path cannot contain glob or template syntax: extra-*.toml"
+        );
+        fs::write(project.join(".cargo/extra.toml"), "[build]\njobs=3\n").unwrap();
+        let config = load("{path='extra.toml',optional=true}", &[]).unwrap();
+        assert_eq!(
+            config.at(&["build", "jobs"]).unwrap().kind,
+            CargoConfigKind::Integer(3)
+        );
+        // A `--config` value's includes are relative to the working directory.
+        fs::write(project.join("cli.toml"), "[build]\njobs=4\n").unwrap();
+        let config = load(
+            "",
+            &[
+                "include=[{path='absent.toml',optional=true}]".into(),
+                "include=[{path='cli.toml',optional=true}]".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            config.at(&["build", "jobs"]).unwrap().kind,
+            CargoConfigKind::Integer(4)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_config_argument_that_is_not_one_plain_assignment_or_carries_a_secret_is_refused() {
+        let root = fixture();
+        let project = root.join("project");
+        let refused = |argument: &str| {
+            load_cargo_configuration(&project, None, &[argument.into()])
+                .unwrap_err()
+                .to_string()
+        };
+        // An empty argument names no file and assigns nothing.
+        assert!(refused("").contains("is not one undecorated TOML dotted-key assignment"));
+        assert!(
+            refused("# a comment\n[build]\njobs=1")
+                .contains("is not one undecorated TOML dotted-key assignment")
+        );
+        assert_eq!(
+            refused("registries.private.token='not-allowed'"),
+            "registries.private.token cannot be set through --config for security reasons"
+        );
+        assert_eq!(
+            refused("registry.secret-key='not-allowed'"),
+            "registry.secret-key cannot be set through --config for security reasons"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -107,6 +107,7 @@
 - A JavaScript test that imports its package's directory (`require('..')`, `import '.'`) or uses path aliases from a tsconfig it extends without `.json` (`"extends": "./tsconfig.base"`) was taken to load any file of the project, so a change to any test helper made its runs out of date. Supercov follows those imports now.
 - A source tool (Biome, cspell, knip and the like) that replaced a file with a directory left the workspace without it and printed "what … wrote could not be brought into the workspace"; the directory is the workspace's now, as it would have been without Supercov.
 - A browser suite run with `SUPERCOV_SOURCE_ROOTS` naming only its JavaScript (`src`) failed with `SUPERCOV_SOURCE_ROOTS=src left no Python source to measure` when the project also held Python, and likewise for Ruby; roots that leave a server language nothing mean there is no such server to measure.
+- On Linux and macOS, a Cargo target runner, `build.rustc` or compiler wrapper configured as a name holding a backslash (`tools\run`) was run from the project directory, while Cargo looks such a name up on `PATH`. Supercov now runs the program Cargo runs.
 
 ## 4.19.0
 
