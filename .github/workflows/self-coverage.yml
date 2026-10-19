@@ -3,7 +3,8 @@ name: Self Coverage
 # Supercov measuring itself: the workspace's tests, end-to-end gates included,
 # run under a release build of the same commit. The gates take turns through a
 # file lock, so in one process they take hours; here they are split across
-# jobs, each measured on its own, and the runs merged into one.
+# jobs, each measured on its own, and the runs merged into one per platform.
+# Linux and macOS compile different code, so each platform is merged on its own.
 #
 # Run it by hand, or add the `self-coverage` label to a pull request.
 
@@ -21,17 +22,16 @@ concurrency:
 
 env:
   SLICES: 8
-  # Gates whose toolchain is another platform's: the clang oracle's golden
-  # file comes from Apple's clang, and CI runs it on macOS.
-  ELSEWHERE: clang_mcdc_oracle
 
 jobs:
   build:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'self-coverage'
-    runs-on: ubuntu-latest
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    outputs:
-      slices: ${{ steps.slices.outputs.slices }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -43,27 +43,27 @@ jobs:
       - run: cargo build --release -p supercov
       - uses: actions/upload-artifact@v4
         with:
-          name: supercov-self
+          name: supercov-self-${{ matrix.os }}
           path: target/release/supercov
           retention-days: 3
-      # Slice 0 is every test but the gates; slices 1..N share the gates
-      # round-robin, in the order the harness declares them.
-      - id: slices
-        run: echo "slices=$(seq 0 "$SLICES" | jq -cs .)" >> "$GITHUB_OUTPUT"
 
   measure:
     needs: build
-    name: Measure slice ${{ matrix.slice }}
-    runs-on: ubuntu-latest
+    name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        slice: ${{ fromJSON(needs.build.outputs.slices) }}
+        os: [ubuntu-latest, macos-latest]
+        # Slice 0 is every test but the gates; slices 1..8 share the gates
+        # round-robin, in the order the harness declares them.
+        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       # The instrumented workspace, its build and the gates' toolchains do not
-      # fit the runner's free space as it comes.
+      # fit a Linux runner's free space as it comes.
       - name: Free disk space
+        if: runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -101,8 +101,13 @@ jobs:
           tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0,cargo-nextest@0.9.140,worker-build@0.8.7
       - name: Install wasmtime 49.0.3
         run: |
-          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/wasmtime-v49.0.3-x86_64-linux" >> "$GITHUB_PATH"
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64) build=x86_64-linux ;;
+            macOS-ARM64) build=aarch64-macos ;;
+            macOS-X64) build=x86_64-macos ;;
+          esac
+          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-$build.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-v49.0.3-$build" >> "$GITHUB_PATH"
       - run: npm ci
       # Each fixture pins its own Playwright, and each version launches its
       # own browser builds: install them for every version a lockfile names.
@@ -114,17 +119,26 @@ jobs:
           done
       - uses: actions/download-artifact@v5
         with:
-          name: supercov-self
+          name: supercov-self-${{ matrix.os }}
           path: ${{ runner.temp }}/self
       - name: Choose this slice's tests
         id: tests
         run: |
+          # What this platform cannot run: the clang oracle's golden file
+          # comes from Apple's clang; macOS runners have no Docker.
+          if [ "${{ runner.os }}" = Linux ]; then
+            elsewhere="clang_mcdc_oracle"
+            tests_elsewhere=""
+          else
+            elsewhere="docker_servers docker_clients rust_region_container"
+            tests_elsewhere="rust_runtime::tests::a_region_in_a_container_is_read_live_from_the_host"
+          fi
           all=$(sed -n '/^gates! {/,/^}/p' crates/supercov-cli/tests/e2e_gates.rs \
             | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
-          gates=$(echo "$all" | grep -vxF -f <(echo "$ELSEWHERE" | tr ' ' '\n'))
+          gates=$(echo "$all" | grep -vxF -f <(echo "$elsewhere" | tr ' ' '\n'))
           slice=${{ matrix.slice }}
           if [ "$slice" = 0 ]; then
-            skips=$(printf -- '--skip %s ' $all)
+            skips=$(printf -- '--skip %s ' $all $tests_elsewhere)
             echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
           else
             picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '(NR - 1) % n == s - 1' | tr '\n' ' ')
@@ -155,7 +169,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: run-${{ matrix.slice }}
+          name: run-${{ matrix.os }}-${{ matrix.slice }}
           path: ${{ runner.temp }}/out
           retention-days: 7
       - name: Fail the slice when a test failed
@@ -164,17 +178,22 @@ jobs:
   merge:
     needs: measure
     if: always() && needs.measure.result != 'skipped'
-    runs-on: ubuntu-latest
+    name: Merge ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v5
         with:
-          name: supercov-self
+          name: supercov-self-${{ matrix.os }}
           path: ${{ runner.temp }}/self
       - uses: actions/download-artifact@v5
         with:
-          pattern: run-*
+          pattern: run-${{ matrix.os }}-*
           path: ${{ runner.temp }}/runs
       - name: Merge the slices
         run: |
@@ -193,6 +212,7 @@ jobs:
           "$supercov" runs "$merged" > "$out/summary.txt"
           "$supercov" runs "$merged" gaps --format jsonl --metric mcdc --output "$out/mcdc-gaps.jsonl"
           {
+            echo "### ${{ matrix.os }}"
             echo '```'
             for slice in "$RUNNER_TEMP"/runs/run-*; do
               echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
@@ -203,6 +223,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: self-coverage
+          name: self-coverage-${{ matrix.os }}
           path: ${{ runner.temp }}/out
           retention-days: 30
