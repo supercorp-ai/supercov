@@ -73,10 +73,6 @@ jobs:
     name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
-    # A fixture pins Playwright 1.60, which predates Ubuntu 26.04: on Linux
-    # every Playwright fetches and launches the 24.04 builds, which run there.
-    env:
-      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ${{ startsWith(matrix.os, 'ubuntu') && 'ubuntu24.04-x64' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -140,9 +136,15 @@ jobs:
         run: |
           versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
           # The system's libraries by the newest, which knows this system.
-          env -u PLAYWRIGHT_HOST_PLATFORM_OVERRIDE npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
+          npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
           for version in $versions; do
-            npx -y "playwright@$version" install
+            # A version older than the runner's OS knows no browser build for
+            # it -- the Next fixture keeps the reporter's 1.60 -- and fetches
+            # its Ubuntu 24.04 Chromium, which runs there. Every other one
+            # installs its own builds: 24.04's WebKit wants 24.04's libraries.
+            if ! npx -y "playwright@$version" install; then
+              PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npx -y "playwright@$version" install chromium
+            fi
           done
       - uses: actions/download-artifact@v5
         with:
