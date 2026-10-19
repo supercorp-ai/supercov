@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, Instant},
@@ -3800,11 +3800,18 @@ fn benchmark_js_transform() -> ExitCode {
         files,
         duration_ns: started.elapsed().as_nanos(),
     };
-    if let Err(error) = serde_json::to_writer(std::io::stdout(), &result) {
+    if let Err(error) = write_json_to_stdout(&result) {
         eprintln!("[supercov] failed to write Rust benchmark output: {error}");
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+/// Writes and flushes: an error the buffer would only meet at exit is lost.
+fn write_json_to_stdout(value: &impl Serialize) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, value)?;
+    stdout.flush()
 }
 
 fn stdin() -> Result<String, String> {
@@ -3860,7 +3867,7 @@ fn instrument_js() -> ExitCode {
             }
         }
     }
-    if let Err(error) = serde_json::to_writer(std::io::stdout(), &outputs) {
+    if let Err(error) = write_json_to_stdout(&outputs) {
         eprintln!("[supercov] failed to write Rust instrumenter output: {error}");
         return ExitCode::from(2);
     }

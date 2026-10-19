@@ -10196,3 +10196,51 @@ fn the_wrapped_command_exits_as_it_would_alone_and_a_missing_root_is_named() {
         )
         .succeeds();
 }
+
+#[test]
+fn private_batch_protocols_and_odd_arguments_say_what_went_wrong() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    // The harnesses' batch protocols fail with a message, not a panic, when
+    // their output cannot be written.
+    for (command, says) in [
+        (
+            "__instrument-js",
+            "failed to write Rust instrumenter output",
+        ),
+        (
+            "__benchmark-js-transform",
+            "failed to write Rust benchmark output",
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_supercov"))
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(std::fs::File::create("/dev/full").unwrap())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"[{"file":"a.js","source":"export const a = 1;\n"}]"#)
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{command}: {stderr}");
+        assert!(stderr.contains(says), "{command}: {stderr}");
+    }
+    let project = Project::cart("odd-arguments");
+    let first = project.measure(&[]);
+    // A lone `-` is no option to merge: it names a run that does not exist.
+    let merged = project.supercov(&["merge", &first, "-"]).exits(2);
+    assert!(!merged.contains("Unknown option"), "{merged}");
+    // An evidence path holding `=` is a path, not an option and its value.
+    project.write(
+        "cov=1.info",
+        "TN:\nSF:src/cart.js\nDA:13,1\nLF:1\nLH:1\nend_of_record\n",
+    );
+    let imported = project.supercov(&["import", "cov=1.info", "--test", "imported"]);
+    assert_eq!(imported.code(), 0, "{}", imported.stderr());
+}
