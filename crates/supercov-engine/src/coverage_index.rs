@@ -1292,7 +1292,10 @@ fn projection_record(
     let empty_tests = selected_tests
         .iter()
         .filter(|test| {
+            // A test whose coverage went to the run reached what it
+            // reached; that is not evidence gone missing.
             test.role == "test"
+                && crate::coverage_report::coverage_is_its_own(&test.attribution)
                 && test.lines.is_empty()
                 && test.hits.is_empty()
                 && test.decisions.is_empty()

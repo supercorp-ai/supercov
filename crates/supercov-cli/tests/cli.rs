@@ -9425,3 +9425,86 @@ fn a_test_that_ran_alongside_others_is_undetermined_and_a_new_file_asks_for_the_
             .starts_with("[supercov] unknown tests action: frob\n\nUsage: ")
     );
 }
+
+#[test]
+fn tests_whose_coverage_went_to_the_run_are_not_reported_as_missing_evidence() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-all-parallel");
+    project.write("go.mod", "module example.com/p\n\ngo 1.22\n");
+    project.write(
+        "sign.go",
+        "package p\n\nfunc Sign(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"not positive\"\n}\n",
+    );
+    project.write(
+        "sign_test.go",
+        "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tif Sign(-1) != \"not positive\" {\n\t\tt.Fatal(\"not positive\")\n\t}\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", go, "test", "./..."]).succeeds();
+    // The one test ran alongside nothing it could be told from: what it
+    // reached counts run-wide, and no view reads that as evidence lost.
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Lines      75.00% (3/4)",
+            "  unit            1 test(s)  coverage not attributable; counted run-wide",
+            "  Attribution      1 counted run-wide",
+        ],
+    );
+    assert!(
+        !summary.contains("no source-coverage evidence"),
+        "{summary}"
+    );
+    assert!(
+        project
+            .supercov(&["runs", "latest", "kinds"])
+            .succeeds()
+            .contains("unit  1 test(s)  coverage not attributable; counted run-wide")
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "without-evidence"])
+            .succeeds(),
+        "Tests that made assertions and recorded no coverage: 0\n"
+    );
+}
+
+#[test]
+fn a_long_decision_is_shortened_in_its_file_and_whole_on_its_own() {
+    let project = Project::cart("long-decision");
+    project.write(
+        "src/long.js",
+        "export function check(alpha, beta, gamma) {\n  if (alpha.someLongPropertyName > 10 && beta.anotherLongPropertyName < 20 && gamma.yetAnotherLongPropertyName !== 30) {\n    return 1;\n  }\n  return 0;\n}\n",
+    );
+    project.write(
+        "test/long.test.js",
+        "import test from \"node:test\";\nimport { check } from \"../src/long.js\";\ntest(\"long\", () => { check({ someLongPropertyName: 1 }, {}, {}); });\n",
+    );
+    project.commit("long");
+    project.measure(&[]);
+    let file = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/long.js",
+            "--group",
+            "decision",
+        ])
+        .succeeds();
+    assert!(
+        file.contains("  missing 3/3  alpha.someLongPropertyName > 10 && beta.anotherLongPropertyName < 20 && gamma.yetAnotherLongPro…\n"),
+        "{file}"
+    );
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/long.js:2"])
+        .succeeds();
+    assert!(
+        decision.contains("\nalpha.someLongPropertyName > 10 && beta.anotherLongPropertyName < 20 && gamma.yetAnotherLongPropertyName !== 30\n"),
+        "{decision}"
+    );
+}

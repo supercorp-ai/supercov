@@ -12,6 +12,9 @@
 
 **Fixed**
 
+- A test whose coverage counts run-wide (a Go `t.Parallel` test, for one) is no longer reported as a test that made assertions with no coverage evidence, in the run summary or in `tests without-evidence`.
+- `quality` with every file failing says no file was assessed instead of `Quality — (0.0/10) over 0 files`.
+- `quality patch` and `security patch` open with how many checks the change introduced, no longer claim a health score the review does not give, and say `1 changed file`.
 - `tests affected`, `tests` and `assertions` answer a usage mistake under `--json` with the JSON failure envelope on standard output, as `files` and the other queries do, instead of the usage text.
 - `assertions <file>` and `assertions <file> --weak` past the end of their listing show where it ends instead of an empty table or nothing. A `--test` name that matches no assessed test says that a test which ran is asked nothing when other tests catch each statement it runs first.
 - `file` on a file whose every line is covered said "Nothing measured: the run counts no obligation in this file"; it says every line is covered and measured.

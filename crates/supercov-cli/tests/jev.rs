@@ -1039,7 +1039,7 @@ fn a_patch_review_reads_only_changed_source_and_says_what_it_skipped() {
         &unstaged,
         &[
             "Reviewing unstaged changes.",
-            "Nothing introduced across 1 changed files.",
+            "Nothing introduced across 1 changed file.",
             "3 changed files not reviewed.",
         ],
     );
@@ -2931,5 +2931,103 @@ fn each_affected_test_says_how_it_meets_the_change_as_the_change_grows() {
     assert_eq!(
         names("--asserting"),
         "total applies a coupon\ntotal adds prices\nshipping is free over fifty\n"
+    );
+}
+
+#[test]
+fn a_file_that_cannot_be_assessed_is_named_beside_those_that_were() {
+    let project = Project::cart("quality-partial");
+    project.write("src/b.js", "export const b = (x) => x * 2;\n");
+    project.commit("b");
+    let run = project.measure(&[]);
+    let ask = |args: &[&str], faults: common::Faults| {
+        let (base, _) = gateway_with(MODEL, answer_yes, faults);
+        project.supercov_with(args, &through(&base))
+    };
+    let first_refused: common::Faults = |n| (n == 0).then_some((400, "{}"));
+
+    // One request refused: the other file is scored, the refused one named,
+    // and the count said on standard error.
+    let partial = ask(&["quality", "--refresh"], first_refused);
+    assert_eq!(partial.code(), 0, "{}", partial.stderr());
+    contains_all(
+        &partial.stdout(),
+        &["Quality weak (1.0/10) over 1 file.", "  error  src/"],
+    );
+    assert!(
+        partial.stderr().contains(
+            "[supercov] 1 of 2 files could not be assessed; each is listed in the report with its reason"
+        ),
+        "{}",
+        partial.stderr()
+    );
+    let security = ask(&["security", "--refresh", "--run", &run], first_refused);
+    assert_eq!(security.code(), 0, "{}", security.stderr());
+    assert!(
+        security
+            .stderr()
+            .contains("1 of 2 files could not be assessed")
+    );
+
+    // A server asking for a wait longer than the command keeps: every file
+    // fails, and no score stands in for the ones never given.
+    let waited = ask(&["quality", "--refresh"], |_| Some((429, "wait")));
+    assert_eq!(waited.code(), 2);
+    let said = waited.stdout();
+    contains_all(
+        &said,
+        &[
+            "Quality not scored: no file was assessed.\n",
+            "HTTP 429 and asked for 100000 seconds, longer than this command will wait; try again later or with fewer paths",
+        ],
+    );
+    assert!(!said.contains("/10"), "{said}");
+    assert!(
+        ask(&["quality", "-h"], |_| None)
+            .succeeds()
+            .starts_with("Code quality powered by Jev.")
+    );
+
+    // A review says how much it found before listing it, pages its files,
+    // and names a file it could not review among them.
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    project.edit("src/b.js", "x * 2", "x * 3");
+    let review = ask(&["quality", "patch", "--limit", "1"], |_| None).succeeds();
+    assert!(
+        review.starts_with(
+            "Reviewing unstaged changes.\n54 checks introduced across 2 changed files. Each is a judgment you can verify against the file.\n\nsrc/b.js\n"
+        ),
+        "{review}"
+    );
+    assert!(
+        review.ends_with("... and 1 more changed files\n"),
+        "{review}"
+    );
+    assert!(!review.contains("Health"), "{review}");
+    let every = ask(&["quality", "patch", "--limit", "0"], |_| None).succeeds();
+    assert!(every.contains("\nsrc/cart.js\n") && !every.contains("more changed"));
+    let failed = ask(
+        &["quality", "patch", "--refresh", "--run", &run],
+        first_refused,
+    );
+    assert_eq!(failed.code(), 0, "{}", failed.stderr());
+    contains_all(
+        &failed.stdout(),
+        &[
+            "  failed  src/",
+            " of its measured lines are not covered by the run",
+        ],
+    );
+    assert!(
+        failed
+            .stderr()
+            .contains("1 of 2 files could not be assessed")
+    );
+    let security = ask(&["security", "patch", "--run", &run], |_| None).succeeds();
+    assert!(
+        security.starts_with(
+            "Reviewing unstaged changes.\n24 checks introduced across 2 changed files."
+        ),
+        "{security}"
     );
 }

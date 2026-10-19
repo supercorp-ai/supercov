@@ -3431,18 +3431,23 @@ fn human_quality(report: &Value) -> String {
             .filter(|f| band(f["health"].as_f64()) == name)
             .count()
     };
-    out.push_str(&format!(
-        "Quality {} ({:.1}/10) over {}.\n",
-        band(health),
-        health.unwrap_or(0.0),
-        self::files(scored.len() as u64)
-    ));
-    out.push_str(&format!(
-        "  {} good, {} fair, {} weak.\n",
-        count("good"),
-        count("fair"),
-        count("weak")
-    ));
+    // With no file scored there is no health, and a 0.0 would read as the
+    // worst one.
+    if let Some(health) = health {
+        out.push_str(&format!(
+            "Quality {} ({health:.1}/10) over {}.\n",
+            band(Some(health)),
+            self::files(scored.len() as u64)
+        ));
+        out.push_str(&format!(
+            "  {} good, {} fair, {} weak.\n",
+            count("good"),
+            count("fair"),
+            count("weak")
+        ));
+    } else {
+        out.push_str("Quality not scored: no file was assessed.\n");
+    }
     if let Some(resolved) = report["scope_resolved"].as_object() {
         out.push_str(&format!(
             "  {} files under no source root were read by the model from the tree: \
@@ -3715,21 +3720,27 @@ fn human_security(report: &Value) -> String {
 
 fn human_patch(report: &Value, limit: usize) -> String {
     let empty = Vec::new();
-    let mut out = String::new();
-    out.push_str(HOW_IT_IS_SCORED);
-    out.push_str(&format!(
-        "Reviewing {}.\n\n",
+    let mut out = format!(
+        "Reviewing {}.\n",
         report["range_description"].as_str().unwrap_or("a change")
-    ));
+    );
     let reviewed = report["reviewed_files"].as_u64().unwrap_or(0);
     let introduced = report["introduced"].as_u64().unwrap_or(0);
     if reviewed == 0 {
         out.push_str("No changed source files to review.\n");
         return out;
     }
+    let changed = format!("changed {}", if reviewed == 1 { "file" } else { "files" });
     if introduced == 0 {
         out.push_str(&format!(
-            "Nothing introduced across {reviewed} changed files.\n"
+            "Nothing introduced across {reviewed} {changed}.\n"
+        ));
+    } else {
+        // A review names which checks appeared; health is a file's, not a
+        // change's, so no number is given.
+        out.push_str(&format!(
+            "{introduced} check{} introduced across {reviewed} {changed}. Each is a judgment you can verify against the file.\n\n",
+            if introduced == 1 { "" } else { "s" }
         ));
     }
     let files = report["files"].as_array().unwrap_or(&empty);

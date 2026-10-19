@@ -293,7 +293,8 @@ pub type Seen = Arc<Mutex<Vec<(String, String, Value)>>>;
 pub type Answerer = fn(&str, &Value) -> Value;
 
 /// Replaces the answer to the request with this number (from 0) with a
-/// status and a body, sent with `retry-after: 0`.
+/// status and a body, sent with `retry-after: 0`, or, for the body `wait`,
+/// `retry-after: 100000`.
 pub type Faults = fn(usize) -> Option<(u16, &'static str)>;
 
 /// A local server answering every question as `model`, recording each request.
@@ -352,10 +353,11 @@ pub fn gateway_with(model: &'static str, answerer: Answerer, faults: Faults) -> 
                         serde_json::to_vec(&answer(&request, model, answerer)).unwrap(),
                     ),
                 };
+                let wait = if reply == b"wait" { 100_000 } else { 0 };
                 write!(
                     stream,
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
-                     retry-after: 0\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                     retry-after: {wait}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     reply.len()
                 )
                 .unwrap();

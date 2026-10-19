@@ -3604,6 +3604,7 @@ pub fn tests_without_evidence_query(
         .into_iter()
         .filter(|test| {
             test.summary.role == "test"
+                && crate::coverage_report::coverage_is_its_own(&test.summary.attribution)
                 && test.lines.is_empty()
                 && test.hits.is_empty()
                 && test.decisions.is_empty()
