@@ -1,0 +1,187 @@
+name: Self Coverage
+
+# Supercov measuring itself: the workspace's tests, end-to-end gates included,
+# run under a release build of the same commit. The gates take turns through a
+# file lock, so in one process they take hours; here they are split across
+# jobs, each measured on its own, and the runs merged into one.
+#
+# Run it by hand, or add the `self-coverage` label to a pull request.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SLICES: 8
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'self-coverage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      slices: ${{ steps.slices.outputs.slices }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: npm ci
+      - run: cargo build --release -p supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-self
+          path: target/release/supercov
+          retention-days: 3
+      # Slice 0 is every test but the gates; slices 1..N share the gates
+      # round-robin, in the order the harness declares them.
+      - id: slices
+        run: echo "slices=$(seq 0 "$SLICES" | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  measure:
+    needs: build
+    name: Measure slice ${{ matrix.slice }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: ${{ fromJSON(needs.build.outputs.slices) }}
+    steps:
+      # The instrumented workspace, its build and the gates' toolchains do not
+      # fit the runner's free space as it comes.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: tc39/test262
+          ref: 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
+          path: test262
+      # Outside the repository, as locally: the measured copy of the
+      # workspace has no business holding fifty thousand test files.
+      - run: mv test262 "$RUNNER_TEMP/test262"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install wasmtime 49.0.3
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-v49.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - uses: actions/download-artifact@v5
+        with:
+          name: supercov-self
+          path: ${{ runner.temp }}/self
+      - name: Choose this slice's tests
+        id: tests
+        run: |
+          gates=$(sed -n '/^gates! {/,/^}/p' crates/supercov-cli/tests/e2e_gates.rs \
+            | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
+          slice=${{ matrix.slice }}
+          if [ "$slice" = 0 ]; then
+            skips=$(printf -- '--skip %s ' $gates)
+            echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
+          else
+            picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '(NR - 1) % n == s - 1' | tr '\n' ' ')
+            echo "command=cargo test -p supercov --test e2e_gates -- --include-ignored --exact $picked" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Measure
+        env:
+          TEST262_DIR: ${{ runner.temp }}/test262
+        run: |
+          chmod +x "$RUNNER_TEMP/self/supercov"
+          echo "${{ steps.tests.outputs.command }}"
+          # A failing test still leaves a run to merge; the merge says it failed.
+          "$RUNNER_TEMP/self/supercov" -- ${{ steps.tests.outputs.command }} 2>&1 | tee measure.log
+          echo "exit ${PIPESTATUS[0]}" | tee -a measure.log
+      - name: Keep the run
+        if: always()
+        run: |
+          run=$(ls -t .supercov/runs | head -1)
+          mkdir -p "$RUNNER_TEMP/out"
+          tar -C .supercov/runs -czf "$RUNNER_TEMP/out/run.tar.gz" "$run"
+          cp measure.log "$RUNNER_TEMP/out/"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run-${{ matrix.slice }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+
+  merge:
+    needs: measure
+    if: always() && needs.measure.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v5
+        with:
+          name: supercov-self
+          path: ${{ runner.temp }}/self
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: run-*
+          path: ${{ runner.temp }}/runs
+      - name: Merge the slices
+        run: |
+          supercov="$RUNNER_TEMP/self/supercov"
+          chmod +x "$supercov"
+          mkdir -p .supercov/runs
+          ids=()
+          for slice in "$RUNNER_TEMP"/runs/run-*; do
+            tar -C .supercov/runs -xzf "$slice/run.tar.gz"
+            echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
+          done
+          ids=$(ls .supercov/runs)
+          "$supercov" merge $ids | tee merge.log
+          merged=$(ls -t .supercov/runs | head -1)
+          "$supercov" runs "$merged" > summary.txt
+          "$supercov" runs "$merged" gaps --format jsonl --metric mcdc --output mcdc-gaps.jsonl
+          {
+            echo '```'
+            for slice in "$RUNNER_TEMP"/runs/run-*; do
+              echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
+            done
+            echo
+            cat summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: self-coverage
+          path: |
+            summary.txt
+            mcdc-gaps.jsonl
+            merge.log
+          retention-days: 30
