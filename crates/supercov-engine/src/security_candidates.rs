@@ -416,6 +416,42 @@ router.get('/x/:id', async (req, res) => {{
         );
     }
 
+    /// A route is a handler only when its first argument is a path or `*`;
+    /// a template literal with no substitution can be a secret; only a
+    /// spread of request data is a spread; a decorated method is a handler;
+    /// only `require` of a string is an import, and a bare import names
+    /// nothing; a function assigned to a property is a named span; and a file
+    /// that does not parse is refused.
+    #[test]
+    fn each_javascript_shape_is_read_for_what_it_can_be() {
+        let source = format!(
+            "import './side-effect'\napp.get('*', (req, res) => res.send(1))\napp.get('name', (req, res) => res.send(2))\nconst k = `{FAKE_KEY}`\nconst t = `${{k}}{FAKE_KEY}`\nconst a = {{ ...defaults }}\nconst b = {{ ...req.params }}\nexport default class {{\n  @Get() find() {{ return 1 }}\n}}\nconst c = require(name)\nconst d = load('./x')\nexports.f = function () {{ return 2 }}\nthis.handle = (req, res) => 3\nwindow.flag = 1\n"
+        );
+        let found = nodes(Path::new("a.ts"), &source).unwrap();
+        let at =
+            |line: usize, kind: NodeKind| found.iter().any(|n| n.line == line && n.kind == kind);
+        assert!(at(2, NodeKind::Handler), "{found:?}");
+        assert!(!at(3, NodeKind::Handler), "{found:?}");
+        assert!(at(4, NodeKind::Literal), "{found:?}");
+        assert!(!at(5, NodeKind::Literal), "{found:?}");
+        assert!(!at(6, NodeKind::Spread), "{found:?}");
+        assert!(at(7, NodeKind::Spread), "{found:?}");
+        assert!(at(9, NodeKind::Handler), "{found:?}");
+        let s = structure(Path::new("a.ts"), &source).unwrap();
+        assert!(s.imports.is_empty(), "{:?}", s.imports);
+        let names = s
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&"f") && names.contains(&"handle"),
+            "{names:?}"
+        );
+        assert!(!names.contains(&"flag"), "{names:?}");
+        assert!(nodes(Path::new("b.js"), "function (").is_err());
+    }
+
     #[test]
     fn a_secret_is_a_prefix_a_long_run_or_a_password_word() {
         assert!(secretish(FAKE_KEY));
