@@ -1160,6 +1160,99 @@ mod tests {
 
     use super::*;
 
+    /// A stored run is refused for metadata too large to be one, a
+    /// directory name no run has, and evidence metadata that does not
+    /// describe the archive beside it; a store that is not a directory is
+    /// refused whole.
+    #[test]
+    fn a_stored_run_is_refused_for_what_does_not_describe_it() {
+        let root = temporary_directory("refusals");
+        let edit = |id: &str, change: &dyn Fn(&mut serde_json::Value)| {
+            let path = root.join(".supercov/runs").join(id).join("run.json");
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            change(&mut value);
+            fs::write(&path, value.to_string()).unwrap();
+        };
+        for (id, change) in [
+            (
+                "run-format",
+                &(|v: &mut serde_json::Value| v["rawEvidence"]["format"] = "zip".into())
+                    as &dyn Fn(&mut serde_json::Value),
+            ),
+            ("run-file", &|v: &mut serde_json::Value| {
+                v["rawEvidence"]["file"] = "other.gz".into()
+            }),
+            ("run-files", &|v: &mut serde_json::Value| {
+                v["rawEvidence"]["files"] = 0.into()
+            }),
+        ] {
+            create_analyzable_test_run(&root, id);
+            edit(id, change);
+        }
+        create_analyzable_test_run(&root, "run-large");
+        fs::write(
+            root.join(".supercov/runs/run-large/run.json"),
+            vec![b' '; (MAX_RUN_METADATA_BYTES + 1) as usize],
+        )
+        .unwrap();
+        fs::create_dir_all(root.join(".supercov/runs/bad\u{1}id")).unwrap();
+        let inventory = discover_runs(&root).unwrap();
+        assert!(inventory.runs.is_empty(), "{:?}", inventory.runs);
+        let reasons = inventory
+            .rejected
+            .iter()
+            .map(|run| (run.entry.clone(), run.reason.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (id, reason) in [
+            ("run-format", "raw evidence metadata"),
+            ("run-file", "raw evidence metadata"),
+            ("run-files", "raw evidence metadata"),
+            ("run-large", "run metadata is too large"),
+            ("bad\u{1}id", "run directory name"),
+        ] {
+            assert!(reasons[id].contains(reason), "{id}: {}", reasons[id]);
+        }
+        let file_store = temporary_directory("file-store");
+        fs::create_dir_all(file_store.join(".supercov")).unwrap();
+        fs::write(file_store.join(".supercov/runs"), "").unwrap();
+        assert!(matches!(
+            discover_runs(&file_store),
+            Err(RunStoreError::UnsafeStore(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(file_store).unwrap();
+    }
+
+    /// The execution environment is named only when nothing else changed.
+    #[test]
+    fn an_execution_change_alone_is_named_and_otherwise_left_unsaid() {
+        let root = temporary_directory("execution");
+        create_analyzable_test_run(&root, "run-a");
+        let stored = discover_runs(&root)
+            .unwrap()
+            .runs
+            .remove(0)
+            .metadata
+            .integrity;
+        let mut current = stored.clone();
+        current.fingerprint.execution = "9".repeat(64);
+        assert_eq!(
+            compare_run_integrity(Some(&stored), &current).reasons,
+            ["execution environment changed"]
+        );
+        current.fingerprint.tests = "8".repeat(64);
+        assert_eq!(
+            compare_run_integrity(Some(&stored), &current).reasons,
+            ["test files changed"]
+        );
+        assert_eq!(
+            compare_run_integrity(None, &current).reasons,
+            ["run predates integrity fingerprints"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn temporary_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
