@@ -1112,13 +1112,21 @@ impl ArtifactLauncher {
             Some(crate::rust_wasm_browser::Browser::Other(name)) => {
                 // Said only where the driver was chosen by name: a driver
                 // found on PATH may never be used (the tests may run in Node).
-                let named =
-                    ["GECKODRIVER", "SAFARIDRIVER", "MSEDGEDRIVER"]
-                        .iter()
-                        .any(|variable| {
-                            environment.iter().any(|(key, _)| key == variable)
-                                || std::env::var_os(variable).is_some()
-                        });
+                // A remote driver, Chrome's included, is always named.
+                let named = [
+                    "GECKODRIVER",
+                    "SAFARIDRIVER",
+                    "MSEDGEDRIVER",
+                    "GECKODRIVER_REMOTE",
+                    "SAFARIDRIVER_REMOTE",
+                    "CHROMEDRIVER_REMOTE",
+                    "MSEDGEDRIVER_REMOTE",
+                ]
+                .iter()
+                .any(|variable| {
+                    environment.iter().any(|(key, _)| key == variable)
+                        || std::env::var_os(variable).is_some()
+                });
                 if named {
                     self.unmeasured_browser = Some(name);
                 }
@@ -1532,13 +1540,12 @@ pub(crate) fn dynamic_library_environment(
     target_libdir: &Path,
     executable: &Path,
 ) -> Vec<(&'static str, OsString)> {
-    let variable = if cfg!(target_os = "macos") {
-        "DYLD_FALLBACK_LIBRARY_PATH"
-    } else if cfg!(windows) {
-        "PATH"
-    } else {
-        "LD_LIBRARY_PATH"
-    };
+    #[cfg(target_os = "macos")]
+    let variable = "DYLD_FALLBACK_LIBRARY_PATH";
+    #[cfg(windows)]
+    let variable = "PATH";
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let variable = "LD_LIBRARY_PATH";
     let mut entries = Vec::new();
     if let Some(deps) = executable.parent() {
         entries.push(deps.to_path_buf());
@@ -2728,7 +2735,217 @@ mod tests {
             "{}",
             default.display()
         );
+        // A toolchain whose rustc cannot answer stops the run.
+        script(&root.join("broken/bin/rustc"), "#!/bin/sh\nexit 3\n");
+        let selector = format!("+{}", root.join("broken").display());
+        let error = rustc_target_libdir(&project, &invocation(&["cargo", &selector, "test"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("rustc --print target-libdir exited with exit status: 3"),
+            "{error}"
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A directory of its own under the system temporary directory.
+    fn scratch(label: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-{label}-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// An executable script, copied into place by another process so that
+    /// no descriptor to it is open here while a test thread forks.
+    #[cfg(unix)]
+    fn script(path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let draft = path.with_extension("draft");
+        fs::write(&draft, text).unwrap();
+        assert!(
+            Command::new("cp")
+                .arg(&draft)
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_that_fails_says_how_with_whatever_the_binary_wrote() {
+        let root = scratch("failed-listing");
+        let launcher = ArtifactLauncher::default();
+        let listed = |name: &str, body: &str| {
+            let binary = root.join(name);
+            script(&binary, &format!("#!/bin/sh\n{body}\n"));
+            list_tests(&launcher, &binary, &[], &[])
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            listed("stderr", "echo 'cannot start' >&2; echo ignored; exit 2")
+                .ends_with("when asked to --list: cannot start"),
+        );
+        assert!(
+            listed("stdout", "echo 'half a listing'; exit 2")
+                .ends_with("when asked to --list: no stderr; stdout was half a listing"),
+        );
+        assert!(
+            listed("silent", "kill -9 $$")
+                .ends_with("when asked to --list: no output on either stream")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_wasm_runner_names_the_browser_it_cannot_read() {
+        let launcher = || ArtifactLauncher {
+            wasm_bindgen_runner: true,
+            ..ArtifactLauncher::default()
+        };
+        let unmeasured = |environment: &[(&str, &str)]| {
+            launcher()
+                .with_environment(
+                    &environment
+                        .iter()
+                        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                        .collect::<Vec<_>>(),
+                )
+                .unmeasured_browser()
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            unmeasured(&[("GECKODRIVER", "/opt/geckodriver")]),
+            Some("geckodriver".into())
+        );
+        // A remote driver runs its tests where Supercov cannot read them,
+        // Chrome's as much as any other's.
+        assert_eq!(
+            unmeasured(&[("CHROMEDRIVER_REMOTE", "http://grid:4444")]),
+            Some("a remote chromedriver".into())
+        );
+        // Tests that run in Node use no browser.
+        assert_eq!(
+            unmeasured(&[
+                ("GECKODRIVER", "/opt/geckodriver"),
+                ("WASM_BINDGEN_TEST_ONLY_NODE", "1")
+            ]),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_configured_runner_launches_native_tests_but_not_one_of_several_targets() {
+        let root = scratch("artifact-launcher");
+        let host = String::from_utf8(Command::new("rustc").arg("-vV").output().unwrap().stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+            .unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!("[target.{host}]\nrunner = ['emulator', '--fast']\n"),
+        )
+        .unwrap();
+        let project = PreparedRustProject::empty(root.clone());
+        let invocation = |command: &[&str]| {
+            cargo_invocation(
+                &root,
+                &command
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let launcher =
+            ArtifactLauncher::for_invocation(&project, &invocation(&["cargo", "test"]), &root)
+                .unwrap();
+        let command = launcher.command(Path::new("/target/debug/deps/fixture"), None);
+        assert_eq!(command.get_program(), "emulator");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--fast", "/target/debug/deps/fixture"]
+        );
+        // A native target's tests load no wasm hook.
+        assert!(!command.get_envs().any(|(name, _)| name == "NODE_OPTIONS"));
+        let error = ArtifactLauncher::for_invocation(
+            &project,
+            &invocation(&[
+                "cargo",
+                "test",
+                &format!("--target={host}"),
+                "--target=wasm32-unknown-unknown",
+            ]),
+            &root,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("several targets, one of them with a target runner"),
+            "{error}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn small_paths_and_words_are_read_as_their_tools_read_them() {
+        // A Windows path is a file URL from its drive.
+        assert_eq!(
+            file_url(Path::new("C:\\hooks\\a b.mjs")),
+            "file:///C:/hooks/a%20b.mjs"
+        );
+        // A source is a path below the workspace and nothing else.
+        let root = Path::new("/work");
+        assert!(relative_source(root, Path::new("/work")).is_err());
+        assert!(relative_source(root, Path::new("/work/src/../../etc")).is_err());
+        assert_eq!(
+            relative_source(root, Path::new("/work/src/lib.rs")).unwrap(),
+            "src/lib.rs"
+        );
+        // A trailing space ends no word.
+        assert_eq!(shell_words("cargo test ").unwrap(), ["cargo", "test"]);
+        // An executable that is the root, or sits in it, has fewer
+        // directories to search.
+        let library_path = |executable: &str| {
+            let environment = dynamic_library_environment(Path::new("/lib"), Path::new(executable));
+            std::env::split_paths(&environment[0].1)
+                .take(3)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(library_path("/")[0], PathBuf::from("/lib"));
+        assert_eq!(
+            library_path("/fixture")[..2],
+            [PathBuf::from("/"), PathBuf::from("/lib")]
+        );
+        // `-vv` is nextest's verbosity; `-vx` is no option it knows.
+        let unknown = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::NextestRun,
+            arguments: ["nextest", "run", "-vx"].map(String::from).to_vec(),
+            runner_arguments: Vec::new(),
+        };
+        assert!(
+            nextest_list_invocation(&unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("does not recognize option -vx")
+        );
     }
 
     #[test]
