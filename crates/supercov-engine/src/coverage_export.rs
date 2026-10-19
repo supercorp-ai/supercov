@@ -46,9 +46,8 @@ fn rate(covered: usize, total: usize) -> f64 {
 }
 
 fn counts(view: &RunView, metric: Metric) -> (usize, usize) {
-    view.metric(metric)
-        .map(|m| (m.covered, m.eligible))
-        .unwrap_or((0, 0))
+    let metric = view.metric(metric);
+    (metric.covered, metric.eligible)
 }
 
 /// The export formats, named once so the rest of the product never has to

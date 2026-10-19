@@ -10244,3 +10244,111 @@ fn private_batch_protocols_and_odd_arguments_say_what_went_wrong() {
     let imported = project.supercov(&["import", "cov=1.info", "--test", "imported"]);
     assert_eq!(imported.code(), 0, "{}", imported.stderr());
 }
+
+#[test]
+fn filters_selectors_and_stray_entries_on_the_run_commands() {
+    let project = Project::cart("run-commands");
+    for directory in ["a", "b", "c", "d", "e", "f"] {
+        project.write(&format!("tools/{directory}.js"), "export const tool = 1;\n");
+    }
+    project.commit("tools");
+    let run = project.measure(&[]);
+    // Six files no source imports, named five at a time.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "check", "--min-lines", "1"])
+            .succeeds()
+            .contains(
+                "6 files outside the source roots that no source imports are not counted: \
+             tools/a.js, tools/b.js, tools/c.js, tools/d.js, tools/e.js, and 1 more."
+            )
+    );
+    // A test filter without its value, on each command that takes one.
+    for (command, usage) in [
+        (
+            vec!["check", "--min-lines", "10"],
+            "supercov runs <run-id> check",
+        ),
+        (
+            vec!["patch", "--base", "HEAD"],
+            "supercov runs <run-id> patch",
+        ),
+        (
+            vec!["report", "--format", "lcov"],
+            "supercov runs <run-id> report",
+        ),
+    ] {
+        let mut args = vec!["runs", "latest"];
+        args.extend(command);
+        args.push("--kind");
+        contains_all(
+            &project.supercov(&args).exits(2),
+            &["--kind needs a value", usage],
+        );
+    }
+    // A decision by a file and something that is no line, and by its id.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "decision", "src/cart.js:abc"])
+            .exits(2)
+            .contains("Decision not found: src/cart.js:abc")
+    );
+    let decisions = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--json",
+        ])
+        .json();
+    let id = decisions["data"]["decisions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        project
+            .supercov(&["runs", "latest", "decision", &id])
+            .succeeds()
+            .contains("coupon && coupon.percent > 0")
+    );
+    // A run stored under a name of the pre-release store, or any name but a
+    // run id, is no run to list.
+    let runs = project.root.join(".supercov/runs");
+    for name in [
+        "2026-08-25T23-33-12-211Z",
+        "run_35c35ceeaf4b843Z",
+        "abcdefghijklmnopqrst",
+    ] {
+        let copied = std::process::Command::new("cp")
+            .arg("-R")
+            .arg(runs.join(&run))
+            .arg(runs.join(name))
+            .status()
+            .unwrap();
+        assert!(copied.success());
+    }
+    contains_all(
+        &project.supercov(&["runs"]).succeeds(),
+        &[&run, "showing 1-1 of 1"],
+    );
+    // A stale run's patch, as JSON: an error with its reason, no pass.
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let patch = project
+        .supercov(&["runs", "latest", "patch", "--base", "HEAD", "--json"])
+        .json();
+    assert_eq!(patch["data"]["result"], "error", "{patch}");
+    assert!(
+        patch["data"]["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("instrumented source changed"),
+        "{patch}"
+    );
+}

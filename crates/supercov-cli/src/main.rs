@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, Instant},
 };
@@ -118,9 +118,12 @@ fn queried_files(request: &supercov_engine::indexed_query::IndexedQueryRequest) 
             files.push(file.clone());
         }
         files.extend(request.more_lines.iter().map(|(file, _)| file.clone()));
+        // `decision` always has its selector: an id, or a file and line.
         if request.command == "decision"
-            && let Some(selector) = &request.selector
-            && let Some((file, line)) = selector.rsplit_once(':')
+            && let Some((file, line)) = request
+                .selector
+                .as_deref()
+                .and_then(|selector| selector.rsplit_once(':'))
             && line.parse::<usize>().is_ok()
         {
             files.push(file.to_owned());
@@ -163,16 +166,9 @@ fn hydrate_line_source_from_working_tree(
     if source.is_some() {
         return;
     }
-    let relative = Path::new(&location.file);
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return;
-    }
-    let Ok(contents) = fs::read_to_string(root.join(relative)) else {
+    // The query answers only for a file the run recorded, which is always
+    // a path within the project.
+    let Ok(contents) = fs::read_to_string(root.join(&location.file)) else {
         return;
     };
     let Some(line) = contents.lines().nth(location.line.saturating_sub(1)) else {
@@ -1217,16 +1213,15 @@ fn render_check(
     use supercov_engine::run_view::Outcome;
     let mut out = format!("Coverage check for {}\n", view.run);
     for floor in floors {
-        if let Some(metric) = view.metric(floor.metric) {
-            out.push_str(&format!(
-                "  {:<11} {:>8}  {}/{}  (floor {})\n",
-                metric.metric.name(),
-                render_percentage(metric.covered, metric.eligible),
-                metric.covered,
-                metric.eligible,
-                render_floor(floor.ppm),
-            ));
-        }
+        let metric = view.metric(floor.metric);
+        out.push_str(&format!(
+            "  {:<11} {:>8}  {}/{}  (floor {})\n",
+            metric.metric.name(),
+            render_percentage(metric.covered, metric.eligible),
+            metric.covered,
+            metric.eligible,
+            render_floor(floor.ppm),
+        ));
     }
     match outcome {
         Outcome::Pass => out.push_str("\nPASS: every floor is met.\n"),
@@ -3878,7 +3873,7 @@ fn instrument_js() -> ExitCode {
 mod docs_command_tests {
     use super::localize_guide;
 
-    const GUIDE: &str = "Run `npx supercov security` or `supercov quality`.\nKeep `supercov-cli` and `supercov`.\n\n```sh\nnpx supercov -- npm test\nsupercov runs latest   # newest run\n$ supercov security patch\n```\n\n```text\nsupercov security: 3 files flagged\n```\n";
+    const GUIDE: &str = "Run `npx supercov security` or `supercov quality`.\nKeep `supercov-cli`, `npx supercov-cli` and `supercov`.\n\n```sh\nnpx supercov -- npm test\nsupercov runs latest   # newest run\n$ supercov security patch\n```\n\n```text\nsupercov security: 3 files flagged\n```\n";
 
     #[test]
     fn guides_print_commands_the_way_the_reader_started_supercov() {
@@ -3889,7 +3884,7 @@ mod docs_command_tests {
             "{go} -- npm test\n{go} runs latest   # newest run\n$ {go} security patch"
         )));
         // A package name, the bare binary name and recorded output stay put.
-        assert!(printed.contains("Keep `supercov-cli` and `supercov`."));
+        assert!(printed.contains("Keep `supercov-cli`, `npx supercov-cli` and `supercov`."));
         assert!(printed.contains("```text\nsupercov security: 3 files flagged\n```"));
 
         let npm = localize_guide(GUIDE, "npx supercov");

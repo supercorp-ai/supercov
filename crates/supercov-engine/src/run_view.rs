@@ -256,8 +256,12 @@ pub struct RunView {
 }
 
 impl RunView {
-    pub fn metric(&self, metric: Metric) -> Option<&MetricView> {
-        self.totals.iter().find(|view| view.metric == metric)
+    /// Every metric has a total: one with nothing eligible is not applicable.
+    pub fn metric(&self, metric: Metric) -> &MetricView {
+        self.totals
+            .iter()
+            .find(|view| view.metric == metric)
+            .expect("a run view totals every metric")
     }
 
     pub fn file(&self, path: &str) -> Option<&FileView> {
@@ -567,25 +571,18 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
         reasons.push("no floor requested; give at least one --min-<metric>".into());
     }
     for floor in floors {
-        match view.metric(floor.metric) {
-            None => reasons.push(format!(
-                "{} is not measured by this run's language adapter; remove {}",
+        match &view.metric(floor.metric).applicability {
+            Applicability::NotApplicable => reasons.push(format!(
+                "{} has nothing eligible in this run, which is not the same as complete; remove {} or widen the scope",
                 floor.metric.name(),
                 floor.metric.flag()
             )),
-            Some(metric) => match &metric.applicability {
-                Applicability::NotApplicable => reasons.push(format!(
-                    "{} has nothing eligible in this run, which is not the same as complete; remove {} or widen the scope",
-                    floor.metric.name(),
-                    floor.metric.flag()
-                )),
-                Applicability::Incomplete { unmeasured } => reasons.push(format!(
-                    "{} left {unmeasured} obligation(s) unmeasured, so {} cannot be judged exactly",
-                    floor.metric.name(),
-                    floor.metric.flag()
-                )),
-                Applicability::Measured => {}
-            },
+            Applicability::Incomplete { unmeasured } => reasons.push(format!(
+                "{} left {unmeasured} obligation(s) unmeasured, so {} cannot be judged exactly",
+                floor.metric.name(),
+                floor.metric.flag()
+            )),
+            Applicability::Measured => {}
         }
     }
     if !reasons.is_empty() {
@@ -594,9 +591,7 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
 
     let mut violations = Vec::new();
     for floor in floors {
-        let Some(metric) = view.metric(floor.metric) else {
-            continue;
-        };
+        let metric = view.metric(floor.metric);
         if !metric.meets(floor.ppm) {
             violations.push(Violation {
                 file: None,
@@ -653,7 +648,18 @@ mod tests {
         }
     }
 
-    fn view(totals: Vec<MetricView>, files: Vec<FileView>) -> RunView {
+    /// A view of these totals, every metric it leaves out not applicable.
+    fn view(mut totals: Vec<MetricView>, files: Vec<FileView>) -> RunView {
+        for metric in Metric::ALL {
+            if !totals.iter().any(|total| total.metric == metric) {
+                totals.push(MetricView {
+                    metric,
+                    covered: 0,
+                    eligible: 0,
+                    applicability: Applicability::NotApplicable,
+                });
+            }
+        }
         RunView {
             schema_version: RUN_VIEW_SCHEMA_VERSION,
             run: "run_1".into(),
