@@ -2564,6 +2564,108 @@ fn normalize(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn questions_of(
+        file: &str,
+        source: &str,
+        lines: &[(usize, &str)],
+        language: Language,
+    ) -> Vec<Vec<String>> {
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "t".into(),
+                file: Some("t".into()),
+                name: "t".into(),
+                role: "test".into(),
+                runner: "r".into(),
+            }],
+            points: lines
+                .iter()
+                .map(|(line, text)| InputPoint {
+                    file: file.into(),
+                    line: *line,
+                    source: (*text).into(),
+                    tests: vec![0],
+                })
+                .collect(),
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([(file.to_owned(), source.to_owned())]);
+        let population =
+            population_from(Path::new("/nonexistent"), &input, &sources, language).unwrap();
+        (0..population.statements.len())
+            .map(|s| population.questions(s))
+            .collect()
+    }
+
+    /// Go, the JVM languages and Rust are asked in their own terms: a zero
+    /// value written out, a default value after the expression runs, a
+    /// `switch` whose every returned value changes, and an `Ok` that becomes
+    /// an error. A replacement that is the statement itself is not asked.
+    #[test]
+    fn each_language_is_asked_in_its_own_terms() {
+        let go = "package a\n\nfunc f(x int) (int, error) {\n\ty := g(x)\n\tif y > 1 {\n\t\treturn y, nil\n\t}\n\treturn 0, nil\n}\n";
+        let asked = questions_of(
+            "a.go",
+            go,
+            &[(4, "y := g(x)"), (6, "return y, nil"), (8, "return 0, nil")],
+            Language::Go,
+        );
+        assert_eq!(asked.len(), 2, "{asked:#?}");
+        assert!(
+            asked[0][0].contains("hold the zero value of their type"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[1][0].contains(
+                "becomes `return 0, nil` (the original expression is still evaluated first)"
+            ),
+            "{asked:#?}"
+        );
+
+        let java = "class A {\n  int f(int x) {\n    switch (x) {\n      case 1: return 1;\n      default: return 2;\n    }\n  }\n  int g(int x) {\n    int y = x + 1;\n    return y;\n  }\n}\n";
+        let asked = questions_of(
+            "A.java",
+            java,
+            &[
+                (
+                    3,
+                    "switch (x) {\n      case 1: return 1;\n      default: return 2;\n    }",
+                ),
+                (9, "int y = x + 1;"),
+                (10, "return y;"),
+            ],
+            Language::Jvm,
+        );
+        assert!(
+            asked[0][0].contains("every value `switch (x) {` returns becomes"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[1][0].contains("the variable it assigns holds the default value"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[2][0].contains("returns the default value"),
+            "{asked:#?}"
+        );
+
+        let rust = "fn f(x: u8) -> Result<u8, ()> {\n    if x > 2 {\n        return Ok(x);\n    }\n    Ok(0)\n}\n";
+        let asked = questions_of(
+            "src/a.rs",
+            rust,
+            &[(3, "return Ok(x);"), (5, "Ok(0)")],
+            Language::Rust,
+        );
+        assert!(
+            asked[0][0].contains("becomes `return Err(());`"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[1][0].contains("(it is the value the enclosing block produces)"),
+            "{asked:#?}"
+        );
+    }
+
     #[test]
     fn a_replacement_that_is_the_statement_is_no_change() {
         assert!(super::same_code("return 0, nil", "return 0,  nil"));
