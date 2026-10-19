@@ -748,7 +748,8 @@ impl<'a> VisitMut<'a> for GeneratedStatementSpans<'a, '_> {
     }
 
     fn visit_block_statement(&mut self, block: &mut oxc_ast::ast::BlockStatement<'a>) {
-        if self.depth > 0 && block.span.is_empty() {
+        // Every block is inside a statement, so never at the top level.
+        if block.span.is_empty() {
             block.span = self.span;
         } else if self.borrowed(block.span)
             // Not after a jump: `allowUnreachableCode: false` would reject it
@@ -13302,5 +13303,11 @@ mod tests {
             "{}",
             output.code
         );
+    }
+    #[test]
+    fn an_arrow_that_ends_the_file_still_returns_its_value() {
+        // Its body is made a block, whose brace would map past the source.
+        let printed = printed_alike("var both = (a, b) => a && b", "print(both(1, 2));");
+        assert_eq!(printed, "2");
     }
 }
