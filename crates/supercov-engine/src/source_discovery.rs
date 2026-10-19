@@ -916,8 +916,9 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
                 .map_err(|name| SourceDiscoveryError::NonUtf8Path(directory.join(name)))?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|error| io_error(&path, error))?;
+            // An entry's type is the link's own, never its target's: a link
+            // to a directory is no directory here.
             if !file_type.is_dir()
-                || file_type.is_symlink()
                 || generated_directory(&name)
                 || owned_workspace_store(&path)
                 || nested_checkout(&path)
@@ -1477,6 +1478,8 @@ mod tests {
             ("static/a.css", false),
             ("static/short.js", false),
             ("static/abcdefghij.js", false),
+            // Capitals alone are a word, not a hash.
+            ("dist/assets/x-ABCDEFGH.js", false),
         ] {
             assert_eq!(built_asset(file), built, "{file}");
         }
@@ -1566,6 +1569,115 @@ mod tests {
             fs::write(path, contents).unwrap();
         }
         root
+    }
+
+    #[test]
+    fn task_runner_files_are_tooling_and_comments_end_where_json_says() {
+        for file in [
+            "gulpfile.js",
+            "gruntfile.js",
+            "Gulpfile.mjs",
+            "vite.config.ts",
+        ] {
+            assert!(config_file(file), "{file}");
+        }
+        assert!(!config_file("gulp.js"));
+        // A slash that opens no comment, and a star inside one, are text.
+        assert_eq!(
+            strip_jsonc_comments("{\"a\": 1 /* x * y */, \"b\": 2 / 1 // z\n}"),
+            "{\"a\": 1 , \"b\": 2 / 1 \n}"
+        );
+    }
+
+    /// What a package names as its entries, its include patterns and its
+    /// test setup are read as far as they reach real files of its own.
+    #[test]
+    fn declarations_are_followed_only_to_the_projects_own_files() {
+        let root = repository(
+            "declared",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"declared","workspaces":["packages/*"],
+                        "exports":{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":{"j":"./deep/x.js"}}}}}}}}}},
+                        "main":"./node_modules/dep/index.js",
+                        "jest":{"setupFiles":["<rootDir>/missing.js","<rootDir>/setup.js"]}}"#,
+                ),
+                ("setup.js", "export const s = 1;\n"),
+                ("deep/x.js", "export const x = 1;\n"),
+                ("tsconfig.json", r#"{"include":["src/**/*","!src/legacy"]}"#),
+                ("src/a.js", "export const a = 1;\n"),
+                ("packages/ui/package.json", r#"{"name":"ui"}"#),
+                ("packages/ui/index.js", "export const ui = 1;\n"),
+                ("packages/vendored/package.json", r#"{"name":"vendored"}"#),
+                ("packages/vendored/.git/HEAD", "ref: refs/heads/main\n"),
+                ("packages/vendored/index.js", "export const v = 1;\n"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        let packages = package_directories(&root).unwrap();
+        assert!(packages.contains(&root.join("packages/ui")), "{packages:?}");
+        // A package that is a checkout of its own is not this project's.
+        assert!(
+            !packages.contains(&root.join("packages/vendored")),
+            "{packages:?}"
+        );
+        // Only setup files that exist are setup.
+        assert_eq!(
+            declared_test_setup(std::slice::from_ref(&root)),
+            BTreeSet::from([root.join("setup.js")])
+        );
+        // An entry deeper than anything a manifest is read to is not a root.
+        assert!(
+            discovered
+                .scope
+                .entries
+                .iter()
+                .all(|e| e.file != "deep/x.js")
+                || entry(&discovered, "deep/x.js").reason != "package entry",
+            "{:?}",
+            discovered.scope.entries
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_root_that_is_no_directory_or_no_source_is_refused_by_name() {
+        let root = repository(
+            "refused",
+            &[
+                ("src/a.js", "export const a = 1;\n"),
+                ("docs/README.md", "# docs\n"),
+            ],
+        );
+        // A project root that is a file.
+        assert!(matches!(
+            discover_source_scope(&root.join("src/a.js"), None),
+            Err(SourceDiscoveryError::InvalidRoot(_))
+        ));
+        // A root below a file is neither missing nor a root: the error says so.
+        assert!(discover_source_scope(&root, Some(&["src/a.js/inner".into()])).is_err());
+        // A root that exists but holds no source is not called missing.
+        let environment = BTreeMap::from([(SOURCE_ROOTS_VARIABLE.to_owned(), "docs".to_owned())]);
+        let roots = ExplicitSourceRoots::from_environment(&root, &environment)
+            .unwrap()
+            .unwrap();
+        let refused = roots.refuse_if_empty(0, "JavaScript").unwrap_err();
+        assert!(refused.contains("left no JavaScript source"), "{refused}");
+        assert!(!refused.contains("does not exist"), "{refused}");
+        // Relative roots name the same file in a copy as in the project.
+        let copy = repository("refused-copy", &[("docs/README.md", "# docs\n")]);
+        let rebased = ExplicitSourceRoots::from_environment_in(&root, &copy, &environment)
+            .unwrap()
+            .unwrap();
+        assert!(
+            rebased
+                .refuse_if_empty(0, "Go")
+                .unwrap_err()
+                .contains("docs")
+        );
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&copy).unwrap();
     }
 
     fn entry<'a>(scope: &'a DiscoveredSourceScope, file: &str) -> &'a SourceScopeEntry {
