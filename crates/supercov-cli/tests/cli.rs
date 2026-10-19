@@ -8900,3 +8900,52 @@ fn a_merge_of_two_kinds_pages_and_narrows_by_kind() {
         ],
     );
 }
+
+/// First-party code outside any root it recognises is ambiguous, blocks a
+/// complete measurement, is named four directories at a time in the summary
+/// and in full in `scope`, and both say which roots to name.
+#[test]
+fn code_outside_the_source_roots_is_named_with_the_roots_to_give() {
+    let project = Project::empty("spread-scope");
+    project.write(
+        "package.json",
+        r#"{ "name": "spread", "private": true, "type": "module" }"#,
+    );
+    let mut imports = String::new();
+    for dir in [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    ] {
+        project.write(
+            &format!("{dir}/index.js"),
+            &format!("export const {dir} = (x) => x ? 1 : 2;\n"),
+        );
+        imports.push_str(&format!("import {{ {dir} }} from \"../{dir}/index.js\";\n"));
+    }
+    project.write(
+        "test/all.test.js",
+        &format!("import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n{imports}\ntest(\"alpha\", () => {{ assert.equal(alpha(true), 1); }});\n"),
+    );
+    project.write("src/main.js", "export const main = 1;\n");
+    project.git(&["init", "-q"]);
+    project.commit("spread");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let roots = "SUPERCOV_SOURCE_ROOTS=src,alpha,beta,delta,epsilon,eta,gamma,theta,zeta";
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Incomplete — 8 blocking limitation(s) in 8 file(s)",
+            "Unclassified source: alpha 1, beta 1, delta 1, epsilon 1, 4 elsewhere",
+            roots,
+        ],
+    );
+    let scope = project.supercov(&["runs", "latest", "scope"]).succeeds();
+    contains_all(
+        &scope,
+        &[
+            "included 1, excluded 1, ambiguous 8",
+            "1  AMBIGUOUS  zeta       unclassified first-party source",
+            roots,
+        ],
+    );
+}
