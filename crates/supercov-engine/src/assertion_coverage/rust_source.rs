@@ -1766,6 +1766,37 @@ mod tests {
         );
     }
 
+    /// An integration test's helpers are the modules it declares, as a
+    /// directory or a file, from a nested crate's `tests` too; a unit test
+    /// has none; and a generic test on the file's first line is found.
+    #[test]
+    fn integration_helpers_and_a_generic_first_line_test() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("crates/x/tests/common")).unwrap();
+        std::fs::write(root.join("crates/x/tests/common/mod.rs"), "").unwrap();
+        std::fs::write(root.join("crates/x/tests/util.rs"), "").unwrap();
+        let text = "mod common;\npub mod util;\nmod missing;\nuse std::fmt;\n";
+        assert_eq!(
+            helpers(&root, "crates/x/tests/it.rs", text),
+            ["crates/x/tests/common/mod.rs", "crates/x/tests/util.rs"]
+        );
+        assert!(helpers(&root, "src/lib.rs", text).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+        let lines = ["fn generic<T>() {", "}"];
+        let found = locate(&lines, "tests/g.rs::generic").unwrap();
+        assert_eq!(
+            (found.context.clone(), found.start, found.end),
+            (vec![], 0, 1)
+        );
+    }
+
     #[test]
     fn tests_and_doctests_are_found() {
         let text = "//! ```\n//! assert!(a::f());\n//! ```\n\n#[test]\nfn works() {\n    assert!(f());\n}\n";
