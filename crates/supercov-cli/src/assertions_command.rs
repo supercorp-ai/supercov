@@ -1684,9 +1684,16 @@ fn view(
                         .map(|(file, name)| format!("  {name} ({file})"))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return Err(format!(
-                        "{n} assessed tests match {query}; give one's full name:\n{names}"
-                    ));
+                    // One name in several files is told apart by its file.
+                    let how = if tests
+                        .iter()
+                        .all(|(_, name)| name == &tests.first().unwrap().1)
+                    {
+                        "add --test-file with one's file"
+                    } else {
+                        "give one's full name"
+                    };
+                    return Err(format!("{n} assessed tests match {query}; {how}:\n{names}"));
                 }
             };
             let mut items = all
@@ -1900,6 +1907,11 @@ fn render_files(run: &str, data: &Value) -> String {
         return format!(
             "Run {run}: not assessed for the tests {filter} picks: the {unasked} statement(s) they run were asked of other tests, which answered first. `{ask}` asks these tests.\n"
         );
+    }
+    if s["statements"].as_u64() == Some(0)
+        && let Some(filter) = data["filter"].as_str()
+    {
+        return format!("Run {run}: the tests {filter} picks ran no assessed statement.\n");
     }
     let mut out = format!(
         "Run {run}: {} asserted ({} of {} executed statements){}\n",

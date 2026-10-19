@@ -3031,3 +3031,78 @@ fn a_file_that_cannot_be_assessed_is_named_beside_those_that_were() {
         "{security}"
     );
 }
+
+#[test]
+fn an_assessment_read_for_some_tests_says_what_those_tests_ran_and_were_asked() {
+    let project = Project::cart("assertions-picked");
+    project.write(
+        "test/other.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\n\ntest(\"total adds prices\", () => {\n  assert.equal(total([{ price: 1, quantity: 1 }]), 1);\n});\n\ntest(\"noop\", () => { assert.ok(true); });\n",
+    );
+    project.commit("other");
+    let run = project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_no);
+    let read = |args: &[&str]| {
+        let mut full = vec!["runs", run.as_str(), "assertions"];
+        full.extend_from_slice(args);
+        project.supercov_with(&full, &through(&base))
+    };
+    // A test that runs no source has nothing to be asked.
+    assert!(
+        read(&["assess", "--title", "noop"])
+            .exits(2)
+            .contains("the tests --title noop picks ran no assessed statement")
+    );
+    read(&["assess"]).succeeds();
+    assert!(read(&["--title", "noop"]).succeeds().starts_with(&format!(
+        "Run {run}: the tests --title noop picks ran no assessed statement.\n\n"
+    )));
+    // One name in two files: the file tells them apart.
+    let both = read(&["--test", "total adds prices"]).exits(2);
+    contains_all(
+        &both,
+        &[
+            "2 assessed tests match total adds prices; add --test-file with one's file:",
+            "  total adds prices (test/other.test.js)",
+        ],
+    );
+    assert!(
+        read(&["--test", "total adds prices", "--test-file", "test/other.test.js"])
+            .succeeds()
+            .contains("total adds prices (test/other.test.js): judged to catch a change to 0 of the 5 statements")
+    );
+    let several = read(&["--test", "total"]).exits(2);
+    assert!(several.contains("give one's full name:"), "{several}");
+    // A line that is no number names a file, and the JSON says so too.
+    assert!(
+        read(&["src/cart.js:abc"])
+            .exits(2)
+            .contains("no assessed statement in src/cart.js:abc")
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&read(&["src/none.js", "--json"]).stdout()).unwrap();
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+
+    // Tests that were never asked, because others answered first.
+    let (yes, _) = gateway(MODEL, answer_yes);
+    let caught = Project::cart("assertions-unasked");
+    let first = caught.measure(&[]);
+    caught
+        .supercov_with(&["runs", &first, "assertions", "assess"], &through(&yes))
+        .succeeds();
+    assert!(
+        caught
+            .supercov(&["runs", &first, "assertions", "--title", "total adds"])
+            .succeeds()
+            .contains("not assessed for the tests --title total adds picks: the 5 statement(s) they run were asked of other tests, which answered first.")
+    );
+    // A later run points back at the last one assessed.
+    let later = caught.measure(&[]);
+    contains_all(
+        &caught.supercov(&["runs", &later, "assertions"]).succeeds(),
+        &[
+            "assertions not assessed for this run.",
+            &format!("Last assessed: {first}, 100.0% asserted."),
+        ],
+    );
+}
