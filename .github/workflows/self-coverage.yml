@@ -76,7 +76,7 @@ jobs:
     # A fixture pins Playwright 1.60, which predates Ubuntu 26.04: on Linux
     # every Playwright fetches and launches the 24.04 builds, which run there.
     env:
-      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ${{ runner.os == 'Linux' && 'ubuntu24.04-x64' || '' }}
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ${{ startsWith(matrix.os, 'ubuntu') && 'ubuntu24.04-x64' || '' }}
     strategy:
       fail-fast: false
       matrix:
