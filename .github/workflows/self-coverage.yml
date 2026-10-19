@@ -6,10 +6,17 @@ name: Self Coverage
 # jobs, each measured on its own, and the runs merged into one per platform.
 # Linux and macOS compile different code, so each platform is merged on its own.
 #
-# Run it by hand, or add the `self-coverage` label to a pull request.
+# Run it by hand, or add the `self-coverage` label to a pull request: Linux
+# alone, about 25 minutes. The `self-coverage-macos` label, or `macos: true` by
+# hand, measures macOS too; the two platforms differ by a handful of gaps.
 
 on:
   workflow_dispatch:
+    inputs:
+      macos:
+        description: "Measure macOS as well as Linux"
+        type: boolean
+        default: false
   pull_request:
     types: [labeled]
 
@@ -24,14 +31,28 @@ env:
   SLICES: 8
 
 jobs:
+  platforms:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'self-coverage')
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.os.outputs.os }}
+    steps:
+      - id: os
+        run: |
+          if [ "${{ inputs.macos }}" = true ] || [ "${{ github.event.label.name }}" = self-coverage-macos ]; then
+            echo 'os=["ubuntu-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'self-coverage'
+    needs: platforms
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -48,14 +69,14 @@ jobs:
           retention-days: 3
 
   measure:
-    needs: build
+    needs: [platforms, build]
     name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
         # Slice 0 is every test but the gates; slices 1..8 share the gates
         # round-robin, in the order the harness declares them.
         slice: [0, 1, 2, 3, 4, 5, 6, 7, 8]
@@ -176,7 +197,7 @@ jobs:
         run: grep -qx 'exit 0' <(tail -1 "$RUNNER_TEMP/out/measure.log")
 
   merge:
-    needs: measure
+    needs: [platforms, measure]
     if: always() && needs.measure.result != 'skipped'
     name: Merge ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -184,7 +205,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v5
