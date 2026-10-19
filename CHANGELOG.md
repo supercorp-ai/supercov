@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `line` with several locations reports one past the end of its file as not answered, with how many lines the file has, instead of reading it as a line that holds no code; all of them past the end fails the call, as one does.
 - `minimize` refusing a run with background evidence names the way through, `--kind` or `--runner`, instead of "select a fully attributed coverage view".
 - A Rust run whose test filter matches no test can be read: it says no test ran and to check the filter, instead of failing to open with `frontend declares an unobserved runner`.
 - `security --run` says every line of the flagged files ran when none was left unexecuted, instead of `0 flagged files have lines no test ... executed`, and counts one file in the singular.

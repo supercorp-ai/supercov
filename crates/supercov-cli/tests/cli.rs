@@ -9833,3 +9833,46 @@ fn minimize_refuses_background_evidence_and_names_the_filter_that_leaves_it_out(
         ],
     );
 }
+
+#[test]
+fn a_line_past_the_end_of_its_file_fails_among_several_as_it_does_alone() {
+    let project = Project::cart("lines-past-end");
+    project.measure(&[]);
+    let mixed = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:2", "src/cart.js:999"])
+        .succeeds();
+    contains_all(
+        &mixed,
+        &[
+            "src/cart.js:2\n",
+            "Not answered\n  src/cart.js:999: src/cart.js has 21 lines; there is no line 999",
+        ],
+    );
+    assert!(!mixed.contains("Nothing on this line is code"), "{mixed}");
+    let json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:2",
+            "src/cart.js:999",
+            "--json",
+        ])
+        .json();
+    assert_eq!(json["data"]["lines"].as_array().unwrap().len(), 1, "{json}");
+    assert_eq!(json["data"]["failed"][0]["location"], "src/cart.js:999");
+    // Every location failing fails the call, as one does.
+    let none = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:998",
+            "src/cart.js:999",
+        ])
+        .exits(2);
+    assert!(
+        none.contains("src/cart.js has 21 lines; there is no line 998"),
+        "{none}"
+    );
+}

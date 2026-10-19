@@ -3135,6 +3135,63 @@ fn execute_public_query(
                 query_indexed(&index, report.as_ref(), &request, newer_query)
                     .map_err(|error| error.agent_error())
             })();
+            // A line past the end of its file is no line, as it is when asked
+            // alone: it fails, the others stand; all failing fails the call.
+            let result = result.and_then(|mut output| {
+                if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) =
+                    &mut output.data
+                {
+                    let mut kept = Vec::new();
+                    let mut pages = Vec::new();
+                    for (line, page) in std::mem::take(&mut data.lines)
+                        .into_iter()
+                        .zip(std::mem::take(&mut data.pages))
+                    {
+                        let location = match &line {
+                            supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
+                                &data.location
+                            }
+                            supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                                &data.location
+                            }
+                        };
+                        let lines_in_file = fs::read_to_string(root.join(&location.file))
+                            .ok()
+                            .map(|contents| contents.lines().count());
+                        match lines_in_file {
+                            Some(count) if location.line > count => {
+                                data.failed.push(
+                                    supercov_engine::indexed_query::CoverageLineFailure {
+                                        location: format!("{}:{}", location.file, location.line),
+                                        code: agent_json::ErrorCode::InvalidArgument,
+                                        message: format!(
+                                            "{} has {count} lines; there is no line {}",
+                                            location.file, location.line
+                                        ),
+                                    },
+                                );
+                            }
+                            _ => {
+                                kept.push(line);
+                                pages.push(page);
+                            }
+                        }
+                    }
+                    data.lines = kept;
+                    data.pages = pages;
+                    if data.lines.is_empty()
+                        && let Some(first) = data.failed.first()
+                    {
+                        return Err(agent_json::AgentError {
+                            code: first.code,
+                            message: first.message.clone(),
+                            retryable: false,
+                            details: Some(serde_json::json!({ "location": first.location })),
+                        });
+                    }
+                }
+                Ok(output)
+            });
             result
                 .map(|mut output| {
                     let recorded = matches!(
