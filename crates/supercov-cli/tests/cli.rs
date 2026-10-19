@@ -9078,3 +9078,41 @@ fn unittest_outcomes_each_count_and_a_decorator_skip_is_a_test() {
         refused.stderr()
     );
 }
+
+/// A query about one file warns that the run is stale only when what it
+/// reads changed: a test file's change says nothing about a source file,
+/// that file's own change names it, and a dependency change names why.
+#[test]
+fn a_file_query_warns_of_staleness_only_for_what_it_reads() {
+    let project = Project::cart("scoped-stale");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let file = |project: &Project| project.supercov(&["runs", "latest", "file", "src/cart.js"]);
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total adds up prices",
+    );
+    let quiet = file(&project);
+    assert_eq!(quiet.code(), 0);
+    assert!(!quiet.stderr().contains("stale run"), "{}", quiet.stderr());
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    let named = file(&project);
+    assert!(
+        named.stderr().contains("src/cart.js changed since the run"),
+        "{}",
+        named.stderr()
+    );
+    project.edit("src/cart.js", "return 1;", "return 0;");
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" }, "dependencies": { "x": "1" } }"#,
+    );
+    let dependency = file(&project);
+    assert!(
+        dependency
+            .stderr()
+            .contains("dependencies or lockfile changed"),
+        "{}",
+        dependency.stderr()
+    );
+}

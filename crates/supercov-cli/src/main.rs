@@ -109,9 +109,10 @@ const DOC_TOPICS: &[&str] = &[
 /// a decision's. Empty for a query about the whole run.
 fn queried_files(request: &supercov_engine::indexed_query::IndexedQueryRequest) -> Vec<String> {
     let mut files = Vec::new();
+    // `file` reaches here as the view it asked for.
     if matches!(
         request.command.as_str(),
-        "line" | "file" | "decision" | "source"
+        "line" | "file-detail" | "file-decisions" | "decision" | "source"
     ) {
         if let Some(file) = &request.file {
             files.push(file.clone());
