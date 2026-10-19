@@ -371,14 +371,18 @@ impl Imports {
     }
 
     fn resolve(&self, from: &str, specifier: &str) -> Resolved {
-        // A query or fragment is no part of the file; a leading `#` is a
-        // package.json subpath import, the whole name.
-        let specifier = specifier.split('?').next().unwrap_or(specifier);
-        let specifier = match specifier.char_indices().skip(1).find(|(_, c)| *c == '#') {
-            Some((at, _)) => &specifier[..at],
-            None => specifier,
-        };
-        if specifier.starts_with("./") || specifier.starts_with("../") || specifier == "." {
+        // A query or a fragment (`./icon.svg?raw`) names no other file. The
+        // `#` that starts a subpath import is the name's own.
+        let end = specifier
+            .char_indices()
+            .skip(1)
+            .find(|(_, character)| matches!(character, '?' | '#'))
+            .map_or(specifier.len(), |(index, _)| index);
+        let specifier = &specifier[..end];
+        if specifier.starts_with("./")
+            || specifier.starts_with("../")
+            || matches!(specifier, "." | "..")
+        {
             let base = Path::new(from).parent().unwrap_or(Path::new(""));
             return self.file(&base.join(specifier));
         }
@@ -475,10 +479,16 @@ impl Imports {
                 .iter()
                 .map(|extension| format!("{path}{extension}")),
         );
+        // The root's own index where the path is the root.
+        let directory = if path.is_empty() {
+            String::new()
+        } else {
+            format!("{path}/")
+        };
         candidates.extend(
             EXTENSIONS
                 .iter()
-                .map(|extension| format!("{path}/index{extension}")),
+                .map(|extension| format!("{directory}index{extension}")),
         );
         match candidates.into_iter().find(|candidate| exists(candidate)) {
             Some(found) => Resolved::File(found),
@@ -620,9 +630,13 @@ fn aliases(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
         }
         match json.get("extends").and_then(Value::as_str) {
             Some(parent) if parent.starts_with('.') => {
+                // As TypeScript finds it: the path as written, or with
+                // `.json` added where no file is there.
                 config = directory.join(parent);
-                if config.extension().is_none() {
-                    config.set_extension("json");
+                if !config.is_file() && !parent.ends_with(".json") {
+                    let mut named = config.into_os_string();
+                    named.push(".json");
+                    config = PathBuf::from(named);
                 }
             }
             _ => break,
@@ -1367,6 +1381,271 @@ mod tests {
             ruby.files.contains("spec/spec_helper.rb") && ruby.files.contains("spec/other.rb"),
             "{ruby:?}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_setup_file_named_twice_is_named_once() {
+        let root = project(&[
+            (
+                "vitest.config.ts",
+                "export default { test: { setupFiles: ['./setup.ts', './setup.ts'] } };\n",
+            ),
+            ("setup.ts", "export {};\n"),
+        ]);
+        let imports = Imports::new(&root);
+        assert_eq!(imports.named_by("vitest.config.ts"), ["setup.ts"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_file_belongs_to_its_runner() {
+        assert_eq!(configuration_runner("vitest.workspace.ts"), Some("vitest"));
+        assert_eq!(configuration_runner("vitest.setup.ts"), None);
+    }
+
+    #[test]
+    fn data_a_test_imports_is_loaded_and_not_read_for_imports() {
+        let root = project(&[
+            ("package.json", "{}"),
+            (
+                "a.test.js",
+                "import data from './data.json';\nimport notes from './notes.txt?raw#top';\n",
+            ),
+            ("data.json", "{\"a\": 1}\n"),
+            ("notes.txt", "notes\n"),
+        ]);
+        let loads = Imports::new(&root).loads(["a.test.js"]);
+        assert_eq!(loads.open, None, "{loads:?}");
+        assert_eq!(
+            loads.files.into_iter().collect::<Vec<_>>(),
+            ["a.test.js", "data.json", "notes.txt"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_test_that_imports_its_package_directory_loads_its_index() {
+        let root = project(&[
+            ("package.json", "{}"),
+            ("a.test.js", "import main from '.';\n"),
+            ("test/b.test.js", "const main = require('..');\n"),
+            ("index.js", "module.exports = 1;\n"),
+        ]);
+        let imports = Imports::new(&root);
+        for test in ["a.test.js", "test/b.test.js"] {
+            let loads = imports.loads([test]);
+            assert_eq!(loads.open, None, "{loads:?}");
+            assert!(loads.files.contains("index.js"), "{loads:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn type_only_exports_and_namespace_aliases_load_nothing() {
+        let root = project(&[
+            ("package.json", "{}"),
+            (
+                "a.test.ts",
+                "export type * from './types';\nimport Alias = Space.Inner;\nimport helper = require('./helper');\n",
+            ),
+            ("types.ts", "export type T = 1;\n"),
+            ("helper.ts", "export = 1;\n"),
+        ]);
+        let loads = Imports::new(&root).loads(["a.test.ts"]);
+        assert_eq!(loads.open, None, "{loads:?}");
+        assert_eq!(
+            loads.files.into_iter().collect::<Vec<_>>(),
+            ["a.test.ts", "helper.ts"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_leaves_the_answer_open() {
+        let root = project(&[
+            ("package.json", "{}"),
+            ("a.test.js", "import { from './x';\n"),
+            ("b_spec.rb", "def broken(\n"),
+        ]);
+        let imports = Imports::new(&root);
+        assert_eq!(
+            imports.loads(["a.test.js"]).open.as_deref(),
+            Some("a.test.js could not be read")
+        );
+        assert_eq!(
+            imports.loads(["b_spec.rb"]).open.as_deref(),
+            Some("b_spec.rb could not be read")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_alias_or_subpath_falls_through_to_a_target_that_exists() {
+        let root = project(&[
+            (
+                "package.json",
+                r##"{"imports":{"#missing":"./gone.js","#fallback":["./gone.js","./lib/real.js"]}}"##,
+            ),
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions":{"paths":{"@/*":["./generated/*","./src/*"]}}}"#,
+            ),
+            ("src/x.ts", "export const x = 1;\n"),
+            ("lib/real.js", "export {};\n"),
+            (
+                "a.test.ts",
+                "import { x } from '@/x';\nimport '#fallback';\n",
+            ),
+            ("b.test.ts", "import '#missing';\n"),
+        ]);
+        let imports = Imports::new(&root);
+        let loads = imports.loads(["a.test.ts"]);
+        assert_eq!(loads.open, None, "{loads:?}");
+        assert!(loads.files.contains("src/x.ts"), "{loads:?}");
+        assert!(loads.files.contains("lib/real.js"), "{loads:?}");
+        assert!(imports.loads(["b.test.ts"]).open.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tsconfig_paths_come_from_the_nearest_config_that_sets_them() {
+        let root = project(&[
+            (
+                "tsconfig.json",
+                r#"{"extends":"./tsconfig.base.json","compilerOptions":{"paths":{"@app/*":["src/*"]}}}"#,
+            ),
+            (
+                "tsconfig.base.json",
+                r#"{"extends":"@tsconfig/node20/tsconfig.json","compilerOptions":{"paths":{"@app/*":["old/*"],"@base/*":["base/*"]}}}"#,
+            ),
+        ]);
+        assert_eq!(
+            aliases(&root),
+            [(String::from("@app/*"), vec![PathBuf::from("src/*")])]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_tsconfig_extends_a_config_named_without_json_as_typescript_does() {
+        // TypeScript reads the path as written and, where no file is there,
+        // with `.json` added: `./tsconfig.base` is `tsconfig.base.json`.
+        let root = project(&[
+            ("tsconfig.json", r#"{"extends":"./tsconfig.base"}"#),
+            ("tsconfig.base.json", r#"{"extends":"./configs/common"}"#),
+            (
+                "configs/common.json",
+                r#"{"compilerOptions":{"paths":{"@common/*":["*"]}}}"#,
+            ),
+        ]);
+        assert_eq!(
+            aliases(&root),
+            [(String::from("@common/*"), vec![PathBuf::from("configs/*")])]
+        );
+        fs::remove_dir_all(root).unwrap();
+        let root = project(&[(
+            "tsconfig.json",
+            r#"{"extends":"./gone.json","compilerOptions":{"paths":{"@/*":["*"]}}}"#,
+        )]);
+        assert_eq!(
+            aliases(&root).len(),
+            1,
+            "a config that is gone ends the chain"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_tsconfig_extends_chain_that_loops_or_runs_long_ends() {
+        let root = project(&[
+            (
+                "tsconfig.json",
+                r#"{"extends":"./b.json","compilerOptions":{}}"#,
+            ),
+            (
+                "b.json",
+                r#"{"extends":"./tsconfig.json","compilerOptions":{"paths":{"@b/*":["b/*"]}}}"#,
+            ),
+        ]);
+        assert_eq!(aliases(&root).len(), 1);
+        fs::remove_dir_all(root).unwrap();
+        // Each config extends the next; the sixteenth is never read.
+        let mut files = (0..20)
+            .map(|index| {
+                let name = if index == 0 {
+                    String::from("tsconfig.json")
+                } else {
+                    format!("c{index}.json")
+                };
+                let paths = if index == 15 {
+                    r#","compilerOptions":{"paths":{"@far/*":["far/*"]}}"#
+                } else {
+                    ""
+                };
+                (
+                    name,
+                    format!(r#"{{"extends":"./c{}.json"{paths}}}"#, index + 1),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push((String::from("c20.json"), String::from("{}")));
+        let files = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let root = project(&files);
+        assert_eq!(aliases(&root), []);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_spec_without_rspec_options_loads_what_it_requires() {
+        let root = project(&[
+            ("spec/a_spec.rb", "require_relative \"helper\"\n"),
+            ("spec/helper.rb", "module Helper; end\n"),
+        ]);
+        let loads = Imports::new(&root).loads(["spec/a_spec.rb"]);
+        assert_eq!(loads.open, None);
+        assert_eq!(
+            loads.files.into_iter().collect::<Vec<_>>(),
+            ["spec/a_spec.rb", "spec/helper.rb"]
+        );
+        fs::remove_dir_all(root).unwrap();
+        let root = project(&[
+            (".rspec", "--require=rails_helper --require=spec_helper\n"),
+            ("spec/spec_helper.rb", "\n"),
+            ("spec/a_spec.rb", "\n"),
+        ]);
+        let loads = Imports::new(&root).loads(["spec/a_spec.rb"]);
+        assert_eq!(
+            loads.files.into_iter().collect::<Vec<_>>(),
+            ["spec/a_spec.rb", "spec/spec_helper.rb"],
+            "a gem's helper is not the project's"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reading_sys_path_leaves_a_python_answer_closed() {
+        let root = project(&[(
+            "test_a.py",
+            "import sys\nif sys.path.count('x'):\n    pass\n",
+        )]);
+        let loads = Imports::new(&root).loads(["test_a.py"]);
+        assert_eq!(loads.open, None, "{loads:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_python_test_outside_the_checkout_cannot_be_read() {
+        let root = project(&[("tests/test_a.py", "\n")]);
+        let loads = Imports::new(&root.join("tests")).loads(["../elsewhere/test_a.py"]);
+        assert_eq!(
+            loads.files.into_iter().collect::<Vec<_>>(),
+            ["../elsewhere/test_a.py"]
+        );
+        assert!(loads.open.is_some());
         fs::remove_dir_all(root).unwrap();
     }
 }

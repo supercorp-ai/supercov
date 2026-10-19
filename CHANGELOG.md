@@ -104,6 +104,7 @@
 - `quality patch` on an emptied file says it was emptied instead of calling it a deletion, and a change too large to review even as its diff names `supercov quality <path>`, which reads the file in windows, instead of speaking of a pair of versions a new file does not have.
 - A Python file that does not parse is no longer parsed a second time.
 - The `security gaps` refusal of a snapshot with no findings names `supercov security`, not `supercov quality`.
+- A JavaScript test that imports its package's directory (`require('..')`, `import '.'`) or uses path aliases from a tsconfig it extends without `.json` (`"extends": "./tsconfig.base"`) was taken to load any file of the project, so a change to any test helper made its runs out of date. Supercov follows those imports now.
 
 ## 4.19.0
 
