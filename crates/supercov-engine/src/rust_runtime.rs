@@ -60,6 +60,25 @@ impl std::fmt::Display for RustProbeReadError {
 impl std::error::Error for RustProbeReadError {}
 
 const REGION_TEMPLATE: &str = include_str!("../runtime-assets/rust-region-runtime.rs");
+
+/// Where a test's instrumented code writes its evidence.
+pub const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
+/// The instrumentation the tests a runner starts belong to: a runner of
+/// Supercov's (nextest's target runner, the doctest wrappers) runs in a
+/// process of its own and reads it from here.
+pub const PROBE_TOKEN_ENV: &str = "SUPERCOV_RUST_PROBE_TOKEN";
+
+/// A test's evidence directory, said twice: by the variable every
+/// instrumentation reads, and by one only `token`'s reads first. A Supercov
+/// that a test starts -- Supercov measuring itself -- sets the first for its
+/// own tests; this instrumentation's code below them still writes into this
+/// test's evidence, where it is read.
+pub fn evidence_environment(token: &str, directory: &Path) -> [(String, std::path::PathBuf); 2] {
+    [
+        (EVIDENCE_DIR_ENV.to_owned(), directory.to_owned()),
+        (format!("{EVIDENCE_DIR_ENV}_{token}"), directory.to_owned()),
+    ]
+}
 const REGION_MAGIC: &[u8; 8] = b"SCVRGN01";
 const REGION_VERSION: u32 = 1;
 
@@ -785,6 +804,49 @@ fn main() {
             })
             .collect::<Vec<_>>();
         assert_eq!(decisions, [(vec![Some(true)], true)]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A Supercov a test starts -- Supercov measuring itself -- names the
+    /// shared evidence directory anew for its own tests. Code of the outer
+    /// instrumentation running below them still writes where its own run
+    /// reads: the directory named for its token.
+    #[test]
+    fn code_below_a_nested_run_writes_into_its_own_run_s_evidence() {
+        let source = r#"fn main() {
+    if std::env::args().count() > 99 { println!("many"); } else { println!("few"); }
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let runtime = region_runtime(&transformed.probes);
+        let directory = temporary_directory("nested");
+        let input = directory.join("main.rs");
+        let binary = directory.join("program");
+        let ours = directory.join("ours");
+        let nested = directory.join("nested");
+        fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
+        let compile = Command::new("rustc")
+            .arg("--edition=2024")
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = Command::new(&binary)
+            .envs(evidence_environment(TOKEN, &ours))
+            .env(EVIDENCE_DIR_ENV, &nested)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"few\n");
+        assert_eq!(read_regions(&ours, &transformed.probes).len(), 1);
+        assert!(!nested.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 

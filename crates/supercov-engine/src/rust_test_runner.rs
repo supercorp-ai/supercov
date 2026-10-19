@@ -2288,7 +2288,10 @@ pub fn run_prepared_rust_tests(
                                 &target_libdir,
                                 &task.artifact.executable,
                             ))
-                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
+                            .envs(crate::rust_runtime::evidence_environment(
+                                &project.probes.token,
+                                &task.directory,
+                            ))
                             .envs(
                                 rust_workers
                                     .iter()

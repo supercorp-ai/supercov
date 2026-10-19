@@ -75,7 +75,6 @@ pub const CHILD_BINARY_ENV: &str = "SUPERCOV_DOCTEST_CHILD_BINARY";
 /// rustdoc's own protocol for merged doctest harnesses.
 pub const RUSTDOC_BIN_PATH_ENV: &str = "RUSTDOC_DOCTEST_BIN_PATH";
 pub const RUSTDOC_RUN_NB_TEST_ENV: &str = "RUSTDOC_DOCTEST_RUN_NB_TEST";
-const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
 /// The argument that puts this program in runtool mode.
 pub const RUNTOOL_MODE_ARGUMENT: &str = "__doctest-runner";
 
@@ -267,7 +266,8 @@ pub(crate) fn run_doctests(
             .env("RUSTFLAGS", capped_rustflags(project, invocation))
             .env("RUSTDOC", &program)
             .env(WRAPPER_ROOT_ENV, root)
-            .env(REAL_RUSTDOC_ENV, &real_rustdoc),
+            .env(REAL_RUSTDOC_ENV, &real_rustdoc)
+            .env(crate::rust_runtime::PROBE_TOKEN_ENV, &project.probes.token),
     )
     .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
@@ -1238,7 +1238,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             fs::create_dir_all(&evidence).map_err(io_error)?;
             let output = Command::new(&binary)
                 .envs(instrumented_stack_environment())
-                .env(EVIDENCE_DIR_ENV, &evidence)
+                .envs(evidence_environment(&evidence)?)
                 .output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -1273,6 +1273,15 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
 /// This program as the child a merged harness spawns for one case: run the
 /// harness binary in rustdoc's single-case mode under this case's own
 /// evidence directory, record how it went, and exit as it exited.
+/// A doctest's evidence directory, for the instrumentation the run that
+/// started rustdoc named (see `rust_runtime::evidence_environment`).
+fn evidence_environment(evidence: &Path) -> Result<[(String, PathBuf); 2], RustTestRunnerError> {
+    let token = std::env::var(crate::rust_runtime::PROBE_TOKEN_ENV).map_err(|_| {
+        RustTestRunnerError::Context("the doctest runner has no instrumentation token".into())
+    })?;
+    Ok(crate::rust_runtime::evidence_environment(&token, evidence))
+}
+
 pub fn doctest_child() -> i32 {
     match doctest_child_inner() {
         Ok(code) => code,
@@ -1305,7 +1314,7 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
         .env_remove(CHILD_DIR_ENV)
         .env_remove(CHILD_BINARY_ENV)
         .envs(instrumented_stack_environment())
-        .env(EVIDENCE_DIR_ENV, &evidence)
+        .envs(evidence_environment(&evidence)?)
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);

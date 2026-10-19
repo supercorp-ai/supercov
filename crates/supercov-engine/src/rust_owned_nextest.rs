@@ -42,7 +42,6 @@ use crate::{
 
 /// The first argument that makes this program nextest's target runner.
 pub const RUNNER_MODE_ARGUMENT: &str = "__nextest-runner";
-const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
 const PLAN_FILE: &str = "runner-plan.json";
 const ATTEMPTS_DIRECTORY: &str = "attempts";
 
@@ -50,6 +49,8 @@ const ATTEMPTS_DIRECTORY: &str = "attempts";
 /// if any, which this program wraps.
 #[derive(Debug, Serialize, Deserialize)]
 struct RunnerPlan {
+    /// The instrumentation the tests belong to, for their evidence.
+    token: String,
     targets: Vec<RunnerTarget>,
 }
 
@@ -155,6 +156,7 @@ pub(crate) fn run_nextest(
         resolve_cargo_runner_plan(&project.workspace_root, &project.workspace_root, invocation)
             .map_err(|error| RustTestRunnerError::Context(error.to_string()))?;
     let runner_plan = RunnerPlan {
+        token: project.probes.token.clone(),
         targets: plan
             .targets
             .iter()
@@ -587,7 +589,10 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
     fs::create_dir_all(&evidence).map_err(io_error)?;
     let status = command
         .envs(instrumented_stack_environment())
-        .env(EVIDENCE_DIR_ENV, &evidence)
+        .envs(crate::rust_runtime::evidence_environment(
+            &plan.token,
+            &evidence,
+        ))
         .status()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let code = exit_code(&status);
@@ -892,6 +897,7 @@ mod tests {
     #[test]
     fn runner_configuration_names_every_target_once() {
         let plan = RunnerPlan {
+            token: "0123456789abcdef".into(),
             targets: vec![
                 RunnerTarget {
                     target: "aarch64-apple-darwin".into(),
@@ -922,6 +928,7 @@ mod tests {
             ]
         );
         let duplicated = RunnerPlan {
+            token: "0123456789abcdef".into(),
             targets: vec![
                 RunnerTarget {
                     target: "aarch64-apple-darwin".into(),
