@@ -124,6 +124,17 @@ fn metric_counts(summary: &CoverageSummary, metric: Metric) -> (usize, usize) {
     }
 }
 
+/// A file named as a test, in any language's way: `cart.test.js`,
+/// `cart.spec.ts`, `test_cart.py`, `cart_test.go`, `cart_spec.rb`.
+fn named_as_test(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase()
+        .split(['_', '.', '-'])
+        .any(|part| part == "test" || part == "spec")
+}
+
 fn metrics_of(summary: &CoverageSummary) -> Vec<MetricView> {
     let unmeasured = summary.unmeasured_obligations.unwrap_or(0);
     Metric::ALL
@@ -277,9 +288,11 @@ impl RunView {
     /// Whether this path looks like product source for this project: a file
     /// sitting where the run found measured source, with an extension it
     /// measured there. True for a file added beside existing source, false for
-    /// a document, a lockfile or a test living somewhere nothing is measured.
+    /// a document, a lockfile or a test living somewhere nothing is measured,
+    /// and false for a test named as one beside the source it tests.
     pub fn looks_like_source(&self, path: &str) -> bool {
-        neighbourhood(path).is_some_and(|key| self.source_neighbourhoods.contains(&key))
+        !named_as_test(path)
+            && neighbourhood(path).is_some_and(|key| self.source_neighbourhoods.contains(&key))
     }
 
     /// Everything that makes this run unusable as evidence for a gate.

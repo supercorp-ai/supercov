@@ -10462,3 +10462,33 @@ fn files_named_beyond_ascii_are_changes_like_any_other() {
         files.stderr()
     );
 }
+
+#[test]
+fn a_patch_names_new_source_it_did_not_measure_and_not_new_tests() {
+    let project = Project::cart("patch-unmeasured");
+    let base = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    project.edit("src/cart.js", "  let sum = 0;", "  let sum = 0 + 0;");
+    project.write("src/cart.bench.js", "export const bench = 1;\n");
+    project.write("src/helper.spec.js", "export const spec = 1;\n");
+    project.commit("branch");
+    project.measure(&[]);
+    let patch = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "patch",
+            "--base",
+            &base,
+            "--min-lines",
+            "50",
+        ])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "Changed but not measured by this run:\n    src/cart.bench.js\n",
+            "PASS: at or above 50%",
+        ],
+    );
+    assert!(!patch.contains("helper.spec.js"), "{patch}");
+}
