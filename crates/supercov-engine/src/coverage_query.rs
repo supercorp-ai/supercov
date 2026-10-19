@@ -3213,8 +3213,22 @@ pub fn coverage_summary_query(
             });
         }
     }
-    let coverage_by_kind = index.dimensions(options.view, CoverageDimension::Kind)?;
-    let coverage_by_runner = index.dimensions(options.view, CoverageDimension::Runner)?;
+    // Narrowed as the totals above it are: a kind the filter leaves out is no
+    // part of what the summary describes.
+    let coverage_by_kind = filtered_dimensions(
+        index,
+        options.view,
+        CoverageDimension::Kind,
+        options.kind,
+        options.runner,
+    )?;
+    let coverage_by_runner = filtered_dimensions(
+        index,
+        options.view,
+        CoverageDimension::Runner,
+        options.kind,
+        options.runner,
+    )?;
     let coverage_by_tests = if options.kind.is_none() && options.runner.is_none() {
         index
             .dimensions(options.view, CoverageDimension::Tests)?

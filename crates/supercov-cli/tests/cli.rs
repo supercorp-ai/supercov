@@ -9943,3 +9943,58 @@ fn a_workspace_with_nested_dependencies_and_their_links_runs_in_the_copy_as_it_d
     );
     assert!(!files.contains("node_modules"), "{files}");
 }
+
+#[test]
+fn a_summary_narrowed_to_one_kind_lists_only_that_kind() {
+    let project = Project::cart("summary-one-kind");
+    project.write(
+        "test/ship.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { shipping } from \"../src/cart.js\";\ntest(\"ships\", () => assert.equal(shipping(10, true), 15));\n",
+    );
+    project.commit("ship");
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/cart.test.js"],
+            &[("SUPERCOV_TEST_KIND", "unit")],
+        )
+        .succeeds();
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/ship.test.js"],
+            &[("SUPERCOV_TEST_KIND", "integration")],
+        )
+        .succeeds();
+    project.supercov(&["merge"]).succeeds();
+    let whole = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &whole,
+        &["  integration     1 test(s)", "  unit            3 test(s)"],
+    );
+    let narrowed = project
+        .supercov(&["runs", "latest", "--kind", "integration"])
+        .succeeds();
+    contains_all(
+        &narrowed,
+        &[
+            "(kind integration)",
+            "Lines      23.08% (3/13)",
+            "By test kind\n  integration     1 test(s)  lines  23.08%",
+        ],
+    );
+    assert!(!narrowed.contains("  unit "), "{narrowed}");
+    let json = project
+        .supercov(&["runs", "latest", "--kind", "integration", "--json"])
+        .json();
+    assert_eq!(
+        json["data"]["coverageByKind"].as_array().unwrap().len(),
+        1,
+        "{json}"
+    );
+    // A test the kind leaves out is named as left out.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "test", "ships", "--kind", "unit"])
+            .exits(2)
+            .contains("No test matching ships is in this view")
+    );
+}
