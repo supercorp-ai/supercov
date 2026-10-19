@@ -9009,3 +9009,72 @@ fn a_go_test_on_a_terminal_passes_partial_lines_on_and_names_the_project() {
     let root = project.root.display().to_string();
     assert!(seen.contains(&format!("prompt> done in {root}")), "{seen}");
 }
+
+/// A unittest run counts each test as it ended: a pass, a failure that
+/// keeps the run diagnostic, an import error, and a test its decorator
+/// skipped, which never enters a phase and is still a test. A suite with no
+/// tests at all is refused.
+#[test]
+fn unittest_outcomes_each_count_and_a_decorator_skip_is_a_test() {
+    let make = |label: &str, test: &str| {
+        let project = Project::empty(label);
+        project.write(
+            "pyproject.toml",
+            "[project]\nname = \"shop\"\nversion = \"0.1.0\"\n",
+        );
+        project.write("src/shop/__init__.py", "");
+        project.write(
+            "src/shop/cart.py",
+            "def total(a):\n    if a:\n        return 1\n    return 2\n",
+        );
+        project.write("tests/__init__.py", "");
+        project.write("tests/test_cart.py", test);
+        project
+    };
+    let head = "import sys, unittest\nsys.path.insert(0, 'src')\nfrom shop.cart import total\n\nclass T(unittest.TestCase):\n";
+    let command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    for (label, test, exit, outcome) in [
+        (
+            "ut-pass",
+            format!("{head}    def test_total(self):\n        self.assertEqual(total(True), 1)\n"),
+            0,
+            "Passed      1",
+        ),
+        (
+            "ut-fail",
+            format!("{head}    def test_total(self):\n        self.assertEqual(total(True), 2)\n"),
+            1,
+            "Failed      1",
+        ),
+        (
+            "ut-error",
+            "import nothing_here\n".to_owned(),
+            1,
+            "Failed      1",
+        ),
+        (
+            "ut-skip",
+            format!("{head}    @unittest.skip('later')\n    def test_total(self):\n        pass\n"),
+            0,
+            "Skipped     1",
+        ),
+    ] {
+        let project = make(label, &test);
+        let ran = project.supercov(&command);
+        assert_eq!(ran.code(), exit, "{label}: {}", ran.stderr());
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        assert!(summary.contains(outcome), "{label}: {summary}");
+    }
+    let empty = make("ut-none", "# no tests\n");
+    let refused = empty.supercov(&command);
+    assert_eq!(refused.code(), 1);
+    assert!(
+        refused
+            .stderr()
+            .contains("the Python run produced no test outcomes"),
+        "{}",
+        refused.stderr()
+    );
+}

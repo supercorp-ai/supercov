@@ -101,6 +101,11 @@ def install(runtime):
 
     def record(test, status, xfail=False):
         state = _active.get(id(test))
+        # A test its decorator skips is reported before any phase is
+        # entered; it is still a test with an outcome, and stopTest follows.
+        if state is None and status == "skipped" and isinstance(test, unittest.case.TestCase):
+            state = _active[id(test)] = _State(test.id())
+            state.phase = "call"
         if state is None or state.phase is None:
             return
         state.statuses[state.phase] = status

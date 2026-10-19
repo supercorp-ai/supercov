@@ -31,6 +31,7 @@
 - `file <path>` on a file the run's scope includes but that holds nothing measured (a file of comments, say) said "Source file not found", although `scope` lists it; it says the file holds nothing the run measures.
 - The summary under `--kind` or `--runner` counted every test of the run on its Attribution line ("Exact for 4 test(s)" above "Total 1"); it counts the tests the view picks.
 - `quality scope` and `security scope` printed the count of files left out for each reason as bare rows under the roots; they stand under a heading that says what they count.
+- A unittest test skipped by its decorator (`@unittest.skip`, `skipUnless`) was not counted, since it never reaches setUp or the test method; a suite of only such tests said "the Python run produced no test outcomes" and exited 1. Each is a skipped test.
 - `report` wrote its progress line, and the spaces that erase it, to standard error when that is a file or a pipe, so a CI log of a failed report began with 96 spaces; progress is drawn only on a terminal.
 - A Playwright run whose mock server loaded a file URL with a `%` before a non-ASCII character (`%a` then `é`) crashed while reading which tests the server reached; such a `%` is kept as written.
 - `assertions` and `assertions --weak` with an `--offset` past the last file printed the summary and no table; they say the offset is past the end.
