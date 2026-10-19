@@ -993,6 +993,64 @@ mod tests {
         root
     }
 
+    /// A runner path is relative to the workspace when inside it, absolute
+    /// when outside, a name to search for when bare, and refused when it is
+    /// the workspace itself, climbs out of it, or is left relative.
+    #[test]
+    fn a_runner_path_is_read_against_the_workspace() {
+        let root = Path::new("/w");
+        let read = |path: &str| runner_program(root, PathBuf::from(path));
+        assert_eq!(
+            read("/w/bin/run").unwrap(),
+            RustCargoRunnerProgram::WorkspaceRelative {
+                value: "bin/run".into()
+            }
+        );
+        assert_eq!(
+            read("/usr/bin/run").unwrap(),
+            RustCargoRunnerProgram::Absolute {
+                value: "/usr/bin/run".into()
+            }
+        );
+        assert_eq!(
+            read("wasm-runner").unwrap(),
+            RustCargoRunnerProgram::SearchPath {
+                value: "wasm-runner".into()
+            }
+        );
+        for refused in ["/w", "/w/../x", "tools/run"] {
+            assert!(read(refused).is_err(), "{refused}");
+        }
+    }
+
+    /// `--config` takes its value from the next word or after `=`, and one
+    /// with no value is refused; a toolchain selector must come first, alone,
+    /// and name something; and `-Z` before the subcommand is not resolved.
+    #[test]
+    fn command_line_configuration_and_toolchains_are_read_exactly() {
+        assert_eq!(
+            command_config_arguments(&invocation(&["--config", "a=1", "test", "--config=b=2"]))
+                .unwrap(),
+            ["a=1", "b=2"]
+        );
+        assert!(command_config_arguments(&invocation(&["test", "--config"])).is_err());
+        assert!(command_config_arguments(&invocation(&["test", "--config="])).is_err());
+        let selector = |arguments: &[&str]| {
+            let invocation = invocation(arguments);
+            let position = invocation.command_position();
+            toolchain_selector(&invocation, position).map(|value| value.map(str::to_owned))
+        };
+        assert_eq!(
+            selector(&["+nightly", "test"]).unwrap().as_deref(),
+            Some("nightly")
+        );
+        assert_eq!(selector(&["test"]).unwrap(), None);
+        assert!(selector(&["+", "test"]).is_err());
+        assert!(selector(&["-v", "+nightly", "test"]).is_err());
+        assert!(command_targets(&invocation(&["-Zunstable-options", "test"])).is_err());
+        assert!(command_targets(&invocation(&["-Z", "x", "test"])).is_err());
+    }
+
     fn invocation(arguments: &[&str]) -> CargoTestInvocation {
         CargoTestInvocation {
             program: "cargo".into(),
