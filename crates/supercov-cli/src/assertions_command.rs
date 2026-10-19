@@ -1682,11 +1682,11 @@ fn view(
                         format!("no assessed test is named {query}; this assessment asked no test")
                     } else if more > 0 {
                         format!(
-                            "no assessed test is named {query}; the assessed tests include:\n{listed}\n  and {more} more"
+                            "no assessed test is named {query}; a test that ran is asked nothing when other tests catch each statement it runs first. The assessed tests include:\n{listed}\n  and {more} more"
                         )
                     } else {
                         format!(
-                            "no assessed test is named {query}; the assessed tests are:\n{listed}"
+                            "no assessed test is named {query}; a test that ran is asked nothing when other tests catch each statement it runs first. The assessed tests are:\n{listed}"
                         )
                     });
                 }
@@ -2051,6 +2051,9 @@ fn render_weak_file(run: &str, data: &Value) -> String {
         WEAK_ANSWER * 100.0
     );
     if weak.is_empty() {
+        if data["page"]["total"].as_u64() > Some(0) {
+            out.push_str(&page_footer(data, ""));
+        }
         return out;
     }
     out.push_str("\nThe least certain first. Each was settled by the test named, at the answer shown; the tests not asked were not judged.\n  LINE  STATEMENT  (change)  answer  tests asked  test\n");
@@ -2114,6 +2117,10 @@ fn render_file(run: &str, data: &Value) -> String {
         return out;
     }
     out.push_str(&weak);
+    if not.is_empty() {
+        out.push_str(&page_footer(data, ""));
+        return out;
+    }
     out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MAX_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
     for st in &not {
         let closest = st["test"]["name"]

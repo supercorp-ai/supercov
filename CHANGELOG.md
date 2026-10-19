@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `assertions <file>` and `assertions <file> --weak` past the end of their listing show where it ends instead of an empty table or nothing. A `--test` name that matches no assessed test says that a test which ran is asked nothing when other tests catch each statement it runs first.
 - `file` on a file whose every line is covered said "Nothing measured: the run counts no obligation in this file"; it says every line is covered and measured.
 - `kinds` and `runners` with a `--filter` no attempt matched (`--filter failed` on a passing run) printed an empty line; they say no tests are in that view.
 - `diff` said "most lost first" above a list of files where nothing was lost.

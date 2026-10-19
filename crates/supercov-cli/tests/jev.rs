@@ -2487,7 +2487,7 @@ fn assertion_views_page_name_assessed_tests_and_refuse_what_matches_nothing() {
     contains_all(
         &said(&["--test", "nobody"]).exits(2),
         &[
-            "no assessed test is named nobody; the assessed tests are:",
+            "no assessed test is named nobody; a test that ran is asked nothing when other tests catch each statement it runs first. The assessed tests are:",
             "  total adds prices (test/cart.test.js)",
         ],
     );
@@ -2659,4 +2659,189 @@ fn a_quality_diff_reads_in_either_direction_and_names_its_mistakes() {
         let refused = project.supercov(&args).exits(2);
         assert!(refused.contains(message), "{args:?}: {refused}");
     }
+}
+
+fn answer_weakly(_: &str, _: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "type": "noul", "noul": 0.6 })
+}
+
+#[test]
+fn every_assertion_view_reads_an_empty_page_and_a_page_past_its_end() {
+    let caught = Project::cart("views-caught");
+    let (base, _) = gateway(MODEL, answer_yes);
+    let run = caught.measure(&[]);
+    caught
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let read = |project: &Project, run: &str, args: &[&str]| {
+        let mut full = vec!["runs", run, "assertions"];
+        full.extend(args);
+        project.supercov(&full)
+    };
+    // Everything asserted, nothing weak: each view says so and offers no
+    // next step.
+    let weak = read(&caught, &run, &["--weak"]).succeeds();
+    assert!(
+        weak.contains("0 of 8 asserted statements rest on an answer under 75%"),
+        "{weak}"
+    );
+    assert!(!weak.contains("inspect"), "{weak}");
+    let file = read(&caught, &run, &["src/cart.js", "--offset", "50"]).succeeds();
+    assert!(
+        file.contains("Every statement this file ran is asserted.\n"),
+        "{file}"
+    );
+    assert!(!file.contains("showing"), "{file}");
+    let weak_file = read(&caught, &run, &["src/cart.js", "--weak"]).succeeds();
+    assert!(
+        weak_file.ends_with("0 asserted statement(s) rest on an answer under 75%\n"),
+        "{weak_file}"
+    );
+    // A test that ran but was asked nothing is not among the assessed ones,
+    // and the refusal says why that can be.
+    let unasked = read(&caught, &run, &["--test", "total adds prices"]).exits(2);
+    contains_all(
+        &unasked,
+        &[
+            "a test that ran is asked nothing when other tests catch each statement it runs first",
+            "  total applies a coupon (test/cart.test.js)",
+        ],
+    );
+    assert!(!unasked.contains("and 0 more"), "{unasked}");
+    // A filter that picks no test is refused before any view is read.
+    for args in [
+        &["--title", "zzz", "--weak"][..],
+        &["src/cart.js", "--title", "zzz"],
+    ] {
+        assert!(
+            read(&caught, &run, args)
+                .exits(2)
+                .contains("No tests match --title zzz")
+        );
+    }
+
+    // Nothing asserted: a file's list pages, and a page past its end shows
+    // no table, only where the listing ends.
+    let missed = Project::cart("views-missed");
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = missed.measure(&[]);
+    missed
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let first = read(&missed, &run, &["src/cart.js", "--limit", "1"]).succeeds();
+    contains_all(
+        &first,
+        &[
+            "     2  let sum = 0;  (value becomes undefined)  2 of 2  total applies a coupon 10%",
+            "showing 1-1 of 8",
+            "assertions 'src/cart.js' --offset 1 --limit 1",
+        ],
+    );
+    let past = read(&missed, &run, &["src/cart.js", "--offset", "50"]).succeeds();
+    assert!(
+        past.contains("showing none of 8: --offset 50 is past the end"),
+        "{past}"
+    );
+    assert!(!past.contains("LINE  STATEMENT"), "{past}");
+    let test = read(
+        &missed,
+        &run,
+        &["--test", "total adds prices", "--offset", "40"],
+    )
+    .succeeds();
+    contains_all(
+        &test,
+        &[
+            "judged to catch a change to 0 of the 5 statements it was asked about",
+            "showing none of 5: --offset 40 is past the end",
+        ],
+    );
+    assert!(!test.contains("Would not catch"), "{test}");
+    let none_weak = read(&missed, &run, &["--weak"]).succeeds();
+    assert!(
+        none_weak.contains("0 of 0 asserted statements"),
+        "{none_weak}"
+    );
+
+    // Every verdict weak: the weak views list and page them.
+    let unsure = Project::cart("views-unsure");
+    let (base, _) = gateway(MODEL, answer_weakly);
+    let run = unsure.measure(&[]);
+    unsure
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let files = read(&unsure, &run, &["src/cart.js"]).succeeds();
+    contains_all(
+        &files,
+        &[
+            "Every statement this file ran is asserted.",
+            "8 of the asserted rest on an answer under 75%",
+            "assertions 'src/cart.js' --weak`",
+        ],
+    );
+    contains_all(
+        &read(&unsure, &run, &["--weak"]).succeeds(),
+        &["     8         8  src/cart.js", "inspect a file: "],
+    );
+    assert!(
+        read(&unsure, &run, &["--weak", "--offset", "5"])
+            .succeeds()
+            .contains("showing none of 1: --offset 5 is past the end")
+    );
+    contains_all(
+        &read(&unsure, &run, &["src/cart.js", "--weak", "--limit", "1"]).succeeds(),
+        &[
+            "     2  let sum = 0;  (value becomes undefined)  60%  1 of 2  total applies a coupon",
+            "assertions 'src/cart.js' --weak --offset 1 --limit 1",
+            "inspect a statement: ",
+        ],
+    );
+    let weak_past = read(&unsure, &run, &["src/cart.js", "--weak", "--offset", "50"]).succeeds();
+    assert!(
+        weak_past.contains("showing none of 8: --offset 50 is past the end"),
+        "{weak_past}"
+    );
+    assert!(!weak_past.contains("LINE  STATEMENT"), "{weak_past}");
+    assert!(
+        read(&unsure, &run, &["src/cart.js:2"])
+            .succeeds()
+            .contains("     60%  would fail   total applies a coupon")
+    );
+}
+
+#[test]
+fn a_statement_many_test_files_run_names_the_first_few_left_unasked() {
+    let project = Project::empty("views-many");
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" } }"#,
+    );
+    project.write("src/cart.js", common::CART);
+    for i in 0..25 {
+        project.write(
+            &format!("test/t{i:02}.test.js"),
+            &format!(
+                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ total }} from \"../src/cart.js\";\n\ntest(\"sum {i:02}\", () => {{\n  assert.ok(total([{{ price: {i}, quantity: 1 }}]) >= 0);\n}});\n"
+            ),
+        );
+    }
+    project.git(&["init", "-q"]);
+    project.commit("many");
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let statement = project
+        .supercov(&["runs", &run, "assertions", "src/cart.js:2"])
+        .succeeds();
+    assert!(
+        statement.contains("Not asked: 7 test(s). No test was asked from 7 file(s) that run it: "),
+        "{statement}"
+    );
+    assert!(statement.contains(", and 2 more"), "{statement}");
+    let unknown = project
+        .supercov(&["runs", &run, "assertions", "--test", "nobody"])
+        .exits(2);
+    contains_all(&unknown, &["The assessed tests include:", "  and 8 more"]);
 }
