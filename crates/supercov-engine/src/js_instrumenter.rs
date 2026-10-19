@@ -488,9 +488,11 @@ fn shift_source_map(
                 shift += replacement.len() as isize - (*end - *start) as isize;
                 edit_index += 1;
             }
+            // The loop above stops at the first edit that ends past the
+            // token, so the token is inside it exactly when it starts there.
             let shifted_offset = edits
                 .get(edit_index)
-                .filter(|(start, end, _)| *start <= original_offset && original_offset < *end)
+                .filter(|(start, _, _)| *start <= original_offset)
                 .map_or_else(
                     || original_offset.saturating_add_signed(shift),
                     |(start, _, _)| start.saturating_add_signed(shift),
@@ -3062,12 +3064,9 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
         node: &mut ArrowFunctionExpression<'a>,
         context: &mut TraverseCtx<'a, ()>,
     ) {
-        let point_span = function_point_span(node.span, context);
-        let label = if point_span == node.span {
-            function_label(None, context)
-        } else {
-            None
-        };
+        // A method or an accessor, whose point is its whole definition, is a
+        // function, never an arrow: an arrow's point is its own span.
+        let label = function_label(None, context);
         if self
             .source_sensitive_functions
             .contains(&span_key(node.span))
@@ -3076,7 +3075,7 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
             return;
         }
         if self.pass == PointPass::Functions && !self.unsafe_context() {
-            let point = self.point(point_span, "function", label);
+            let point = self.point(node.span, "function", label);
             self.function_targets
                 .insert(span_key(node.span), point.id.clone());
             self.points.push(point);
@@ -8387,9 +8386,10 @@ fn reachable_vector_count(expression: &Expression<'_>, conditions: &[Span]) -> u
         indices: &HashMap<SpanKey, usize>,
     ) -> bool {
         match transparent_expression(expression) {
-            Expression::LogicalExpression(logical)
-                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
-            {
+            // Only a decision whose conditions are transparent is evaluated,
+            // and a `??` is not: every logical expression here is `&&` or
+            // `||`.
+            Expression::LogicalExpression(logical) => {
                 let left = evaluate(&logical.left, assignment, encoded, indices);
                 if logical.operator == LogicalOperator::And {
                     left && evaluate(&logical.right, assignment, encoded, indices)
@@ -9121,14 +9121,11 @@ impl DefaultCollector<'_> {
         match pattern {
             BindingPattern::AssignmentPattern(_) => true,
             BindingPattern::ObjectPattern(object) => {
+                // An object's rest is a name, never a pattern with defaults.
                 object
                     .properties
                     .iter()
                     .any(|property| Self::has_binding_default(&property.value))
-                    || object
-                        .rest
-                        .as_ref()
-                        .is_some_and(|rest| Self::has_binding_default(&rest.argument))
             }
             BindingPattern::ArrayPattern(array) => {
                 array
@@ -12807,5 +12804,314 @@ mod tests {
             analyze_candidate("let value = 1", "unknown.extension"),
             Err(CandidateError::UnknownSourceType(_))
         ));
+    }
+
+    /// What a classic script prints with `script` run after it, as written
+    /// and as instrumented, which must be the same.
+    fn printed_alike(source: &str, script: &str) -> String {
+        let instrumented = instrument_direct_candidate(source, "public/a.js").unwrap();
+        let runtime = include_str!("../runtime-assets/javascript/runtime.mjs");
+        let runtime = &runtime[..runtime.rfind("\nexport {").unwrap()];
+        let run = |code: &str| {
+            let program = format!(
+                "const vm = require('node:vm'); const out = []; const ctx = vm.createContext({{ setTimeout, clearTimeout, queueMicrotask, console, print: (value) => out.push(String(value)) }});\
+                 vm.runInContext({}, ctx); vm.runInContext({}, ctx); process.stdout.write(out.join('\\n'));",
+                serde_json::to_string(runtime).unwrap(),
+                serde_json::to_string(&format!("{code}\n{script}")).unwrap(),
+            );
+            let mut node = std::process::Command::new("node")
+                .arg("-")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("Node.js for the JavaScript regression");
+            std::io::Write::write_all(&mut node.stdin.take().unwrap(), program.as_bytes()).unwrap();
+            let result = node.wait_with_output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{code}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            String::from_utf8(result.stdout).unwrap()
+        };
+        let written = run(source);
+        assert_eq!(run(&instrumented.code), written, "{}", instrumented.code);
+        written
+    }
+
+    #[test]
+    fn a_nested_position_scope_leaves_the_outer_ones_index() {
+        let outer = PositionScope::enter();
+        {
+            let _inner = PositionScope::enter();
+            line_and_utf16_column("a\nb", 2);
+        }
+        assert!(POSITIONS.with(|positions| positions.borrow().is_some()));
+        drop(outer);
+        assert!(POSITIONS.with(|positions| positions.borrow().is_none()));
+    }
+
+    #[test]
+    fn an_index_describes_only_the_text_it_was_built_for() {
+        let _positions = PositionScope::enter();
+        let mut text = String::from("ab\ncd\nef");
+        // A prefix starts where the text does.
+        assert_eq!(line_and_utf16_column(&text, 4), (2, 2));
+        assert_eq!(line_and_utf16_column(&text[..5], 4), (2, 2));
+        // The same buffer with other text: same address, same length.
+        text.replace_range(.., "abcd\nef\n");
+        assert_eq!(line_and_utf16_column(&text, 4), (1, 5));
+    }
+
+    #[test]
+    fn a_generated_name_is_never_one_taken_before() {
+        let mut names = CandidateNames::new("const plain = 1;");
+        assert_eq!(names.allocate("_p1"), "_p1");
+        // `_p` with the first suffix is `_p1`, already given out.
+        assert_eq!(names.allocate("_p"), "_p2");
+        // A name the source has is taken, underscored or not.
+        assert_eq!(names.allocate("plain"), "plain3");
+    }
+
+    #[test]
+    fn a_last_line_that_is_not_ascii_leaves_generated_statements_unmapped() {
+        assert_eq!(generated_statement_span("a();\n// é"), None);
+        assert_eq!(generated_statement_span("a();\n"), Some(Span::new(6, 7)));
+    }
+
+    #[test]
+    fn capability_imports_wrap_only_imported_roots_in_a_test_file() {
+        let wrap = |source: &str, file: &str| {
+            instrument_node_assertion_phases_with_runtime_hooks(
+                source,
+                file,
+                &[],
+                Some("../.supercov/launchSupervisor.mjs"),
+            )
+            .unwrap()
+        };
+        let source = concat!(
+            "import { readFileSync } from 'node:fs';\n",
+            "import { launch, unrelated } from './sdk.mjs';\n",
+            "import { other } from './other.mjs';\n",
+            "launch({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+        );
+        let output = wrap(source, "tests/runner.mjs");
+        assert_eq!(output.capability_imports, 1);
+        assert!(output.code.contains("__supercovRawlaunch"));
+        assert!(!output.code.contains("__supercovRawunrelated"));
+        assert!(!output.code.contains("__supercovRawother"));
+        assert!(!output.code.contains("__supercovRawreadFileSync"));
+        // A launcher the file declares itself is not an import to wrap.
+        let local = "function launch(options) {}\nlaunch({ hostPath: 1, guestPath: 2 });\n";
+        let output = wrap(local, "tests/runner.mjs");
+        assert_eq!(
+            (output.capability_imports, output.code.as_str()),
+            (0, local)
+        );
+        // A CommonJS file has no imports to wrap.
+        let output = wrap(source, "tests/runner.cjs");
+        assert_eq!(output.capability_imports, 0);
+        // A mapping no call is given selects nothing.
+        let unused = "import { launch } from './sdk.mjs';\nexport const options = { hostPath: 1, guestPath: 2 };\n";
+        assert_eq!(wrap(unused, "tests/runner.mjs").capability_imports, 0);
+    }
+
+    #[test]
+    fn capability_imports_wrap_only_imported_roots_in_a_source_file() {
+        let wrap = |source: &str| {
+            instrument_with_import_policy(source, "src/run.mjs", "./capability.mjs", false)
+                .unwrap()
+                .code
+        };
+        let code = wrap(concat!(
+            "import { launch } from './sdk.mjs';\n",
+            "import { other } from './other.mjs';\n",
+            "launch({ hostPath: process.cwd(), guestPath: '/workspace' }, other);\n",
+        ));
+        assert!(code.contains("__supercovRawlaunch"), "{code}");
+        assert!(!code.contains("__supercovRawother"), "{code}");
+        let code = wrap("function launch(options) {}\nlaunch({ hostPath: 1, guestPath: 2 });\n");
+        assert!(!code.contains("wrapImportedCapability"), "{code}");
+    }
+
+    #[test]
+    fn a_mount_call_without_both_sides_of_a_mount_selects_nothing() {
+        let source = concat!(
+            "import { GenericContainer } from 'testcontainers';\n",
+            "import { helper } from './helper.mjs';\n",
+            "const target = '/workspace';\n",
+            "new GenericContainer('node').withBindMounts(paths);\n",
+            "helper.withMounts([{ source: '.' }]);\n",
+            "(await import('./sdk.mjs')).launch({ hostPath: 1, guestPath: target });\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.mjs",
+            &[],
+            Some("../.supercov/launchSupervisor.mjs"),
+        )
+        .unwrap();
+        assert_eq!(output.capability_imports, 0);
+        assert_eq!(output.code, source);
+    }
+
+    #[test]
+    fn a_stylex_call_that_is_not_a_macro_is_measured() {
+        // `props` runs in the browser; only `create` and its kind are
+        // compiled away.
+        let source = "import * as stylex from '@stylexjs/stylex';\nexport const view = (dark) => stylex.props(() => dark);\n";
+        let output = instrument_direct_candidate(source, "src/view.js").unwrap();
+        assert_eq!(
+            output
+                .points
+                .iter()
+                .filter(|point| point.kind == "function")
+                .count(),
+            2,
+            "{:?}",
+            output.points
+        );
+    }
+
+    #[test]
+    fn a_function_compared_or_added_to_text_keeps_its_source() {
+        let source = concat!(
+            "print('' + function f() { return 1; });\n",
+            "print(function g() { return 2; } < 'z');\n",
+            "print('a' >= function k() { return 4; });\n",
+            "print('' + (function h() { return 3; }, 0));\n",
+        );
+        let printed = printed_alike(source, "");
+        assert_eq!(printed, "function f() { return 1; }\ntrue\nfalse\n0");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        for text in ["function g() { return 2; }", "function k() { return 4; }"] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+        // A function only passed through a sequence is not read as text.
+        assert!(!output.code.contains("function h() { return 3; }"));
+    }
+
+    #[test]
+    fn a_function_whose_source_is_read_records_no_branch_inside_it() {
+        let source = concat!(
+            "function shown(items) {\n",
+            "  try { items.check(); } catch { return 0; }\n",
+            "  for (const item of items) { print(item); }\n",
+            "  class Local {}\n",
+            "  return new Local();\n",
+            "}\n",
+            "print(String(shown).length > 0);\n",
+        );
+        printed_alike(source, "");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        assert!(output.branches.is_empty(), "{:?}", output.branches);
+        assert!(
+            !output
+                .points
+                .iter()
+                .any(|point| point.source.contains("class Local")),
+            "{:?}",
+            output.points
+        );
+    }
+
+    #[test]
+    fn an_ambient_class_is_no_statement() {
+        let output = instrument_direct_candidate(
+            "declare class Shape {}\nexport class Real {}\n",
+            "src/a.ts",
+        )
+        .unwrap();
+        assert!(
+            !output
+                .points
+                .iter()
+                .any(|point| point.source.contains("Shape"))
+        );
+        assert!(
+            output
+                .points
+                .iter()
+                .any(|point| point.source.contains("class Real"))
+        );
+    }
+
+    #[test]
+    fn a_decision_too_wide_to_encode_still_decides_the_same() {
+        // Thirty-four conditions, past the 32 the encoding holds: the
+        // decision keeps the call-based form. Among them a nested `!`, a `!`
+        // and a `+` of one operand, and a `??`, each one condition.
+        let mut conditions = (0..29)
+            .map(|index| format!("v[{index}]"))
+            .collect::<Vec<_>>();
+        conditions.push("!v[29]".into());
+        conditions.push("!(v[30] && v[31])".into());
+        conditions.push("+v[32]".into());
+        conditions.push("(v[33] ?? true)".into());
+        let wide = conditions.join(" && ");
+        let source = format!(
+            "function wide(v) {{ if ({wide}) return 'all'; return 'not'; }}\nfunction later(v, seen = ({wide}) ? 1 : 0) {{ return seen; }}\nfunction value(v) {{ return {wide}; }}\n"
+        );
+        let printed = printed_alike(
+            &source,
+            "const all = Array(34).fill(true); all[29] = false; all[30] = false; all[32] = 1; print(wide(all)); print(later(all)); print(value(all)); all[5] = false; print(wide(all)); print(later(all)); print(value(all));",
+        );
+        assert_eq!(printed, "all\n1\ntrue\nnot\n0\nfalse");
+        let output = instrument_direct_candidate(&source, "public/a.js").unwrap();
+        assert!(
+            output
+                .decisions
+                .iter()
+                .any(|decision| decision.conditions.len() == 34),
+            "{:?}",
+            output.decisions
+        );
+    }
+
+    #[test]
+    fn a_decision_in_a_default_value_decides_the_same() {
+        // A parameter's default has no function body to declare a frame in:
+        // the decision carries its own. Its `??` is one condition.
+        // So does a decision used as a value, and one whose outcome the
+        // syntax fixes is no decision.
+        let source = concat!(
+            "function pick(a, b, c, d, chosen = (a && (b ?? c)) || !d ? 'yes' : 'no') { return chosen; }\n",
+            "function kept(a, b, c, chosen = (a && b) || c) { return chosen; }\n",
+            "function fixed(a, c, chosen = (a && false) || c) { return chosen; }\n",
+        );
+        let printed = printed_alike(
+            source,
+            "print(pick(1, null, 0, 1)); print(pick(1, 2, 0, 1)); print(pick(0, 0, 0, 0)); print(kept(1, 2, 3)); print(kept(0, 2, 3)); print(fixed(1, 5));",
+        );
+        assert_eq!(printed, "no\nyes\nyes\n2\n3\n5");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        assert!(
+            !output
+                .decisions
+                .iter()
+                .any(|decision| decision.source.contains("false")),
+            "{:?}",
+            output.decisions
+        );
+    }
+
+    #[test]
+    fn a_rest_pattern_with_a_default_inside_is_measured() {
+        let source = "function first(list) { const [...[a = 1]] = list; const { ...rest } = { list }; return a + rest.list.length; }\n";
+        let printed = printed_alike(source, "print(first([])); print(first([2]));");
+        assert_eq!(printed, "1\n3");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        assert!(
+            output
+                .branches
+                .iter()
+                .any(|branch| branch.source.contains("a = 1")),
+            "{:?}",
+            output.branches
+        );
+        // An object's rest is only ever a name.
+        assert!(analyze_candidate("const { ...{ a = 1 } } = x;", "a.js").is_err());
     }
 }
