@@ -8984,3 +8984,28 @@ fn a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for() {
         &html[..80]
     );
 }
+
+/// On a terminal, a Go test's partial line is passed on after a moment and
+/// the rest joins it, the terminal's size is kept up through a long test,
+/// and the copy's path is named as the project's.
+#[cfg(unix)]
+#[test]
+fn a_go_test_on_a_terminal_passes_partial_lines_on_and_names_the_project() {
+    let project = Project::empty("go-terminal");
+    project.write("go.mod", "module example.com/term\n\ngo 1.21\n");
+    project.write(
+        "x.go",
+        "package x\n\nfunc F(a bool) int {\n\tif a {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+    );
+    project.write(
+        "x_test.go",
+        "package x\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestX(t *testing.T) {\n\tfmt.Print(\"prompt> \")\n\ttime.Sleep(600 * time.Millisecond)\n\tdir, _ := os.Getwd()\n\tfmt.Println(\"done in \" + dir)\n\tF(true)\n}\n",
+    );
+    let mut terminal = common::OnTerminal::start(&project, &["--", "go", "test", "-v", "./..."]);
+    terminal.wait_for("prompt> ");
+    terminal.wait_for("done in ");
+    let (code, seen) = terminal.finish();
+    assert_eq!(code, 0, "{seen}");
+    let root = project.root.display().to_string();
+    assert!(seen.contains(&format!("prompt> done in {root}")), "{seen}");
+}
