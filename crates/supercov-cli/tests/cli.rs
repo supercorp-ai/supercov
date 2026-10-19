@@ -11170,19 +11170,21 @@ fn a_repository_the_workspace_cannot_mirror_is_named_under_debug() {
 }
 
 #[test]
-fn settings_a_suite_chose_for_docker_and_playwright_reach_it_unchanged() {
+fn settings_a_suite_chose_for_docker_playwright_and_uv_reach_it_unchanged() {
     // A daemon reached over TCP has no socket to relay, and a Playwright
-    // cache someone chose is theirs.
+    // cache or a uv sync someone chose is theirs.
     let project = Project::cart("chosen-settings");
+    project.write(".venv/pyvenv.cfg", "home = /usr/bin\n");
     project.write(
         "test/environment.test.js",
-        "import { test } from 'node:test';\nimport { equal } from 'node:assert/strict';\ntest('settings', () => {\n  equal(process.env.DOCKER_HOST, 'tcp://127.0.0.1:2375');\n  equal(process.env.PWTEST_CACHE_DIR, '/tmp/chosen-playwright-cache');\n});\n",
+        "import { test } from 'node:test';\nimport { equal } from 'node:assert/strict';\ntest('settings', () => {\n  equal(process.env.DOCKER_HOST, 'tcp://127.0.0.1:2375');\n  equal(process.env.PWTEST_CACHE_DIR, '/tmp/chosen-playwright-cache');\n  equal(process.env.UV_NO_SYNC, '0');\n});\n",
     );
     let run = project.supercov_with(
         &["--", "node", "--test"],
         &[
             ("DOCKER_HOST", "tcp://127.0.0.1:2375"),
             ("PWTEST_CACHE_DIR", "/tmp/chosen-playwright-cache"),
+            ("UV_NO_SYNC", "0"),
         ],
     );
     assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
