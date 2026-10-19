@@ -3268,3 +3268,65 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
         "{report}"
     );
 }
+
+#[test]
+fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_named() {
+    let project = Project::empty("probe-observed");
+    project.write("package.json", r#"{"name":"observed","type":"module"}"#);
+    project.write(
+        "src/db.js",
+        "export function sinkRun(db, v) {\n  return db.query(\"q\" + v);\n}\n",
+    );
+    project.write("src/handler.js", "import { sinkRun } from \"./db.js\";\nexport function takeHandler(req, db) {\n  return sinkRun(db, req.q);\n}\n");
+    let mut tests = String::from(
+        "import test from \"node:test\";\nimport { sinkRun } from \"../src/db.js\";\nimport { takeHandler } from \"../src/handler.js\";\n",
+    );
+    for i in 1..=4 {
+        project.write(&format!("src/route{i}.js"), &format!("export function takeRoute{i}(req, deps) {{\n  return deps.sinkRun(deps.db, req.p);\n}}\n"));
+        tests.push_str(&format!(
+            "import {{ takeRoute{i} }} from \"../src/route{i}.js\";\n"
+        ));
+    }
+    tests.push_str("const db = { query: () => 1 };\n");
+    for i in 1..=4 {
+        tests.push_str(&format!(
+            "test(\"route {i}\", () => {{ takeRoute{i}({{ p: 1 }}, {{ db, sinkRun }}); }});\n"
+        ));
+    }
+    tests.push_str("test(\"route 1 again\", () => { takeRoute1({ p: 2 }, { db, sinkRun }); });\n");
+    tests.push_str("test(\"handler\", () => { takeHandler({ q: 1 }, db); });\n");
+    project.write("test/all.test.js", &tests);
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_by_name);
+    let report = project
+        .supercov_with(&["security", "src/", "--run", "latest"], &through(&base))
+        .succeeds();
+    // The handler's path is the import's, not asked again for the test that
+    // ran it; route 1, run twice, is one path; a fourth caller is named.
+    contains_all(
+        &report,
+        &[
+            "Cross-file paths confirmed: 4\n  0.90  injection_sink  src/handler.js:3 takeHandler -> src/db.js:1 sinkRun\n",
+            "(observed in a test)  src/route1.js:1 takeRoute1 -> src/db.js:1 sinkRun\n",
+            "1 more caller(s) ran with a flagged function in a test and were not asked, three being asked per function:\n",
+        ],
+    );
+    assert_eq!(report.matches("takeRoute1 -> ").count(), 1, "{report}");
+    assert_eq!(
+        report.matches(" -> src/db.js:1 sinkRun\n").count(),
+        5,
+        "{report}"
+    );
+    let json = project
+        .supercov_with(
+            &["security", "src/", "--run", "latest", "--json"],
+            &through(&base),
+        )
+        .json();
+    assert_eq!(
+        json["paths_not_asked"].as_array().unwrap().len(),
+        1,
+        "{json}"
+    );
+}

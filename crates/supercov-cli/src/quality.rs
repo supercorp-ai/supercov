@@ -2520,7 +2520,7 @@ fn run_paths(
     structures: &BTreeMap<String, (candidates::Structure, String)>,
     points: &[(String, usize, Vec<String>)],
     already: &[Value],
-) -> (Vec<Value>, Usage, Usage) {
+) -> (Vec<Value>, Vec<Value>, Usage, Usage) {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
     // test -> file -> executed lines
@@ -2564,6 +2564,7 @@ fn run_paths(
         })
         .collect();
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut unasked = Vec::new();
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
     for (callee_file, (callee_structure, callee_source)) in structures {
@@ -2618,7 +2619,16 @@ fn run_paths(
                             format!("{caller_file}#{}", caller.name),
                             format!("{callee_file}#{}", callee.name),
                         );
-                        if known.contains(&pair) || !seen.insert(pair) || callers >= 3 {
+                        if known.contains(&pair) || !seen.insert(pair) {
+                            continue;
+                        }
+                        // Three callers a function are asked about; the rest
+                        // are named, not dropped.
+                        if callers >= 3 {
+                            unasked.push(json!({
+                                "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
+                                "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
+                            }));
                             continue;
                         }
                         callers += 1;
@@ -2651,7 +2661,8 @@ fn run_paths(
             }
         }
     }
-    confirm_pending(root, key, refresh, pending, candidates_found)
+    let (paths, usage, reused) = confirm_pending(root, key, refresh, pending, candidates_found);
+    (paths, unasked, usage, reused)
 }
 
 /// Guards a run observed. For every function that takes outside data, the
@@ -3091,6 +3102,7 @@ fn run_health(
     // of unlabelled files against pass one's 23%, at 58% recall with a line.
     let (mut usage, mut reused) = (usage, reused);
     let mut paths_found: Vec<Value> = Vec::new();
+    let mut paths_not_asked: Vec<Value> = Vec::new();
     let mut handlers_by_file: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     if instrument == Instrument::Security {
         let (_, more, cached) = ask_lines(root, key, options.refresh, &mut answers);
@@ -3104,7 +3116,7 @@ fn run_health(
         if let Some(selector) = options.run.as_deref()
             && let Ok(points) = crate::load_point_tests((selector != "latest").then_some(selector))
         {
-            let (paths, more, cached) = run_paths(
+            let (paths, not_asked, more, cached) = run_paths(
                 root,
                 key,
                 options.refresh,
@@ -3116,6 +3128,7 @@ fn run_health(
             usage.input_tokens += more.input_tokens;
             reused.input_tokens += cached.input_tokens;
             paths_found.extend(paths);
+            paths_not_asked = not_asked;
             handlers_by_file = run_guards(&answers, &structures, &points);
         }
     }
@@ -3233,7 +3246,12 @@ fn run_health(
         "usage_this_run": usage,
         "usage_from_cache": reused,
     });
-    let recorded = json!({ "files": files, "directories": directories, "paths": paths_found });
+    let recorded = json!({
+        "files": files,
+        "directories": directories,
+        "paths": paths_found,
+        "paths_not_asked": paths_not_asked,
+    });
     let saved = store::write(root, instrument.lane(), &id, &manifest, &recorded);
     let mut report = manifest.take();
     if let Err(error) = &saved {
@@ -3244,6 +3262,7 @@ fn run_health(
     report["directories"] = recorded["directories"].clone();
     report["files"] = recorded["files"].clone();
     report["paths"] = recorded["paths"].clone();
+    report["paths_not_asked"] = recorded["paths_not_asked"].clone();
     report["files_scored"] = json!(weighted.len());
     Ok((report, failed))
 }
@@ -3701,6 +3720,30 @@ fn human_security(report: &Value) -> String {
                 path["callee"]["line"].as_u64().unwrap_or(0),
                 path["callee"]["function"].as_str().unwrap_or("?"),
             ));
+        }
+        if paths.len() > 10 {
+            out.push_str(&format!("  ... and {} more\n", paths.len() - 10));
+        }
+    }
+    let not_asked = report["paths_not_asked"].as_array().unwrap_or(&empty);
+    if !not_asked.is_empty() {
+        out.push_str(&format!(
+            "{} more caller(s) ran with a flagged function in a test and were not asked, three being asked per function:\n",
+            not_asked.len()
+        ));
+        for path in not_asked.iter().take(5) {
+            out.push_str(&format!(
+                "  {}:{} {} -> {}:{} {}\n",
+                path["caller"]["file"].as_str().unwrap_or("?"),
+                path["caller"]["line"].as_u64().unwrap_or(0),
+                path["caller"]["function"].as_str().unwrap_or("?"),
+                path["callee"]["file"].as_str().unwrap_or("?"),
+                path["callee"]["line"].as_u64().unwrap_or(0),
+                path["callee"]["function"].as_str().unwrap_or("?"),
+            ));
+        }
+        if not_asked.len() > 5 {
+            out.push_str(&format!("  ... and {} more\n", not_asked.len() - 5));
         }
     }
     let failed: Vec<&Value> = files.iter().filter(|f| f["status"] == "failed").collect();
