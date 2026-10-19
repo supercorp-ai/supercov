@@ -753,7 +753,11 @@ impl SupervisedResult {
         } else if let Some(signal) = self.interrupted_signal {
             signal.exit_code()
         } else {
-            self.status.unwrap_or(128)
+            // A command a signal ended exits as a shell reports it: 128 plus
+            // the signal, so 143 for SIGTERM and 137 for SIGKILL.
+            self.status
+                .or(self.signal.map(|signal| 128 + signal))
+                .unwrap_or(128)
         }
     }
 }

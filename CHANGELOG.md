@@ -12,6 +12,9 @@
 
 **Fixed**
 
+- A test command ended by a signal exits as a shell reports it, 128 plus the signal (143 for SIGTERM), instead of 128.
+- A JavaScript or TypeScript run whose `SUPERCOV_SOURCE_ROOTS` names nothing that exists says which root does not exist, as Python, Ruby and the other languages do, instead of telling you to set the variable.
+- `supercov help <command>` shows that command's help. `diff --gained` with nothing gained says so without claiming nothing was lost. `quality patch` refusing two change ranges names `--base`, the option it has. `assess --changed` with nothing changed says nothing was asked, and `security --run` says every executed flagged file is caught instead of counting zero.
 - `quality gaps`, `security gaps` and `quality diff` cut short by `--limit` say how many more files there are. A snapshot of the other lane, asked of `quality` or `security`, is named as that lane's instead of "no snapshot here".
 - The run summary narrowed with `--kind` or `--runner` lists only the kinds and runners the filter keeps, as its totals do, instead of every kind in the run.
 - `line` with several locations reports one past the end of its file as not answered, with how many lines the file has, instead of reading it as a line that holds no code; all of them past the end fails the call, as one does.

@@ -601,7 +601,7 @@ pub fn run_direct_javascript(
         && !serves_rust_wasm
     {
         return Err(
-            crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
+            crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()
                 .into(),
         );
@@ -770,7 +770,7 @@ pub fn run_direct_javascript(
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
-            crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
+            crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()
                 .into(),
         );

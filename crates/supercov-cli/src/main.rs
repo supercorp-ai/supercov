@@ -244,9 +244,33 @@ fn main() -> ExitCode {
     }
     let mut arguments = arguments.into_iter();
     match arguments.next().as_deref() {
-        None | Some("help" | "--help" | "-h") => {
+        None | Some("--help" | "-h") => {
             print!("{HELP}");
             ExitCode::SUCCESS
+        }
+        // `help runs` is `runs --help`, as `git help` and `cargo help` read it.
+        Some("help") => {
+            let asked = vec!["--help".to_owned()];
+            match arguments.next().as_deref() {
+                None => {
+                    print!("{HELP}");
+                    ExitCode::SUCCESS
+                }
+                Some("quality") => quality::command(asked),
+                Some("security") => quality::security_command(asked),
+                Some("docs") => docs_command(asked),
+                Some("runs") => public_query_command("runs", asked),
+                Some("diff") => public_query_command("diff", asked),
+                Some("report") => html_report::report_command(asked),
+                Some("merge") => merge_command(asked),
+                Some("import") => import_command(asked),
+                Some(other) => {
+                    eprintln!(
+                        "[supercov] No help for {other}: it is no command. Try supercov help."
+                    );
+                    ExitCode::from(2)
+                }
+            }
         }
         Some("--version" | "-V") => {
             println!(

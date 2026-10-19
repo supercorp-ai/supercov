@@ -1774,6 +1774,14 @@ fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> 
 fn render(data: &Value) -> String {
     if data["impact"] == true {
         let s = &data["summary"];
+        // Nothing the run measured changed: nothing to ask, and nothing for
+        // `tests affected` to say.
+        if s["changed"].as_u64() == Some(0) {
+            return format!(
+                "Run {}: no statement the run assessed has changed since it; nothing was asked.\n",
+                data["run"].as_str().unwrap_or("")
+            );
+        }
         let capped = s["capped"].as_u64().unwrap_or(0);
         let asked = if capped == 0 {
             "asked of every test that ran them".to_owned()

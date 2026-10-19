@@ -2205,7 +2205,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 let moved = [data.delta.lines, data.delta.branches, data.delta.mcdc]
                     .iter()
                     .any(|delta| *delta != 0.0);
-                lines.push(if moved {
+                lines.push(if data.gained_only {
+                    // Losses are not looked for with --gained.
+                    "Nothing was gained.".into()
+                } else if moved {
                     "Nothing covered in one run is uncovered in the other: the percentages moved because the runs measure different code.".into()
                 } else {
                     "Nothing was gained or lost.".into()

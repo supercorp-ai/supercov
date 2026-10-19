@@ -3475,3 +3475,70 @@ fn saved_assessments_say_what_a_limit_left_out_and_which_lane_holds_a_snapshot()
         );
     }
 }
+
+#[test]
+fn assessments_and_reviews_refuse_plainly_and_say_when_nothing_changed() {
+    let project = Project::cart("assess-shapes");
+    let run = project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_all_but_the_sum);
+    let ask = |args: &[&str]| project.supercov_with(args, &through(&base));
+    for workers in ["0", "two"] {
+        assert!(
+            ask(&["runs", &run, "assertions", "assess", "--workers", workers])
+                .exits(2)
+                .contains("--workers needs a positive number")
+        );
+    }
+    let dry = ask(&["runs", &run, "assertions", "assess", "--dry-run", "--json"]).json();
+    assert_eq!(dry["data"]["dryRun"], true);
+    assert_eq!(dry["data"]["statements"], 8);
+    // --changed reads the sources an assessment kept, so it comes second.
+    assert!(
+        ask(&["runs", &run, "assertions", "assess", "--changed"])
+            .exits(2)
+            .contains("this run's sources were not kept; assess the run first")
+    );
+    ask(&["runs", &run, "assertions", "assess", "--workers", "1"]).succeeds();
+    assert_eq!(
+        ask(&["runs", &run, "assertions", "assess", "--changed"]).succeeds(),
+        format!(
+            "Run {run}: no statement the run assessed has changed since it; nothing was asked.\n"
+        )
+    );
+    // Beside an assessed run, where every executed flagged file is caught.
+    assert!(
+        ask(&["security", "src/", "--run", &run])
+            .succeeds()
+            .contains(
+                "; every flagged file a test executes has a line some test is judged to catch."
+            )
+    );
+    // Change ranges: each is its own, one at a time, and a ref must exist.
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    project.git(&["add", "src/cart.js"]);
+    assert!(
+        ask(&["quality", "patch", "--staged"])
+            .succeeds()
+            .starts_with("Reviewing staged changes.\n27 checks introduced across 1 changed file.")
+    );
+    assert!(
+        ask(&["quality", "patch", "--unstaged"])
+            .succeeds()
+            .contains("No changed source files to review.")
+    );
+    assert!(
+        ask(&["quality", "patch", "--staged", "--unstaged"])
+            .exits(2)
+            .contains("pick one change range: --unstaged, --staged or --base <ref>")
+    );
+    assert!(
+        ask(&["quality", "patch", "--annotate", "gitlab"])
+            .exits(2)
+            .contains("--annotate does not know gitlab; use github")
+    );
+    assert!(
+        ask(&["quality", "patch", "--base", "nonexistent-ref"])
+            .exits(2)
+            .contains("make sure nonexistent-ref exists locally")
+    );
+}

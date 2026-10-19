@@ -9998,3 +9998,201 @@ fn a_summary_narrowed_to_one_kind_lists_only_that_kind() {
             .contains("No test matching ships is in this view")
     );
 }
+
+#[test]
+fn filters_pages_imports_and_help_topics_read_as_a_user_reads_them() {
+    let project = Project::cart("broad-shapes");
+    let first = project.measure(&[]);
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    // Tests affected, narrowed every way a runner's filter wants it.
+    assert_eq!(
+        on_run(&["tests", "affected", "--kind", "unit", "--names"]).succeeds(),
+        "shipping is free over fifty\n"
+    );
+    assert_eq!(
+        on_run(&["tests", "affected", "--runner", "node:test", "--files"]).succeeds(),
+        "test/cart.test.js\n"
+    );
+    assert!(
+        on_run(&["tests", "affected", "--test-file", "test/cart.test.js"])
+            .succeeds()
+            .starts_with(&format!(
+                "Run {first}: 1 of 3 tests affected by changes since the run (--test-file test/cart.test.js)\n"
+            ))
+    );
+    assert!(
+        on_run(&["tests", "affected", "--tag", "nothing"])
+            .exits(2)
+            .contains("No tests match --tag nothing")
+    );
+    // Pages past their end, and options that need another.
+    assert!(
+        on_run(&["scope", "--files", "--offset", "9"])
+            .succeeds()
+            .contains("showing none of 2: --offset 9 is past the end")
+    );
+    assert!(
+        on_run(&["file", "src/cart.js", "--sort", "missing"])
+            .exits(2)
+            .contains("--sort requires --group decision")
+    );
+    assert!(
+        on_run(&[
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--sort",
+            "nonsense"
+        ])
+        .exits(2)
+        .contains("--sort must be location or missing")
+    );
+    contains_all(
+        &on_run(&["test", "total", "--limit", "1"]).succeeds(),
+        &["showing 1-1 of 2 matching tests", "all 2 at once: "],
+    );
+    assert!(
+        project
+            .supercov(&["runs", "--limit", "1", "--offset", "5"])
+            .succeeds()
+            .contains("showing none of 1: --offset 5 is past the end")
+    );
+    assert!(
+        project
+            .supercov(&["runs", "clean", "--keep", "abc"])
+            .exits(2)
+            .contains("--keep must be a non-negative integer")
+    );
+    // An LCOV import names what it left out and keeps a failed outcome.
+    project.write(
+        "cov.info",
+        "TN:\nSF:src/cart.js\nFN:12,shipping\nFNDA:1,shipping\nDA:13,1\nLF:1\nLH:1\nend_of_record\nSF:lib/elsewhere.js\nDA:1,1\nend_of_record\n",
+    );
+    assert!(
+        project
+            .supercov(&[
+                "import", "cov.info", "--test", "imported", "--status", "maybe"
+            ])
+            .exits(2)
+            .contains("--status is passed or failed, not maybe")
+    );
+    let imported = project.supercov(&[
+        "import", "cov.info", "--test", "imported", "--status", "failed",
+    ]);
+    assert_eq!(imported.code(), 0, "{}", imported.stderr());
+    assert!(
+        imported.stderr().contains(
+            "left out 1 file(s) of the evidence: lib/elsewhere.js (no such file in the project)"
+        ),
+        "{}",
+        imported.stderr()
+    );
+    assert!(
+        on_run(&["test", "imported"])
+            .succeeds()
+            .contains("outcome failed; retry 0=failed")
+    );
+    // --gained looks for no losses, and says only what it looked for.
+    let gained = project
+        .supercov(&["diff", &first, "latest", "--gained"])
+        .succeeds();
+    assert!(
+        gained.contains("Nothing was gained.\n") && !gained.contains("or lost"),
+        "{gained}"
+    );
+    // `help <command>` is that command's help.
+    assert!(
+        project
+            .supercov(&["help", "runs"])
+            .succeeds()
+            .starts_with("Usage: supercov runs [options]")
+    );
+    assert!(
+        project
+            .supercov(&["help", "import"])
+            .succeeds()
+            .starts_with("Usage: supercov import")
+    );
+    assert!(
+        project
+            .supercov(&["help", "nope"])
+            .exits(2)
+            .contains("No help for nope: it is no command")
+    );
+    assert!(
+        project
+            .supercov(&["docs", "nonsense"])
+            .exits(2)
+            .contains("unknown guide \"nonsense\"")
+    );
+}
+
+#[test]
+fn the_wrapped_command_exits_as_it_would_alone_and_a_missing_root_is_named() {
+    let project = Project::cart("wrapped-exits");
+    assert!(
+        project
+            .supercov(&["--"])
+            .exits(2)
+            .contains("Usage: supercov -- <test command>")
+    );
+    let missing = project.supercov(&["--", "definitely-not-a-command"]);
+    assert_eq!(missing.code(), 127);
+    assert!(
+        missing
+            .stderr()
+            .contains("could not spawn definitely-not-a-command"),
+        "{}",
+        missing.stderr()
+    );
+    assert_eq!(
+        project
+            .supercov(&["--", "node", "-e", "process.exit(3)"])
+            .code(),
+        3
+    );
+    // Ended by a signal: 128 plus the signal, as a shell says it.
+    #[cfg(unix)]
+    assert_eq!(
+        project
+            .supercov(&["--", "node", "-e", "process.kill(process.pid, 'SIGTERM')"])
+            .code(),
+        143
+    );
+    assert!(
+        project
+            .supercov(&["--exact-attribution", "node"])
+            .exits(2)
+            .contains("--exact-attribution goes before the command")
+    );
+    // Every root named missing is a mistake to name.
+    let roots = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_SOURCE_ROOTS", "nowhere")],
+    );
+    assert_eq!(roots.code(), 1);
+    assert!(
+        roots.stderr().contains(
+            "SUPERCOV_SOURCE_ROOTS=nowhere left no JavaScript or TypeScript source to measure; nowhere does not exist"
+        ),
+        "{}",
+        roots.stderr()
+    );
+    // One of several missing is a checkout without that directory.
+    project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_SOURCE_ROOTS", "src,nowhere")],
+        )
+        .succeeds();
+}

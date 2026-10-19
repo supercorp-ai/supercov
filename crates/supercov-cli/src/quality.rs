@@ -392,7 +392,7 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let set = |chosen: changes::Range, slot: &mut Option<changes::Range>| match slot {
         Some(existing) if *existing != chosen => {
-            Err("pick one change range: --unstaged, --staged or --since <ref>".to_string())
+            Err("pick one change range: --unstaged, --staged or --base <ref>".to_string())
         }
         slot => {
             *slot = Some(chosen);
@@ -3584,6 +3584,9 @@ fn human_security(report: &Value) -> String {
             },
         );
         match report["flagged_executed_unasserted"].as_u64() {
+            Some(0) => out.push_str(
+                "; every flagged file a test executes has a line some test is judged to catch.\n",
+            ),
             Some(n) => out.push_str(&format!(
                 "; {n} {} executed by tests that are not judged to catch any line of {}.\n",
                 if n == 1 { "is" } else { "are" },

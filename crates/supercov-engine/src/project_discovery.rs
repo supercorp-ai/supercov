@@ -84,8 +84,13 @@ pub struct CoverageProject {
 #[derive(Debug)]
 pub enum ProjectDiscoveryError {
     Source(SourceDiscoveryError),
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     NoSourceFiles,
+    /// Named roots that left nothing: the roots, quoted as written.
+    RootsLeftNothing(String),
 }
 
 impl From<SourceDiscoveryError> for ProjectDiscoveryError {
@@ -103,6 +108,7 @@ impl std::fmt::Display for ProjectDiscoveryError {
                 formatter,
                 "No application source files were discovered. If your sources live somewhere unusual, set SUPERCOV_SOURCE_ROOTS=src,app. Alternatively, Supercov may not support your project layout or test framework yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
             ),
+            Self::RootsLeftNothing(message) => write!(formatter, "{message}"),
         }
     }
 }
@@ -765,9 +771,26 @@ pub fn discover_coverage_project(
 ) -> Result<CoverageProject, ProjectDiscoveryError> {
     let project = discover_coverage_project_of_any_size(root, environment, command)?;
     if project.source_files.is_empty() {
-        return Err(ProjectDiscoveryError::NoSourceFiles);
+        return Err(no_source_error(root, environment));
     }
     Ok(project)
+}
+
+/// Why a project has nothing to measure. Roots that were named and left
+/// nothing are the mistake to show, as the other languages show it: "set
+/// SUPERCOV_SOURCE_ROOTS" read as if it had not been set.
+pub fn no_source_error(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> ProjectDiscoveryError {
+    match crate::source_discovery::ExplicitSourceRoots::from_environment(root, environment) {
+        Ok(Some(explicit)) => match explicit.refuse_if_empty(0, "JavaScript or TypeScript") {
+            Err(message) => ProjectDiscoveryError::RootsLeftNothing(message),
+            Ok(()) => ProjectDiscoveryError::NoSourceFiles,
+        },
+        Ok(None) => ProjectDiscoveryError::NoSourceFiles,
+        Err(error) => ProjectDiscoveryError::Source(error),
+    }
 }
 
 /// `discover_coverage_project` for a suite whose application may hold no
