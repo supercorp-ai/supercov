@@ -1415,6 +1415,137 @@ mod tests {
         assert_eq!(found.len(), 1);
     }
 
+    /// The suite is read past everything that is not a test of its own --
+    /// hidden folders, installed packages, links, files that are not text or
+    /// do not parse, and loads and launches by a name only known at run time
+    /// -- and a Jest started as `jest.cmd` still reads source directly.
+    #[test]
+    fn a_suite_with_nothing_compiled_runs_source_directly_whatever_else_it_holds() {
+        let root = project(
+            "source-direct-oddities",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","test":"node_modules/.bin/jest.cmd"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                ("test/.cache/old.test.js", "require('../dist/index.js')"),
+                (
+                    "test/node_modules/dep/index.js",
+                    "require('../dist/index.js')",
+                ),
+                (
+                    "test/dynamic.test.js",
+                    "const name = './x';\nrequire(name);\nimport(name);\nimport('./fixtures/y.js');\n",
+                ),
+                (
+                    "test/launch.test.js",
+                    "import { spawn } from 'node:child_process';\nconst program = 'npm';\nspawn(program, ['run', 'start']);\nspawn('node', ['dist/index.js']);\n",
+                ),
+                ("test/broken.test.js", "const = ;\n"),
+            ],
+        );
+        fs::write(root.join("test/latin1.test.js"), b"// caf\xe9\n").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.join("test/dynamic.test.js"),
+                root.join("test/linked.test.js"),
+            )
+            .unwrap();
+            let fifo = root.join("test/pipe.test.js");
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert!(discovered.uses_jest);
+        assert!(
+            discovered.unrun_build.is_empty(),
+            "{:?}",
+            discovered.unrun_build
+        );
+    }
+
+    /// Compiled output a test in a nested folder loads is found there, and a
+    /// Windows `.exe` Jest is Jest.
+    #[test]
+    fn compiled_output_a_nested_test_loads_names_the_build() {
+        let root = project(
+            "nested-compiled",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","test":"jest.exe"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                (
+                    "test/unit/deep/a.test.js",
+                    "require('../../../dist/index.js')",
+                ),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert!(discovered.uses_jest);
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
+    }
+
+    /// node:test over TypeScript runs source directly unless the command
+    /// builds it first; a glob like `*.ts*` names TypeScript too.
+    #[test]
+    fn node_test_over_typescript_reads_source_unless_the_command_builds() {
+        let discovered = |test: &str| {
+            let root = project(
+                "node-typescript",
+                &[
+                    (
+                        "package.json",
+                        &format!(r#"{{"scripts":{{"build":"tsc","test":"{test}"}}}}"#),
+                    ),
+                    ("src/index.ts", "export const ready = true"),
+                ],
+            );
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"]))
+                .unwrap()
+                .unrun_build
+        };
+        assert!(discovered("node --test 'tests/**/*.ts*'").is_empty());
+        // The command runs tsc itself: it owns its build, and none is named.
+        assert!(discovered("tsc && node --test tests/a.test.ts").is_empty());
+    }
+
+    #[test]
+    fn a_run_with_no_script_name_and_an_overridden_playwright_module() {
+        let root = project(
+            "no-script",
+            &[
+                ("package.json", r#"{"scripts":{}}"#),
+                ("src/a.js", "export const a = 1;\n"),
+            ],
+        );
+        // `npm run` alone names no script.
+        assert_eq!(script_command(&root, &command(&["npm", "run"])), None);
+        let environment = BTreeMap::from([(
+            "SUPERCOV_PLAYWRIGHT_MODULE".to_owned(),
+            "./fixtures/playwright.js".to_owned(),
+        )]);
+        let discovered = discover_coverage_project(
+            &root,
+            &environment,
+            &command(&["npx", "playwright", "test"]),
+        )
+        .unwrap();
+        assert_eq!(discovered.playwright_module, "./fixtures/playwright.js");
+        // A module of the user's own exports Playwright's `test` by that name.
+        assert_eq!(discovered.playwright_test_export, "test");
+    }
+
     #[test]
     fn environment_overrides_are_authoritative() {
         let root = project(
