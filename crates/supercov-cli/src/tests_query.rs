@@ -76,9 +76,12 @@ pub fn command(args: &[String]) -> ExitCode {
     {
         let asked_for_help = args.iter().any(|a| matches!(a.as_str(), "--help" | "-h"));
         return match args.get(2) {
-            Some(action) if !asked_for_help && action != "affected" => {
-                usage(format!("unknown tests action: {action}"))
-            }
+            Some(action) if !asked_for_help && action != "affected" => crate::refuse(
+                "runs.tests",
+                args.iter().any(|a| a == "--json"),
+                format!("unknown tests action: {action}"),
+                HELP,
+            ),
             _ => {
                 print!("{HELP}");
                 ExitCode::SUCCESS
@@ -93,6 +96,14 @@ pub fn command(args: &[String]) -> ExitCode {
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut seen = BTreeSet::new();
     let rest = &args[3..];
+    let usage = |message: String| {
+        crate::refuse(
+            "runs.tests.affected",
+            rest.iter().any(|a| a == "--json"),
+            message,
+            HELP,
+        )
+    };
     let mut index = 0;
     while let Some(flag) = rest.get(index) {
         index += 1;
@@ -214,25 +225,7 @@ pub fn command(args: &[String]) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(message) => {
-            if json_output {
-                print!(
-                    "{}",
-                    agent_json::failure(
-                        Some("runs.tests.affected"),
-                        &agent_json::AgentError {
-                            code: agent_json::ErrorCode::InvalidArgument,
-                            message,
-                            retryable: false,
-                            details: None,
-                        }
-                    )
-                );
-            } else {
-                eprintln!("[supercov] {message}");
-            }
-            ExitCode::from(2)
-        }
+        Err(message) => crate::refuse("runs.tests.affected", json_output, message, ""),
     }
 }
 
@@ -643,11 +636,6 @@ fn runner_filter_name(file: &str, name: &str) -> String {
 /// A mistake and the guide to put it right, both on standard error: a
 /// script reading `--names` from standard output must not take the guide for
 /// test names.
-fn usage(message: String) -> ExitCode {
-    eprint!("[supercov] {message}\n\n{HELP}");
-    ExitCode::from(2)
-}
-
 /// Whether every configuration file that changed since the run belongs to a
 /// test runner its tests did not run under: the Playwright configuration
 /// changing changes nothing a Vitest run did.

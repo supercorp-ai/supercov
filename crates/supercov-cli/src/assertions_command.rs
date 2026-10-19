@@ -209,8 +209,12 @@ pub fn command(args: &[String]) -> ExitCode {
         Ok(o) => o,
         // On standard error with the mistake: standard output is the answer.
         Err(message) => {
-            eprint!("[supercov] {message}\n\n{HELP}");
-            return ExitCode::from(2);
+            return crate::refuse(
+                "runs.assertions",
+                args.iter().any(|a| a == "--json"),
+                message,
+                HELP,
+            );
         }
     };
     let result = (|| -> Result<Value, String> {
@@ -252,25 +256,7 @@ pub fn command(args: &[String]) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(message) => {
-            if options.json {
-                print!(
-                    "{}",
-                    agent_json::failure(
-                        Some("runs.assertions"),
-                        &agent_json::AgentError {
-                            code: agent_json::ErrorCode::InvalidArgument,
-                            message,
-                            retryable: false,
-                            details: None,
-                        }
-                    )
-                );
-            } else {
-                eprintln!("[supercov] {message}");
-            }
-            ExitCode::from(2)
-        }
+        Err(message) => crate::refuse("runs.assertions", options.json, message, ""),
     }
 }
 

@@ -308,6 +308,31 @@ fn main() -> ExitCode {
     }
 }
 
+/// A mistake in what was asked: under `--json` the failure envelope on
+/// standard output, as every answer to `--json` is; otherwise the message, and
+/// the usage `help` when there is one, on standard error.
+pub(crate) fn refuse(command: &str, json: bool, message: String, help: &str) -> ExitCode {
+    if json {
+        print!(
+            "{}",
+            agent_json::failure(
+                Some(command),
+                &agent_json::AgentError {
+                    code: agent_json::ErrorCode::InvalidArgument,
+                    message,
+                    retryable: false,
+                    details: None,
+                }
+            )
+        );
+    } else if help.is_empty() {
+        eprintln!("[supercov] {message}");
+    } else {
+        eprint!("[supercov] {message}\n\n{help}");
+    }
+    ExitCode::from(2)
+}
+
 /// The command the reader used to start Supercov. The npm package sets
 /// `SUPERCOV_PACKAGE_ROOT`, the Go launcher sets `SUPERCOV_LAUNCHER=go`, and
 /// the PyPI, Ruby and Rust packages run the binary itself as `supercov`.

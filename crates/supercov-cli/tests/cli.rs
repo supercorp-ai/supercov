@@ -9324,3 +9324,104 @@ fn failures_are_named_five_at_a_time_and_other_scripts_are_offered() {
         "{exec}"
     );
 }
+
+#[test]
+fn a_test_that_ran_alongside_others_is_undetermined_and_a_new_file_asks_for_the_whole_suite() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-undetermined");
+    project.write("go.mod", "module example.com/u\n\ngo 1.22\n");
+    project.write(
+        "sign.go",
+        "package u\n\nfunc Sign(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"not positive\"\n}\n",
+    );
+    project.write(
+        "sign_test.go",
+        "package u\n\nimport \"testing\"\n\nfunc TestPositive(t *testing.T) {\n\tif Sign(1) != \"positive\" {\n\t\tt.Fatal(\"positive\")\n\t}\n}\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tif Sign(-1) != \"not positive\" {\n\t\tt.Fatal(\"not positive\")\n\t}\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("u");
+    project.supercov(&["--", go, "test", "./..."]).succeeds();
+
+    // The parallel test has no record of its own: a change to code the run
+    // covered could have reached it, so it is neither affected nor not.
+    project.edit("sign.go", "return \"not positive\"", "return \"negative\"");
+    let affected = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &affected,
+        &[
+            "1 of 2 tests affected by changes since the run, 1 undetermined",
+            "  sign_test.go › TestPositive\n    sign.go: Sign (line 3) changed (this test ran it)",
+            "Undetermined — what these ran was not fully recorded",
+            "  sign_test.go › TestParallel\n    sign.go: Sign (line 3) changed (the run covered it)",
+        ],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    assert_eq!(json["data"]["undetermined"][0]["attribution"], "run-wide");
+    // Both are for a runner to run.
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--names"])
+            .succeeds(),
+        "TestParallel\nTestPositive\n"
+    );
+
+    // A file the run never captured: no record can say who loads it.
+    project.edit("sign.go", "return \"negative\"", "return \"not positive\"");
+    project.write("extra.go", "package u\n\nfunc Extra() int { return 3 }\n");
+    let added = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &added,
+        &[
+            "No captured file has changed.",
+            "  A source or test file exists that the run did not capture; no test's record can say whether it loads it. Run the suite in full.",
+        ],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    assert_eq!(json["data"]["workingTree"]["sourceSetChanged"], true);
+
+    // Mistakes under --json are answered in JSON, as every --json answer is.
+    for (args, command, message) in [
+        (
+            &["tests", "affected", "--frob", "--json"][..],
+            "runs.tests.affected",
+            "Unknown option: --frob",
+        ),
+        (
+            &["tests", "frob", "--json"],
+            "runs.tests",
+            "unknown tests action: frob",
+        ),
+        (
+            &["assertions", "--frob", "--json"],
+            "runs.assertions",
+            "Unknown option: --frob",
+        ),
+    ] {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        let refused = project.supercov(&full);
+        assert_eq!(refused.code(), 2);
+        let json: serde_json::Value = serde_json::from_str(&refused.stdout()).unwrap();
+        assert_eq!(json["command"], command);
+        assert_eq!(json["error"]["message"], message);
+        assert_eq!(refused.stderr(), "");
+    }
+    // Without it, the usage follows the mistake on standard error.
+    let text = project.supercov(&["runs", "latest", "tests", "frob"]);
+    assert_eq!(text.code(), 2);
+    assert!(
+        text.stderr()
+            .starts_with("[supercov] unknown tests action: frob\n\nUsage: ")
+    );
+}

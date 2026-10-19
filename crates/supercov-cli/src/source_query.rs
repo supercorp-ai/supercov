@@ -78,25 +78,7 @@ pub fn command(args: &[String]) -> ExitCode {
             print!("{}", render(&data));
             ExitCode::SUCCESS
         }
-        Err(message) => {
-            if json_output {
-                print!(
-                    "{}",
-                    agent_json::failure(
-                        Some("coverage.source"),
-                        &agent_json::AgentError {
-                            code: agent_json::ErrorCode::InvalidArgument,
-                            message,
-                            retryable: false,
-                            details: None,
-                        }
-                    )
-                );
-            } else {
-                eprintln!("[supercov] {message}");
-            }
-            ExitCode::from(2)
-        }
+        Err(message) => crate::refuse("coverage.source", json_output, message, ""),
     }
 }
 
