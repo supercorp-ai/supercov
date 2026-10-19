@@ -9068,15 +9068,22 @@ fn unittest_outcomes_each_count_and_a_decorator_skip_is_a_test() {
     }
     let empty = make("ut-none", "# no tests\n");
     let refused = empty.supercov(&command);
-    // unittest's own exit when nothing ran: 5 from Python 3.12, 1 before.
-    assert!(matches!(refused.code(), 1 | 5), "{}", refused.code());
-    assert!(
-        refused
-            .stderr()
-            .contains("the Python run produced no test outcomes"),
-        "{}",
-        refused.stderr()
-    );
+    // unittest's own exit when nothing ran: 5 from Python 3.12, which
+    // Supercov names as the command's; before that, 1 with no outcome.
+    let said = refused.stderr();
+    match refused.code() {
+        5 => assert!(
+            said.contains("the test command exited 5 before any test reported an outcome"),
+            "{said}"
+        ),
+        code => {
+            assert_eq!(code, 1, "{said}");
+            assert!(
+                said.contains("the Python run produced no test outcomes"),
+                "{said}"
+            );
+        }
+    }
 }
 
 /// A query about one file warns that the run is stale only when what it
