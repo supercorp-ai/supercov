@@ -3297,7 +3297,10 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             "or",
             location.start_offset(),
             location.end_offset(),
-            Some(node.name().as_slice()),
+            // `mod ||= x` declares `mod` where it stands: read up front, a
+            // first `mod` is a method call and raises. Found on
+            // addressable's `normalize_path`.
+            None,
             &value,
         );
         self.depth += 1;
@@ -3315,7 +3318,10 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             "and",
             location.start_offset(),
             location.end_offset(),
-            Some(node.name().as_slice()),
+            // `mod ||= x` declares `mod` where it stands: read up front, a
+            // first `mod` is a method call and raises. Found on
+            // addressable's `normalize_path`.
+            None,
             &value,
         );
         self.depth += 1;
@@ -4125,6 +4131,29 @@ end
             line.contains(".pre(") && line.contains(".es("),
             "arrival form: {line}"
         );
+    }
+
+    #[test]
+    fn a_local_or_and_assignment_is_never_read_before_it_is_declared() {
+        // addressable's `normalize_path`: `mod ||= ...` is where `mod` is
+        // declared, so a read placed before it is a call to a method `mod`.
+        let source = "def f(t)\n  loop do\n    mod ||= t.sub!(\"a\", \"b\")\n    all &&= mod\n    return mod\n  end\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/f.rb", source.as_bytes(), &mut probe).unwrap();
+        let transformed =
+            String::from_utf8(apply_edits(source.as_bytes(), &obligations.plan.edits)).unwrap();
+        for line in [2, 3] {
+            let line = transformed.lines().nth(line).unwrap();
+            assert!(
+                !line.contains(".l("),
+                "no read before the declaration: {line}"
+            );
+            assert!(
+                line.contains(".pre(") && line.contains(".es("),
+                "arrival form: {line}"
+            );
+        }
     }
 
     #[test]

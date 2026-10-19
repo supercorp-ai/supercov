@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- A Ruby local variable first assigned with `||=` or `&&=` (`mod ||= path.gsub!(...)`) no longer raises `NameError` under measurement: the probe read the variable before the assignment that declares it. addressable's suite failed 357 examples on it.
 - The trash a run starts emptying is empty when the run ends, however long that takes within the end's ten seconds: the sweep at the end waits for the one started with the run instead of finding the trash locked and leaving, which left files and a `__sweep-trash` process behind after Supercov exited.
 - `runs <run> patch` no longer lists a new test named as one beside the source (`src/helper.spec.js`, `test_cart.py`) under "Changed but not measured by this run"; new product source is still listed.
 - `runs <run> patch` counts a changed file whose name is not ASCII (`src/é.js`) instead of reporting no executable changes, and a stale run's warning names such a file added since the run. A name with leading or trailing spaces is no longer trimmed into another.
