@@ -331,6 +331,13 @@ impl IndexedQueryError {
                     format!("Source file not found: {selector}"),
                     Some(json!({ "selector": selector })),
                 ),
+                QueryError::NothingMeasured(file) => (
+                    ErrorCode::SourceNotFound,
+                    format!(
+                        "{file} holds nothing the run measures: no statement, branch or function starts in it"
+                    ),
+                    Some(json!({ "selector": file, "status": "included" })),
+                ),
                 QueryError::OutOfScope {
                     file,
                     status,
@@ -396,12 +403,14 @@ fn location_failure(error: &QueryError) -> bool {
     matches!(
         error,
         QueryError::SourceNotFound(_)
+            | QueryError::NothingMeasured(_)
             | QueryError::OutOfScope { .. }
             | QueryError::AmbiguousSelector { .. }
     )
 }
 
-/// A file the query did not find that the run's scope left out says why.
+/// A file the query did not find that the run's scope names says why: left
+/// out, with the scope's reason, or included with nothing in it to measure.
 fn with_scope_reason(
     index: &CoverageIndex<'_>,
     view: CoverageViewId,
@@ -410,19 +419,22 @@ fn with_scope_reason(
     let QueryError::SourceNotFound(selector) = &error else {
         return error;
     };
-    index
+    let Some(entry) = index
         .scope_entries(view)
         .ok()
-        .and_then(|entries| {
-            entries.into_iter().find(|entry| {
-                entry.file == *selector && !entry.status.eq_ignore_ascii_case("included")
-            })
-        })
-        .map_or(error, |entry| QueryError::OutOfScope {
+        .and_then(|entries| entries.into_iter().find(|entry| entry.file == *selector))
+    else {
+        return error;
+    };
+    if entry.status.eq_ignore_ascii_case("included") {
+        QueryError::NothingMeasured(entry.file)
+    } else {
+        QueryError::OutOfScope {
             file: entry.file,
             status: entry.status,
             reason: entry.reason,
-        })
+        }
+    }
 }
 
 /// A location of a several-line query that could not be answered.

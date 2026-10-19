@@ -8740,3 +8740,116 @@ fn tests_affected_reads_each_kind_of_change_and_refuses_on_stderr() {
         ],
     );
 }
+
+/// A wider project: directories page, decisions group and page, a long
+/// decision reads whole, tests without evidence page and filter, and a file
+/// the scope includes with nothing in it says so instead of "not found".
+#[test]
+fn a_wider_project_pages_groups_and_names_an_empty_included_file() {
+    let project = Project::cart("wider-views");
+    project.write(
+        "lib/extra.js",
+        "export const extra = (value) => value + 1;\n",
+    );
+    project.write("src/notes.js", "// Nothing here runs.\n");
+    project.write(
+        "src/long.js",
+        "export function long(first, second, third, fourth) {\n  if ((first > 10 && second < 20) || (third === 'some fairly long string value' && fourth !== null)) {\n    return 1;\n  }\n  return 0;\n}\n",
+    );
+    project.write(
+        "test/more.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { long } from \"../src/long.js\";\nimport { extra } from \"../lib/extra.js\";\n\ntest(\"long\", () => {\n  assert.equal(long(11, 1, '', null), 1);\n  assert.equal(extra(1), 2);\n});\n\ntest(\"twice nothing\", () => {\n  assert.ok(true);\n  assert.ok(1);\n});\n\ntest(\"once nothing\", () => {\n  assert.ok(true);\n});\n",
+    );
+    project.commit("wider");
+    project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_SOURCE_ROOTS", "src,lib")],
+        )
+        .succeeds();
+    let directories = project
+        .supercov(&["runs", "latest", "files", "--group", "dir", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &directories,
+        &["showing 1-1 of 2", "files --group dir --offset 1 --limit 1"],
+    );
+    let none = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "lib/extra.js",
+            "--group",
+            "decision",
+        ])
+        .succeeds();
+    assert!(
+        none.contains("decisions 0, with missing conditions 0"),
+        "{none}"
+    );
+    let paged = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--limit",
+            "1",
+        ])
+        .succeeds();
+    contains_all(
+        &paged,
+        &[
+            "showing 1-1 of 3 decisions",
+            "--group decision --offset 1 --limit 1",
+        ],
+    );
+    let long = project
+        .supercov(&["runs", "latest", "decision", "src/long.js:2"])
+        .succeeds();
+    contains_all(
+        &long,
+        &[
+            "(first > 10 && second < 20) || (third === 'some fairly long string value' && fourth !== null)",
+            "C4 MISSING: fourth !== null (never evaluated)",
+        ],
+    );
+    let without = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "without-evidence",
+            "--limit",
+            "1",
+        ])
+        .succeeds();
+    contains_all(
+        &without,
+        &["showing 1-1 of 2", "without-evidence --offset 1 --limit 1"],
+    );
+    let passed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "without-evidence",
+            "--filter",
+            "passed",
+        ])
+        .succeeds();
+    contains_all(
+        &passed,
+        &["2 — passed attempts only", "passed, 2 assertions"],
+    );
+    let empty = project
+        .supercov(&["runs", "latest", "file", "src/notes.js"])
+        .exits(2);
+    assert!(
+        empty.contains("src/notes.js holds nothing the run measures"),
+        "{empty}"
+    );
+}

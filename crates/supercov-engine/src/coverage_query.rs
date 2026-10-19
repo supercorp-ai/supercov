@@ -207,6 +207,9 @@ pub enum QueryError {
     TestNotFound(String),
     DecisionNotFound(String),
     SourceNotFound(String),
+    /// A file the run's scope includes that holds nothing it measures: no
+    /// statement, branch or function starts in it.
+    NothingMeasured(String),
     /// A file the run's scope left out, with the scope's reason.
     OutOfScope {
         file: String,
