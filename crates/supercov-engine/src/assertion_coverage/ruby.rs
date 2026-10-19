@@ -633,6 +633,27 @@ mod tests {
         assert_eq!(condition("elsif a && b"), "a && b");
     }
 
+    /// Shared examples are not counted; `skip` is an example only with a
+    /// block; `it_behaves_like` is a group whose body is elsewhere; and once
+    /// `include_examples` stands before an example, its id no longer says
+    /// which it is and the group holding it is what is known.
+    #[test]
+    fn rspec_ids_count_only_what_rspec_numbers() {
+        let spec = "RSpec.shared_examples \"s\" do\n  it \"in shared\" do\n  end\nend\ndescribe A do\n  skip \"no block\"\n  skip \"with block\" do\n  end\n  it_behaves_like \"s\"\n  include_examples \"s\"\n  it \"after include\" do\n  end\nend\n";
+        let lines = spec.split('\n').collect::<Vec<_>>();
+        let at = |id: &str| {
+            locate(spec, &lines, "rspec", &format!("spec/a_spec.rb[{id}]"))
+                .map(|found| (found.start, found.end))
+        };
+        assert_eq!(at("1:1"), Some((6, 7)));
+        assert_eq!(at("1:2"), Some((8, 8)));
+        // Not exact any more, or past the end: the group that holds it.
+        assert_eq!(at("1:4"), Some((4, 12)));
+        assert_eq!(at("1:9"), Some((4, 12)));
+        assert_eq!(at("2"), None);
+        assert!(locate(spec, &lines, "rspec", "no brackets").is_none());
+    }
+
     #[test]
     fn tests_are_found_by_runner() {
         let spec = "RSpec.describe A do\n  it \"one\" do\n    expect(1).to eq(1)\n  end\n\n  context \"more\" do\n    %w[a b].each do |x|\n      it \"loops #{x}\" do\n      end\n    end\n    it \"two\" do\n      expect(2).to eq(2)\n    end\n  end\nend\n";
