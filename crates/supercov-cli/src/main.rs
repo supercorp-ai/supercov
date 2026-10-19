@@ -1835,7 +1835,8 @@ pub(crate) fn load_point_tests(
         .view
         .points
         .iter()
-        .filter(|point| point.covered && !point.tests.is_empty())
+        // A point is covered exactly when some test reached it.
+        .filter(|point| !point.tests.is_empty())
         .map(|point| {
             (
                 point.meta.file.clone(),
@@ -2035,6 +2036,19 @@ fn javascript_number(value: f64) -> String {
     }
 }
 
+/// A run this process published, timed: every published run records its
+/// timings.
+fn print_run_timings(metadata: &supercov_engine::run_store::RunMetadata, command_ms: f64) {
+    let timings = metadata
+        .timings
+        .as_ref()
+        .expect("a run this process published records its timings");
+    eprintln!(
+        "[supercov] timings {}",
+        format_run_timings(timings, metadata.duration_ms, Some(command_ms))
+    );
+}
+
 /// `run_ms` is the engine's own clock, which stops before the run is published;
 /// `command_ms`, when the run was published, is the whole command. What lies
 /// between is publication -- analysing the evidence once for the per-test
@@ -2216,16 +2230,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     "[supercov] Rust coverage: {} test(s) across {} artifact(s)",
                     result.tests, result.artifacts
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2279,16 +2284,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                         result.unparseable_tests
                     );
                 }
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2315,16 +2311,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     "[supercov] JVM coverage: {} test(s) across {} source file(s) in {} module(s)",
                     result.tests, result.source_files, result.modules
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2353,16 +2340,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     result.interpreters,
                     result.python_versions.join(", ")
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2391,16 +2369,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     result.interpreters,
                     result.ruby_versions.join(", ")
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2435,19 +2404,14 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     &command_text,
                 );
             }
+            // A server's run directory is named by its run id.
             for (language, server) in &result.server_runs {
-                if let Some(id) = server.file_name().and_then(|id| id.to_str()) {
-                    eprintln!(
-                        "[supercov] the {language} server's coverage is run {id}: `supercov runs {id}`"
-                    );
-                }
-            }
-            if let Some(timings) = &result.metadata.timings {
+                let id = server.file_name().unwrap_or_default().to_string_lossy();
                 eprintln!(
-                    "[supercov] timings {}",
-                    format_run_timings(timings, result.metadata.duration_ms, Some(command_ms()))
+                    "[supercov] the {language} server's coverage is run {id}: `supercov runs {id}`"
                 );
             }
+            print_run_timings(&result.metadata, command_ms());
             process_exit_code(result.exit_code)
         }
         Err(supercov_engine::javascript_run::DirectJavascriptRunError::Interrupted {
@@ -2858,12 +2822,14 @@ impl PublicQueryOutput {
             // The standard page: a pager following `nextOffset` asks for the
             // rest as it asks for any page.
             let returned = data.lines.len();
-            if let Some(page) = output.pagination.as_mut() {
-                page.returned = returned;
-                page.limit = returned;
-                page.has_more = true;
-                page.next_offset = Some(page.offset + returned);
-            }
+            let page = output
+                .pagination
+                .as_mut()
+                .expect("a page of lines is paginated");
+            page.returned = returned;
+            page.limit = returned;
+            page.has_more = true;
+            page.next_offset = Some(page.offset + returned);
         }
     }
 
@@ -2884,12 +2850,14 @@ impl PublicQueryOutput {
                 next_offset: page.next_offset,
             });
         }
-        if let Some(next) = page.next_offset {
-            eprintln!(
-                "[supercov] this page holds {} of the {asked} entries asked for, as many as fit in one reply ({} in all); the rest start at --offset {next}",
-                page.returned, page.total
-            );
-        }
+        // A page cut to fit always has more after it: what fits is fewer
+        // than were asked for, and as many were there to return.
+        eprintln!(
+            "[supercov] this page holds {} of the {asked} entries asked for, as many as fit in one reply ({} in all); the rest start at --offset {}",
+            page.returned,
+            page.total,
+            page.offset + page.returned
+        );
     }
 
     /// How many entries of a page too large for one reply would fit, when
@@ -3055,9 +3023,13 @@ fn execute_public_query(
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
                 // One line past the end of the file is no line: reading it as
                 // code the run did not measure would be an answer.
+                // A `line` request always names its file and line.
+                let (file, line) = (
+                    request.file.as_deref().unwrap_or_default(),
+                    request.line.unwrap_or_default(),
+                );
                 if request.command == "line"
                     && request.more_lines.is_empty()
-                    && let (Some(file), Some(line)) = (&request.file, request.line)
                     && let Ok(contents) = fs::read_to_string(root.join(file))
                     && line > contents.lines().count()
                 {
@@ -3137,17 +3109,14 @@ fn execute_public_query(
                         &run.metadata.integrity.fingerprint,
                         &newer_run.metadata.integrity.fingerprint,
                     );
-                    if older.algorithm == newer.algorithm
-                        && !older.source.is_empty()
-                        && !newer.source.is_empty()
-                    {
-                        diff_inputs = Some(supercov_engine::coverage_query::CoverageDiffInputs {
-                            source_changed: older.source != newer.source
-                                || older.dependencies != newer.dependencies
-                                || older.configuration != newer.configuration,
-                            tests_changed: older.tests != newer.tests,
-                        });
-                    }
+                    // A stored run's fingerprints are sha256 digests, or it
+                    // is not read at all.
+                    diff_inputs = Some(supercov_engine::coverage_query::CoverageDiffInputs {
+                        source_changed: older.source != newer.source
+                            || older.dependencies != newer.dependencies
+                            || older.configuration != newer.configuration,
+                        tests_changed: older.tests != newer.tests,
+                    });
                     let comparison_progress = ProgressLine::start("loading comparison run");
                     newer_container = open_query_index_for(newer_run, test_filter.as_ref())
                         .map_err(|error| {
@@ -3409,10 +3378,9 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                 let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
                     break;
                 };
-                if fits >= request.limit {
-                    break;
-                }
-                request.limit = fits;
+                // What fits is fewer than the page returned, which is at most
+                // its limit; the limit falls each time, so this ends.
+                request.limit = fits.min(request.limit - 1);
                 match execute_public_query(&root, &invocation) {
                     Ok(smaller) => output = smaller,
                     Err(failure) => {
