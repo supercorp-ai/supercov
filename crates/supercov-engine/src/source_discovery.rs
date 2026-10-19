@@ -1190,14 +1190,15 @@ fn nearest_package_root<'a>(path: &Path, packages: &'a [PathBuf]) -> Option<&'a 
         .max_by_key(|directory| directory.components().count())
 }
 
-/// Reason for a file under no root that first-party source or a test loads.
-pub const LOADED_REASON: &str = "loaded by first-party source or tests";
+/// Reason for a file under no root that first-party source loads.
+pub const LOADED_REASON: &str = "loaded by first-party source";
 
-/// A file under no source root that first-party source or a test imports is
-/// code the product runs: a `shared/` folder beside `src/`, a helper under
-/// `docs/` a test loads. It is followed from what is known to be source and
-/// tests, before anything runs, so nobody has to name a root for a project
-/// whose tests pass without Supercov. What nothing loads stays ambiguous.
+/// A file under no source root that first-party source imports is code the
+/// product runs: a `shared/` folder beside `src/`. It is followed from what
+/// is known to be source, before anything runs, so nobody has to name a root
+/// for a project whose tests pass without Supercov. What only tests load
+/// stays ambiguous: tests load their own helpers, mocks and simulators, and
+/// counting those would measure test code as product.
 fn promote_loaded(
     root: &Path,
     entries: &mut [SourceScopeEntry],
@@ -1212,14 +1213,7 @@ fn promote_loaded(
     }
     let starts = entries
         .iter()
-        .filter(|entry| {
-            entry.status == SourceScopeStatus::Included
-                || (entry.status == SourceScopeStatus::Excluded
-                    && matches!(
-                        entry.reason.as_str(),
-                        "test or fixture source" | "declared test setup"
-                    ))
-        })
+        .filter(|entry| entry.status == SourceScopeStatus::Included)
         .map(|entry| entry.file.clone())
         .collect::<Vec<_>>();
     let loaded = crate::test_loads::Imports::new(root)
@@ -1249,7 +1243,7 @@ fn scope_limitation(file: &str) -> SourceLimitation {
         line: 1,
         column: 1,
         source: file.into(),
-        reason: "JavaScript/TypeScript under no source root that nothing the tests or source load imports, so the run did not measure it. If it is your code, name the roots with SUPERCOV_SOURCE_ROOTS.".into(),
+        reason: "JavaScript/TypeScript under no source root that no first-party source imports, so the run did not measure it. If it is your code, name the roots with SUPERCOV_SOURCE_ROOTS.".into(),
     }
 }
 
@@ -1500,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_under_no_root_that_source_or_a_test_loads_is_source() {
+    fn a_file_under_no_root_that_source_loads_is_source_and_one_only_a_test_loads_is_not() {
         let root = repository(
             "loaded",
             &[
@@ -1523,25 +1517,29 @@ mod tests {
             ],
         );
         let discovered = discover_source_scope(&root, None).unwrap();
-        // Through source, through a test, and through what those load.
-        for file in ["shared/y.js", "shared/deep.ts", "docs/x.js"] {
+        // Through source, and through what that loads in turn.
+        for file in ["shared/y.js", "shared/deep.ts"] {
             let found = entry(&discovered, file);
             assert_eq!(found.status, SourceScopeStatus::Included, "{file}");
             assert_eq!(found.reason, LOADED_REASON, "{file}");
             assert!(discovered.source_files.contains(&file.to_owned()), "{file}");
         }
-        // Nothing loads it: still a question, and still said.
-        assert_eq!(
-            entry(&discovered, "extra/z.js").status,
-            SourceScopeStatus::Ambiguous
-        );
+        // Only a test loads one, nothing loads the other: still questions,
+        // and still said.
+        for file in ["docs/x.js", "extra/z.js"] {
+            assert_eq!(
+                entry(&discovered, file).status,
+                SourceScopeStatus::Ambiguous,
+                "{file}"
+            );
+        }
         assert_eq!(
             discovered
                 .limitations
                 .iter()
                 .map(|limitation| limitation.file.as_str())
                 .collect::<Vec<_>>(),
-            ["extra/z.js"]
+            ["docs/x.js", "extra/z.js"]
         );
         // Named roots settle it: nothing is promoted past them.
         let named = discover_source_scope(&root, Some(&["src".to_owned()])).unwrap();

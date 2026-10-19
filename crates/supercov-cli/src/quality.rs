@@ -3585,7 +3585,9 @@ fn human_security(report: &Value) -> String {
         );
         match report["flagged_executed_unasserted"].as_u64() {
             Some(n) => out.push_str(&format!(
-                "; {n} are executed by tests that are not judged to catch any line of them.\n"
+                "; {n} {} executed by tests that are not judged to catch any line of {}.\n",
+                if n == 1 { "is" } else { "are" },
+                if n == 1 { "it" } else { "them" }
             )),
             None => out.push_str(".\n"),
         }

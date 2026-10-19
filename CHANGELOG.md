@@ -12,11 +12,12 @@
 
 **Fixed**
 
+- A Rust run whose test filter matches no test can be read: it says no test ran and to check the filter, instead of failing to open with `frontend declares an unobserved runner`.
 - `security --run` says every line of the flagged files ran when none was left unexecuted, instead of `0 flagged files have lines no test ... executed`, and counts one file in the singular.
 - `security --run` names the callers it saw in tests but did not ask about, past three per function, instead of dropping them. A list of more than ten cross-file paths says how many more there are.
 - `security` no longer reports a cross-file path from a caller to every function of a module it imports only the default export of; a default import reaches the function the module exports as default.
-- `line` on a file left out of scope (under no source root, and loaded by nothing) gives the reason on every line, instead of saying the line holds no code.
-- JavaScript and TypeScript code under no source root that a test or first-party source imports, such as a `shared/` folder beside `src/`, is now counted as source with no `SUPERCOV_SOURCE_ROOTS` needed. Before, it stayed ambiguous: unmeasured, and left out of every percentage. `runs check` names the files that are still ambiguous under its result, without failing.
+- `line` on a file left out of scope (under no source root, and imported by no source) gives the reason on every line, instead of saying the line holds no code.
+- JavaScript and TypeScript code under no source root that first-party source imports, such as a `shared/` folder beside `src/`, is now counted as source with no `SUPERCOV_SOURCE_ROOTS` needed. Code only tests import stays out: tests load their own helpers and mocks. Before, it stayed ambiguous: unmeasured, and left out of every percentage. `runs check` names the files that are still ambiguous under its result, without failing.
 - `file src/a.js:3`, a line asked as a file, points at `line src/a.js:3` in its refusal.
 - `source <path>` reads a file that still matches the run when other files have changed since; only the file read has to match. An empty file says it is empty. `quality snapshots` says `1 quality snapshot`.
 - `assertions --test <name>` matching one name in several test files says to add `--test-file`, since the full name cannot tell them apart. `assertions` read for tests that ran no assessed statement says so instead of `nothing asserted (0 of 0 executed statements)`.

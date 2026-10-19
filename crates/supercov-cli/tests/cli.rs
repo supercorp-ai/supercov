@@ -4860,9 +4860,7 @@ fn source_roots_named_after_a_first_run_take_effect() {
     );
     project.write(
         "test/tax.test.js",
-        // Loaded by a computed path, which no reading of the imports can
-        // follow: only a named root says it is source.
-        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nconst { tax } = await import(\"../extra/\" + \"tax.js\");\ntest(\"tax applies over a hundred\", () => {\n  assert.equal(tax(200), 20);\n});\n",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { tax } from \"../extra/tax.js\";\ntest(\"tax applies over a hundred\", () => {\n  assert.equal(tax(200), 20);\n});\n",
     );
     project.commit("tax");
     project.supercov(&["--", "node", "--test"]).succeeds();
@@ -9673,27 +9671,31 @@ fn query_numbers_and_shapes_are_checked_before_anything_is_read() {
 }
 
 #[test]
-fn code_outside_the_roots_counts_when_loaded_and_is_named_by_check_when_not() {
+fn code_outside_the_roots_counts_when_source_loads_it_and_is_named_by_check_when_not() {
     let project = Project::cart("loaded-outside");
     project.write(
         "shared/round.js",
         "export function round(value) {\n  if (value < 0) return 0;\n  return Math.round(value);\n}\n",
     );
+    project.write(
+        "src/price.js",
+        "import { round } from \"../shared/round.js\";\nexport const price = (value) => round(value);\n",
+    );
     project.write("extra/unused.js", "export const unused = 1;\n");
     project.write(
         "test/round.test.js",
-        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { round } from \"../shared/round.js\";\n\ntest(\"rounds\", () => assert.equal(round(1.4), 1));\n",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { price } from \"../src/price.js\";\n\ntest(\"rounds\", () => assert.equal(price(1.4), 1));\n",
     );
     project.commit("outside");
     project.measure(&[]);
-    // A test loads it, so it is source: measured, with its gap.
+    // Source loads it, so it is source: measured, with its gap.
     let scope = project
         .supercov(&["runs", "latest", "scope", "--files"])
         .succeeds();
     contains_all(
         &scope,
         &[
-            "INCLUDED  shared/round.js  loaded by first-party source or tests",
+            "INCLUDED  shared/round.js  loaded by first-party source",
             "AMBIGUOUS  extra/unused.js  unclassified first-party source",
         ],
     );
@@ -9713,7 +9715,7 @@ fn code_outside_the_roots_counts_when_loaded_and_is_named_by_check_when_not() {
         .succeeds();
     assert!(
         check.contains(
-            "PASS: every floor is met.\n1 file outside the source roots that nothing loads is not counted: extra/unused.js."
+            "PASS: every floor is met.\n1 file outside the source roots that no source imports is not counted: extra/unused.js."
         ),
         "{check}"
     );
@@ -9729,8 +9731,53 @@ fn code_outside_the_roots_counts_when_loaded_and_is_named_by_check_when_not() {
         &line,
         &[
             "  NOT MEASURED\n",
-            "  - source-scope: JavaScript/TypeScript under no source root that nothing the tests or source load imports",
+            "  - source-scope: JavaScript/TypeScript under no source root that no first-party source imports",
         ],
     );
     assert!(!line.contains("Nothing on this line is code"), "{line}");
+}
+
+#[test]
+fn a_cargo_filter_that_matches_no_test_says_so_when_the_run_is_read() {
+    let project = Project::empty("cargo-no-match");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"nomatch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn sign(n: i32) -> bool {\n    n > 0\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn positive() {\n        assert!(super::sign(1));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project
+        .supercov(&["--", "cargo", "test", "--", "nothing_matches"])
+        .succeeds();
+    let read = project.supercov(&["runs", "latest"]).exits(2);
+    assert!(
+        read.contains(
+            "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test."
+        ),
+        "{read}"
+    );
+    // Libtest's own selection, skips included, is the run's.
+    project
+        .supercov(&[
+            "--",
+            "cargo",
+            "test",
+            "--",
+            "--exact",
+            "--skip",
+            "tests::positive",
+        ])
+        .succeeds();
+    project
+        .supercov(&["--", "cargo", "test", "--", "--exact", "tests::positive"])
+        .succeeds();
+    assert!(
+        project
+            .supercov(&["runs", "latest", "test", "tests::positive"])
+            .succeeds()
+            .contains("outcome passed")
+    );
 }

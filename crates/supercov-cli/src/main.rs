@@ -1592,7 +1592,7 @@ fn uncounted_note(view: &supercov_engine::run_view::RunView) -> String {
     let shown = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
     let more = files.len().saturating_sub(5);
     format!(
-        "{} {} outside the source roots that nothing loads {} not counted: {shown}{}. \
+        "{} {} outside the source roots that no source imports {} not counted: {shown}{}. \
          If {} your code, name the roots with SUPERCOV_SOURCE_ROOTS; `{} runs {} scope` lists them.\n",
         files.len(),
         if files.len() == 1 { "file" } else { "files" },
@@ -3048,6 +3048,9 @@ fn execute_public_query(
                         RunIndexError::Report(ReportError::NoEvidence(_))
                     ) {
                         match run.metadata.test_exit_code {
+                            // A command that passed with nothing recorded ran
+                            // no test: a filter that matched none, most often.
+                            Some(0) => "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test.".into(),
                             Some(code) => format!(
                                 "The wrapped command exited {code} before publishing queryable coverage evidence. Inspect that command's original output and rerun after it passes."
                             ),

@@ -321,8 +321,10 @@ pub fn validate_frontend_report_request(
         observed.insert(name);
         require_exact_identities(runner, raw, &request.run_id, &mut phase_ids)?;
     }
+    // A run in which no test ran -- a filter that matched none -- names the
+    // runner it asked, and nothing was observed of it or of any other.
     for runner in runners.keys() {
-        if !observed.contains(runner) {
+        if !observed.contains(runner) && !request.raw_results.is_empty() {
             return Err(FrontendProtocolError::UnobservedRunner(
                 (*runner).to_owned(),
             ));

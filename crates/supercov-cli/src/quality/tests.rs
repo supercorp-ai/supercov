@@ -2553,7 +2553,7 @@ fn a_run_that_was_not_assessed_is_not_said_to_catch_nothing() {
     });
     let text = human_security(&report);
     assert!(
-        text.contains("0 flagged files have lines no test in run run_1 executed.\n  Run run_1 has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported. Assess it with `supercov runs run_1 assertions assess`.\n"),
+        text.contains("Every line of the flagged files was executed by a test in run run_1.\n  Run run_1 has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported. Assess it with `supercov runs run_1 assertions assess`.\n"),
         "{text}"
     );
     assert!(!text.contains("judged to catch"), "{text}");
@@ -2580,7 +2580,7 @@ fn the_security_report_names_what_fired_and_where_tests_never_went() {
     let text = human_security(&report);
     assert!(text.starts_with("Security: 1 of 3 files flagged, 2 clean.\n"));
     assert!(text.contains("injection_sink 1"));
-    assert!(text.contains("1 flagged files have lines no test in run run_1 executed; 1 are executed by tests that are not judged to catch any line of them."));
+    assert!(text.contains("1 flagged file has lines no test in run run_1 executed; 1 is executed by tests that are not judged to catch any line of it."));
     assert!(
         text.contains(
             "executed by tests, but no test is judged to catch a change to any line of it"
