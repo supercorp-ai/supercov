@@ -885,6 +885,28 @@ fn render(data: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// Statements still standing are the longest run matching the current
+    /// lines in order, so a repeated line counts where it is; past the size
+    /// a table fits, each statement is looked for anywhere.
+    #[test]
+    fn standing_statements_are_matched_in_order() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let statements = ["a", "ret", "b", "ret", "c"];
+        assert_eq!(
+            aligned(&statements, &words("a ret c")),
+            [true, true, false, false, true]
+        );
+        assert_eq!(aligned(&statements, &[]), [false; 5]);
+        assert_eq!(aligned(&["x", "y"], &words("x")), [true, false]);
+        assert_eq!(aligned(&["y", "x"], &words("x y")), [false, true]);
+        let many = (0..2001).map(|i| format!("s{i}")).collect::<Vec<_>>();
+        let many = many.iter().map(String::as_str).collect::<Vec<_>>();
+        let lines = (0..2001).rev().map(|i| format!("s{i}")).collect::<Vec<_>>();
+        // In reverse order, the in-order match would keep one; the lookup
+        // finds each.
+        assert!(aligned(&many, &lines).iter().all(|kept| *kept));
+    }
+
     /// dry-rb/dry-inflector, 1,128 examples, a change every test reached:
     /// 364 KB of JSON and the command failed instead of answering.
     #[test]
