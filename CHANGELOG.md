@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `minimize` refusing a run with background evidence names the way through, `--kind` or `--runner`, instead of "select a fully attributed coverage view".
 - A Rust run whose test filter matches no test can be read: it says no test ran and to check the filter, instead of failing to open with `frontend declares an unobserved runner`.
 - `security --run` says every line of the flagged files ran when none was left unexecuted, instead of `0 flagged files have lines no test ... executed`, and counts one file in the singular.
 - `security --run` names the callers it saw in tests but did not ask about, past three per function, instead of dropping them. A list of more than ten cross-file paths says how many more there are.

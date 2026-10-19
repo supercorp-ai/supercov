@@ -266,7 +266,7 @@ impl IndexedQueryError {
                 ),
                 QueryError::UnattributedEvidence => (
                     ErrorCode::UnattributedEvidence,
-                    "Cannot minimize exactly: this coverage view contains background/unattributed evidence. Use a runner with exact test attribution or select a fully attributed coverage view.".into(),
+                    "Cannot minimize exactly: this coverage view contains background/unattributed evidence, code that ran when no test was running. Narrow it to the tests' own evidence with --kind <kind> or --runner <runner>, which leave the background out; `runs <run> kinds` lists them.".into(),
                     None,
                 ),
                 QueryError::TargetUnreachable {

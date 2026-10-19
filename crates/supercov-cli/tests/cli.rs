@@ -9789,3 +9789,47 @@ fn a_cargo_filter_that_matches_no_test_says_so_when_the_run_is_read() {
             .contains("outcome passed")
     );
 }
+
+#[test]
+fn minimize_refuses_background_evidence_and_names_the_filter_that_leaves_it_out() {
+    let project = Project::cart("minimize-background");
+    project.write(
+        "test/setup.test.js",
+        "import { before, test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\nconst loaded = total([{ price: 1, quantity: 1 }]);\nbefore(() => { total([{ price: 2, quantity: 1 }]); });\ntest(\"loaded\", () => assert.equal(loaded, 1));\n",
+    );
+    project.commit("setup");
+    project.measure(&[]);
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    // Module-load work ran with no test running: no subset of tests keeps it.
+    let refused = on_run(&["minimize"]).exits(2);
+    assert!(
+        refused.contains("Narrow it to the tests' own evidence with --kind <kind> or --runner <runner>, which leave the background out"),
+        "{refused}"
+    );
+    for target in ["150", "nan"] {
+        assert!(
+            on_run(&["minimize", "--target", target])
+                .exits(2)
+                .contains("--target must be between 0 and 100")
+        );
+    }
+    // The filter it names: the tests alone, setup scope included.
+    let minimum = on_run(&["minimize", "--kind", "unit"]).succeeds();
+    assert!(
+        minimum.starts_with(
+            "exact minimum 3/4 test(s) keeping the coverage of all 4 tests in every measured metric"
+        ),
+        "{minimum}"
+    );
+    contains_all(
+        &on_run(&["kinds"]).succeeds(),
+        &[
+            "background  0 test(s)  lines 46.15%",
+            "unit  4 test(s) + 1 setup scope(s)  lines 76.92%",
+        ],
+    );
+}
