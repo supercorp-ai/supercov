@@ -11104,3 +11104,87 @@ fn the_report_details_an_unmeasured_gap_and_spans_a_run_never_saved() {
     let again = report("again.html");
     assert_eq!(again["runs"][0]["statementSpans"], spans);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
+    let project = Project::empty("kept-back");
+    project.write(
+        "package.json",
+        r#"{ "name": "kept-back", "scripts": { "test": "oxlint --fix src && node edit.cjs && node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  var rate = 5;\n  return sum > 100 ? 0 : rate;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    project.write_script(
+        "node_modules/.bin/oxlint",
+        "#!/bin/sh\nsed 's/var rate/const rate/' \"$2\"/fee.js > fixed.tmp && mv fixed.tmp \"$2\"/fee.js\n",
+    );
+    // Someone edits the project's own file while the command runs.
+    project.write(
+        "edit.cjs",
+        "const fs = require('node:fs');\nconst file = process.env.EDITED_PROJECT + '/src/fee.js';\nfs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('var rate = 5', 'let rate = 5'));\n",
+    );
+    project.git(&["init", "-q"]);
+    let root = project.root.display().to_string();
+    let run = project.supercov_with(&["--", "npm", "test"], &[("EDITED_PROJECT", &root)]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(
+        run.stderr().contains(
+            "the command's tools changed 1 source file(s) that were edited in the project while it ran; those changes were not applied"
+        ),
+        "{}",
+        run.stderr()
+    );
+    assert!(project.read("src/fee.js").contains("let rate = 5"));
+}
+
+#[test]
+fn a_repository_the_workspace_cannot_mirror_is_named_under_debug() {
+    let project = Project::empty("unmirrored");
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module" }"#,
+    );
+    project.write("src/cart.js", common::CART);
+    project.write("test/cart.test.js", common::CART_TESTS);
+    // A worktree whose repository is gone.
+    project.write(".git", "gitdir: /nonexistent/supercov/worktree\n");
+    let run = project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_DEBUG", "1")]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(
+        run.stderr()
+            .contains("the workspace has no git repository of its own"),
+        "{}",
+        run.stderr()
+    );
+    let quiet = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(quiet.code(), 0, "{}{}", quiet.stdout(), quiet.stderr());
+    assert!(!quiet.stderr().contains("no git repository of its own"));
+}
+
+#[test]
+fn settings_a_suite_chose_for_docker_and_playwright_reach_it_unchanged() {
+    // A daemon reached over TCP has no socket to relay, and a Playwright
+    // cache someone chose is theirs.
+    let project = Project::cart("chosen-settings");
+    project.write(
+        "test/environment.test.js",
+        "import { test } from 'node:test';\nimport { equal } from 'node:assert/strict';\ntest('settings', () => {\n  equal(process.env.DOCKER_HOST, 'tcp://127.0.0.1:2375');\n  equal(process.env.PWTEST_CACHE_DIR, '/tmp/chosen-playwright-cache');\n});\n",
+    );
+    let run = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            ("DOCKER_HOST", "tcp://127.0.0.1:2375"),
+            ("PWTEST_CACHE_DIR", "/tmp/chosen-playwright-cache"),
+        ],
+    );
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(run.stdout().contains("pass 4"), "{}", run.stdout());
+}

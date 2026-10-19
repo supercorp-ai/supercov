@@ -13290,4 +13290,17 @@ mod tests {
         );
         assert!(analyze_candidate(&output.code, "src/size.ts").is_ok());
     }
+
+    #[test]
+    fn a_block_comment_put_back_mid_line_is_set_apart_from_the_code_before_it() {
+        // The printer drops a comment that opens a template's substitution;
+        // put back right after `${`, it gets a space of its own.
+        let source = "export const s = `\n  ${/* inside */ value}`;\n";
+        let output = instrument_direct_candidate(source, "src/a.js").unwrap();
+        assert!(
+            output.code.contains("${ /* inside */ value}"),
+            "{}",
+            output.code
+        );
+    }
 }

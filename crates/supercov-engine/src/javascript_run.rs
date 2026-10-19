@@ -325,9 +325,6 @@ struct RunCleanup {
     workspace: Option<PathBuf>,
     state_written: bool,
     terminal_recorded: bool,
-    /// Leave the instrumented copy in place: its build failed, and what the
-    /// build read is the only evidence of why.
-    keep_workspace: bool,
 }
 
 impl RunCleanup {
@@ -370,8 +367,8 @@ impl Drop for RunCleanup {
                     .join(".supercov/server-evidence")
                     .join(&self.run_id),
             );
-            let keep_workspace = self.keep_workspace
-                || std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
+            let keep_workspace =
+                std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
             if !keep_workspace {
                 let _ = prune_cached_workspace_sources(&self.root, &self.lock);
             }
@@ -545,7 +542,6 @@ pub fn run_direct_javascript(
         workspace: None,
         state_written: false,
         terminal_recorded: false,
-        keep_workspace: false,
     };
     let recovered_runs =
         recover_abandoned_runs(&root, &started_at).map_err(|error| error.to_string())?;
@@ -923,19 +919,17 @@ pub fn run_direct_javascript(
     #[cfg(unix)]
     let docker_state = root.join(".supercov/work").join(&run_id).join("docker");
     #[cfg(unix)]
-    let mut docker_proxy = if !project.source_files.is_empty() || !servers.is_empty() {
-        start_docker_relay(
-            &root,
-            &workspace,
-            &docker_state,
-            &servers,
-            &environment,
-            &mut overrides,
-            diagnostics,
-        )?
-    } else {
-        None
-    };
+    // There is JavaScript source or a server here: a run with neither ended
+    // above.
+    let mut docker_proxy = start_docker_relay(
+        &root,
+        &workspace,
+        &docker_state,
+        &servers,
+        &environment,
+        &mut overrides,
+        diagnostics,
+    )?;
     // What bootstrap.cjs installs in a process that runs the workspace without
     // these settings: one started in a container or VM the workspace is
     // mounted into. It moves `root` to where it sees the workspace from.
