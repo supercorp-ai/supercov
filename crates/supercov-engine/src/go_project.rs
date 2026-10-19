@@ -909,6 +909,57 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// `use(` opens a block as `use (` does, `use .` is the root module,
+    /// and a trailing slash or an empty entry adds nothing of its own.
+    #[test]
+    fn workspace_entries_are_read_in_every_spelling() {
+        let root = fixture("go-work-spellings");
+        fs::write(
+            root.join("go.work"),
+            "go 1.22\nuse(\n\t./a/\n)\nuse .\nuse ./\n",
+        )
+        .unwrap();
+        assert_eq!(
+            workspace_modules(&root).into_iter().collect::<Vec<_>>(),
+            [".", "a"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Only a plain `ignore` term, or a lone pre-1.17 option holding it, is
+    /// read as never built.
+    #[test]
+    fn grouped_and_alternative_constraints_are_not_read_as_ignored() {
+        assert!(!build_ignored("//go:build (ignore)\n\npackage p\n"));
+        assert!(!build_ignored("// +build linux,amd64\n\npackage p\n"));
+        assert!(!build_ignored(
+            "// +build ignore,linux darwin\n\npackage p\n"
+        ));
+    }
+
+    /// Generics need Go 1.18: a module that declares less, or a file built
+    /// only for less, has none; one that says nothing is taken as 1.16.
+    #[test]
+    fn generics_follow_the_module_and_the_file_s_constraint() {
+        let root = fixture("go-generics");
+        let source = |constraint: &str| format!("{constraint}\n\npackage p\n");
+        fs::write(root.join("go.mod"), "module m\n\ngo 1.21\n").unwrap();
+        assert!(has_generics(&root, "p.go", &source("")));
+        assert!(!has_generics(&root, "p.go", &source("//go:build go1.16")));
+        assert!(has_generics(
+            &root,
+            "p.go",
+            &source("//go:build !go1.17 && linux")
+        ));
+        fs::write(root.join("go.mod"), "module m\n\ngo 1.17\n").unwrap();
+        assert!(!has_generics(&root, "p.go", &source("")));
+        fs::write(root.join("go.mod"), "module m\n").unwrap();
+        assert!(!has_generics(&root, "p.go", &source("")));
+        fs::remove_file(root.join("go.mod")).unwrap();
+        assert!(!has_generics(&root, "sub/p.go", &source("")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_workspace_names_the_modules_it_uses() {
         // go.work writes `use` either inline or as a block, with comments and
