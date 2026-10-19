@@ -1565,6 +1565,53 @@ fn integration_choice() {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A backslash not before a space is part of the path, and the empty
+    /// word between two spaces is no path; a path is confined to its root;
+    /// and the runtime's module takes the first name no source already uses.
+    #[test]
+    fn depinfo_paths_confined_paths_and_the_runtime_s_name() {
+        let mut compiled = BTreeSet::new();
+        collect_depinfo_sources("t: src\\x.rs  src/y.rs\n", Path::new("/w"), &mut compiled);
+        // Kept, and written with `/` as every path is.
+        assert_eq!(
+            compiled.into_iter().collect::<Vec<_>>(),
+            ["src/x.rs", "src/y.rs"]
+        );
+        let root = Path::new("/w");
+        assert_eq!(
+            confined_relative(root, Path::new("/w/src/a.rs")).unwrap(),
+            "src/a.rs"
+        );
+        for refused in ["/w", "/x/a.rs", "/w/../x"] {
+            assert!(
+                confined_relative(root, Path::new(refused)).is_err(),
+                "{refused}"
+            );
+        }
+        let sources = |texts: &[&str]| {
+            texts
+                .iter()
+                .enumerate()
+                .map(|(at, text)| (format!("src/{at}.rs"), (*text).to_owned()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            runtime_module_name(&sources(&["fn a() {}"])),
+            "__supercov_runtime_v1"
+        );
+        assert_eq!(
+            runtime_module_name(&sources(&["mod __supercov_runtime_v1;"])),
+            "__supercov_runtime_v1_1"
+        );
+        assert_eq!(
+            runtime_module_name(&sources(&[
+                "__supercov_runtime_v1",
+                "__supercov_runtime_v1_1"
+            ])),
+            "__supercov_runtime_v1_2"
+        );
+    }
+
     /// Depinfo names every source of every rule, a space escaped; only
     /// workspace `.rs` files count, and a directory with no depinfo says
     /// nothing at all.
