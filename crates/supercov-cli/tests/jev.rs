@@ -2585,3 +2585,78 @@ fn an_assessment_where_nothing_fires_reads_as_such_in_every_view() {
         ],
     );
 }
+
+/// A diff of two assessments compares the files both assessed, lists what
+/// declined, improved, was added and removed in either direction, says when
+/// an unchanged file moved by the model's own variation, and names a
+/// snapshot asked twice, missing or unknown.
+#[test]
+fn a_quality_diff_reads_in_either_direction_and_names_its_mistakes() {
+    let project = Project::cart("quality-diff");
+    let (no, _) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["quality"], &through(&no))
+        .succeeds();
+    project.write("src/extra.js", "export const extra = (x) => x ? 1 : 2;\n");
+    project.commit("extra");
+    let (yes, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["quality", "--refresh"], &through(&yes))
+        .succeeds();
+    let list: serde_json::Value = serde_json::from_str(
+        &project
+            .supercov(&["quality", "snapshots", "--json"])
+            .stdout(),
+    )
+    .unwrap();
+    let ids = list["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|snapshot| snapshot["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let (newer, older) = (&ids[0], &ids[1]);
+    let declined = project
+        .supercov(&["quality", "diff", older, newer])
+        .succeeds();
+    contains_all(
+        &declined,
+        &[
+            "Health good (9.0) to weak (1.0).",
+            "compare the 1 file both assessed",
+            "1 declined, 0 improved, 0 unchanged, 1 added, 0 removed.",
+            "12 properties appeared that were not there before.",
+            "complex_conditional  0.10 → 0.90, appeared",
+            "the file did not change, so this is the model's own variation",
+            "weak  src/extra.js",
+        ],
+    );
+    let improved = project
+        .supercov(&["quality", "diff", newer, older])
+        .succeeds();
+    contains_all(
+        &improved,
+        &[
+            "0 declined, 1 improved, 0 unchanged, 0 added, 1 removed.",
+            "0.90 → 0.10, no longer present",
+            "Removed:\n  src/extra.js",
+        ],
+    );
+    for (args, message) in [
+        (
+            vec!["quality", "diff", newer.as_str(), newer.as_str()],
+            "is the same snapshot twice",
+        ),
+        (
+            vec!["quality", "diff", newer.as_str()],
+            "requires a second snapshot",
+        ),
+        (
+            vec!["quality", "diff", newer.as_str(), "q_nope"],
+            "not a snapshot id: q_nope",
+        ),
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(refused.contains(message), "{args:?}: {refused}");
+    }
+}
