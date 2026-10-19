@@ -1836,6 +1836,36 @@ mod replacement_tests {
         assert_eq!(replacement("|x| x == 1", None), "Default::default()");
     }
 
+    /// An empty string built any way becomes a non-empty one, a suffixed or
+    /// grouped integer becomes zero of its kind, a negation or comparison is
+    /// negated, a vector of anything becomes an empty one, and an empty
+    /// tuple option takes a value.
+    #[test]
+    fn more_shapes_are_replaced_by_values_that_differ() {
+        for (expr, ty, expected) in [
+            (
+                "\"\".to_owned()",
+                Some("String"),
+                "String::from(\"supercov\")",
+            ),
+            (
+                "\"\".to_string()",
+                Some("String"),
+                "String::from(\"supercov\")",
+            ),
+            ("String::new()", None, "String::from(\"supercov\")"),
+            ("5usize", None, "0usize"),
+            ("1_000", None, "0"),
+            ("!flag", Some("bool"), "!(!flag)"),
+            ("a != b", Some("bool"), "!(a != b)"),
+            ("vec![Some(1), None]", Some("Vec<Option<u8>>"), "Vec::new()"),
+            ("None", Some("Option<(u8, u8)>"), "Some(Default::default())"),
+            ("(1, true)", Some("(u8, bool)"), "Default::default()"),
+        ] {
+            assert_eq!(replacement(expr, ty), expected, "{expr} {ty:?}");
+        }
+    }
+
     /// Every shape `replacement` reads, typed and untyped: the value it
     /// gives is of the same type and never the same value.
     #[test]
