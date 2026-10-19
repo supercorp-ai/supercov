@@ -10356,6 +10356,57 @@ mod tests {
         }
     }
 
+    /// More shapes the instrumenter reads: optional links in every
+    /// position, negations of literals and names, template literals with and
+    /// without substitutions, `String()` with and without an argument,
+    /// route modules of each framework, names its helpers must step around,
+    /// and StyleX's compile-time and runtime calls. Each instruments to
+    /// source that parses again.
+    #[test]
+    fn more_shapes_instrument_to_source_that_parses() {
+        for (file, source) in [
+            (
+                "src/m.js",
+                "const a = {}, k = 'x';\nexport const r = [a?.b.c, a.b?.c(), a?.[k], a?.b?.(), -k, -1, `t`, `${k}`, String(), String(a)];\n",
+            ),
+            (
+                "app/routes/y.tsx",
+                "export const loader = async () => null;\nexport async function action() { return null; }\nexport function meta() { return []; }\n",
+            ),
+            (
+                "app/api/x/route.ts",
+                "export async function GET() { return new Response('x'); }\nexport async function helper() { return 1; }\n",
+            ),
+            (
+                "app/entry.server.tsx",
+                "export default function handleRequest(): number { return 1; }\n",
+            ),
+            (
+                "src/under.js",
+                "const _a = 1, __b = 2, a$1 = 3;\nexport function f(_) { return _ ? _a : __b + a$1; }\n",
+            ),
+            (
+                "src/style.js",
+                "import * as stylex from '@stylexjs/stylex';\nexport const s = stylex.create({ a: { color: 'red' } });\nexport const k = stylex.keyframes({ from: { opacity: 0 } });\nexport const p = (x) => stylex.props(x);\n",
+            ),
+        ] {
+            let out = instrument_candidate(source, file)
+                .unwrap_or_else(|error| panic!("{file}: {error:?}\n{source}"));
+            assert!(!out.code.is_empty(), "{file}");
+        }
+        for (source, assertions) in [
+            ("test('g', () => { expect(1).toBe(1); check(2); });\n", 1),
+            (
+                "const assert = require('assert');\ntest('h', () => { assert.ok(1); });\n",
+                1,
+            ),
+        ] {
+            let out = instrument_node_assertion_phases(source, "tests/y.test.mjs")
+                .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+            assert_eq!(out.assertions, assertions, "{source}\n{}", out.code);
+        }
+    }
+
     /// Text edits are refused where they overlap, run past the source,
     /// are reversed, or would add or remove a line.
     #[test]
