@@ -3011,6 +3011,76 @@ mod tests {
 
     use super::*;
 
+    /// The names instrumentation generated in `code`, other than the
+    /// runtime's.
+    fn generated_names(code: &str) -> BTreeSet<String> {
+        SourceFile::parse(code, Edition::Edition2024)
+            .tree()
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == SyntaxKind::IDENT)
+            .map(|token| token.text().to_owned())
+            .filter(|name| {
+                name.to_ascii_lowercase().starts_with("__supercov_")
+                    && !name.starts_with("__supercov_runtime")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_generated_name_the_source_already_uses_is_numbered_past_it() {
+        let source = concat!(
+            "pub fn f(o: Option<i32>, mut items: std::vec::IntoIter<i32>, n: i32) -> i32 {\n",
+            "    let mut total = 0;\n",
+            "    if let Some(x) = o && x > 0 { total += x; }\n",
+            "    while let Some(y) = items.next() { total += y; }\n",
+            "    let mut k = n;\n",
+            "    while k > 0 { k -= 1; }\n",
+            "    match n { 0 => total, _ => total + 1 }\n",
+            "}\n",
+        );
+        let runtime = "crate::__supercov_runtime_v1";
+        let first = instrument_rust_file("src/lib.rs", source, runtime, false, None).unwrap();
+        let names = generated_names(&first.code);
+        for kind in ["decision", "ARMS", "CHAIN", "loop", "broke"] {
+            assert!(
+                names.iter().any(|name| name
+                    .to_ascii_lowercase()
+                    .contains(&kind.to_ascii_lowercase())),
+                "{kind}: {names:?}"
+            );
+        }
+        // Each of them already taken, after the code that asks for it, so
+        // its place and so its stable name are unchanged.
+        let taken = names
+            .iter()
+            .map(|name| format!("pub fn {name}() {{}}\n"))
+            .collect::<String>();
+        let second = instrument_rust_file(
+            "src/lib.rs",
+            &format!("{source}{taken}"),
+            runtime,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            SourceFile::parse(&second.code, Edition::Edition2024)
+                .errors()
+                .is_empty(),
+            "{}",
+            second.code
+        );
+        let renamed = generated_names(&second.code);
+        for name in &names {
+            assert!(
+                renamed.contains(&format!("{name}_1")),
+                "{name}: {renamed:?}"
+            );
+        }
+    }
+
     /// A limitation's kind: its ID without the file that scopes it.
     fn limitation_kind_of(limitation: &serde_json::Value) -> Option<&str> {
         limitation.get("id")?.as_str()?.split('#').next()
