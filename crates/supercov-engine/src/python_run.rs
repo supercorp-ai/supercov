@@ -626,7 +626,11 @@ impl PythonServer {
         else {
             return Ok(None);
         };
-        let project = prepare_python_project(root, roots.as_ref())?;
+        let Some(project) =
+            crate::python_project::prepare_python_server_project(root, roots.as_ref())?
+        else {
+            return Ok(None);
+        };
         if project.plan.files.is_empty() {
             return Ok(None);
         }

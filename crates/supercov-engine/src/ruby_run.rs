@@ -469,7 +469,10 @@ impl RubyServer {
         else {
             return Ok(None);
         };
-        let project = prepare_ruby_project(root, roots.as_ref())?;
+        let Some(project) = crate::ruby_project::prepare_ruby_server_project(root, roots.as_ref())?
+        else {
+            return Ok(None);
+        };
         if project.plan.files.is_empty() {
             return Ok(None);
         }

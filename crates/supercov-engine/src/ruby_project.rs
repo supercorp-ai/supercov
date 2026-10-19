@@ -171,10 +171,31 @@ pub fn prepare_ruby_project(
     root: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedRubyProject, String> {
+    prepare(root, roots, false).map(|project| project.expect("refused when empty"))
+}
+
+/// The Ruby a browser suite's server runs, or None where the source roots
+/// leave none: roots named for the suite's JavaScript mean there is no Ruby
+/// server to measure, not a mistake.
+pub fn prepare_ruby_server_project(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<Option<PreparedRubyProject>, String> {
+    prepare(root, roots, true)
+}
+
+fn prepare(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    server: bool,
+) -> Result<Option<PreparedRubyProject>, String> {
     let mut files = discover_ruby_files(root)?;
     match roots {
         Some(roots) => {
             roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+            if server && files.sources.is_empty() {
+                return Ok(None);
+            }
             roots.refuse_if_empty(files.sources.len(), "Ruby")?;
         }
         None => crate::source_discovery::leave_out_what_lies_beside(
@@ -302,13 +323,13 @@ pub fn prepare_ruby_project(
     if mentions_ractors(root, &files) {
         plan.use_ractor_safe_receiver();
     }
-    Ok(PreparedRubyProject {
+    Ok(Some(PreparedRubyProject {
         root: root.to_owned(),
         plan,
         manifest,
         files,
         unparseable,
-    })
+    }))
 }
 
 /// Whether any of the project's Ruby, its tests included, mentions Ractors:
@@ -405,6 +426,24 @@ mod tests {
         let named =
             prepare_ruby_project(&root, Some(&explicit_roots(&root, &["examples"]))).unwrap();
         assert_eq!(named.files.sources, ["examples/usage.rb"]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn roots_named_for_a_browser_suites_javascript_mean_no_ruby_server() {
+        let root = fixture("roots-name-javascript");
+        write(&root, "src/app.js", "export const x = 1;\n");
+        write(&root, "app.rb", "def f\n  1\nend\n");
+        let roots = explicit_roots(&root, &["src"]);
+        assert!(
+            prepare_ruby_server_project(&root, Some(&roots))
+                .unwrap()
+                .is_none()
+        );
+        // Asked to measure Ruby itself, the same roots are a mistake.
+        let error = prepare_ruby_project(&root, Some(&roots)).unwrap_err();
+        assert!(error.contains("left no Ruby source"), "{error}");
+        assert!(prepare_ruby_server_project(&root, None).unwrap().is_some());
         fs::remove_dir_all(root).ok();
     }
 
