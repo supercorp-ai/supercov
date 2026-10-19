@@ -9541,3 +9541,62 @@ fn a_comparison_of_runs_that_measure_different_code_says_why_the_percentages_mov
         ],
     );
 }
+
+#[test]
+fn a_patch_counts_new_files_and_reads_only_the_tests_a_filter_picks() {
+    let project = Project::cart("patch-filtered");
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    project.write("README.md", "# readme\n");
+    project.write("src/fresh.js", "export const fresh = 1;\n");
+    project.measure(&[]);
+    // A file git does not track yet is part of the change; prose is not
+    // executable and is no part of the count.
+    let patch = project
+        .supercov(&["runs", "latest", "patch", "--base", "HEAD"])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "  1 of 2 changed executable line(s) covered (50.00%)",
+            "  src/fresh.js: 1",
+        ],
+    );
+    assert!(!patch.contains("README"), "{patch}");
+    let filtered = project.supercov(&[
+        "runs",
+        "latest",
+        "patch",
+        "--base",
+        "HEAD",
+        "--title",
+        "coupon",
+        "--min-lines",
+        "90",
+    ]);
+    assert_eq!(filtered.code(), 1);
+    assert!(
+        filtered.stdout().ends_with("FAIL: below 90%\n"),
+        "{}",
+        filtered.stdout()
+    );
+    assert!(
+        filtered
+            .stderr()
+            .contains("reading only the tests --title coupon picks")
+    );
+    let none = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "patch",
+            "--base",
+            "HEAD",
+            "--test-file",
+            "test/none.js",
+        ])
+        .exits(2);
+    assert!(
+        none.contains("no test of the run matches --test-file test/none.js"),
+        "{none}"
+    );
+}
