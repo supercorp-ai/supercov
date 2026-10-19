@@ -2638,7 +2638,7 @@ fn mark_tests_that_import_no_measured_source(
 }
 
 /// A run against the checkout as it is now (`compare_with_checkout`).
-fn checkout_comparison(
+pub(crate) fn checkout_comparison(
     root: &Path,
     run: &StoredRun,
 ) -> supercov_engine::run_store::IntegrityComparison {

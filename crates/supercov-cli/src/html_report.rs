@@ -16,7 +16,7 @@ use supercov_engine::{
         CoverageFileDetailOptions, CoverageScopeQueryOptions, CoverageSummaryQueryOptions,
         FileDetailSource, coverage_file_detail_from, coverage_scope_query, coverage_summary_query,
     },
-    run_store::{StoredRun, compare_run_integrity, select_run},
+    run_store::{StoredRun, select_run},
 };
 
 use crate::{current_integrity_for_run, full_suite_hints, public_run_inventory};
@@ -393,16 +393,12 @@ fn build_run(
     let source_exact = current_integrity.as_ref().is_some_and(|current| {
         current.fingerprint.source == run.metadata.integrity.fingerprint.source
     });
-    let comparison = current_integrity
-        .as_ref()
-        .map(|current| compare_run_integrity(Some(&run.metadata.integrity), current));
-    let stale = comparison.as_ref().is_some_and(|value| value.stale)
-        || run.metadata.integrity.stale.unwrap_or(false);
-    let stale_reasons = comparison
-        .as_ref()
-        .map(|value| value.reasons.clone())
-        .or_else(|| run.metadata.integrity.stale_reasons.clone())
-        .unwrap_or_default();
+    let comparison = supercov_engine::run_store::compare_with_checkout(
+        &run.metadata.integrity,
+        current_integrity.as_ref(),
+    );
+    let stale = comparison.stale || run.metadata.integrity.stale.unwrap_or(false);
+    let stale_reasons = comparison.reasons;
     let container = match crate::open_query_index_for(run, filter) {
         Ok(container) => container,
         Err(supercov_engine::run_store::RunIndexError::Report(

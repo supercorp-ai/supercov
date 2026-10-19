@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt::Write, process::ExitCode};
 use supercov_engine::{
     agent_json,
-    run_store::{StoredRun, compare_run_integrity, discover_runs, select_run},
+    run_store::{StoredRun, discover_runs, select_run},
     source_manifest,
 };
 
@@ -117,13 +117,8 @@ fn parse(args: &[String]) -> Result<(String, usize, usize), String> {
 }
 
 fn working_tree(root: &std::path::Path, run: &StoredRun) -> Value {
-    match super::current_integrity_for_run(root, run) {
-        Some(current) => {
-            let comparison = compare_run_integrity(Some(&run.metadata.integrity), &current);
-            json!({"stale": comparison.stale, "reasons": comparison.reasons})
-        }
-        None => json!({"stale": null, "reason": "current source integrity unavailable"}),
-    }
+    let comparison = super::checkout_comparison(root, run);
+    json!({"stale": comparison.stale, "reasons": comparison.reasons})
 }
 
 fn quote(value: &str) -> String {

@@ -10428,6 +10428,12 @@ fn a_run_whose_source_is_gone_is_stale_and_never_passes_a_gate() {
             .succeeds()
             .contains(&format!("STALE ({reason})"))
     );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "tests", "affected"])
+            .succeeds(),
+        &["3 of 3 tests affected", &format!("{reason} (every test)")],
+    );
 }
 
 #[test]

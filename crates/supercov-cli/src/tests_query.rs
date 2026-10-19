@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, process::ExitCode};
 use supercov_engine::{
     agent_json,
-    run_store::{StoredRun, compare_run_integrity, discover_runs, select_run},
+    run_store::{StoredRun, discover_runs, select_run},
     source_manifest as maps,
 };
 
@@ -61,13 +61,14 @@ Also: supercov runs <run> tests without-evidence
 
 /// Working-tree differences the per-test record cannot see: every test is
 /// affected by them.
-const RUN_WIDE: [&str; 6] = [
+const RUN_WIDE: [&str; 7] = [
     "coverage schema changed",
     "instrumenter contract changed",
     "dependencies or lockfile changed",
     "test/build configuration changed",
     "execution environment changed",
     "run predates integrity fingerprints",
+    supercov_engine::run_store::SOURCE_UNMEASURABLE,
 ];
 
 pub fn command(args: &[String]) -> ExitCode {
@@ -699,10 +700,7 @@ fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
 /// run-wide difference makes every test affected; a source set that changed
 /// without any captured file changing means a file was added.
 fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
-    let Some(current) = super::current_integrity_for_run(root, run) else {
-        return json!({"stale": null, "reason": "current source integrity unavailable"});
-    };
-    let comparison = compare_run_integrity(Some(&run.metadata.integrity), &current);
+    let comparison = super::checkout_comparison(root, run);
     let run_wide = comparison
         .reasons
         .iter()
