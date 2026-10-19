@@ -205,6 +205,8 @@ pub enum QueryError {
         runner: Option<String>,
     },
     TestNotFound(String),
+    /// A test the run has that the view's filter, kind or runner leaves out.
+    TestNotInView(String),
     DecisionNotFound(String),
     SourceNotFound(String),
     /// A file the run's scope includes that holds nothing it measures: no
@@ -1327,7 +1329,19 @@ pub fn coverage_test_query(
         })
         .collect::<Vec<_>>();
     if matches.is_empty() {
-        return Err(QueryError::TestNotFound(options.selector.into()));
+        // A test the run has that this view leaves out is not missing.
+        let narrowed = options.view != CoverageViewId::All
+            || options.kind.is_some()
+            || options.runner.is_some();
+        let in_run = narrowed
+            && index.test_details(CoverageViewId::All)?.iter().any(|test| {
+                test.summary.id == selector || test.summary.name.to_lowercase().contains(&selector)
+            });
+        return Err(if in_run {
+            QueryError::TestNotInView(options.selector.into())
+        } else {
+            QueryError::TestNotFound(options.selector.into())
+        });
     }
     let filters = query_filters(options.view, options.kind, options.runner);
     if matches.len() > 1 {

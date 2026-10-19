@@ -321,6 +321,13 @@ impl IndexedQueryError {
                     format!("Test not found: {selector}"),
                     Some(json!({ "selector": selector })),
                 ),
+                QueryError::TestNotInView(selector) => (
+                    ErrorCode::TestNotFound,
+                    format!(
+                        "No test matching {selector} is in this view: the run has one, and --filter, --kind or --runner leaves it out"
+                    ),
+                    Some(json!({ "selector": selector, "inRun": true })),
+                ),
                 QueryError::DecisionNotFound(selector) => (
                     ErrorCode::DecisionNotFound,
                     format!("Decision not found: {selector}"),

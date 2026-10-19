@@ -33,6 +33,7 @@
 - `quality scope` and `security scope` printed the count of files left out for each reason as bare rows under the roots; they stand under a heading that says what they count.
 - A unittest test skipped by its decorator (`@unittest.skip`, `skipUnless`) was not counted, since it never reaches setUp or the test method; a suite of only such tests said "the Python run produced no test outcomes" and exited 1. Each is a skipped test.
 - `file <path>` warned that the run was stale whenever anything had changed, a new test included, although `line` and `decision` warn only when what they read changed; `file` does the same now.
+- `test <name>` under `--filter`, `--kind` or `--runner` said "Test not found" for a test the run has but the view leaves out; it says the test is in the run and the filter leaves it out.
 - `report` wrote its progress line, and the spaces that erase it, to standard error when that is a file or a pipe, so a CI log of a failed report began with 96 spaces; progress is drawn only on a terminal.
 - A Playwright run whose mock server loaded a file URL with a `%` before a non-ASCII character (`%a` then `é`) crashed while reading which tests the server reached; such a `%` is kept as written.
 - `assertions` and `assertions --weak` with an `--offset` past the last file printed the summary and no table; they say the offset is past the end.

@@ -9116,3 +9116,77 @@ fn a_file_query_warns_of_staleness_only_for_what_it_reads() {
         dependency.stderr()
     );
 }
+
+/// Asked for the failed attempts of a run that failed nothing, each view
+/// reads as that projection: nothing touched, nothing covered, a minimum of
+/// no tests, and a test the run has is named as left out by the filter
+/// rather than missing.
+#[test]
+fn a_failed_projection_of_a_passing_run_reads_as_empty_and_names_what_it_leaves_out() {
+    let project = Project::cart("failed-projection");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let file = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--filter",
+            "failed",
+        ])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "Tests touching this file: 0",
+            "showing 1-13 of 13 gap lines",
+        ],
+    );
+    let line = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:14",
+            "--filter",
+            "failed",
+        ])
+        .succeeds();
+    contains_all(&line, &["NOT COVERED", "Covering tests\n  None"]);
+    let decision = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "decision",
+            "src/cart.js:13",
+            "--filter",
+            "failed",
+        ])
+        .succeeds();
+    contains_all(&decision, &["confidence unexecuted", "vectors:\n  none"]);
+    let minimum = project
+        .supercov(&["runs", "latest", "minimize", "--filter", "failed"])
+        .succeeds();
+    assert!(minimum.contains("exact minimum 0/0 test(s)"), "{minimum}");
+    let left_out = project
+        .supercov(&["runs", "latest", "test", "total", "--filter", "failed"])
+        .exits(2);
+    assert!(
+        left_out.contains("No test matching total is in this view: the run has one"),
+        "{left_out}"
+    );
+    let missing = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "test",
+            "nothing-like-it",
+            "--filter",
+            "failed",
+        ])
+        .exits(2);
+    assert!(
+        missing.contains("Test not found: nothing-like-it"),
+        "{missing}"
+    );
+}
