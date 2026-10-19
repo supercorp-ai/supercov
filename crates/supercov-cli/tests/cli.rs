@@ -9190,3 +9190,137 @@ fn a_failed_projection_of_a_passing_run_reads_as_empty_and_names_what_it_leaves_
         "{missing}"
     );
 }
+
+/// `patch` counts the changed executable lines the run covered, fails a
+/// floor it misses, annotates up to the cap, passes an empty change, and
+/// names a base git cannot find; `check` passes and fails floors by count.
+#[test]
+fn patch_and_check_read_a_change_and_a_run_by_count() {
+    let unchanged = Project::cart("patch-empty");
+    unchanged.supercov(&["--", "node", "--test"]).succeeds();
+    let empty = unchanged
+        .supercov(&["runs", "patch", "--base", "HEAD", "--min-lines", "50"])
+        .succeeds();
+    contains_all(
+        &empty,
+        &[
+            "No executable changes.",
+            "PASS: nothing executable changed, so 50% does not apply.",
+        ],
+    );
+    let below = unchanged
+        .supercov(&["runs", "check", "--min-lines", "99"])
+        .exits(1);
+    contains_all(
+        &below,
+        &[
+            "(floor 99%)",
+            "FAIL: 1 floor(s) not met.",
+            "lines 76.92%  10/13 below 99%",
+        ],
+    );
+    let json = unchanged
+        .supercov(&["runs", "check", "--min-lines", "10", "--json"])
+        .json();
+    assert_eq!(json["data"]["outcome"]["result"], "pass", "{json}");
+
+    let changed = Project::cart("patch-changed");
+    changed.write("src/extra.js", "export const extra = (x) => x ? 1 : 2;\n");
+    changed.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    changed.supercov(&["--", "node", "--test"]).succeeds();
+    let patch = changed
+        .supercov(&["runs", "patch", "--base", "HEAD"])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "1 of 2 changed executable line(s) covered (50.00%)",
+            "src/extra.js: 1",
+        ],
+    );
+    let failed = changed
+        .supercov(&["runs", "patch", "--base", "HEAD", "--min-lines", "90"])
+        .exits(1);
+    assert!(failed.contains("FAIL: below 90%"), "{failed}");
+    let annotated = changed
+        .supercov(&[
+            "runs",
+            "patch",
+            "--base",
+            "HEAD",
+            "--annotate",
+            "github",
+            "--max-annotations",
+            "1",
+        ])
+        .succeeds();
+    assert!(
+        annotated.contains("::warning file=src/extra.js,line=1,endLine=1::Changed line 1 not covered by the selected tests."),
+        "{annotated}"
+    );
+    let json = changed
+        .supercov(&["runs", "patch", "--base", "HEAD", "--json"])
+        .json();
+    assert_eq!(
+        (
+            json["data"]["patch"]["covered"].as_u64(),
+            json["data"]["patch"]["eligible"].as_u64()
+        ),
+        (Some(1), Some(2))
+    );
+    let base = changed
+        .supercov(&["runs", "patch", "--base", "nope"])
+        .exits(2);
+    assert!(
+        base.contains("Could not find where this branch left nope"),
+        "{base}"
+    );
+}
+
+/// Many failing tests are named five at a time; a run of one test script
+/// names the others the package defines.
+#[test]
+fn failures_are_named_five_at_a_time_and_other_scripts_are_offered() {
+    let failing = Project::cart("many-failing");
+    let mut tests = String::from(
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\n",
+    );
+    for i in 0..7 {
+        tests.push_str(&format!(
+            "test(\"fails {i}\", () => {{ assert.equal(total([]), {}); }});\n",
+            i + 1
+        ));
+    }
+    failing.write("test/fail.test.js", &tests);
+    failing.commit("failing");
+    let ran = failing.supercov(&["--", "node", "--test", "test/fail.test.js"]);
+    assert_eq!(ran.code(), 1);
+    assert!(
+        ran.stderr()
+            .contains("7 test(s) failed: fails 0, fails 1, fails 2, fails 3, fails 4, and 2 more"),
+        "{}",
+        ran.stderr()
+    );
+    let scripts = Project::cart("other-scripts");
+    scripts.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test", "test:unit": "node --test test/cart.test.js", "test:e2e": "node --test" } }"#,
+    );
+    scripts.commit("scripts");
+    scripts
+        .supercov(&["--", "npm", "run", "test:unit"])
+        .succeeds();
+    let one = scripts.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        one.contains("wrapped `npm run test:unit`. Other test scripts include test:e2e."),
+        "{one}"
+    );
+    scripts
+        .supercov(&["--", "npm", "exec", "--", "node", "--test"])
+        .succeeds();
+    let exec = scripts.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        exec.contains("Other test scripts include test:unit, test:e2e."),
+        "{exec}"
+    );
+}

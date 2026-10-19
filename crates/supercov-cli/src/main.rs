@@ -1050,10 +1050,9 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     let mut index = 0;
     // `runs <id> check ...`; the id may be absent, meaning the latest run.
     let rest = &arguments[1..];
-    if let Some(first) = arguments.first()
-        && first != "check"
-    {
-        selector = Some(first.as_str());
+    // Dispatch put the word first or second, so there is a first argument.
+    if arguments[0] != "check" {
+        selector = Some(arguments[0].as_str());
     }
     while index < rest.len() {
         let argument = rest[index].as_str();
@@ -1362,10 +1361,9 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
     let mut json = false;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
-    if let Some(first) = arguments.first()
-        && first != "patch"
-    {
-        selector = Some(first.as_str());
+    // Dispatch put the word first or second, so there is a first argument.
+    if arguments[0] != "patch" {
+        selector = Some(arguments[0].as_str());
     }
     let rest = &arguments[1..];
     let mut index = 0;
@@ -1785,10 +1783,9 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     let mut force = false;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
-    if let Some(first) = arguments.first()
-        && first != "report"
-    {
-        selector = Some(first.as_str());
+    // Dispatch put the word first or second, so there is a first argument.
+    if arguments[0] != "report" {
+        selector = Some(arguments[0].as_str());
     }
     let rest = &arguments[1..];
     let mut index = 0;
