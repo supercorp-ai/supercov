@@ -568,6 +568,74 @@ mod tests {
     }
     use serde_json::json;
 
+    /// What a run's archive says it ran, read from its own entries or, in a
+    /// merge, each shard's: a support record of another shape, a declaration
+    /// that names no runners and an entry that is not JSON say nothing.
+    #[test]
+    fn what_a_run_ran_is_read_from_its_entries_or_its_shards() {
+        let entry = |path: &str, contents: Value| EvidenceArchiveEntry {
+            path: path.into(),
+            contents: serde_json::to_vec(&contents).unwrap(),
+        };
+        let entries = [
+            entry(
+                "shards/0/frontend.json",
+                json!({"runners": [{"runner": "vitest"}, {"runner": "background"}]}),
+            ),
+            entry("shards/1/frontend.json", json!({"language": "javascript"})),
+            entry("shards/1/support-reach.json", json!(["not", "a", "reach"])),
+            entry(
+                "shards/1/manifest.json",
+                json!({"scope": {"entries": [
+                    {"file": "src/a.js", "status": "included"},
+                    {"file": "test/a.js", "status": "excluded"}
+                ]}}),
+            ),
+            EvidenceArchiveEntry {
+                path: "shards/2/playwright-configuration.json".into(),
+                contents: b"not json".to_vec(),
+            },
+        ];
+        let merged = Ran::from_entries(&entries, true);
+        assert_eq!(merged.runners, Some(BTreeSet::from(["vitest".to_owned()])));
+        assert_eq!(
+            merged.measured,
+            Some(BTreeSet::from(["src/a.js".to_owned()]))
+        );
+        assert!(merged.support.is_none());
+        assert!(merged.playwright.is_none());
+        // Read as one run's, a shard's entries are none of its own.
+        let single = Ran::from_entries(&entries, false);
+        assert!(single.runners.is_none() && single.measured.is_none());
+    }
+
+    /// A run whose tests include a file Supercov reads no imports from, or
+    /// that names no test file, has no answer to what its tests load.
+    #[test]
+    fn what_tests_load_is_unknown_past_a_file_whose_imports_are_not_read() {
+        let tests = BTreeSet::new();
+        let checkout = Checkout::new(Path::new("/nonexistent"), &tests);
+        let own = |files: &[&str]| files.iter().map(|file| (*file).to_owned()).collect();
+        assert!(checkout.loads(&own(&[]), None, &[]).is_none());
+        assert!(
+            checkout
+                .loads(&own(&["test/a.test.js", "test/data.json"]), None, &[])
+                .is_none()
+        );
+        assert!(
+            checkout
+                .loads(&own(&["test/a.test.js"]), None, &[])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn an_unnamed_playwright_project_that_is_gone_is_said_to_be_removed() {
+        let then = json!({"projects": [{"use": {"baseURL": "http://127.0.0.1:3000"}}]});
+        let now = json!({"projects": [{"name": "chromium", "use": {}}]});
+        assert_eq!(playwright_differences(&then, &now), ["removed"]);
+    }
+
     #[test]
     fn scheduling_settings_do_not_change_what_a_test_reaches() {
         let then = json!({
