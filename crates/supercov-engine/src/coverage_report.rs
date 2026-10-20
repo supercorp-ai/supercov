@@ -1529,6 +1529,19 @@ pub fn blocking_limitation(limitation: &Value) -> bool {
         .unwrap_or(true)
 }
 
+/// The observation a snapshot or a server record made of `vector` for
+/// decision `id`, if one did: `vector_indexes` numbers each decision's
+/// observations as `vectors_by_decision` holds them.
+fn observation_of<'o>(
+    vector_indexes: &FastMap<String, FastMap<String, usize>>,
+    vectors_by_decision: &'o mut FastMap<String, Vec<MutableObservation>>,
+    id: &str,
+    vector: &McdcVector,
+) -> Option<&'o mut MutableObservation> {
+    let index = *vector_indexes.get(id)?.get(&vector_key(vector))?;
+    vectors_by_decision.get_mut(id)?.get_mut(index)
+}
+
 fn hash_slot<'m, V: Default, S: std::hash::BuildHasher>(
     map: &'m mut HashMap<String, V, S>,
     key: &str,
@@ -1773,38 +1786,34 @@ fn confidence_from(
     tests: &Reached,
     phases: &Reached,
     explicit: &Reached,
-    test_traits: &[Option<TestTraits<'_>>],
-    phase_kinds: &[Option<&str>],
-    explicit_kinds: &[Option<&str>],
+    test_traits: &[TestTraits<'_>],
+    phase_kinds: &[&str],
+    explicit_kinds: &[&str],
 ) -> CoverageConfidence {
-    let mut has_test = false;
+    let has_test = !tests.numbers.is_empty();
     let mut setup_roles = true;
     let mut background_roles = true;
     let mut runners = BTreeSet::new();
     let mut kinds = BTreeSet::new();
     for number in &tests.numbers {
-        if let Some(test) = &test_traits[*number as usize] {
-            has_test = true;
-            setup_roles &= test.setup;
-            background_roles &= test.background;
-            runners.insert(test.runner);
-            kinds.insert(test.kind);
-        }
+        let test = &test_traits[*number as usize];
+        setup_roles &= test.setup;
+        background_roles &= test.background;
+        runners.insert(test.runner);
+        kinds.insert(test.kind);
     }
-    let mut has_phase = false;
+    let has_phase = !phases.numbers.is_empty();
     let mut setup_phases = true;
     let mut background_phases = true;
     for number in &phases.numbers {
-        if let Some(kind) = phase_kinds[*number as usize] {
-            has_phase = true;
-            setup_phases &= kind == "setup";
-            background_phases &= kind == "background";
-        }
+        let kind = phase_kinds[*number as usize];
+        setup_phases &= kind == "setup";
+        background_phases &= kind == "background";
     }
     let has_action = explicit
         .numbers
         .iter()
-        .any(|number| explicit_kinds[*number as usize] == Some("action"));
+        .any(|number| explicit_kinds[*number as usize] == "action");
     let level = if tests.names.is_empty() {
         "unexecuted"
     } else if has_action {
@@ -2049,13 +2058,8 @@ fn create_coverage_view_with_model(
                         .as_ref()
                         .ok_or_else(|| ReportError::InvalidEvent(event.id.clone()))?;
                     tree_slot(&mut phase.decisions, &event.id).insert(vector);
-                    if let Some(index) = vector_indexes
-                        .get(&event.id)
-                        .and_then(|indexes| indexes.get(&vector_key(vector)))
-                        .copied()
-                        && let Some(observation) = vectors_by_decision
-                            .get_mut(&event.id)
-                            .and_then(|observations| observations.get_mut(index))
+                    if let Some(observation) =
+                        observation_of(&vector_indexes, &mut vectors_by_decision, &event.id, vector)
                     {
                         observation.phases.push(phases_by_hit.number(phase_id, ids));
                         if explicit {
@@ -2098,13 +2102,8 @@ fn create_coverage_view_with_model(
                     let id = &decision.meta.id;
                     for vector in &decision.vectors {
                         tree_slot(&mut phase.decisions, id).insert(vector);
-                        if let Some(index) = vector_indexes
-                            .get(id)
-                            .and_then(|indexes| indexes.get(&vector_key(vector)))
-                            .copied()
-                            && let Some(observation) = vectors_by_decision
-                                .get_mut(id)
-                                .and_then(|observations| observations.get_mut(index))
+                        if let Some(observation) =
+                            observation_of(&vector_indexes, &mut vectors_by_decision, id, vector)
                         {
                             observation.phases.push(phases_by_hit.number(phase_id, ids));
                             observation
@@ -2206,36 +2205,32 @@ fn create_coverage_view_with_model(
                 phase.inferred_events += 1;
                 phase.inferred_server_events += 1;
             }
-            if event.event_type == "hit" {
+            // A record is a hit or a decision, and only a decision carries a
+            // vector.
+            let Some(vector) = &event.vector else {
                 let hit = hit_ids.number(&event.id, ids);
                 phase.hits.push(hit);
                 phases_by_hit.add(hit, &phase_id, ids);
                 if explicit {
                     explicit_phases_by_hit.add(hit, &phase_id, ids);
                 }
-            } else if let Some(vector) = &event.vector {
-                phase
-                    .decisions
-                    .entry(event.id.clone())
-                    .or_default()
-                    .insert(vector);
-                if let Some(index) = vector_indexes
-                    .get(&event.id)
-                    .and_then(|indexes| indexes.get(&vector_key(vector)))
-                    .copied()
-                    && let Some(observation) = vectors_by_decision
-                        .get_mut(&event.id)
-                        .and_then(|observations| observations.get_mut(index))
-                {
-                    observation
-                        .phases
-                        .push(phases_by_hit.number(&phase_id, ids));
-                    if explicit {
-                        observation
-                            .explicit_phases
-                            .push(explicit_phases_by_hit.number(&phase_id, ids));
-                    }
-                }
+                continue;
+            };
+            phase
+                .decisions
+                .entry(event.id.clone())
+                .or_default()
+                .insert(vector);
+            let observation =
+                observation_of(&vector_indexes, &mut vectors_by_decision, &event.id, vector)
+                    .expect("the record registered its vector above");
+            observation
+                .phases
+                .push(phases_by_hit.number(&phase_id, ids));
+            if explicit {
+                observation
+                    .explicit_phases
+                    .push(explicit_phases_by_hit.number(&phase_id, ids));
             }
         }
     }
@@ -2266,20 +2261,17 @@ fn create_coverage_view_with_model(
     // What confidence asks of each test and phase a relation numbers, looked
     // up once per number rather than once per mention: a run's points and
     // lines mention tests millions of times, and each lookup hashed an id.
+    // A relation numbers only the tests and phases registered above.
     let test_traits = tests_by_hit
         .names
         .iter()
-        .map(|name| tests_by_id.get(name).map(TestTraits::of))
+        .map(|name| TestTraits::of(&tests_by_id[name]))
         .collect::<Vec<_>>();
     let phase_kind = |relation: &Relation| {
         relation
             .names
             .iter()
-            .map(|name| {
-                phases_by_id
-                    .get(name)
-                    .map(|phase| phase.phase.kind.as_str())
-            })
+            .map(|name| phases_by_id[name].phase.kind.as_str())
             .collect::<Vec<_>>()
     };
     let phase_kinds = phase_kind(&phases_by_hit);
@@ -2527,7 +2519,7 @@ fn create_coverage_view_with_model(
             let traits = tests
                 .numbers
                 .iter()
-                .filter_map(|number| test_traits[*number as usize].as_ref())
+                .map(|number| &test_traits[*number as usize])
                 .collect::<Vec<_>>();
             let runners = traits
                 .iter()
@@ -3207,12 +3199,8 @@ pub fn archive_request(
                 .filter_map(|existing| serde_json::to_vec(existing).ok())
                 .collect()
         });
-        let Ok(key) = serde_json::to_vec(record) else {
-            if !raw.server.contains(record) {
-                raw.server.push(record.clone());
-            }
-            continue;
-        };
+        // A record is strings and numbers: it always serializes.
+        let key = serde_json::to_vec(record).unwrap_or_default();
         if known.insert(key) {
             raw.server.push(record.clone());
         }
@@ -3780,9 +3768,14 @@ mod tests {
         let mut beside = raw("report", 0, "passed", &[]);
         beside.phases = vec![phase(350, 450)];
         let mut results = vec![first, second, beside];
+        // A second process repeats the work left after every test: it is
+        // counted once.
         let left = credit_by_time(
             &mut results,
-            vec![vec![at(50), at(155), loading, at(320), at(360), at(500)]],
+            vec![
+                vec![at(50), at(155), loading, at(320), at(360), at(500)],
+                vec![at(500)],
+            ],
         );
         // During the first test, between two of its phases: its own.
         assert_eq!(results[0].server.len(), 1);
@@ -5216,5 +5209,197 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    fn decision_meta(id: &str, file: &str) -> DecisionMeta {
+        DecisionMeta {
+            id: id.into(),
+            file: file.into(),
+            line: 1,
+            column: 0,
+            source: "ready".into(),
+            conditions: vec!["ready".into()],
+            kind: "if".into(),
+        }
+    }
+
+    fn manifest_of(decisions: Vec<DecisionMeta>, branches: Vec<BranchMeta>) -> CoverageManifest {
+        CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions,
+            points: vec![point("work", 2)],
+            branches,
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        }
+    }
+
+    /// A record hook evidence wrote without a status goes with the attempt
+    /// the runner reported; an attempt with none reported did not pass.
+    #[test]
+    fn a_record_without_a_status_passes_with_its_attempt_and_not_alone() {
+        let mut companion = raw("checkout", 0, "passed", &["work"]);
+        companion.status = None;
+        let mut alone = raw("refund", 0, "passed", &["work"]);
+        alone.status = None;
+        let results = [raw("checkout", 0, "passed", &[]), companion, alone];
+        let passing = passing_coverage_results(&results)
+            .iter()
+            .map(|raw| (raw.test.as_str(), raw.status.is_some()))
+            .collect::<Vec<_>>();
+        assert_eq!(passing, [("checkout", true), ("checkout", false)]);
+    }
+
+    /// A decision a test listed with no vector it saw was not executed by
+    /// that test; one in a file the manifest does not hold, named in a
+    /// phase's snapshot, is passed over.
+    #[test]
+    fn a_decision_without_vectors_or_outside_the_manifest_executes_nothing() {
+        let manifest = manifest_of(vec![decision_meta("ready", "src/app.js")], Vec::new());
+        let mut test = raw("test", 0, "passed", &["work"]);
+        test.phases = vec![CoveragePhase {
+            id: "test:call".into(),
+            kind: "test".into(),
+            operation: "call".into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms: 0,
+            ended_at_ms: Some(1),
+            status: Some("passed".into()),
+            error: None,
+        }];
+        test.runtime[0].phase_id = Some("test:call".into());
+        test.runtime[0].decisions = vec![
+            DecisionSnapshot {
+                meta: decision_meta("ready", "src/app.js"),
+                vectors: Vec::new(),
+            },
+            DecisionSnapshot {
+                meta: decision_meta("vendored", "vendor/lib.js"),
+                vectors: vec![McdcVector {
+                    values: vec![Some(true)],
+                    outcome: true,
+                }],
+            },
+        ];
+        let view = create_coverage_view(&manifest, &[test], "time").unwrap();
+        assert_eq!(view.decisions.len(), 1);
+        assert!(!view.decisions[0].executed);
+        assert!(view.decisions[0].tests.is_empty());
+        assert!(view.points[0].covered);
+    }
+
+    #[test]
+    fn a_server_record_of_an_unknown_type_is_refused() {
+        let manifest = manifest_of(Vec::new(), Vec::new());
+        let mut test = raw("test", 0, "passed", &[]);
+        test.server = vec![ServerRecord {
+            record_type: "trace".into(),
+            meta: None,
+            vector: None,
+            id: Some("work".into()),
+            timestamp_ms: None,
+            phase_id: None,
+            scope: None,
+            request: None,
+        }];
+        assert!(matches!(
+            create_coverage_view(&manifest, &[test], "time"),
+            Err(ReportError::InvalidServerRecord(kind)) if kind == "trace"
+        ));
+    }
+
+    /// Only a branch whose every outcome is declined is declined itself: one
+    /// declared with no outcomes has none to decline.
+    #[test]
+    fn a_branch_without_outcomes_is_never_declined_whole() {
+        let branch = |id: &str, alternatives: &[&str]| BranchMeta {
+            id: id.into(),
+            kind: "if".into(),
+            file: "src/app.js".into(),
+            line: 3,
+            column: 0,
+            source: "if (ready)".into(),
+            alternatives: alternatives
+                .iter()
+                .map(|alternative| BranchAlternativeMeta {
+                    id: (*alternative).into(),
+                    label: (*alternative).into(),
+                })
+                .collect(),
+        };
+        let mut manifest = manifest_of(
+            Vec::new(),
+            vec![branch("empty", &[]), branch("gone", &["gone:then"])],
+        );
+        manifest.unmeasured = vec!["gone:then".into()];
+        let view =
+            create_coverage_view(&manifest, &[raw("test", 0, "passed", &[])], "time").unwrap();
+        let ids = view
+            .branches
+            .iter()
+            .map(|branch| branch.meta.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["empty"]);
+    }
+
+    /// Two executions of one test under one identity keep apart even where
+    /// a phase's name already carries the suffix a repeat would take.
+    #[test]
+    fn a_repeat_skips_a_suffix_a_phase_already_has() {
+        let record = |phases: &[&str]| -> RawTestResult {
+            serde_json::from_value(serde_json::json!({
+                "test": "parse",
+                "retry": 0,
+                "status": "passed",
+                "phases": phases.iter().map(|id| serde_json::json!({
+                    "id": id, "kind": "assertion", "operation": "expect", "startedAtMs": 0
+                })).collect::<Vec<_>>(),
+            }))
+            .unwrap()
+        };
+        let mut results = vec![record(&["p", "p~2"]), record(&["p"])];
+        separate_repeated_executions(&mut results);
+        assert_eq!(results[1].phases[0].id, "p~3");
+    }
+
+    /// A result that does not parse fails the archive, and the batches read
+    /// after it are not parsed at all.
+    #[test]
+    fn a_result_that_does_not_parse_fails_however_many_follow_it() {
+        let manifest = manifest_of(Vec::new(), Vec::new());
+        let mut entries = vec![
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "a-broken/mcdc.json".into(),
+                contents: b"{".to_vec(),
+            },
+        ];
+        for index in 0..300 {
+            entries.push(EvidenceArchiveEntry {
+                path: format!("w{index:03}/mcdc.json"),
+                contents: serde_json::to_vec(&raw(&format!("t{index}"), 0, "passed", &["work"]))
+                    .unwrap(),
+            });
+        }
+        let path = archive(entries);
+        let result = analyze_coverage_archive(&ArchiveReportRequest {
+            archive_path: path.clone(),
+            run_id: "run".into(),
+            generated_at: "time".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+            test_filter: None,
+        });
+        assert!(
+            matches!(&result, Err(ReportError::InvalidJson { path, .. }) if path.contains("a-broken")),
+            "{:?}",
+            result.err()
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
