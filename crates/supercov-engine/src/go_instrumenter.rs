@@ -503,18 +503,19 @@ fn in_function_with_goto(node: Node) -> bool {
     false
 }
 
+/// The condition a `for` loop tests: written alone (`for x < n {`), which
+/// the grammar puts straight under the loop, or as a clause's middle part
+/// (`for i := 0; ok; i++ {`). None for a range loop and a bare `for {`.
 fn loop_condition<'t>(node: Node<'t>) -> Option<Node<'t>> {
-    if let Some(condition) = node.child_by_field_name("condition") {
-        return Some(condition);
-    }
     let mut cursor = node.walk();
-    let clause = node
+    let head = node
         .children(&mut cursor)
-        .find(|child| child.kind() == "for_clause")?;
-    let mut inner = clause.walk();
-    clause
-        .children(&mut inner)
-        .find(|child| child.is_named() && child.kind().ends_with("_expression"))
+        .find(|child| child.is_named() && !matches!(child.kind(), "block" | "comment"))?;
+    match head.kind() {
+        "for_clause" => head.child_by_field_name("condition"),
+        "range_clause" => None,
+        _ => Some(head),
+    }
 }
 
 impl<'a> Collector<'a> {
@@ -2090,5 +2091,31 @@ func classify(a int, b bool) string {
         // so the concatenated table lines up with the concatenated manifest.
         assert_eq!(first.decision_widths, [2]);
         assert_eq!(second.decision_widths, [2]);
+    }
+
+    #[test]
+    fn a_loop_that_names_only_its_condition_branches_on_it() {
+        // Go's while, `for x < n {`, holds its condition straight under the
+        // loop, and a clause's condition need not be an operator. Both were
+        // declared loops with no condition, and never measured.
+        let source = "package m\n\nfunc f(n int, ok bool) int {\n\tx := 0\n\tfor x < n {\n\t\tx++\n\t}\n\tfor i := 0; ok; i++ {\n\t\tok = i < 2\n\t}\n\tfor /* until told */ {\n\t\tbreak\n\t}\n\treturn x\n}\n";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations =
+            build_go_obligations("m.go", source, &mut next, &mut decisions).expect("go");
+        let loops = obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "loop")
+            .map(|branch| branch.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(loops, ["for x < n {", "for i := 0; ok; i++ {"]);
+        let rewritten = rewrite(source, &obligations.edits);
+        assert!(rewritten.contains("for __supercov.B("), "{rewritten}");
+        assert!(rewritten.contains("i := 0; __supercov.B("), "{rewritten}");
+        parse(&rewritten).expect("rewritten Go parses");
+        // The bare loop, a comment and all, is still one with nothing to test.
+        assert_eq!(obligations.manifest.limitations.len(), 1);
     }
 }
