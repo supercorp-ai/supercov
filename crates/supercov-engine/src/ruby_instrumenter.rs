@@ -116,14 +116,12 @@ pub const RACTOR_BLOCK_LIMITATION: &str = "ruby-ractor-block-unprobed";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RubyInstrumenterError {
     Parse(String),
-    InvalidRange,
 }
 
 impl std::fmt::Display for RubyInstrumenterError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parse(error) => write!(formatter, "Ruby parse failed: {error}"),
-            Self::InvalidRange => write!(formatter, "Ruby parser returned an invalid range"),
         }
     }
 }
@@ -522,9 +520,9 @@ fn probe_keys_in(text: &str) -> Vec<u64> {
             .chars()
             .take_while(char::is_ascii_digit)
             .collect();
-        if let Ok(key) = digits.parse() {
-            keys.push(key);
-        }
+        // Every probe call opens with its key (`.s(12`, `.c(12, 0`), so the
+        // digits always parse.
+        keys.extend(digits.parse::<u64>().ok());
         rest = &rest[open + 1..];
     }
     keys
@@ -745,7 +743,6 @@ struct Collector<'a> {
     ractor_blocks: Vec<(usize, usize)>,
     /// Byte ranges of `refine` blocks (see [`RubyFilePlan::refine_blocks`]).
     refine_blocks: Vec<[usize; 2]>,
-    error: Option<RubyInstrumenterError>,
 }
 
 impl<'a> Collector<'a> {
@@ -793,7 +790,6 @@ impl<'a> Collector<'a> {
             begin_unmeasured: Vec::new(),
             ractor_blocks: Vec::new(),
             refine_blocks: Vec::new(),
-            error: None,
         }
     }
 
@@ -1124,10 +1120,11 @@ impl<'a> Collector<'a> {
         let mut not = 0;
         loop {
             if let Some(parens) = current.as_parentheses_node() {
+                // Prism flags parentheses holding more than one statement, so
+                // an unflagged body's first statement is its only one.
                 if !parens.is_multiple_statements()
                     && let Some(body) = parens.body()
                     && let Some(statements) = body.as_statements_node()
-                    && statements.body().iter().count() == 1
                     && let Some(inner) = statements.body().iter().next()
                 {
                     current = inner;
@@ -2622,14 +2619,13 @@ impl<'a> Collector<'a> {
             }
             return Some(targets);
         }
-        if let Some(parentheses) = node.as_parentheses_node() {
-            let body = parentheses.body()?;
-            return match body.as_statements_node() {
-                Some(statements) => self.arm_targets(Some(statements)),
-                None => self.probe_targets(body),
-            };
+        // `jump_exposed` holds only for a jump or the constructs above, or
+        // for parentheses: nothing else reaches this point.
+        let body = node.as_parentheses_node()?.body()?;
+        match body.as_statements_node() {
+            Some(statements) => self.arm_targets(Some(statements)),
+            None => self.probe_targets(body),
         }
-        None
     }
 
     fn arm_targets<'n>(&self, statements: Option<StatementsNode<'n>>) -> Option<Vec<Node<'n>>> {
@@ -2906,12 +2902,11 @@ impl<'a> Collector<'a> {
         for edit in &dropped {
             keys.extend(probe_keys_in(&edit.text));
         }
-        let mut targets = BTreeMap::new();
-        for key in &keys {
-            if let Some(target) = self.probes.remove(key) {
-                targets.insert(*key, target);
-            }
-        }
+        // Every key an insertion names is a probe still in the table.
+        let targets = self
+            .probes
+            .extract_if(.., |key, _| keys.contains(key))
+            .collect::<BTreeMap<_, _>>();
         let mut unmeasured = probe_obligations_of(&targets);
         for target in targets.values() {
             for named in target_ids(target) {
@@ -3570,9 +3565,6 @@ pub fn build_ruby_obligations(
     }
     let mut collector = Collector::new(file, source, next_probe);
     collector.visit(&result.node());
-    if let Some(error) = collector.error.take() {
-        return Err(error);
-    }
     Ok(collector.finish())
 }
 
@@ -4215,5 +4207,231 @@ end
             build_ruby_obligations("m.rb", b"def x(\n", &mut probe),
             Err(RubyInstrumenterError::Parse(_))
         ));
+    }
+
+    fn probed(source: &str) -> (RubyFileObligations, String) {
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/p.rb", source.as_bytes(), &mut probe).unwrap();
+        let transformed =
+            String::from_utf8(apply_edits(source.as_bytes(), &obligations.plan.edits)).unwrap();
+        assert!(
+            ruby_prism::parse(transformed.as_bytes())
+                .errors()
+                .next()
+                .is_none(),
+            "{transformed}"
+        );
+        (obligations, transformed)
+    }
+
+    #[test]
+    fn a_ractor_block_declares_what_its_loop_and_modifier_probes_would_have_proven() {
+        let source = "def a(x)\n  x&.size\n  Ractor.new(x) do |y|\n    while y\n      y = nil\n    end\n    a = 1 if y\n  end\nend\n";
+        let (obligations, transformed) = probed(source);
+        // The probe before the block stays; none is left inside it.
+        assert!(
+            transformed.contains("$__supercov.n(0, (x))&.size"),
+            "{transformed}"
+        );
+        let [[block_start, _]] = obligations.plan.ractor_blocks[..] else {
+            panic!("{:?}", obligations.plan.ractor_blocks);
+        };
+        assert!(
+            obligations
+                .plan
+                .edits
+                .iter()
+                .all(|edit| edit.offset < block_start)
+        );
+        let manifest = &obligations.manifest;
+        let unmeasured = &manifest.unmeasured;
+        for decision in &manifest.decisions {
+            assert!(unmeasured.contains(&decision.id), "{}", decision.kind);
+        }
+        let while_loop = manifest
+            .branches
+            .iter()
+            .find(|branch| branch.kind == "while" && branch.source.starts_with("while"))
+            .unwrap();
+        assert!(unmeasured.contains(&while_loop.id));
+        // The modifier's body was proven by the outcome probe that ran it.
+        let body = manifest
+            .points
+            .iter()
+            .find(|point| point.source == "a = 1")
+            .unwrap();
+        assert!(unmeasured.contains(&body.id), "{unmeasured:?}");
+        assert_eq!(manifest.limitations.len(), 1);
+    }
+
+    #[test]
+    fn a_negation_called_with_arguments_or_a_block_is_a_condition_of_its_own() {
+        let source = "def b(x, a)\n  return 1 if a && x.!(1)\n  return 2 if a && x.! { 1 }\n  x.!(2)\n  x.! { 3 }\nend\n";
+        let (obligations, _) = probed(source);
+        let decisions = obligations
+            .manifest
+            .decisions
+            .iter()
+            .map(|decision| (decision.kind.as_str(), decision.conditions.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decisions,
+            [
+                ("if", vec!["a".to_owned(), "x.!(1)".to_owned()]),
+                ("if", vec!["a".to_owned(), "x.! { 1 }".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_case_arms_are_keyed_by_their_clause_and_probed_where_a_body_would_start() {
+        let source = "def c(x)\n  case x\n  in 1\n  in 2 then 3\n  else\n  end\n  case x\n  when 1\n  else\n  end\nend\n";
+        let (obligations, transformed) = probed(source);
+        let keys = obligations
+            .plan
+            .branches
+            .iter()
+            .map(|branch| (branch.key.branch.as_str(), branch.key.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                ("in", KeyKind::Node),
+                ("in", KeyKind::List),
+                ("else", KeyKind::Node),
+                ("when", KeyKind::Node),
+                ("else", KeyKind::Node),
+            ]
+        );
+        assert!(
+            transformed.contains("in 1 then $__supercov.hs("),
+            "{transformed}"
+        );
+        assert!(
+            transformed.contains("when 1 then $__supercov.hs("),
+            "{transformed}"
+        );
+        assert_eq!(
+            transformed.matches("else $__supercov.hs(").count(),
+            2,
+            "{transformed}"
+        );
+    }
+
+    #[test]
+    fn a_begin_body_ending_in_a_construct_is_probed_where_each_of_its_arms_ends() {
+        let wrapped = |body: &str| {
+            format!("def m(x, xs)\n  begin\n{body}\n  rescue StandardError\n    nil\n  end\nend\n")
+        };
+        let cases = [
+            // An `else` that returns: each arm carries the probe.
+            (
+                "    unless x\n      1\n    else\n      return 2\n    end",
+                &["$__supercov.ok(0, (1))", "return $__supercov.ok(0, (2))"][..],
+            ),
+            // Nothing jumps: the construct is wrapped whole.
+            (
+                "    begin\n      x\n    rescue ArgumentError\n      1\n    end",
+                &["$__supercov.ok(0, (begin"],
+            ),
+            (
+                "    case x\n    when 1 then 2\n    end",
+                &["$__supercov.ok(0, (case x"],
+            ),
+            (
+                "    case x\n    when 1 then 2\n    else return 3\n    end",
+                &["$__supercov.ok(0, (2))", "return $__supercov.ok(0, (3))"],
+            ),
+            (
+                "    case x\n    in 1 then 2\n    else return 3\n    end",
+                &["$__supercov.ok(0, (2))", "return $__supercov.ok(0, (3))"],
+            ),
+            (
+                "    begin\n      return 1\n    rescue StandardError\n      2\n    end",
+                &["return $__supercov.ok(0, (", "$__supercov.ok(0, (2))"],
+            ),
+            // `redo` has no value: the probe goes before it.
+            (
+                "    xs.each do\n      begin\n        redo\n      rescue StandardError\n        nil\n      end\n    end",
+                &["$__supercov.ok0(2); redo"],
+            ),
+        ];
+        for (body, fragments) in cases {
+            let (obligations, transformed) = probed(&wrapped(body));
+            for fragment in fragments {
+                assert!(transformed.contains(fragment), "{fragment}\n{transformed}");
+            }
+            assert!(obligations.manifest.unmeasured.is_empty(), "{transformed}");
+        }
+        // `alias $a $b` has no expression form: the completion is declared.
+        let (obligations, transformed) = probed(&wrapped("    alias $a $b"));
+        assert!(!transformed.contains("$__supercov.ok"), "{transformed}");
+        assert!(
+            obligations
+                .manifest
+                .unmeasured
+                .iter()
+                .any(|id| id.ends_with(":success"))
+        );
+    }
+
+    #[test]
+    fn only_a_literal_block_on_a_receiverless_refine_or_ractor_new_is_set_apart() {
+        let source = "Ractor.new(1)\nRactor.new(&blk)\nx.refine(String) do\nend\nrefine(String)\nrefine(String, &blk)\n";
+        let (obligations, _) = probed(source);
+        assert!(obligations.plan.ractor_blocks.is_empty());
+        assert!(obligations.plan.refine_blocks.is_empty());
+        let source = format!("{source}Ractor.new {{ 1 }}\nrefine(String) do\nend\n");
+        let (obligations, _) = probed(&source);
+        assert_eq!(obligations.plan.ractor_blocks.len(), 1);
+        assert_eq!(obligations.plan.refine_blocks.len(), 1);
+    }
+
+    #[test]
+    fn a_lambda_body_with_rescue_is_probed_like_a_begin() {
+        let source = "l = -> {}\nm = -> do\n  1\nrescue StandardError\n  2\nend\n";
+        let (obligations, transformed) = probed(source);
+        let begins = obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "begin")
+            .map(|branch| branch.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(begins, ["do\n  1\nrescue StandardError\n  2\nend"]);
+        assert!(
+            transformed.contains("$__supercov.ok(0, (1))"),
+            "{transformed}"
+        );
+        assert!(
+            transformed.contains("$__supercov.h(0, 0); 2"),
+            "{transformed}"
+        );
+    }
+
+    #[test]
+    fn a_literal_predicate_with_an_empty_live_arm_leaves_nothing_to_measure() {
+        let source = "x = \"#{}\"\nif true\nend\nif false\n  1\nelse\nend\nunless true\n  2\nend\nunless true\n  3\nelse\nend\nunless false\nend\n";
+        let (obligations, transformed) = probed(source);
+        assert_eq!(transformed, source);
+        let manifest = &obligations.manifest;
+        assert!(manifest.decisions.is_empty() && manifest.branches.is_empty());
+        let statements = manifest
+            .points
+            .iter()
+            .map(|point| point.source.lines().next().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statements,
+            [
+                "x = \"#{}\"",
+                "if true",
+                "if false",
+                "unless true",
+                "unless true",
+                "unless false"
+            ]
+        );
     }
 }
