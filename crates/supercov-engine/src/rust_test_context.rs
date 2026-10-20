@@ -46,11 +46,17 @@ pub fn rust_test_context_id(test: &str) -> Result<u64, RustTestContextError> {
         value ^= u64::from(byte);
         value = value.wrapping_mul(PRIME);
     }
-    Ok(if matches!(value, 0 | u64::MAX) {
+    Ok(unreserved(value))
+}
+
+/// Zero and all ones are reserved; a name that hashes to either takes the
+/// value remapped. No name is known to, so the remap is checked on its own.
+fn unreserved(value: u64) -> u64 {
+    if matches!(value, 0 | u64::MAX) {
         value ^ RESERVED_REMAP
     } else {
         value
-    })
+    }
 }
 
 fn preflight_with(
@@ -101,6 +107,13 @@ mod tests {
             rust_test_context_id(""),
             Err(RustTestContextError::InvalidTestName)
         ));
+        assert!(matches!(
+            rust_test_context_id("tests::a\0b"),
+            Err(RustTestContextError::InvalidTestName)
+        ));
+        assert_eq!(unreserved(0), RESERVED_REMAP);
+        assert_eq!(unreserved(u64::MAX), !RESERVED_REMAP);
+        assert_eq!(unreserved(7), 7);
     }
 
     #[test]
