@@ -701,15 +701,23 @@ mod tests {
             ),
             ("test/helpers.js", helpers),
             ("test/util.js", "export function util() {}\n"),
+            (
+                "test/open.test.js",
+                "const helper = await import(process.env.HELPER);\nhelper();\n",
+            ),
         ] {
             let path = root.join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         }
-        let tests = ["test/own.test.js", "test/other.test.js"]
-            .map(str::to_owned)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let tests = [
+            "test/own.test.js",
+            "test/other.test.js",
+            "test/open.test.js",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
         let checkout = Checkout::new(&root, &tests);
         let own = ["test/own.test.js".to_owned()]
             .into_iter()
@@ -768,6 +776,19 @@ mod tests {
         };
         let unit = Ran {
             runners: Some(["node:test".to_owned()].into_iter().collect()),
+            ..Ran::default()
+        };
+        let open = ["test/open.test.js".to_owned()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let served_helpers = Ran {
+            measured: Some(BTreeSet::new()),
+            support: Some(crate::support_reach::SupportReach {
+                files: [("test/helpers.js".to_owned(), ["t1".to_owned()].into())]
+                    .into_iter()
+                    .collect(),
+                names: BTreeMap::new(),
+            }),
             ..Ran::default()
         };
         let cases: Vec<(&str, Judgment)> = vec![
@@ -997,6 +1018,50 @@ mod tests {
                     false,
                 ),
             ),
+            (
+                "helper, own imports cannot all be followed",
+                judge_one(
+                    &[("test/util.js", "a")],
+                    &[("test/util.js", "b")],
+                    Some(&open),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "source no test places",
+                judge_one(
+                    &[("lib/unused.js", "a")],
+                    &[("lib/unused.js", "b")],
+                    Some(&own),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "served and loaded",
+                judge_one(
+                    &[("test/helpers.js", helpers)],
+                    &[("test/helpers.js", &helpers.replace("1", "2"))],
+                    Some(&own),
+                    &served_helpers,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "file without code",
+                judge_one(
+                    &[("test/fixture.json", "{}")],
+                    &[("test/fixture.json", "[]")],
+                    None,
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
         ];
         // (outdated, across, reached, own tests, settled)
         type Verdict<'a> = (&'a [&'a str], &'a [&'a str], &'a [&'a str], bool, bool);
@@ -1099,6 +1164,22 @@ mod tests {
                 false,
                 false,
             ),
+            (&["test/util.js changed: top level"], &[], &[], false, false),
+            (
+                &["lib/unused.js changed: top level"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (
+                &["test/helpers.js changed: help (line 1)"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (&["test/fixture.json has changed"], &[], &[], false, false),
         ];
         assert_eq!(cases.len(), expected.len());
         for ((name, judgment), (outdated, across, reached, own_tests, settled)) in

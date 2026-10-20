@@ -878,15 +878,12 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         .into_iter()
         .collect();
 
-    if declaration
+    // Every result names a declared runner -- its own where declared, the
+    // first declared otherwise -- and there is at least one result, so this
+    // always keeps a runner.
+    declaration
         .runners
-        .iter()
-        .any(|runner| observed.contains(runner.runner.as_str()))
-    {
-        declaration
-            .runners
-            .retain(|runner| observed.contains(runner.runner.as_str()));
-    }
+        .retain(|runner| observed.contains(runner.runner.as_str()));
     Ok(OwnedFrontendRun {
         declaration,
         tests: raw_results.len(),
@@ -1068,6 +1065,24 @@ mod tests {
             run.request.raw_results[0].status.as_deref(),
             Some("passed"),
             "it counts as coverage because the run passed"
+        );
+        let failed = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 1,
+            coverage_model: go_coverage_model(),
+        })
+        .unwrap();
+        assert_eq!(
+            failed.request.raw_results[0].status.as_deref(),
+            Some("failed"),
+            "a failing run cannot say a passing test produced it"
         );
     }
 

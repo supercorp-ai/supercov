@@ -889,8 +889,10 @@ pub fn publish_archived_run(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunPublicationFault {
     FinalRename,
-    /// The query index cannot be written at publication.
-    QueryIndexWrite,
+    /// The files publication derives from the evidence -- the query index,
+    /// the statement spans and the assessment input -- cannot be written:
+    /// they are written below the staged evidence file, where nothing can be.
+    DerivedWrites,
 }
 
 pub(crate) fn publish_run_with_fault(
@@ -976,6 +978,16 @@ pub(crate) fn publish_run_with_fault(
             )));
         }
     };
+    let derived = if fault == Some(RunPublicationFault::DerivedWrites) {
+        let directory = staged.evidence_path.join("derived");
+        crate::run_store::StoredRun {
+            query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+            directory,
+            ..staged.clone()
+        }
+    } else {
+        staged.clone()
+    };
     // The execution record and the query index both read the analysis and
     // write their own files, so they are written side by side.
     let prepared = std::thread::scope(|scope| {
@@ -983,23 +995,21 @@ pub(crate) fn publish_run_with_fault(
             scope.spawn(|| {
                 // Disposable, like every query index: one that failed to
                 // write is rebuilt by the first query.
-                if fault == Some(RunPublicationFault::QueryIndexWrite)
-                    || crate::run_store::write_query_index_from(&staged, report).is_err()
-                {
-                    let _ = fs::remove_file(&staged.query_index_path);
+                if crate::run_store::write_query_index_from(&derived, report).is_err() {
+                    let _ = fs::remove_file(&derived.query_index_path);
                 }
                 // Also disposable: the report analyses the evidence when the
                 // file is missing.
-                if crate::run_store::write_statement_spans(&staged, report).is_err() {
+                if crate::run_store::write_statement_spans(&derived, report).is_err() {
                     let _ = fs::remove_file(
-                        staged
+                        derived
                             .directory
                             .join(crate::run_store::STATEMENT_SPANS_FILE),
                     );
                 }
-                if crate::run_store::write_assessment_input(&staged, report).is_err() {
+                if crate::run_store::write_assessment_input(&derived, report).is_err() {
                     let _ = fs::remove_file(
-                        staged
+                        derived
                             .directory
                             .join(crate::run_store::ASSESSMENT_INPUT_FILE),
                     );
@@ -1414,10 +1424,60 @@ pub fn clean_storage(
     result
 }
 
+/// The metadata of a run `id` whose evidence is `bytes` long, for tests.
+#[cfg(test)]
+pub(crate) fn test_run_metadata(id: &str, bytes: u64) -> RunMetadata {
+    use crate::run_store::{RawEvidenceMetadata, RunFingerprint, RunIntegrity};
+
+    RunMetadata {
+        id: id.into(),
+        started_at: "2026-01-01T00:00:00Z".into(),
+        duration_ms: 1.0,
+        command: vec!["test".into()],
+        test_exit_code: Some(0),
+        integrity: RunIntegrity {
+            schema_version: 2,
+            instrumenter_version: "rust".into(),
+            git: None,
+            fingerprint: RunFingerprint {
+                algorithm: "sha256".into(),
+                source: "0".repeat(64),
+                tests: "0".repeat(64),
+                dependencies: "0".repeat(64),
+                configuration: "0".repeat(64),
+                instrumenter: "0".repeat(64),
+                execution: "0".repeat(64),
+                combined: "0".repeat(64),
+                source_files: 1,
+                test_files: 1,
+            },
+            stale: None,
+            stale_reasons: None,
+        },
+        raw_evidence: RawEvidenceMetadata {
+            schema_version: 2,
+            format: "supercov-evidence-archive".into(),
+            file: "evidence.raw.gz".into(),
+            files: 1,
+            uncompressed_bytes: bytes,
+            compressed_bytes: bytes,
+        },
+        isolated_build: None,
+        instrumented_build_cache: None,
+        timings: None,
+        merged: None,
+        parents: None,
+        source_roots: None,
+        copy: None,
+        merged_across: None,
+        recorded_by: None,
+        companions: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run_store::{RawEvidenceMetadata, RunFingerprint, RunIntegrity};
 
     fn project() -> PathBuf {
         let root = std::env::temp_dir().join(format!("supercov-lifecycle-{}", unique_name()));
@@ -1481,50 +1541,7 @@ mod tests {
     }
 
     fn metadata(id: &str, bytes: u64) -> RunMetadata {
-        RunMetadata {
-            id: id.into(),
-            started_at: "2026-01-01T00:00:00Z".into(),
-            duration_ms: 1.0,
-            command: vec!["test".into()],
-            test_exit_code: Some(0),
-            integrity: RunIntegrity {
-                schema_version: 2,
-                instrumenter_version: "rust".into(),
-                git: None,
-                fingerprint: RunFingerprint {
-                    algorithm: "sha256".into(),
-                    source: "0".repeat(64),
-                    tests: "0".repeat(64),
-                    dependencies: "0".repeat(64),
-                    configuration: "0".repeat(64),
-                    instrumenter: "0".repeat(64),
-                    execution: "0".repeat(64),
-                    combined: "0".repeat(64),
-                    source_files: 1,
-                    test_files: 1,
-                },
-                stale: None,
-                stale_reasons: None,
-            },
-            raw_evidence: RawEvidenceMetadata {
-                schema_version: 2,
-                format: "supercov-evidence-archive".into(),
-                file: "evidence.raw.gz".into(),
-                files: 1,
-                uncompressed_bytes: bytes,
-                compressed_bytes: bytes,
-            },
-            isolated_build: None,
-            instrumented_build_cache: None,
-            timings: None,
-            merged: None,
-            parents: None,
-            source_roots: None,
-            copy: None,
-            merged_across: None,
-            recorded_by: None,
-            companions: None,
-        }
+        test_run_metadata(id, bytes)
     }
 
     fn evidence(root: &Path) -> (PathBuf, u64) {
@@ -1708,6 +1725,7 @@ mod tests {
     fn an_index_that_could_not_be_written_is_built_by_the_first_query() {
         // A failed index write loses nothing: publication succeeds without a
         // partial file, and the first query builds the index as it used to.
+        // The other files derived from the evidence are as disposable.
         let root = project();
         let id = "2026-01-01T00-00-00-400Z";
         let (evidence, metadata) = analysable_evidence(&root, id);
@@ -1716,11 +1734,21 @@ mod tests {
             &metadata,
             &evidence,
             Archived::default(),
-            Some(RunPublicationFault::QueryIndexWrite),
+            Some(RunPublicationFault::DerivedWrites),
         )
         .unwrap();
         let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
         assert!(!index.exists(), "no partial index is left");
+        assert!(
+            !published
+                .join(crate::run_store::STATEMENT_SPANS_FILE)
+                .exists()
+        );
+        assert!(
+            !published
+                .join(crate::run_store::ASSESSMENT_INPUT_FILE)
+                .exists()
+        );
         assert!(published.join("run.json").is_file());
         crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
         assert!(index.is_file());
