@@ -1394,27 +1394,26 @@ fn instrument_workspace(
             )?;
             let properties = resources.join("junit-platform.properties");
             let existing = fs::read_to_string(&properties).ok();
-            if !exact_attribution {
+            if exact_attribution {
+                // Said out loud, because it changes how the suite runs rather
+                // than how it is measured. Every other thing Supercov does to
+                // the workspace is announced -- the isolated copy, the added
+                // launcher, `-count=1` over in Go -- and this is the one with a
+                // chance of changing an outcome: a test that waits on another
+                // test's thread passes under the project's own command and
+                // hangs under this one.
+                if asks_for_parallel_execution(existing.as_deref()) {
+                    serialised.insert(module.directory.clone());
+                }
+                write(&properties, &sequential_properties(existing.as_deref()))?;
+            } else if asks_for_parallel_execution(existing.as_deref()) {
                 // The suite runs the way its author wrote it. Where that means
                 // tests run at once the runtime notices, says what it could
                 // not credit, and the run records it -- which is a smaller
                 // price than several times the suite's wall time, and not one
                 // Supercov gets to spend on somebody's behalf.
-                if asks_for_parallel_execution(existing.as_deref()) {
-                    concurrent.insert(module.directory.clone());
-                }
-                continue;
+                concurrent.insert(module.directory.clone());
             }
-            // Said out loud, because it changes how the suite runs rather than
-            // how it is measured. Every other thing Supercov does to the
-            // workspace is announced -- the isolated copy, the added launcher,
-            // `-count=1` over in Go -- and this is the one with a chance of
-            // changing an outcome: a test that waits on another test's thread
-            // passes under the project's own command and hangs under this one.
-            if asks_for_parallel_execution(existing.as_deref()) {
-                serialised.insert(module.directory.clone());
-            }
-            write(&properties, &sequential_properties(existing.as_deref()))?;
         }
         if frameworks.testng {
             write(
@@ -3084,6 +3083,7 @@ mod tests {
         // reports it.
         assert!(resources("plain", SERVICES_FILE));
         assert!(resources("both", SERVICES_FILE));
+        assert!(resources("both", TESTNG_SERVICES_FILE));
         assert!(!resources("named", SERVICES_FILE));
         fs::remove_dir_all(&root).ok();
     }
@@ -3271,5 +3271,30 @@ mod tests {
                 .is_none()
         );
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_module_on_testng_and_the_platform_registers_both_listeners_however_it_runs() {
+        // A migration in progress runs both in one JVM. Left to run as
+        // written, the TestNG listener was compiled but never registered, so
+        // the module's TestNG tests recorded nothing.
+        for exact_attribution in [false, true] {
+            let root = temporary_root("jvm-testng-platform");
+            write(
+                &root.join("pom.xml"),
+                "<project><dependencies><dependency><artifactId>testng</artifactId></dependency><dependency><artifactId>junit-jupiter</artifactId><version>5.10.2</version></dependency></dependencies></project>",
+            )
+            .unwrap();
+            java_module(&root, ".", true);
+            instrument_workspace(&root, &root.join("evidence"), exact_attribution, None)
+                .expect("instrument");
+            let resources = root.join("src/test/resources");
+            assert!(resources.join(SERVICES_FILE).exists());
+            assert!(
+                resources.join(TESTNG_SERVICES_FILE).exists(),
+                "exact attribution {exact_attribution}"
+            );
+            fs::remove_dir_all(&root).ok();
+        }
     }
 }
