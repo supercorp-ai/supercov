@@ -632,7 +632,8 @@ impl<'a> PythonObligationCollector<'a> {
                     let Some(span) = self.span(range) else {
                         return;
                     };
-                    if let Some((id, tree)) =
+                    let mut regrouped = Vec::new();
+                    if let Some((id, _)) =
                         self.decision_over(range, "value", true, |this, leaves, boolops| {
                             let mut groups = Vec::with_capacity(left.len());
                             for value in left {
@@ -640,13 +641,12 @@ impl<'a> PythonObligationCollector<'a> {
                                 this.tree(value, leaves, boolops)?;
                                 groups.push((first..leaves.len()).collect());
                             }
-                            boolops.push((range, groups));
+                            boolops.push((range, groups.clone()));
+                            regrouped = groups;
                             Some(())
                         })
-                        && let Some((_, groups)) =
-                            tree.into_iter().find(|(boolop, _)| *boolop == range)
                     {
-                        self.regrouped.insert(own, (id, groups, span));
+                        self.regrouped.insert(own, (id, regrouped, span));
                     }
                 } else if Self::is_compound(&values[0]) {
                     self.decision_over(
@@ -1433,5 +1433,26 @@ mod tests {
             build_python_manifest("src/broken.py", "if :\n    pass\n"),
             Err(PythonInstrumenterError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn a_negated_number_is_a_condition_and_an_async_loop_a_loop_of_its_own() {
+        let source = "async def f(xs, x, y):\n    if -x and not y:\n        return 1\n    async for item in xs:\n        print(item)\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let manifest = &obligations.manifest;
+        assert_eq!(manifest.decisions[0].conditions, ["-x", "not y"]);
+        let loops = manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "async-for")
+            .count();
+        assert_eq!(loops, 1);
+        // The loop's body is headed by its first statement.
+        let print = manifest
+            .points
+            .iter()
+            .find(|point| point.source == "print(item)")
+            .unwrap();
+        assert_eq!(obligations.plan.loops[0].first.as_ref(), Some(&print.id));
     }
 }
