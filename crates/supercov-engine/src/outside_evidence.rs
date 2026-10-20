@@ -1030,4 +1030,75 @@ mod tests {
                 .contains("is an LLVM profile")
         );
     }
+
+    /// A file the run's scope names is imported when the scope included it
+    /// and nothing in it was measured, and skipped, with the scope's reason,
+    /// when the scope left it out.
+    #[test]
+    fn a_file_the_scope_includes_is_imported_and_one_it_leaves_out_is_skipped() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-import-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(base);
+        let directory = crate::run_store::create_analyzable_test_run(&root, "run-a");
+        let evidence_path = directory.join("evidence.raw.gz");
+        let mut entries = read_archive(&evidence_path).unwrap();
+        let manifest = entries
+            .iter_mut()
+            .find(|entry| entry.path == "manifest.json")
+            .unwrap();
+        let mut value: Value = serde_json::from_slice(&manifest.contents).unwrap();
+        value["scope"] = json!({"entries": [
+            {"file": "src/app.js", "status": "included", "reason": "javascript source"},
+            {"file": "src/empty.js", "status": "included", "reason": "javascript source"},
+            {"file": "src/vendor.js", "status": "excluded", "reason": "vendored"},
+        ]});
+        manifest.contents = serde_json::to_vec(&value).unwrap();
+        let archive = write_archive(entries, &evidence_path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence = RawEvidenceMetadata {
+            schema_version: archive.schema_version,
+            format: archive.format.into(),
+            file: archive.file.into(),
+            files: archive.files,
+            uncompressed_bytes: archive.uncompressed_bytes,
+            compressed_bytes: archive.compressed_bytes,
+        };
+        std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        for file in ["src/empty.js", "src/vendor.js"] {
+            std::fs::write(root.join(file), "one();\n").unwrap();
+        }
+        let evidence = root.join("lines.info");
+        std::fs::write(
+            &evidence,
+            "SF:src/empty.js\nDA:1,1\nend_of_record\nSF:src/vendor.js\nDA:1,1\nend_of_record\n",
+        )
+        .unwrap();
+        let outcome = import_line_evidence(&ImportRequest {
+            root: &root,
+            run: Some("run-a"),
+            evidence: &evidence,
+            credit: Credit::Background,
+            status: None,
+            run_id: "run-b",
+            started_at: "2026-01-01T00:00:00.000Z",
+        })
+        .unwrap();
+        assert_eq!(outcome.added_files, ["src/empty.js"]);
+        assert_eq!(
+            outcome.skipped,
+            [(
+                "src/vendor.js".to_owned(),
+                "the run leaves it out: vendored".to_owned()
+            )]
+        );
+    }
 }

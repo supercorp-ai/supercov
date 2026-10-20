@@ -886,6 +886,38 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
     }
 
+    /// Gives a stored run a record of the files it was measured with.
+    fn record_files(root: &Path, id: &str, files: &[(&str, &str)]) {
+        let manifest = crate::source_manifest::InputManifest {
+            schema_version: crate::source_manifest::MANIFEST_SCHEMA,
+            language: "javascript".into(),
+            files: files
+                .iter()
+                .map(|(file, text)| {
+                    (
+                        file.to_string(),
+                        crate::source_manifest::FileFingerprint::of(text),
+                    )
+                })
+                .collect(),
+        };
+        rewrite_entry(
+            root,
+            id,
+            crate::source_capture::ARCHIVE_PATH,
+            Some(serde_json::to_vec(&manifest).unwrap()),
+        );
+    }
+
+    /// Run-a recorded a file run-b did not, which the checkout holds as
+    /// run-a recorded it: run-b is the run the merge grows into.
+    fn grown_from_a_recorded_file(root: &Path) {
+        record_files(root, "run-a", &[("test/data.json", "same")]);
+        record_files(root, "run-b", &[]);
+        fs::create_dir_all(root.join("test")).unwrap();
+        fs::write(root.join("test/data.json"), "same").unwrap();
+    }
+
     fn declaration_with(edit: impl FnOnce(&mut Value)) -> Option<Vec<u8>> {
         let root = temporary();
         create_analyzable_test_run(&root, "source");
@@ -993,6 +1025,88 @@ mod tests {
                 "denominator",
                 Box::new(|root| {
                     rewrite_entry(root, "run-b", "manifest.json", Some(b"{}".to_vec()))
+                }),
+                "Cannot merge runs with different coverage denominators".into(),
+            ),
+            (
+                "configuration, the files unrecorded",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.configuration = "9".repeat(64)
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: configuration".into(),
+            ),
+            (
+                "source and its file count, the files unrecorded",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.source = "9".repeat(64);
+                        m.integrity.fingerprint.source_files = 2;
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: source".into(),
+            ),
+            (
+                "a file recorded once and gone from the checkout",
+                Box::new(|root| {
+                    record_files(root, "run-a", &[("mock/data.json", "{}")]);
+                    record_files(root, "run-b", &[]);
+                }),
+                "Cannot merge run run-a with run run-b: mock/data.json, which it measured, is gone. Measure it again.".into(),
+            ),
+            (
+                "two served files, their test not measured again",
+                Box::new(|root| {
+                    record_files(root, "run-a", &[("mocks/a.js", "1"), ("mocks/b.js", "1")]);
+                    record_files(root, "run-b", &[("mocks/a.js", "2"), ("mocks/b.js", "2")]);
+                    rewrite_entry(
+                        root,
+                        "run-a",
+                        crate::support_reach::ARCHIVE_PATH,
+                        Some(
+                            serde_json::to_vec(&serde_json::json!({"files": {
+                                "mocks/a.js": ["t9"],
+                                "mocks/b.js": ["t9"],
+                            }}))
+                            .unwrap(),
+                        ),
+                    );
+                    let entries = read_archive(&root.join(".supercov/runs/run-a/evidence.raw.gz"))
+                        .unwrap();
+                    let mut manifest: Value = serde_json::from_slice(
+                        &entries
+                            .iter()
+                            .find(|entry| entry.path == "manifest.json")
+                            .unwrap()
+                            .contents,
+                    )
+                    .unwrap();
+                    manifest["scope"] = serde_json::json!({"entries": [
+                        {"file": "src/app.js", "status": "included"}
+                    ]});
+                    rewrite_entry(
+                        root,
+                        "run-a",
+                        "manifest.json",
+                        Some(serde_json::to_vec(&manifest).unwrap()),
+                    );
+                }),
+                "Cannot merge run run-a with run run-b: mocks/a.js; mocks/b.js changed, and 1 of its tests reached them through a server that served them and were not measured again: t9.".into(),
+            ),
+            (
+                "grown, the first run's denominator unreadable",
+                Box::new(|root| {
+                    grown_from_a_recorded_file(root);
+                    rewrite_entry(root, "run-a", "manifest.json", Some(b"[]".to_vec()));
+                }),
+                "Cannot merge runs with different coverage denominators".into(),
+            ),
+            (
+                "grown, the later run's denominator another",
+                Box::new(|root| {
+                    grown_from_a_recorded_file(root);
+                    rewrite_entry(root, "run-b", "manifest.json", Some(b"{}".to_vec()));
                 }),
                 "Cannot merge runs with different coverage denominators".into(),
             ),
