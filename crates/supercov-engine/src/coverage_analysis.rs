@@ -62,10 +62,10 @@ impl Bits {
         for entry in &mut self.0[..word] {
             *entry = 0;
         }
-        if let Some(entry) = self.0.get_mut(word) {
-            let bit = index % 64;
-            *entry &= if bit == 63 { 0 } else { !0_u64 << (bit + 1) };
-        }
+        // Only a vector's own index is removed through, and the set has a
+        // bit for every vector: its word is always there.
+        let bit = index % 64;
+        self.0[word] &= if bit == 63 { 0 } else { !0_u64 << (bit + 1) };
     }
 
     fn first(&self) -> Option<usize> {
@@ -570,6 +570,121 @@ mod tests {
                 actual: 0,
             })
         );
+    }
+
+    /// A vector pairs with another only when they are as wide, the
+    /// condition is one of theirs, and they agree on every other condition
+    /// both evaluated.
+    #[test]
+    fn an_independence_pair_agrees_everywhere_but_its_condition() {
+        let vector = |values: &[Option<bool>], outcome| McdcVector {
+            values: values.to_vec(),
+            outcome,
+        };
+        let (t, f) = (Some(true), Some(false));
+        assert!(is_independence_pair(
+            &vector(&[t, None], true),
+            &vector(&[f, f], false),
+            0
+        ));
+        assert!(!is_independence_pair(
+            &vector(&[t], true),
+            &vector(&[f, f], false),
+            0
+        ));
+        assert!(!is_independence_pair(
+            &vector(&[t, t], true),
+            &vector(&[f, t], false),
+            2
+        ));
+        assert!(!is_independence_pair(
+            &vector(&[t, t], true),
+            &vector(&[f, f], false),
+            0
+        ));
+    }
+
+    /// A witness found from the 64th vector on looks only past it, across
+    /// the word the bitset keeps it in.
+    #[test]
+    fn a_witness_is_found_from_the_last_bit_of_a_word() {
+        let mut vectors = (0..63)
+            .map(|_| McdcVector {
+                values: vec![None],
+                outcome: false,
+            })
+            .collect::<Vec<_>>();
+        vectors.push(McdcVector {
+            values: vec![Some(true)],
+            outcome: true,
+        });
+        vectors.push(McdcVector {
+            values: vec![Some(false)],
+            outcome: false,
+        });
+        assert_eq!(
+            find_witnesses(&vectors).unwrap(),
+            [Some(WitnessIndexes {
+                first: 63,
+                second: 64
+            })]
+        );
+    }
+
+    /// Every condition took both values, yet neither alone was seen to
+    /// change the outcome: the run is not complete.
+    #[test]
+    fn conditions_seen_both_ways_without_a_witness_leave_coverage_incomplete() {
+        let output = analyze_core(&CoverageCoreInput {
+            decisions: vec![DecisionCoverage {
+                condition_count: 2,
+                vectors: vec![
+                    McdcVector {
+                        values: vec![Some(true), Some(true)],
+                        outcome: true,
+                    },
+                    McdcVector {
+                        values: vec![Some(false), Some(false)],
+                        outcome: false,
+                    },
+                ],
+            }],
+            points: vec![],
+            branches: vec![],
+            lines: vec![],
+        })
+        .unwrap();
+        assert_eq!(output.summary.condition_outcomes.percentage, 100.0);
+        assert_eq!(output.summary.condition_coverage_pct, 0.0);
+        assert!(!output.summary.coverage_complete);
+        assert_eq!(
+            analyze_core(&CoverageCoreInput {
+                decisions: vec![
+                    DecisionCoverage {
+                        condition_count: 1,
+                        vectors: vec![],
+                    },
+                    DecisionCoverage {
+                        condition_count: 0,
+                        vectors: vec![],
+                    },
+                ],
+                points: vec![],
+                branches: vec![],
+                lines: vec![],
+            }),
+            Err(AnalysisError::EmptyDecision { decision: 1 })
+        );
+    }
+
+    /// Past the integers a JavaScript number holds exactly, or not finite,
+    /// a number is written as a float.
+    #[test]
+    fn numbers_json_stringify_cannot_write_as_integers_stay_floats() {
+        let json = |value| serde_json::to_string(&JavascriptNumber { value }).unwrap();
+        assert_eq!(json(1e300), r#"{"value":1e+300}"#);
+        assert_eq!(json(f64::NAN), r#"{"value":null}"#);
+        assert_eq!(json(2.5), r#"{"value":2.5}"#);
     }
 
     #[test]
