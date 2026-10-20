@@ -595,6 +595,74 @@ mod tests {
         root
     }
 
+    /// What a build or a coverage run wrote is no input: a profile, and a
+    /// directory Cargo marks by its info file, its lock or its cache tag. A
+    /// link is an input by where it points; a FIFO is no input Supercov
+    /// knows how to fingerprint.
+    #[cfg(unix)]
+    #[test]
+    fn build_output_profiles_and_links_are_told_from_inputs() {
+        let root = project("outputs");
+        for (file, text) in [
+            ("default.profraw", "x"),
+            ("sub/merged.profdata", "x"),
+            ("crate/target/.rustc_info.json", "{}"),
+            ("crate/target/debug/a", "x"),
+            ("locked/.cargo-lock", ""),
+            ("locked/a", "x"),
+            (
+                "tagged/CACHEDIR.TAG",
+                "Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n",
+            ),
+            ("tagged/a", "x"),
+            (
+                "other/CACHEDIR.TAG",
+                "Signature: 8a477f597d28d172789f06886806bc55\n",
+            ),
+        ] {
+            fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            fs::write(root.join(file), text).unwrap();
+        }
+        std::os::unix::fs::symlink("src/lib.rs", root.join("alias.rs")).unwrap();
+        let (mut files, mut links) = (Vec::new(), Vec::new());
+        collect_project_inputs(&root, &root, true, &mut files, &mut links).unwrap();
+        let files = files
+            .iter()
+            .map(|file| file.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+        for left_out in [
+            "default.profraw",
+            "sub/merged.profdata",
+            "crate/target/debug/a",
+            "locked/a",
+            "tagged/a",
+        ] {
+            assert!(
+                !files.iter().any(|file| file == left_out),
+                "{left_out}: {files:?}"
+            );
+        }
+        assert!(
+            files.contains(&"other/CACHEDIR.TAG".to_owned()),
+            "{files:?}"
+        );
+        assert_eq!(links, ["alias.rs=>src/lib.rs"]);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let refused = collect_project_inputs(&root, &root, true, &mut Vec::new(), &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            refused.contains("unsupported Rust project input"),
+            "{refused}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A build cache the project's `.gitignore` excludes is no configuration:
     /// a run copied to CI, where it is absent, read as stale. Outside a git
     /// repository nothing is ignored.

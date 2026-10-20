@@ -418,6 +418,67 @@ mod tests {
         assert_eq!(attempt.test_name, "tests::flaky");
     }
 
+    /// Each malformed identity is refused with its own reason: a nextest
+    /// key without `NEXTEST`, a `NEXTEST` other than 1, a value that is
+    /// empty, oversized or multi-line, a run id that is not a canonical
+    /// lowercase UUID, a version of four parts, an attempt past the total,
+    /// and a stress total on its own.
+    #[test]
+    fn each_malformed_identity_is_refused_for_its_reason() {
+        let attempt = [
+            ("NEXTEST_TEST_NAME", "tests::flaky"),
+            ("NEXTEST_ATTEMPT", "1"),
+            ("NEXTEST_TOTAL_ATTEMPTS", "1"),
+            (
+                "NEXTEST_ATTEMPT_ID",
+                "2ae19189-240a-433a-a31d-acc411fe8e1f:fixture$tests::flaky",
+            ),
+            ("NEXTEST_STRESS_CURRENT", "none"),
+            ("NEXTEST_STRESS_TOTAL", "none"),
+        ];
+        let refused = |changes: &[(&'static str, &'static str)], with_attempt: bool| {
+            let mut values = nextest_base();
+            if with_attempt {
+                values.extend(attempt);
+            }
+            for (key, value) in changes {
+                values.retain(|(k, _)| k != key);
+                values.push((key, value));
+            }
+            classify_rust_runner_environment_from(environment(&values))
+                .unwrap_err()
+                .to_string()
+        };
+        let lone = classify_rust_runner_environment_from(environment(&[(
+            "NEXTEST_RUN_ID",
+            "2ae19189-240a-433a-a31d-acc411fe8e1f",
+        )]))
+        .unwrap_err()
+        .to_string();
+        assert!(lone.contains("without NEXTEST=1"), "{lone}");
+        assert!(refused(&[("NEXTEST", "0")], false).contains("must equal 1"));
+        let long = "a".repeat(4_097).leak() as &'static str;
+        for value in ["", long, "2ae19189\n"] {
+            let error = refused(&[("NEXTEST_RUN_ID", value)], false);
+            assert!(error.contains("not a single-line identity"), "{error}");
+        }
+        for value in [
+            "2ae19189-240a-433a-a31d-acc411fe8e1",
+            "2AE19189-240a-433a-a31d-acc411fe8e1f",
+            "2ae19189-240a-433a-a31d-acc411fe8e1g",
+            "2ae19189x240a-433a-a31d-acc411fe8e1f",
+        ] {
+            let error = refused(&[("NEXTEST_RUN_ID", value)], false);
+            assert!(
+                error.contains("canonical lowercase UUID"),
+                "{value}: {error}"
+            );
+        }
+        assert!(refused(&[("NEXTEST_VERSION", "0.9.140.1")], false).contains("exactly three"),);
+        assert!(refused(&[("NEXTEST_ATTEMPT", "2")], true).contains("exceeds"));
+        assert!(refused(&[("NEXTEST_STRESS_TOTAL", "2")], true).contains("stress"));
+    }
+
     #[test]
     fn partial_or_cross_run_nextest_identity_is_fatal() {
         let mut partial = nextest_base();
