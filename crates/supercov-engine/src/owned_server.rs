@@ -252,13 +252,9 @@ pub fn publish(
         }
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
-        let archive_path = root
-            .join(".supercov/work")
-            .join(&metadata.id)
-            .join(format!("{}-evidence.raw.gz", server.environment));
-        if let Some(parent) = archive_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
+        let work = root.join(".supercov/work").join(&metadata.id);
+        fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+        let archive_path = work.join(format!("{}-evidence.raw.gz", server.environment));
         let raw = write_archive(
             crate::source_capture::append(
                 run.archive_entries().map_err(|error| error.to_string())?,
@@ -318,4 +314,88 @@ pub fn publish(
     });
     let _ = remove_stored_tree_deferred(root, server.directory);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coverage_report::TestProvenance;
+
+    fn served(name: &str, status: &str, window: (i64, i64)) -> ServedTest {
+        ServedTest {
+            worker: "playwright:w0".into(),
+            test_id: name.into(),
+            retry: 0,
+            name: name.into(),
+            title: name.into(),
+            file: "tests/a.spec.js".into(),
+            status: status.into(),
+            expected_status: "passed".into(),
+            provenance: TestProvenance::default(),
+            window: Some(window),
+            attempt_id: None,
+        }
+    }
+
+    fn window(start: i64, end: i64, probes: &[u64], vectors: &[u64]) -> ServerWindow {
+        ServerWindow {
+            start,
+            end,
+            probes: probes.to_vec(),
+            vectors: vectors.to_vec(),
+        }
+    }
+
+    /// A window one test's span overlaps is that test's, each probe and
+    /// vector once; one several tests overlap is only the run's, and those
+    /// tests are named when it held work; one no test overlaps is the run's.
+    /// A probe or decision the server does not declare reaches no total.
+    #[test]
+    fn each_window_is_credited_to_the_one_test_running_or_to_the_run() {
+        let tests = [
+            served("one", "passed", (100, 200)),
+            served("two", "timedOut", (300, 400)),
+            served("three", "skipped", (340, 500)),
+        ];
+        let windows = [
+            window(100, 150, &[0, 1, 99, 1], &[0, 5, 0, 5, 7, 1]),
+            window(350, 360, &[], &[]),
+            window(380, 390, &[1, 2], &[]),
+            window(1000, 1001, &[1, 4], &[]),
+        ];
+        let (evidence, outcomes, credited, overlapped) = credit(&windows, &tests, 2, &[1]);
+        assert_eq!(evidence.global, [1, 6]);
+        assert_eq!(evidence.decision_vectors, [vec![5]]);
+        assert_eq!(
+            evidence.tests[0]
+                .probes
+                .iter()
+                .map(|(probe, mask)| (*probe, *mask))
+                .collect::<Vec<_>>(),
+            [(0, 1), (99, 1)]
+        );
+        assert_eq!(
+            evidence.tests[0].vectors,
+            [
+                PackedVector {
+                    decision: 0,
+                    key: 5
+                },
+                PackedVector {
+                    decision: 7,
+                    key: 1
+                }
+            ]
+        );
+        assert!(evidence.tests[1].probes.is_empty());
+        assert_eq!(credited, BTreeSet::from([0]));
+        assert_eq!(overlapped, BTreeSet::from([1, 2]));
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.status.as_str())
+                .collect::<Vec<_>>(),
+            ["passed", "failed", "skipped"]
+        );
+    }
 }
