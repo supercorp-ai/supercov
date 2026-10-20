@@ -282,10 +282,10 @@ impl<'a> SourceLocations<'a> {
     }
 
     fn range(&self, range: TextRange) -> Result<(usize, usize), PythonInstrumenterError> {
+        // A `TextRange` never starts after it ends.
         let start = range.start().to_usize();
         let end = range.end().to_usize();
-        if start > end
-            || end > self.source.len()
+        if end > self.source.len()
             || !self.source.is_char_boundary(start)
             || !self.source.is_char_boundary(end)
         {
@@ -347,6 +347,10 @@ type DecisionBoolOp = (String, Vec<Vec<usize>>);
 /// A regrouped BoolOp's decision: its ID, the leaf indexes of each operand
 /// but the last, and the span the runtime regroups them under.
 type RegroupedBoolOp = (String, Vec<Vec<usize>>, PlanSpan);
+
+/// The statements that stand for a decision's true and false outcomes: the
+/// first statements of the branches each outcome takes.
+type Heads = (Option<String>, Option<String>);
 
 /// The BoolOps of a decision's and/or tree, each with the leaf indexes of
 /// its operands.
@@ -451,7 +455,8 @@ impl<'a> PythonObligationCollector<'a> {
         });
     }
 
-    fn function(&mut self, range: TextRange, name: &str) {
+    /// A function, whose entry its body's first statement proves.
+    fn function(&mut self, range: TextRange, name: &str, first: Option<String>) {
         let id = stable_id(self.file, "function", range, name);
         if !self.point_ids.insert(id.clone()) {
             return;
@@ -464,7 +469,7 @@ impl<'a> PythonObligationCollector<'a> {
             id,
             name: name.to_owned(),
             span,
-            first: None,
+            first,
         });
     }
 
@@ -517,7 +522,13 @@ impl<'a> PythonObligationCollector<'a> {
     }
 
     fn decision(&mut self, test: &Expr, kind: &str) {
-        self.decision_over(test.range(), kind, false, |this, leaves, boolops| {
+        self.decision_with_heads(test, kind, Heads::default());
+    }
+
+    /// A decision whose outcomes lead to the branches `heads` start: the
+    /// statements standing for its true and false outcomes.
+    fn decision_with_heads(&mut self, test: &Expr, kind: &str, heads: Heads) {
+        self.decision_over(test.range(), kind, false, heads, |this, leaves, boolops| {
             this.tree(test, leaves, boolops).map(|_| ())
         });
     }
@@ -529,6 +540,7 @@ impl<'a> PythonObligationCollector<'a> {
         range: TextRange,
         kind: &str,
         value: bool,
+        (when_true, when_false): Heads,
         build: impl FnOnce(&mut Self, &mut Vec<ConditionPlan>, &mut TreeBoolOps) -> Option<()>,
     ) -> Option<(String, TreeBoolOps)> {
         let id = stable_id(self.file, "decision", range, kind);
@@ -598,8 +610,8 @@ impl<'a> PythonObligationCollector<'a> {
             conditions: leaves,
             outcome_true: format!("{outcome_id}:true"),
             outcome_false: format!("{outcome_id}:false"),
-            when_true: None,
-            when_false: None,
+            when_true,
+            when_false,
             value,
         });
         Some((id, tree))
@@ -633,8 +645,12 @@ impl<'a> PythonObligationCollector<'a> {
                         return;
                     };
                     let mut regrouped = Vec::new();
-                    if let Some((id, _)) =
-                        self.decision_over(range, "value", true, |this, leaves, boolops| {
+                    if let Some((id, _)) = self.decision_over(
+                        range,
+                        "value",
+                        true,
+                        Heads::default(),
+                        |this, leaves, boolops| {
                             let mut groups = Vec::with_capacity(left.len());
                             for value in left {
                                 let first = leaves.len();
@@ -644,8 +660,8 @@ impl<'a> PythonObligationCollector<'a> {
                             boolops.push((range, groups.clone()));
                             regrouped = groups;
                             Some(())
-                        })
-                    {
+                        },
+                    ) {
                         self.regrouped.insert(own, (id, regrouped, span));
                     }
                 } else if Self::is_compound(&values[0]) {
@@ -653,6 +669,7 @@ impl<'a> PythonObligationCollector<'a> {
                         values[0].range(),
                         "value",
                         true,
+                        Heads::default(),
                         |this, leaves, boolops| this.tree(&values[0], leaves, boolops).map(|_| ()),
                     );
                 }
@@ -667,9 +684,13 @@ impl<'a> PythonObligationCollector<'a> {
                 {
                     return;
                 }
-                self.decision_over(unary.range, "value", true, |this, leaves, boolops| {
-                    this.tree(expression, leaves, boolops).map(|_| ())
-                });
+                self.decision_over(
+                    unary.range,
+                    "value",
+                    true,
+                    Heads::default(),
+                    |this, leaves, boolops| this.tree(expression, leaves, boolops).map(|_| ()),
+                );
             }
             _ => {}
         }
@@ -720,7 +741,8 @@ impl<'a> PythonObligationCollector<'a> {
         Some(id)
     }
 
-    fn loop_branch(&mut self, range: TextRange, iter: &Expr, kind: &str) {
+    /// A loop over `iter`, whose entry its body's first statement proves.
+    fn loop_branch(&mut self, range: TextRange, iter: &Expr, kind: &str, first: Option<String>) {
         let Some(id) = self.branch(
             range,
             kind,
@@ -736,7 +758,7 @@ impl<'a> PythonObligationCollector<'a> {
             entered: format!("{id}:entered"),
             id,
             iter: iter_span,
-            first: None,
+            first,
         });
     }
 
@@ -932,24 +954,6 @@ impl<'a> PythonObligationCollector<'a> {
             .and_then(|clause| self.first_statement(&clause.body))
     }
 
-    /// Name the statements that stand for the decision just planned for
-    /// `test`: the heads of the branches its outcomes take.
-    fn branch_heads(&mut self, test: &Expr, when_true: Option<String>, when_false: Option<String>) {
-        let Ok(span) = self.locations.span(test.range()) else {
-            return;
-        };
-        if let Some(plan) = self
-            .plan
-            .decisions
-            .iter_mut()
-            .rev()
-            .find(|plan| plan.span == span)
-        {
-            plan.when_true = when_true;
-            plan.when_false = when_false;
-        }
-    }
-
     fn visit_body_statements(&mut self, body: &'a [Stmt]) {
         for (index, statement) in body.iter().enumerate() {
             if is_unobservable_statement(statement, index == 0) {
@@ -971,29 +975,22 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
         self.statement(statement);
         match statement {
             Stmt::FunctionDef(function) => {
-                self.function(function.range, &function.name);
                 let first = self.first_statement(&function.body);
-                if let Some(plan) = self.plan.functions.last_mut()
-                    && plan.id == stable_id(self.file, "function", function.range, &function.name)
-                {
-                    plan.first = first;
-                }
+                self.function(function.range, &function.name, first);
             }
             Stmt::If(statement) => {
                 let heads = (
                     self.first_statement(&statement.body),
                     self.else_head(&statement.elif_else_clauses),
                 );
-                self.decision(&statement.test, "if");
-                self.branch_heads(&statement.test, heads.0, heads.1);
+                self.decision_with_heads(&statement.test, "if", heads);
                 for (index, clause) in statement.elif_else_clauses.iter().enumerate() {
                     if let Some(test) = &clause.test {
                         let heads = (
                             self.first_statement(&clause.body),
                             self.else_head(&statement.elif_else_clauses[index + 1..]),
                         );
-                        self.decision(test, "elif");
-                        self.branch_heads(test, heads.0, heads.1);
+                        self.decision_with_heads(test, "elif", heads);
                     }
                 }
             }
@@ -1002,10 +999,10 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
                     self.first_statement(&statement.body),
                     self.first_statement(&statement.orelse),
                 );
-                self.decision(&statement.test, "while");
-                self.branch_heads(&statement.test, heads.0, heads.1);
+                self.decision_with_heads(&statement.test, "while", heads);
             }
             Stmt::For(statement) => {
+                let first = self.first_statement(&statement.body);
                 self.loop_branch(
                     statement.range,
                     &statement.iter,
@@ -1014,15 +1011,8 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
                     } else {
                         "for"
                     },
+                    first,
                 );
-                let first = self.first_statement(&statement.body);
-                if let (Some(plan), Ok(span)) = (
-                    self.plan.loops.last_mut(),
-                    self.locations.span(statement.iter.range()),
-                ) && plan.iter == span
-                {
-                    plan.first = first;
-                }
             }
             Stmt::Match(statement) => self.match_statement(statement),
             Stmt::Try(statement) => self.try_statement(statement),
@@ -1036,7 +1026,7 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
 
     fn visit_expr(&mut self, expression: &'a Expr) {
         match expression {
-            Expr::Lambda(lambda) => self.function(lambda.range, "<lambda>"),
+            Expr::Lambda(lambda) => self.function(lambda.range, "<lambda>", None),
             Expr::If(expression) => {
                 self.decision(&expression.test, "ternary");
             }
@@ -1059,6 +1049,7 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
             } else {
                 "comprehension"
             },
+            None,
         );
         for condition in &comprehension.ifs {
             self.decision(condition, "comprehension-if");
@@ -1074,13 +1065,27 @@ pub fn build_python_obligations(
     file: &str,
     source: &str,
 ) -> Result<PythonFileObligations, PythonInstrumenterError> {
-    if source.len() > u32::MAX as usize {
-        return Err(PythonInstrumenterError::SourceTooLarge);
-    }
+    within_text_size(source.len())?;
     let parsed =
         parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))?;
+    obligations_of(file, source, parsed.suite())
+}
+
+/// Ruff's offsets are `u32`: a longer source cannot be parsed.
+fn within_text_size(length: usize) -> Result<(), PythonInstrumenterError> {
+    u32::try_from(length)
+        .map(|_| ())
+        .map_err(|_| PythonInstrumenterError::SourceTooLarge)
+}
+
+/// The obligations of `suite`, parsed from `source`.
+fn obligations_of(
+    file: &str,
+    source: &str,
+    suite: &[Stmt],
+) -> Result<PythonFileObligations, PythonInstrumenterError> {
     let mut collector = PythonObligationCollector::new(file, source);
-    collector.visit_body(parsed.suite());
+    collector.visit_body(suite);
     if let Some(error) = collector.error {
         return Err(error);
     }
@@ -1454,5 +1459,78 @@ mod tests {
             .find(|point| point.source == "print(item)")
             .unwrap();
         assert_eq!(obligations.plan.loops[0].first.as_ref(), Some(&print.id));
+    }
+
+    #[test]
+    fn a_range_past_the_source_or_inside_a_character_is_refused() {
+        let locations = SourceLocations::new("é = 1\n");
+        let range =
+            |start: u32, end: u32| locations.range(TextRange::new(start.into(), end.into()));
+        assert_eq!(range(0, 2), Ok((0, 2)));
+        for (start, end) in [(0, 9), (1, 2), (0, 1)] {
+            assert_eq!(
+                range(start, end),
+                Err(PythonInstrumenterError::InvalidRange),
+                "{start}..{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tree_that_does_not_match_its_source_yields_no_partial_obligations() {
+        let parsed = parse_module("if a_long_name:\n    pass\n").unwrap();
+        assert_eq!(
+            obligations_of("a.py", "x = 1\n", parsed.suite()),
+            Err(PythonInstrumenterError::InvalidRange)
+        );
+        assert!(obligations_of("a.py", "if a_long_name:\n    pass\n", parsed.suite()).is_ok());
+    }
+
+    #[test]
+    fn a_source_longer_than_ruff_can_address_is_too_large() {
+        assert_eq!(within_text_size(u32::MAX as usize), Ok(()));
+        assert_eq!(
+            within_text_size(u32::MAX as usize + 1),
+            Err(PythonInstrumenterError::SourceTooLarge)
+        );
+    }
+
+    #[test]
+    fn registering_the_same_node_twice_declares_it_once() {
+        let source = "def f():\n    return a or b or c\n";
+        let parsed = parse_module(source).unwrap();
+        let Stmt::FunctionDef(function) = &parsed.suite()[0] else {
+            panic!();
+        };
+        let Stmt::Return(returned) = &function.body[0] else {
+            panic!();
+        };
+        let value = returned.value.as_deref().unwrap();
+        let mut collector = PythonObligationCollector::new("a.py", source);
+        for _ in 0..2 {
+            collector.statement(&parsed.suite()[0]);
+            collector.function(function.range, &function.name, None);
+            collector.value_decision(value);
+            collector.loop_branch(function.range, value, "for", None);
+        }
+        assert_eq!(collector.error, None);
+        let kinds = |points: &[PointMeta]| {
+            points
+                .iter()
+                .map(|point| point.kind.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&collector.manifest.points),
+            [PointKind::Statement, PointKind::Function]
+        );
+        assert_eq!(collector.plan.functions.len(), 1);
+        // `a or b` is the one decision, regrouped once.
+        assert_eq!(collector.manifest.decisions.len(), 1);
+        assert_eq!(collector.manifest.decisions[0].conditions, ["a", "b"]);
+        assert_eq!(collector.regrouped.len(), 1);
+        // Its outcome and the loop.
+        assert_eq!(collector.manifest.branches.len(), 2);
+        assert_eq!(collector.plan.loops.len(), 1);
     }
 }
