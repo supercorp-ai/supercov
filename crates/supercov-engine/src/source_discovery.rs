@@ -864,9 +864,10 @@ fn files_under(
         .require_git(true)
         .follow_links(false)
         .sort_by_file_name(|left, right| left.cmp(right))
+        // The walker never asks about the directory it starts from: `ignore`
+        // keeps every entry of depth 0 before it consults this filter.
         .filter_entry(move |entry| {
-            entry.depth() == 0
-                || !entry.file_type().is_some_and(|kind| kind.is_dir())
+            !entry.file_type().is_some_and(|kind| kind.is_dir())
                 || entry.file_name().to_str().is_some_and(|name| {
                     !generated_directory(name)
                         && !owned_workspace_store(entry.path())
@@ -1572,6 +1573,16 @@ mod tests {
     }
 
     #[test]
+    fn only_a_directory_has_source_files_under_it() {
+        let root = repository("files-under-file", &[("main.ts", "")]);
+        assert!(matches!(
+            files_under(&root, &root.join("main.ts"), &mut Vec::new()),
+            Err(SourceDiscoveryError::InvalidRoot(path)) if path == root.join("main.ts")
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn task_runner_files_are_tooling_and_comments_end_where_json_says() {
         for file in [
             "gulpfile.js",
@@ -1582,6 +1593,8 @@ mod tests {
             assert!(config_file(file), "{file}");
         }
         assert!(!config_file("gulp.js"));
+        // A config that is not JavaScript is not a config file of the source.
+        assert!(!config_file("vite.config.json"));
         // A slash that opens no comment, and a star inside one, are text.
         assert_eq!(
             strip_jsonc_comments("{\"a\": 1 /* x * y */, \"b\": 2 / 1 // z\n}"),
@@ -2324,6 +2337,12 @@ mod tests {
                     "packages:\n  # the tools\n\n  - 'tools/cli'\n  - \"tools/missing\"\ncatalog:\n  - not/a/package\n",
                 ),
                 ("apps/web/package.json", "{}"),
+                // A workspace store Supercov made is no package of the project's.
+                ("apps/store/package.json", "{}"),
+                (
+                    "apps/store/.supercov-workspace-store",
+                    "Supercov instrumented workspace. Safe to delete.\n",
+                ),
                 ("apps/nopkg/index.js", ""),
                 ("apps/readme.txt", ""),
                 ("libs/core/package.json", "{}"),
