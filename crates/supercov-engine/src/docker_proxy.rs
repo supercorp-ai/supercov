@@ -64,13 +64,21 @@ pub struct ProxySettings {
 /// when it is not a local socket (a TCP or SSH daemon), which the relay does
 /// not stand in for.
 pub fn upstream_socket(environment: &BTreeMap<String, String>) -> Option<PathBuf> {
+    upstream_socket_through(environment, "docker")
+}
+
+/// [`upstream_socket`], asking the context of the CLI at `docker`.
+fn upstream_socket_through(
+    environment: &BTreeMap<String, String>,
+    docker: &str,
+) -> Option<PathBuf> {
     if let Some(host) = environment
         .get("DOCKER_HOST")
         .filter(|host| !host.is_empty())
     {
         return host.strip_prefix("unix://").map(PathBuf::from);
     }
-    let mut command = Command::new("docker");
+    let mut command = Command::new(docker);
     command
         .args([
             "context",
@@ -97,12 +105,14 @@ pub fn upstream_socket(environment: &BTreeMap<String, String>) -> Option<PathBuf
 /// testcontainers mounts into Ryuk, its reaper. Docker Desktop, Colima and
 /// the like run the daemon in a VM, where it is /var/run/docker.sock whatever
 /// the host calls it; on Linux the daemon shares the host's paths.
+#[cfg(target_os = "linux")]
 fn daemon_side_socket(upstream: &Path) -> PathBuf {
-    if cfg!(target_os = "linux") {
-        upstream.to_owned()
-    } else {
-        PathBuf::from("/var/run/docker.sock")
-    }
+    upstream.to_owned()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn daemon_side_socket(_upstream: &Path) -> PathBuf {
+    PathBuf::from("/var/run/docker.sock")
 }
 
 /// Where the relay listens: in the run's own directory when the path fits a
@@ -1737,6 +1747,12 @@ mod tests {
             Some(PathBuf::from("/run/user/docker.sock"))
         );
         assert_eq!(host("tcp://127.0.0.1:2375"), None);
+        // Without a CLI to ask, the usual socket, where there is one.
+        let usual = Path::new("/var/run/docker.sock");
+        assert_eq!(
+            upstream_socket_through(&BTreeMap::new(), "/nonexistent/docker"),
+            usual.exists().then(|| usual.to_owned())
+        );
         // A base short enough for a socket address; the system temporary
         // directory on macOS is nearly too long on its own.
         let base = PathBuf::from("/tmp").join(format!(
