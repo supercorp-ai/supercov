@@ -2939,6 +2939,11 @@ mod tests {
             std::env::split_paths(&environment[0].1).collect::<Vec<_>>(),
             ["/", "/lib", "/user/a", "/user/b"].map(PathBuf::from)
         );
+        let environment = library_path_environment(Path::new("/lib"), Path::new("/fixture"), None);
+        assert_eq!(
+            std::env::split_paths(&environment[0].1).collect::<Vec<_>>(),
+            ["/", "/lib"].map(PathBuf::from)
+        );
     }
 
     #[cfg(unix)]

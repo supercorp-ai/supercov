@@ -547,7 +547,7 @@ mod tests {
         }
     }
 
-    fn served(index: usize, window: (i64, i64)) -> ServedTest {
+    fn served(index: usize, window: (i64, i64), runner: &str) -> ServedTest {
         ServedTest {
             worker: "playwright:0".into(),
             test_id: format!("t{index}"),
@@ -558,7 +558,7 @@ mod tests {
             status: "passed".into(),
             expected_status: "passed".into(),
             provenance: TestProvenance {
-                runner: String::new(),
+                runner: runner.into(),
                 kind: "e2e".into(),
                 project: None,
                 source: "playwright".into(),
@@ -569,10 +569,10 @@ mod tests {
         }
     }
 
-    /// Work taken while two tests ran is neither's: it is the run's, under
-    /// the runner a test that names none is taken to have come from, and it
-    /// counts as passed only if the run did. Without a test or a take there
-    /// is no run to publish.
+    /// Work taken while two tests ran is neither's: it is the run's, and it
+    /// counts as passed only if the run did. A test whose journal names no
+    /// runner is Playwright's. Without a test or a take there is no run to
+    /// publish.
     #[test]
     fn work_two_tests_overlap_is_the_run_s_and_fails_with_it() {
         let root = std::env::temp_dir().join(format!(
@@ -617,7 +617,8 @@ mod tests {
                 regions: vec![("crate".into(), region_with_one_hit(&project.probes))],
             }]
         };
-        let tests = [served(0, (0, 10)), served(1, (5, 15))];
+        // The second test's journal names no runner.
+        let tests = [served(0, (0, 10), "playwright"), served(1, (5, 15), "")];
         let run_id = "2026-01-01T00-00-00-000Z";
         let mut diagnostics = Vec::new();
         assert_eq!(

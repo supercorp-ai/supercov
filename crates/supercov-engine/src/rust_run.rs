@@ -763,13 +763,19 @@ mod tests {
         )
         .unwrap();
         let request = rust_request(&root, &["cargo", "test", "--no-such-flag"]);
-        let mut diagnostics = Vec::new();
-        assert!(run_direct_rust_timed(&request, &mut diagnostics, true).is_err());
-        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        let run = |timed: bool| {
+            let mut diagnostics = Vec::new();
+            assert!(run_direct_rust_timed(&request, &mut diagnostics, timed).is_err());
+            String::from_utf8(diagnostics).unwrap()
+        };
+        let diagnostics = run(false);
         assert!(
             diagnostics.contains(&format!("recovered abandoned run(s): {abandoned}")),
             "{diagnostics}"
         );
+        assert!(!diagnostics.contains("workspace timings"), "{diagnostics}");
+        let diagnostics = run(true);
+        assert!(!diagnostics.contains("recovered abandoned"), "{diagnostics}");
         assert!(
             diagnostics.contains("[supercov] workspace timings cache-check="),
             "{diagnostics}"
