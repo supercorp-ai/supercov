@@ -1560,10 +1560,12 @@ pub fn run_direct_jvm(
             writeln!(
                 diagnostics,
                 "[supercov] turned JUnit's parallel execution off in the workspace copy ({}): attribution is a sweep of one shared probe array at each test boundary, so two tests running at once cannot both be credited with what they reached. Your suite runs in order here and your own configuration is untouched.",
+                // A module is the directory `module_of` names: `.` for the
+                // root, never empty.
                 instrumented
                     .serialised
                     .iter()
-                    .map(|module| if module.is_empty() { "." } else { module.as_str() })
+                    .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -1576,7 +1578,7 @@ pub fn run_direct_jvm(
                 instrumented
                     .concurrent
                     .iter()
-                    .map(|module| if module.is_empty() { "." } else { module.as_str() })
+                    .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
