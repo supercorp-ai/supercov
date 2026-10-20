@@ -1887,6 +1887,24 @@ func classify(a int, b bool) string {
         );
     }
 
+    /// A name that ends in `new` after a rune outside ASCII is the name's,
+    /// not the builtin: `fünew(v + 1)` is left as written while the builtin
+    /// beside it takes the stand-in.
+    #[test]
+    fn new_at_the_end_of_a_name_with_a_rune_is_not_the_builtin() {
+        let go = obligations(
+            "package p\n\nfunc f\u{fc}new(v int) *int { return &v }\n\nfunc both(v int) (*int, *int) {\n\treturn f\u{fc}new(v + 1), new(v + 1)\n}\n",
+        );
+        assert!(
+            go.manifest
+                .points
+                .iter()
+                .any(|point| point.source == "return f\u{fc}new(v + 1), new(v + 1)"),
+            "{:?}",
+            go.manifest.points
+        );
+    }
+
     #[test]
     fn the_scan_never_mistakes_text_for_code() {
         // The scan that finds a `new(` call site has to know when Go source is
