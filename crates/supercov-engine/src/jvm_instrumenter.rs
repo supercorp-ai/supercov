@@ -910,8 +910,9 @@ fn walk(collector: &mut Collector, node: Node) {
                         collector.edit(inner.end_byte(), 5, ")".to_owned());
                     }
                 }
+                // Kotlin's `while` and `do`/`while` always hold a condition,
+                // so this is its `for`.
                 None if language == JvmLanguage::Kotlin
-                    && node.kind() == "for_statement"
                     && record_loop_ran(collector, node, language) => {}
                 None => {
                     let (line, column) = collector.position(node);
@@ -1102,25 +1103,21 @@ fn record_loop_ran(collector: &mut Collector, node: Node, language: JvmLanguage)
             None => return false,
         }
     } else {
-        if collector.source[..node.start_byte()]
-            .trim_end()
-            .ends_with('@')
-            || collector.text(node).contains('@')
-                && collector
-                    .text(node)
-                    .split('{')
-                    .next()
-                    .is_some_and(|head| head.contains('@'))
+        // A label (`outer@ for`) and an annotated variable are both inside
+        // the loop, before its body.
+        let text = collector.text(node);
+        if text
+            .split_once('{')
+            .map_or(text.as_str(), |(head, _)| head)
+            .contains('@')
         {
             return false;
         }
+        // The grammar puts a braced body straight under the loop; an
+        // unbraced one is a statement there instead.
         let block = node
             .children(&mut node.walk())
-            .find(|child| child.kind() == "control_structure_body")
-            .and_then(|body| {
-                body.children(&mut body.walk())
-                    .find(|child| child.kind() == "block")
-            });
+            .find(|child| child.kind() == "block");
         match block {
             Some(block) => (block.start_byte() + 1, 100),
             None => return false,
@@ -1338,6 +1335,7 @@ class Outer {
     while (true) {
         break
     }
+    for (item in items) sum += 1
     return sum
 }
 "#;
@@ -1707,5 +1705,45 @@ class Outer {
             "{:?}",
             obligations.manifest.limitations
         );
+    }
+
+    fn kotlin(source: &str) -> (JvmFileObligations, String) {
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_jvm_obligations(
+            "K.kt",
+            source,
+            JvmLanguage::Kotlin,
+            &mut next,
+            &mut decisions,
+        )
+        .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+        let out = rewrite(source, &obligations.edits);
+        parse(&out, JvmLanguage::Kotlin)
+            .unwrap_or_else(|error| panic!("rewritten Kotlin does not parse: {error}\n{out}"));
+        (obligations, out)
+    }
+
+    #[test]
+    fn a_kotlin_for_loop_records_whether_it_ran() {
+        // The grammar puts a braced body straight under the loop. Looked for
+        // one level further down, it was never found, and every Kotlin `for`
+        // was a limitation instead of its two outcomes.
+        let source = "fun f(xs: List<Int>): Int {\n    var n = 0\n    for (x in xs) {\n        n += x\n    }\n    outer@ for (x in xs) {\n        n += x\n    }\n    for (x in xs) n += x\n    return n\n}\n";
+        let (obligations, out) = kotlin(source);
+        let loops = obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "for")
+            .map(|branch| branch.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(loops, ["for (x in xs) {"]);
+        assert!(
+            out.contains("var _scvRan46 = false; /*line :3:5*/for (x in xs) { if (!_scvRan46)"),
+            "{out}"
+        );
+        // A labelled loop and one without braces have nowhere for the flag.
+        assert_eq!(obligations.manifest.limitations.len(), 2);
     }
 }

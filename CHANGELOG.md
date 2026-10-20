@@ -114,6 +114,7 @@
 - A project holding a symbolic link in a loop (`cycle -> cycle`), or one whose path runs through a file (`../package.json/x`), could not be measured: preparing the isolated copy failed with "Too many levels of symbolic links" or "Not a directory". Such a link is copied as it is, like any other link that leads nowhere.
 - The assertion assessment left out a line that opens with a block comment and goes on with code (`/** @type {number} */ const max = read();`, `/* given */ cart.add(1);`), as if all of it were a comment: a statement on it was asked about without being shown, or marked as run, in the code the test ran. Such a line is shown as code now.
 - A Java or Kotlin module whose tests run on both TestNG and the JUnit Platform recorded nothing for its TestNG tests unless the run asked for `--exact-attribution`: Supercov compiled its TestNG listener into the module but did not register it. It is registered however the suite runs now.
+- A Kotlin `for` loop was reported as a loop with no condition to observe, so whether it ran at all was never measured. Its zero-iterations and entered outcomes are measured now, as they are for Java's for-each loops; a labelled loop and one without braces are still declared as before.
 
 ## 4.19.0
 
