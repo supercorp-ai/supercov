@@ -464,10 +464,10 @@ fn validate_cli_dotted_key(argument: &str) -> Result<(), CargoConfigModelError> 
         let (key, item) = table.iter().next().expect("one item");
         match item {
             Item::Table(next) => {
-                let key_has_decor = table.key(key).is_some_and(|key| {
-                    has_decor(key.leaf_decor()) || has_decor(key.dotted_decor())
-                });
-                if key_has_decor || has_decor(next.decor()) {
+                // A table's key holds nothing but whitespace around it and
+                // its dots: TOML allows nothing else there, and a comment
+                // before a dotted assignment is its last key's, read below.
+                if has_decor(next.decor()) {
                     break;
                 }
                 table = next;
