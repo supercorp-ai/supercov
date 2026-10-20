@@ -689,6 +689,98 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn rejects_too_many_sections_and_the_reserved_kind() {
+        let root = root("refused-sections");
+        let path = root.join("query-index.v1.bin");
+        let many = (1..=QUERY_INDEX_MAX_SECTIONS as u32 + 1)
+            .map(|kind| QueryIndexSection {
+                kind,
+                record_size: 0,
+                count: 0,
+                bytes: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            write_query_index(&many, &identity(1), &path),
+            Err(QueryIndexError::TooManySections(49))
+        ));
+        assert!(matches!(
+            write_query_index(&many[..0], &identity(1), &path),
+            Ok(())
+        ));
+        assert!(matches!(
+            write_query_index(
+                &[QueryIndexSection {
+                    kind: 0,
+                    record_size: 0,
+                    count: 0,
+                    bytes: Vec::new(),
+                }],
+                &identity(1),
+                &path
+            ),
+            Err(QueryIndexError::InvalidSection { kind: 0, .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_section_without_records_has_no_record_to_read() {
+        let root = root("no-records");
+        let path = root.join("query-index.v1.bin");
+        write_query_index(&sections(9), &identity(1), &path).unwrap();
+        let index = QueryIndex::open(&path, &identity(1)).unwrap();
+        assert!(matches!(
+            index.record(1, 0),
+            Err(QueryIndexError::OutOfBounds { kind: 1, .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_temporary_name_already_taken_is_passed_over() {
+        let root = root("taken");
+        let path = root.join("query-index.v1.bin");
+        let next = TEMPORARY_SEQUENCE.load(Ordering::Relaxed);
+        let taken = (next..next + 256)
+            .map(|sequence| temporary_path(&path, sequence).unwrap())
+            .collect::<Vec<_>>();
+        for temporary in &taken {
+            fs::write(temporary, b"another writer's").unwrap();
+        }
+        write_query_index(&sections(9), &identity(1), &path).unwrap();
+        QueryIndex::open(&path, &identity(1)).unwrap();
+        for temporary in &taken {
+            assert_eq!(fs::read(temporary).unwrap(), b"another writer's");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file_behind() {
+        let root = root("failed-write");
+        // A temporary name too long to create fails before anything is written.
+        let long = root.join("q".repeat(250));
+        assert!(matches!(
+            write_query_index(&sections(9), &identity(1), &long),
+            Err(QueryIndexError::Io(_))
+        ));
+        // A destination that is a directory cannot be renamed over.
+        let path = root.join("query-index.v1.bin");
+        fs::create_dir_all(path.join("occupied")).unwrap();
+        assert!(matches!(
+            write_query_index(&sections(9), &identity(1), &path),
+            Err(QueryIndexError::Io(_))
+        ));
+        let names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["query-index.v1.bin"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlinked_indexes() {

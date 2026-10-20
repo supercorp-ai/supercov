@@ -5166,11 +5166,18 @@ mod tests {
                 .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
                 .unwrap()
         };
-        let line = |index: &CoverageIndex<'_>| {
-            let lines = index.lines(CoverageViewId::All)?;
+        // Found in an index left whole: listing the lines of a corrupt one
+        // would refuse it before `line` read anything.
+        let (file, number) = {
+            let (_root, container) = index_with(&|_| {});
+            let index = CoverageIndex::new(&container).unwrap();
+            let lines = index.lines(CoverageViewId::All).unwrap();
             let first = lines.first().expect("the report has lines");
+            (first.file.clone(), first.line)
+        };
+        let line = |index: &CoverageIndex<'_>| {
             index
-                .line(CoverageViewId::All, &first.file, first.line)?
+                .line(CoverageViewId::All, &file, number)?
                 .map(|_| ())
                 .ok_or(CoverageIndexError::InvalidRecord("line not found"))
         };

@@ -1067,6 +1067,76 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_file_with_an_empty_line_number_gets_no_line_hint() {
+        let error =
+            IndexedQueryError::Query(QueryError::SourceNotFound("src/a.js:".into())).agent_error();
+        assert_eq!(error.message, "Source file not found: src/a.js:");
+        let error =
+            IndexedQueryError::Query(QueryError::SourceNotFound("src/a.js:3".into())).agent_error();
+        assert!(
+            error.message.contains("`line src/a.js:3`"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Several lines asked of one run: each location that is not in it is a
+    /// failure of its own, all of them failing is the call failing, and a
+    /// failure of the whole query is never put down to one location.
+    #[test]
+    fn several_lines_fail_one_by_one_and_together() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-indexed-lines-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        crate::run_store::create_analyzable_test_run(&root, "run-a");
+        let run = crate::run_store::discover_runs(&root)
+            .unwrap()
+            .runs
+            .remove(0);
+        let container = crate::run_store::open_or_rebuild_query_index(&run).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let ask = |extra: Value| {
+            let mut request = json!({
+                "runId": "run-a",
+                "filter": "all",
+                "command": "line",
+                "file": "src/gone.js",
+                "line": 1,
+                "moreLines": [["src/also-gone.js", 2]],
+            });
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let request: IndexedQueryRequest = serde_json::from_value(request).unwrap();
+            query_indexed(&index, None, &request, None)
+        };
+        let Err(IndexedQueryError::Query(QueryError::SourceNotFound(file))) = ask(json!({})) else {
+            panic!("every location failing did not fail the call");
+        };
+        assert_eq!(file, "src/gone.js");
+        let output = ask(json!({ "moreLines": [["src/app.js", 1]] })).unwrap();
+        let IndexedQueryData::Lines(lines) = output.data else {
+            panic!("not a several-line answer");
+        };
+        assert_eq!(lines.lines.len(), 1);
+        assert_eq!(lines.failed.len(), 1);
+        assert_eq!(lines.failed[0].location, "src/gone.js:1");
+        let Err(IndexedQueryError::Query(QueryError::TestFilterEmpty { .. })) =
+            ask(json!({ "kind": "e2e" }))
+        else {
+            panic!("a filter that matches no test was put down to a location");
+        };
+    }
+
+    #[test]
     fn maps_solver_limits_without_losing_machine_readable_details() {
         let error = IndexedQueryError::Query(QueryError::ComplexityLimit {
             candidate_tests: 200,
