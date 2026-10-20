@@ -112,6 +112,7 @@
 - wasm tests that `wasm-bindgen-test-runner` ran through a remote WebDriver (`CHROMEDRIVER_REMOTE`, `GECKODRIVER_REMOTE`, ...) were left unmeasured without a word; Supercov now says they are not measured, as it does for a local Firefox, Safari or Edge.
 - `cargo +<toolchain> test` compiled its doctests with the default toolchain's rustdoc, so each failed with "found crate compiled by an incompatible version of rustc" (E0514) when the two toolchains differed. The doctests now build with the toolchain the command names, as do the library paths its tests load.
 - A project holding a symbolic link in a loop (`cycle -> cycle`), or one whose path runs through a file (`../package.json/x`), could not be measured: preparing the isolated copy failed with "Too many levels of symbolic links" or "Not a directory". Such a link is copied as it is, like any other link that leads nowhere.
+- The assertion assessment left out a line that opens with a block comment and goes on with code (`/** @type {number} */ const max = read();`, `/* given */ cart.add(1);`), as if all of it were a comment: a statement on it was asked about without being shown, or marked as run, in the code the test ran. Such a line is shown as code now.
 
 ## 4.19.0
 

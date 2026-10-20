@@ -189,7 +189,13 @@ impl Language {
             Self::Python | Self::Ruby => t.starts_with('#'),
             Self::JavaScript | Self::Go | Self::Rust | Self::Jvm => {
                 t.starts_with("//")
-                    || t.starts_with("/*")
+                    // A block comment closed before code on its own line
+                    // (`/** @type {number} */ const max = read();`) leaves
+                    // the line code.
+                    || t.strip_prefix("/*").is_some_and(|r| {
+                        r.split_once("*/")
+                            .is_none_or(|(_, rest)| rest.trim().is_empty() || self.comment(rest))
+                    })
                     || t.starts_with("*/")
                     || t == "*"
                     || t.starts_with("* ")
@@ -1460,7 +1466,7 @@ impl Population {
                     }
                     if open && t.contains("*/") {
                         open = false;
-                        return true;
+                        return was || self.language.comment(l);
                     }
                 }
                 was || open || self.language.comment(l)
@@ -3174,6 +3180,63 @@ mod tests {
         );
         assert!(missing.contains("  ..."), "{missing}");
         assert!(missing.contains("assertEquals"), "{missing}");
+    }
+
+    /// A line that opens with a block comment closed before its code is
+    /// code: the statement on it is shown, marked as run, and a test's line
+    /// written that way is kept.
+    #[test]
+    fn a_statement_after_a_block_comment_on_its_line_is_shown() {
+        let source = "export function limit(read) {\n  /** @type {number} */ const max = read();\n  return max;\n}\n";
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "t".into(),
+                file: Some("test/limit.test.js".into()),
+                name: "limit".into(),
+                role: "test".into(),
+                runner: "node:test".into(),
+            }],
+            points: vec![InputPoint {
+                file: "src/limit.js".into(),
+                line: 2,
+                source: "const max = read();".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("src/limit.js".to_owned(), source.to_owned())]);
+        let population = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::JavaScript,
+        )
+        .unwrap()
+        .with_files(sources);
+        let code = &population.code_run(0, &[0])["src/limit.js"];
+        assert!(
+            code.contains("▶    2   /** @type {number} */ const max = read();"),
+            "{code}"
+        );
+        assert!(!code.contains("1 lines not shown\n     3"), "{code}");
+        let java = "package shop;\n\nclass CartTest {\n    @Test\n    void adds() {\n        /* given */ cart.add(1);\n        /* then */\n        assertEquals(1, cart.size());\n    }\n}\n";
+        let code = shown_test_code(
+            "src/test/java/shop/CartTest.java",
+            java,
+            "shop.CartTest#adds()",
+            "junit",
+            Language::Jvm,
+        );
+        assert!(code.contains("/* given */ cart.add(1);"), "{code}");
+        assert!(!code.contains("/* then */"), "{code}");
+        for (line, comment) in [
+            ("/* a */ run();", false),
+            ("/**/", true),
+            ("/* a */ // b", true),
+            ("/* open", true),
+        ] {
+            assert_eq!(Language::JavaScript.comment(line), comment, "{line}");
+        }
     }
 
     /// An `async def` test is found; one not in the file shows the file.
