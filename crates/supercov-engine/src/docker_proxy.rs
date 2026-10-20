@@ -31,7 +31,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
@@ -255,9 +255,8 @@ impl DockerProxy {
             }
         }
         self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        // Always there: only `finish`, which takes the relay, takes it.
+        let _ = self.thread.take().map(JoinHandle::join);
         remove_socket(&self.socket);
     }
 }
@@ -838,20 +837,26 @@ impl Shared {
             .status()
             .ok()?
             .success();
-        if built && let Ok(mut done) = self.built.lock() {
-            done.insert((project.to_owned(), service.to_owned()));
+        if built {
+            // Never poisoned: nothing that holds it can panic.
+            self.built
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert((project.to_owned(), service.to_owned()));
         }
         Some(built)
     }
 
     fn record(&self, id: &str, context: CreateContext) {
-        if let Ok(mut created) = self.created.lock() {
-            created.push(CreatedContainer {
+        // Never poisoned: nothing that holds it can panic.
+        self.created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(CreatedContainer {
                 id: id.to_owned(),
                 measured: context.measured,
                 project: context.project.clone(),
             });
-        }
         let line = json!({
             "id": id,
             "image": context.image,
@@ -923,11 +928,10 @@ fn add_settings(
         config["HostConfig"] = json!({});
     }
     let host = &mut config["HostConfig"];
-    if !host.get("Binds").is_some_and(Value::is_array) {
-        host["Binds"] = json!([]);
-    }
-    if let Some(binds) = host["Binds"].as_array_mut() {
-        binds.push(json!(format!("{mount}:{mount}")));
+    let bind = json!(format!("{mount}:{mount}"));
+    match host.get_mut("Binds").and_then(Value::as_array_mut) {
+        Some(binds) => binds.push(bind),
+        None => host["Binds"] = json!([bind]),
     }
 }
 
@@ -1014,11 +1018,11 @@ fn write_registry(path: &Path, registry: &BTreeMap<String, String>) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(registry) {
-        let temporary = path.with_extension("json.tmp");
-        if fs::write(&temporary, bytes).is_ok() {
-            let _ = fs::rename(temporary, path);
-        }
+    let bytes =
+        serde_json::to_vec_pretty(registry).expect("serializing a map of strings cannot fail");
+    let temporary = path.with_extension("json.tmp");
+    if fs::write(&temporary, bytes).is_ok() {
+        let _ = fs::rename(temporary, path);
     }
 }
 
@@ -1083,6 +1087,12 @@ mod tests {
                                     .unwrap();
                                 continue;
                             }
+                            if path == "/decline" {
+                                writer
+                                    .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                                    .unwrap();
+                                continue;
+                            }
                             writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
                         }
                         let body = read_body(&head, &mut reader).unwrap_or_default();
@@ -1123,12 +1133,34 @@ mod tests {
                                 &json!({"Id": id, "Created": created, "Config": {"Env": ["PYTHONPATH=/srv/app"]}}).to_string(),
                             );
                         } else if method == "POST" && path == "/containers/create" {
-                            sender.send(serde_json::from_slice(&body).unwrap()).unwrap();
-                            respond(
-                                &mut writer,
-                                "201 Created",
-                                r#"{"Id":"c0ffee","Warnings":[]}"#,
-                            );
+                            let config: Value = serde_json::from_slice(&body).unwrap();
+                            let image = config["Image"].as_str().unwrap_or("").to_owned();
+                            sender.send(config).unwrap();
+                            // Refused, failed without JSON, chunked, or
+                            // created plainly.
+                            if image.starts_with("refused") {
+                                respond(
+                                    &mut writer,
+                                    "409 Conflict",
+                                    r#"{"message":"name in use"}"#,
+                                );
+                            } else if image.starts_with("broken") {
+                                respond(&mut writer, "500 Internal Server Error", "boom");
+                            } else if image.starts_with("chunky") {
+                                let body = r#"{"Id":"c0ffee","Warnings":[]}"#;
+                                write!(
+                                    writer,
+                                    "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                                    body.len()
+                                )
+                                .unwrap();
+                            } else {
+                                respond(
+                                    &mut writer,
+                                    "201 Created",
+                                    r#"{"Id":"c0ffee","Warnings":[]}"#,
+                                );
+                            }
                         } else if path == "/events" {
                             writer
                                 .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
@@ -1405,6 +1437,12 @@ mod tests {
         let refused = read_head(&mut reader).unwrap().unwrap();
         assert!(refused.start.contains(" 417"), "{refused:?}");
         assert_eq!(read_body(&refused, &mut reader).unwrap(), b"nope");
+        // So does one without a body.
+        stream
+            .write_all(b"POST /decline HTTP/1.1\r\nHost: docker\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n")
+            .unwrap();
+        let declined = read_head(&mut reader).unwrap().unwrap();
+        assert!(declined.start.contains(" 204"), "{declined:?}");
         // A HEAD answer names a length it does not send.
         stream
             .write_all(b"HEAD /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
@@ -1720,5 +1758,223 @@ mod tests {
         remove_socket(&private);
         assert!(!directory.exists());
         fs::remove_dir_all(base).unwrap();
+    }
+
+    fn create(
+        stream: &mut UnixStream,
+        reader: &mut BufReader<UnixStream>,
+        config: &Value,
+    ) -> (Head, Vec<u8>) {
+        let config = config.to_string();
+        exchange(
+            stream,
+            reader,
+            &format!(
+                "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{config}",
+                config.len()
+            ),
+        )
+    }
+
+    #[test]
+    fn a_create_the_daemon_refuses_is_passed_on_and_not_recorded() {
+        let directory = temporary("refused");
+        let daemon = directory.join("d.sock");
+        let _created = fake_daemon(&daemon);
+        let proxy =
+            DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)).unwrap();
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let (head, body) = create(&mut stream, &mut reader, &json!({"Image": "refused-app"}));
+        assert!(head.start.contains(" 409"), "{head:?}");
+        assert_eq!(body, br#"{"message":"name in use"}"#);
+        let (head, body) = create(&mut stream, &mut reader, &json!({"Image": "broken-app"}));
+        assert!(head.start.contains(" 500"), "{head:?}");
+        assert_eq!(body, b"boom");
+        // A chunked answer reaches the client chunked, and is recorded.
+        let (head, body) = create(&mut stream, &mut reader, &json!({"Image": "chunky-app"}));
+        assert!(head.chunked(), "{head:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["Id"],
+            "c0ffee"
+        );
+        drop(stream);
+        proxy.finish();
+        let state = fs::read_to_string(directory.join("state/containers.jsonl")).unwrap();
+        assert_eq!(state.lines().count(), 1, "{state}");
+        assert!(state.contains("chunky-app"), "{state}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_image_an_earlier_run_built_from_the_same_source_is_measured() {
+        let directory = temporary("same");
+        let daemon = directory.join("d.sock");
+        let created = fake_daemon(&daemon);
+        write_registry(
+            &directory.join("registry.json"),
+            &BTreeMap::from([("sha256:stale".to_owned(), "source-a".to_owned())]),
+        );
+        let proxy =
+            DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)).unwrap();
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        create(&mut stream, &mut reader, &json!({"Image": "stale-app"}));
+        let sent = created.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            sent["Env"]
+                .as_array()
+                .is_some_and(|env| env.contains(&json!("SUPERCOV_RUN=run_1"))),
+            "{sent}"
+        );
+        drop(stream);
+        proxy.finish();
+        assert!(notes(&directory.join("state/containers.jsonl")).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_compose_service_built_earlier_in_the_run_is_measured_without_building_again() {
+        let directory = temporary("built");
+        let daemon = directory.join("d.sock");
+        let created = fake_daemon(&daemon);
+        let proxy =
+            DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)).unwrap();
+        proxy
+            .shared
+            .built
+            .lock()
+            .unwrap()
+            .insert(("shop".to_owned(), "api".to_owned()));
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        // Pulled long ago, but the service was built from the copy.
+        create(
+            &mut stream,
+            &mut reader,
+            &json!({
+                "Image": "pulled-api",
+                "Labels": {"com.docker.compose.project": "shop", "com.docker.compose.service": "api"},
+            }),
+        );
+        let sent = created.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(sent.get("Env").is_some(), "{sent}");
+        assert_eq!(
+            read_registry(&directory.join("registry.json"))
+                .get("sha256:pulled")
+                .map(String::as_str),
+            Some("source-a")
+        );
+        drop(stream);
+        proxy.finish();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_compose_project_compose_cannot_read_is_not_built() {
+        let directory = temporary("unread");
+        let shared = Shared {
+            settings: settings(&directory),
+            upstream: directory.join("d.sock"),
+            socket: directory.join("p.sock"),
+            started_ms: now_ms(),
+            created: Mutex::default(),
+            built: Mutex::default(),
+        };
+        // An empty name in the list is skipped; the file named is missing.
+        let files = format!("{},", directory.join("missing.yml").display());
+        assert_eq!(
+            shared.build_compose_service("shop", "api", Some(files), None),
+            None
+        );
+        assert!(shared.built.lock().unwrap().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_reaper_socket_the_suite_sets_itself_is_kept() {
+        let directory = temporary("reaper");
+        let proxy = DockerProxy::start(
+            &directory.join("p.sock"),
+            &directory.join("d.sock"),
+            settings(&directory),
+        )
+        .unwrap();
+        let ambient = BTreeMap::from([(
+            "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE".to_owned(),
+            "/mine.sock".to_owned(),
+        )]);
+        let environment = proxy.environment(&ambient);
+        assert!(environment.contains_key("DOCKER_HOST"));
+        assert!(!environment.contains_key("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE"));
+        assert!(
+            proxy
+                .environment(&BTreeMap::new())
+                .contains_key("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE")
+        );
+        proxy.finish();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_relay_answers_when_its_record_cannot_be_written_but_needs_a_socket_path() {
+        let directory = temporary("unrecorded");
+        let daemon = directory.join("d.sock");
+        let _created = fake_daemon(&daemon);
+        assert!(DockerProxy::start(Path::new("/"), &daemon, settings(&directory)).is_err());
+        // The root directory: no parent to make, and no file to append to.
+        let unwritable = ProxySettings {
+            state: PathBuf::from("/"),
+            ..settings(&directory)
+        };
+        let proxy = DockerProxy::start(&directory.join("p.sock"), &daemon, unwritable).unwrap();
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let (head, _) = create(&mut stream, &mut reader, &json!({"Image": "app"}));
+        assert!(head.start.contains(" 201"), "{head:?}");
+        drop(stream);
+        proxy.finish();
+        assert!(notes(Path::new("/")).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_registry_that_cannot_be_written_is_left_alone() {
+        let directory = temporary("registry");
+        let registry = BTreeMap::from([("sha256:a".to_owned(), "source-a".to_owned())]);
+        // No parent at all, and a parent that is a file.
+        write_registry(Path::new("/"), &registry);
+        fs::write(directory.join("file"), b"").unwrap();
+        let under_file = directory.join("file/registry.json");
+        write_registry(&under_file, &registry);
+        assert!(read_registry(&under_file).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_relay_socket_outside_a_private_directory_leaves_its_directory() {
+        // Named like a private directory, but not under /tmp.
+        let directory = PathBuf::from(format!("supercov-docker-{}-kept", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let socket = directory.join("docker.sock");
+        fs::write(&socket, b"").unwrap();
+        remove_socket(&socket);
+        let kept = directory.is_dir();
+        let socket_gone = !socket.exists();
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(kept && socket_gone);
+        // A path with no parent removes nothing else.
+        remove_socket(Path::new("/"));
+        assert!(Path::new("/").is_dir());
+    }
+
+    #[test]
+    fn a_docker_context_with_no_endpoint_falls_back_to_the_default_socket() {
+        let upstream = upstream_socket(&BTreeMap::from([(
+            "DOCKER_CONTEXT".to_owned(),
+            format!("supercov-no-such-context-{}", std::process::id()),
+        )]));
+        let default = PathBuf::from("/var/run/docker.sock");
+        assert_eq!(upstream, default.exists().then_some(default));
     }
 }
