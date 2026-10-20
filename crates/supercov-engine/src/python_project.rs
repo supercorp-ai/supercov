@@ -575,6 +575,12 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // Roots that name the Python too make it a server.
+        let roots = explicit(&root, &["src", "server.py"]);
+        let server = prepare_python_server_project(&root, Some(&roots))
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.files.sources, ["server.py"]);
         fs::remove_dir_all(root).ok();
     }
 
@@ -668,6 +674,7 @@ mod tests {
         write(&root, "pkg/core_test.py", "x = 1\n");
         write(&root, "pkg/core_tests.py", "x = 1\n");
         write(&root, "requirements-dev.txt", "pytest\n");
+        write(&root, "requirements-test.txt", "pytest\n");
         write(&root, "requirements.in", "pytest\n");
         // `target` is a build's output only beside a build that writes it.
         write(&root, "target/gen.py", "x = 1\n");
@@ -678,7 +685,10 @@ mod tests {
         assert_eq!(files.tests, ["pkg/core_test.py", "pkg/core_tests.py"]);
         assert_eq!(
             files.dependency_files,
-            [PathBuf::from("requirements-dev.txt")]
+            [
+                PathBuf::from("requirements-dev.txt"),
+                PathBuf::from("requirements-test.txt")
+            ]
         );
         assert!(
             files

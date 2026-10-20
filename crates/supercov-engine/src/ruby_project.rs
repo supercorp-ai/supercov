@@ -440,6 +440,12 @@ mod tests {
         let error = prepare_ruby_project(&root, Some(&roots)).unwrap_err();
         assert!(error.contains("left no Ruby source"), "{error}");
         assert!(prepare_ruby_server_project(&root, None).unwrap().is_some());
+        // Roots that name the Ruby too make it a server.
+        let roots = explicit_roots(&root, &["src", "app.rb"]);
+        let server = prepare_ruby_server_project(&root, Some(&roots))
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.files.sources, ["app.rb"]);
         fs::remove_dir_all(root).ok();
     }
 
