@@ -3230,6 +3230,65 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// Evidence of `probes` probes, none reached, and one passing test.
+    fn evidence_of_one_test(probes: usize) -> Vec<u8> {
+        let mut bytes = (probes as u64).to_le_bytes().to_vec();
+        bytes.extend(std::iter::repeat_n(0_u8, probes * 8));
+        bytes.extend(1_u64.to_le_bytes());
+        for text in ["ApiTest#t()", "passed"] {
+            bytes.extend((text.len() as u64).to_le_bytes());
+            bytes.extend(text.as_bytes());
+        }
+        // Attributed, under the declared runner, untagged, reaching nothing.
+        bytes.extend(0_u64.to_le_bytes());
+        bytes.extend(0_u64.to_le_bytes());
+        for _ in 0..4 {
+            bytes.extend(0_u64.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn evidence_measured_and_then_not_published_is_kept() {
+        let root = temporary_root("jvm-kept");
+        java_module(&root, ".", true);
+        let probes = crate::jvm_project::prepare_jvm_project(&root, None)
+            .unwrap()
+            .probes
+            .len();
+        let prepared = root.with_extension("bin");
+        fs::write(&prepared, evidence_of_one_test(probes)).unwrap();
+        let request = jvm_request(&root, &[]);
+        let module = root
+            .join(".supercov/work")
+            .join(&request.run_id)
+            .join("jvm/_");
+        let runs = root.join(".supercov/runs");
+        let command = format!(
+            "mkdir -p {module} && cp {} {module}/1.bin && rm -rf {runs} && touch {runs}",
+            prepared.display(),
+            module = module.display(),
+            runs = runs.display()
+        );
+        let request = DirectJvmRunRequest {
+            command: vec!["sh".into(), "-c".into(), command],
+            ..request
+        };
+        let error = run_direct_jvm(&request, &mut Vec::new()).unwrap_err();
+        assert!(
+            error.contains("the tests were measured and the run could not be published"),
+            "{error}"
+        );
+        assert!(
+            root.join(".supercov/failed-evidence")
+                .join(&request.run_id)
+                .join("_/1.bin")
+                .exists()
+        );
+        fs::remove_file(&prepared).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_license_check_is_skipped_unless_the_command_already_skips_it() {
         let rat = "<project><dependencies><dependency><artifactId>junit-jupiter</artifactId><version>5.10.2</version></dependency></dependencies><build><plugins><plugin><artifactId>apache-rat-plugin</artifactId></plugin></plugins></build></project>";
