@@ -2307,6 +2307,25 @@ fn render_test(run: &str, data: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// A page past the end says so, an empty listing shows nothing of
+    /// nothing, and the next page names a limit other than the default.
+    #[test]
+    fn a_page_footer_reads_past_the_end_an_empty_listing_and_a_chosen_limit() {
+        let footer = |page: Value| page_footer(&json!({ "page": page }), "assertions");
+        assert_eq!(
+            footer(json!({"offset": 40, "returned": 0, "total": 3})),
+            "showing none of 3: --offset 40 is past the end\n"
+        );
+        assert_eq!(
+            footer(json!({"offset": 0, "returned": 0, "total": 0})),
+            "showing 0-0 of 0\n"
+        );
+        assert_eq!(
+            footer(json!({"offset": 0, "returned": 2, "total": 5, "nextOffset": 2, "limit": 2})),
+            "showing 1-2 of 5\nnext page: assertions --offset 2 --limit 2\n"
+        );
+    }
+
     /// square/moshi: 222 statements not asserted, each with up to 15 tests'
     /// answers, came to 94 KB and the listing failed outright. A file's page
     /// leaves the answers out, and even every statement at once fits.
