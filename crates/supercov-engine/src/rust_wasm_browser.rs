@@ -91,12 +91,20 @@ const DRIVERS: [&str; 4] = [
 ];
 
 pub fn browser(environment: &[(String, String)]) -> Option<Browser> {
+    browser_from(environment, &|name| std::env::var_os(name))
+}
+
+/// `browser`, with `ambient` as the process's own variables.
+pub(crate) fn browser_from(
+    environment: &[(String, String)],
+    ambient: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<Browser> {
     let variable = |name: &str| {
         environment
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.clone())
-            .or_else(|| std::env::var(name).ok())
+            .or_else(|| ambient(name)?.into_string().ok())
     };
     let arguments = |driver: &str| {
         variable(&format!("{}_ARGS", driver.to_uppercase()))
@@ -120,7 +128,7 @@ pub fn browser(environment: &[(String, String)]) -> Option<Browser> {
             return Some(pick(driver, PathBuf::from(path)));
         }
     }
-    let path = std::env::var_os("PATH")?;
+    let path = ambient("PATH")?;
     for directory in std::env::split_paths(&path) {
         for driver in DRIVERS {
             let candidate = directory
@@ -144,8 +152,24 @@ pub struct BrowserReader {
 
 impl BrowserReader {
     pub fn start(chromedriver: &Path, arguments: &[String], token: &str) -> Result<Self, String> {
+        Self::start_within(chromedriver, arguments, token, Duration::from_secs(20))
+    }
+
+    /// `start`, giving the driver `patience` to listen. A driver that never
+    /// does is stopped: left running, it outlived the run.
+    fn start_within(
+        chromedriver: &Path,
+        arguments: &[String],
+        token: &str,
+        patience: Duration,
+    ) -> Result<Self, String> {
         let port = free_port()?;
-        let driver = Command::new(chromedriver)
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let mut driver = Command::new(chromedriver)
             .args(arguments)
             .arg(format!("--port={port}"))
             .stdin(Stdio::null())
@@ -153,23 +177,26 @@ impl BrowserReader {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
+        let mut stop_driver = |error: String| {
+            let _ = driver.kill();
+            let _ = driver.wait();
+            error
+        };
         let upstream = SocketAddr::from(([127, 0, 0, 1], port));
         let started = Instant::now();
         while TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).is_err() {
-            if started.elapsed() > Duration::from_secs(20) {
-                return Err(format!("{} never listened", chromedriver.display()));
+            if started.elapsed() > patience {
+                return Err(stop_driver(format!(
+                    "{} never listened",
+                    chromedriver.display()
+                )));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-        let address = listener.local_addr().map_err(|error| error.to_string())?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| error.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let token = token.to_owned();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("supercov-browser-proxy".into())
             .spawn(move || {
                 while !flag.load(Ordering::Acquire) {
@@ -186,8 +213,8 @@ impl BrowserReader {
                         Err(_) => std::thread::sleep(Duration::from_millis(10)),
                     }
                 }
-            })
-            .map_err(|error| error.to_string())?;
+            });
+        spawned.map_err(|error| stop_driver(error.to_string()))?;
         Ok(Self {
             address,
             driver,
@@ -612,12 +639,24 @@ mod tests {
                     ("POST", "/session") if request.body == b"old" => {
                         (200, json!({"sessionId": "s2", "value": {}}))
                     }
+                    // A session refused, an answer that is no JSON, and one
+                    // that names no session: nothing is installed.
+                    ("POST", "/session") if request.body == b"refused" => {
+                        (500, json!({"value": {"error": "session not created"}}))
+                    }
+                    ("POST", "/session") if request.body == b"text" => (200, json!("{")),
+                    ("POST", "/session") if request.body == b"nameless" => {
+                        (200, json!({"value": {}}))
+                    }
                     ("POST", "/session") => (200, json!({"value": {"sessionId": "s1"}})),
                     ("POST", "/session/s1/execute/sync") => (200, regions.clone()),
                     ("GET", "/status") => (500, json!({"value": "down"})),
                     _ => (200, json!({"value": null})),
                 };
-                let body = body.to_string();
+                // `"{"` is sent as the bare `{` it holds: no JSON at all.
+                let body = body
+                    .as_str()
+                    .map_or_else(|| body.to_string(), str::to_owned);
                 write!(
                     stream,
                     "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n{body}",
@@ -655,6 +694,9 @@ mod tests {
         };
         assert_eq!(ask("POST", "/session", "{}").0, 200);
         assert_eq!(ask("POST", "/session", "old").0, 200);
+        assert_eq!(ask("POST", "/session", "refused").0, 500);
+        assert_eq!(ask("POST", "/session", "text"), (200, b"{".to_vec()));
+        assert_eq!(ask("POST", "/session", "nameless").0, 200);
         let (status, body) = ask("GET", "/status", "");
         assert_eq!((status, body), (500, br#"{"value":"down"}"#.to_vec()));
         assert_eq!(ask("DELETE", "/session/s1/window", "").0, 200);
@@ -667,6 +709,9 @@ mod tests {
                 "POST /session/s1/goog/cdp/execute",
                 "POST /session",
                 "POST /session/s2/goog/cdp/execute",
+                "POST /session",
+                "POST /session",
+                "POST /session",
                 "GET /status",
                 "POST /session/s1/execute/sync",
                 "DELETE /session/s1/window",
@@ -679,5 +724,38 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(written, [ours]);
         std::fs::remove_dir_all(evidence).unwrap();
+    }
+
+    /// A driver that never listens is stopped, not left running past the
+    /// run that started it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_driver_that_never_listens_is_stopped() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-silent-driver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        // `sh -c script --port=N`: the port becomes `$0`, and is ignored.
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let error = BrowserReader::start_within(
+            Path::new("/bin/sh"),
+            &["-c".into(), script],
+            "0123456789ab",
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        assert!(error.ends_with("never listened"), "{error}");
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        assert!(
+            !Path::new(&format!("/proc/{}", pid.trim())).exists(),
+            "the driver is still running"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

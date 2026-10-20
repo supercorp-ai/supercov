@@ -117,6 +117,7 @@
 - A Kotlin `for` loop was reported as a loop with no condition to observe, so whether it ran at all was never measured. Its zero-iterations and entered outcomes are measured now, as they are for Java's for-each loops; a labelled loop and one without braces are still declared as before.
 - A Go loop that names only its condition (`for x < n {`, Go's while), or whose clause tests a plain name (`for i := 0; ok; i++ {`), was reported as a loop with no condition to observe, so its branch and MC/DC were never measured. Both are measured now, like any other loop condition.
 - A JavaScript run whose test command could not start its watchdog -- Supercov itself, started again to end the command if Supercov dies, which fails when the `supercov` executable was replaced or removed since the run began -- waited for good before the tests began. The run now fails saying the command could not be started.
+- A `chromedriver` that never started listening was left running after Supercov gave up on it and measured the wasm tests without it; it is stopped now.
 
 ## 4.19.0
 
