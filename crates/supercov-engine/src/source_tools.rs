@@ -201,11 +201,10 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
     remove(&directory).ok()?;
     // The forms a tool is installed in, in the order the system tries them,
     // and the launcher that answers to the name.
-    let forms: &[&str] = if cfg!(windows) {
-        &[".exe", ".cmd", ".bat"]
-    } else {
-        &[""]
-    };
+    #[cfg(windows)]
+    let forms: &[&str] = &[".exe", ".cmd", ".bat"];
+    #[cfg(not(windows))]
+    let forms: &[&str] = &[""];
     let mut found = false;
     for name in source_tools() {
         let Some(tool) = std::env::split_paths(&path)
@@ -220,12 +219,14 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
             continue;
         };
         fs::create_dir_all(&directory).ok()?;
-        if cfg!(windows) {
-            let launcher = command_launcher(&binary, &tool);
-            write_launcher(&directory.join(format!("{name}.cmd")), &launcher).ok()?;
-        } else {
-            write_launcher(&directory.join(&name), &launcher(&binary, &tool)).ok()?;
-        }
+        #[cfg(windows)]
+        write_launcher(
+            &directory.join(format!("{name}.cmd")),
+            &command_launcher(&binary, &tool),
+        )
+        .ok()?;
+        #[cfg(not(windows))]
+        write_launcher(&directory.join(&name), &launcher(&binary, &tool)).ok()?;
         found = true;
     }
     if !found {
@@ -535,15 +536,33 @@ fn status(command: &mut Command) -> i32 {
 /// process was started in, and return its exit status. Outside a workspace
 /// of a run, the tool runs where it was started.
 pub fn run_source_tool(tool: &Path, arguments: &[OsString]) -> i32 {
+    run_source_tool_in(
+        tool,
+        arguments,
+        std::env::current_dir(),
+        |name| std::env::var_os(name),
+        std::env::vars_os(),
+    )
+}
+
+/// `run_source_tool` from `directory`, with the environment passed in: one
+/// variable by name, and all of them.
+fn run_source_tool_in(
+    tool: &Path,
+    arguments: &[OsString],
+    directory: io::Result<PathBuf>,
+    variable: impl Fn(&str) -> Option<OsString>,
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> i32 {
     let run_as_is = || status(Command::new(tool).args(arguments));
-    let Some(named) = std::env::var_os("SUPERCOV_PROJECT_ROOT").map(PathBuf::from) else {
+    let Some(named) = variable("SUPERCOV_PROJECT_ROOT").map(PathBuf::from) else {
         return run_as_is();
     };
     // By paths a child process can be started in: Windows' own canonical
     // form is one `cmd.exe` refuses as a working directory.
     let (Ok(workspace), Ok(directory)) = (
         crate::workspace::canonicalize_simplified(&named),
-        std::env::current_dir().and_then(crate::workspace::canonicalize_simplified),
+        directory.and_then(crate::workspace::canonicalize_simplified),
     ) else {
         return run_as_is();
     };
@@ -553,7 +572,7 @@ pub fn run_source_tool(tool: &Path, arguments: &[OsString]) -> i32 {
     ) else {
         return run_as_is();
     };
-    let dependencies = std::env::var_os("SUPERCOV_SOURCE_PROJECT_ROOT")
+    let dependencies = variable("SUPERCOV_SOURCE_PROJECT_ROOT")
         .map(|root| PathBuf::from(root).join("node_modules"))
         .unwrap_or_else(|| workspace.join("node_modules"));
     let state = match refresh(&workspace, &view, &dependencies) {
@@ -574,7 +593,7 @@ pub fn run_source_tool(tool: &Path, arguments: &[OsString]) -> i32 {
             .iter()
             .map(|argument| in_view(argument, &names, &view)),
     );
-    for (name, value) in std::env::vars_os() {
+    for (name, value) in variables {
         // Where the tool is, and where a package manager says it is. PATH
         // too: the view's dependencies are the project's, so what the tool
         // starts in turn is the real one. Everything else that names the
@@ -833,6 +852,42 @@ mod tests {
         fs::remove_file(view.join("README.md")).unwrap();
         reconcile(&workspace, &view, &state).unwrap();
         assert!(!workspace.join("README.md").exists());
+        fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+    }
+
+    /// A tool's exit status is the command's even when what it wrote cannot
+    /// be brought back into the workspace.
+    #[test]
+    fn a_tools_status_stands_when_its_changes_cannot_be_kept() {
+        let (workspace, _, dependencies) = workspace();
+        // Where a changed source is kept is a file, so nothing can be kept.
+        fs::write(workspace.join(".supercov/node_modules/.changed"), "").unwrap();
+        let project = workspace.to_owned();
+        let source = dependencies.parent().unwrap().to_owned();
+        let variable = |name: &str| match name {
+            "SUPERCOV_PROJECT_ROOT" => Some(project.clone().into_os_string()),
+            "SUPERCOV_SOURCE_PROJECT_ROOT" => Some(source.clone().into_os_string()),
+            _ => None,
+        };
+        let code = run_source_tool_in(
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "printf 'const a = 2\\n' > src/a.js; exit 3".into(),
+            ],
+            Ok(workspace.clone()),
+            variable,
+            Vec::new(),
+        );
+        assert_eq!(code, 3);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/a.js")).unwrap(),
+            "probe(); const a = 1;\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source_view_path(&workspace).unwrap().join("src/a.js")).unwrap(),
+            "const a = 2\n"
+        );
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
