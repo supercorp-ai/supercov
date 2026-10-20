@@ -1320,6 +1320,8 @@ mod tests {
             "//go:build tools\n\npackage main\n",
         )
         .unwrap();
+        // A file the grammar reads without a package clause votes for none.
+        write(&root.join("lib/c.go"), "func C() int {\n\treturn 3\n}\n").unwrap();
         // Only external tests: the harness joins the first.
         write(&root.join("ext.go"), SOURCE).unwrap();
         for name in ["a_test.go", "b_test.go"] {
