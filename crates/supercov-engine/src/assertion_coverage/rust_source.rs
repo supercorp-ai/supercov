@@ -968,7 +968,8 @@ fn changed(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String> {
             .get(operand.as_str())
             .is_some_and(|t| INTEGERS.contains(&t.as_str()))
     });
-    if ty.is_some_and(|t| INTEGERS.contains(&t)) || integer_shaped(e) || integer_local {
+    // A type among `INTEGERS` was answered by `replacement` already.
+    if integer_shaped(e) || integer_local {
         return Some(format!("({e}) ^ 1"));
     }
     None
@@ -1389,24 +1390,19 @@ fn tail_type(list: &ast::StmtList) -> Option<String> {
         // Through `if`/`else if`/`else` and `match` arms to the expression
         // they form; it must itself be a block's value.
         let mut expression = node.clone();
-        while let Some(up) = expression.parent() {
-            if ast::IfExpr::can_cast(up.kind())
+        while let Some(up) = expression.parent().filter(|up| {
+            ast::IfExpr::can_cast(up.kind())
                 || ast::MatchArm::can_cast(up.kind())
                 || ast::MatchArmList::can_cast(up.kind())
                 || ast::MatchExpr::can_cast(up.kind())
-            {
-                expression = up;
-            } else {
-                break;
-            }
+        }) {
+            expression = up;
         }
         // `expression` is the block itself or the `if` or `match` it climbed
-        // to: a block's parent is only ever one of those.
+        // to. One that stands in a block directly is that block's tail: the
+        // parser puts any other expression in a statement of its own.
         let holder = expression.parent()?;
         let list = ast::StmtList::cast(holder)?;
-        if list.tail_expr().map(|t| t.syntax().clone()) != Some(expression) {
-            return None;
-        }
         node = list.syntax().parent()?;
     }
 }
@@ -2634,5 +2630,59 @@ fn made() -> Thing {
             assert_eq!(at(line), changed, "line {line}");
         }
         assert_eq!(r[&13][1].1, "(x + 1) ^ 1");
+    }
+
+    /// The rarest readings: an associated type with a value, a tuple element
+    /// whose change is itself, a closure whose changed body is a block
+    /// already, a `let` that names nothing, and a slice-shaped text with no
+    /// bracket.
+    #[test]
+    fn each_reading_takes_its_rarest_way() {
+        let source = r#"pub struct P;
+impl std::str::FromStr for P {
+    type Err = u8;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let e: Self::Err = s.len();
+        Err(e)
+    }
+}
+fn f() -> ((), u8) {
+    let cl = || -> (u8, u8) { make() };
+    ((), 1)
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(5), "0", "`Self::Err` is the impl's `u8`");
+        assert_eq!(
+            at(10),
+            "|| -> (u8, u8) { let mut v = { make() }; v.0 = v.0 ^ 1; v }"
+        );
+        assert_eq!(at(11), "((), 0)", "`()` has no other value");
+
+        let tree = parse("fn f() { let mut = 1; }").tree();
+        let pattern = tree
+            .syntax()
+            .descendants()
+            .find_map(ast::Pat::cast)
+            .unwrap();
+        let mut locals = BTreeMap::new();
+        bind(&pattern, "u8", &mut locals);
+        assert!(locals.is_empty());
+
+        let signatures = Signatures::default();
+        let crate_view = Crate {
+            signatures: &signatures,
+            module: String::new(),
+            source: "",
+            locals: BTreeMap::new(),
+            enclosing: None,
+        };
+        assert_eq!(
+            changed("&v[1..]", None, &crate_view),
+            Some("&v[..0]".into())
+        );
+        assert_eq!(changed("&v]", None, &crate_view), None);
     }
 }
