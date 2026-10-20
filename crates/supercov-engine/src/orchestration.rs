@@ -89,14 +89,6 @@ fn duration_milliseconds(started: Instant) -> u64 {
 
 const CAPTURED_OUTPUT_LIMIT: u64 = 1024 * 1024;
 
-/// Whether `SUPERCOV_VERBOSE`, or failing it `SUPERCOV_DEBUG`, asks for every
-/// phase's output, read through `variable` so tests need not set either.
-fn verbose_output(variable: impl Fn(&str) -> Option<String>) -> bool {
-    variable("SUPERCOV_VERBOSE")
-        .or_else(|| variable("SUPERCOV_DEBUG"))
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-}
-
 fn publish_captured_output(
     path: &Path,
     phase: &str,
@@ -172,7 +164,7 @@ pub fn execute_plan_with_supervisor(
     mut before_phase: impl FnMut(&ExecutionPhase, &mut dyn Write) -> Result<(), OrchestrationError>,
 ) -> Result<ExecutionResult, OrchestrationError> {
     validate(plan)?;
-    let verbose = verbose_output(|name| std::env::var(name).ok());
+    let verbose = crate::process_supervision::verbose_output(|name| std::env::var(name).ok());
     // One guard spans every external phase. Signals received after a build
     // exits but before the test spawns remain pending and prevent that spawn.
     let mut executions = Vec::new();
@@ -480,6 +472,7 @@ mod tests {
                     .map(|(_, value)| value.to_string())
             }
         };
+        use crate::process_supervision::verbose_output;
         assert!(!verbose_output(environment(&[])));
         assert!(verbose_output(environment(&[("SUPERCOV_VERBOSE", "yes")])));
         assert!(verbose_output(environment(&[("SUPERCOV_DEBUG", "1")])));
