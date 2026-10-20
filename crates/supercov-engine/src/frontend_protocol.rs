@@ -700,6 +700,45 @@ mod tests {
                     r.raw_results[0].phases.push(second);
                 }),
             ),
+            // A control character makes an identity as absent as a blank one.
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"phase\" }",
+                Box::new(|_, r| {
+                    r.raw_results[0].phases[0].id = "assert\nion".into();
+                    r.raw_results[0].runtime[0].events[0].phase_id = None;
+                }),
+            ),
+            (
+                "UnknownPhaseReference",
+                Box::new(|_, r| r.raw_results[0].runtime[0].phase_id = Some(" ".into())),
+            ),
+            // An event alone is an observation an unstarted test cannot have.
+            (
+                "InvalidUnstartedResult",
+                Box::new(move |_, r| {
+                    let mut runtime = r.raw_results[0].runtime.clone();
+                    runtime[0].hits.clear();
+                    unstarted(&mut r.raw_results[0]);
+                    r.raw_results[0].runtime = runtime;
+                }),
+            ),
+            (
+                "DuplicateManifestLimitation(\"dynamic-fixture\")",
+                Box::new(|_, r| {
+                    let limitation = r.manifest.limitations[0].clone();
+                    r.manifest.limitations.push(limitation);
+                }),
+            ),
+            // Every declared runner must answer for a run that observed anything.
+            (
+                "UnobservedRunner(\"silent-runner\")",
+                Box::new(|d, _| {
+                    let mut silent = d.runners[0].clone();
+                    silent.runner = "silent-runner".into();
+                    silent.limitations[0].id = "silent-no-action-hook".into();
+                    d.runners.push(silent);
+                }),
+            ),
         ];
         for (expected, edit) in &cases {
             let said = check(edit);

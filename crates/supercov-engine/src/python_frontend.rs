@@ -1109,6 +1109,19 @@ mod tests {
                     v["outcomes"].as_array_mut().unwrap().push(copy);
                 }),
             ),
+            // A line or branch coverage.py executed that no context observed
+            // has no test to attribute it to.
+            (
+                "UnattributedExecutedLine(\"src/calculator.py\", 1)",
+                Box::new(|v| v["contexts"][0]["files"][0]["lines"] = json!([9])),
+            ),
+            (
+                "UnattributedExecutedBranch(\"src/calculator.py\", 2, 3)",
+                Box::new(|v| {
+                    v["contexts"][2]["files"][0]["arcs"] =
+                        json!([[-9, 10], [-1, 2], [3, -1], [10, 12], [12, 14], [14, -9]])
+                }),
+            ),
         ];
         for (variant, edit) in &cases {
             let said = import(edit.as_ref());
