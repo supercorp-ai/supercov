@@ -420,7 +420,11 @@ fn real_rustdoc(
     if let Some(configured) = configured {
         return Ok(PathBuf::from(configured));
     }
-    let sysroot = rustc_sysroot(project, invocation)?;
+    rustdoc_in(&rustc_sysroot(project, invocation)?)
+}
+
+/// The rustdoc of the toolchain at `sysroot`.
+fn rustdoc_in(sysroot: &Path) -> Result<PathBuf, RustTestRunnerError> {
     let rustdoc = sysroot
         .join("bin")
         .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX));
@@ -1710,6 +1714,14 @@ mod tests {
             real_rustdoc(Some("/opt/rustdoc-wrapper".into()), &project, &invocation).unwrap(),
             PathBuf::from("/opt/rustdoc-wrapper")
         );
+        // A toolchain without rustdoc is named, not run.
+        let error = rustdoc_in(Path::new("/nonexistent-toolchain")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the selected toolchain has no rustdoc at /nonexistent-toolchain"),
+            "{error}"
+        );
     }
 
     /// `run_doctests` against a script standing in for Cargo, which leaves
@@ -1803,6 +1815,12 @@ mod tests {
         assert!(results.unwrap().is_empty());
         assert_eq!(exit, 0);
         let (results, _, _) = doctests_through(&["test", "--doc"], "", "", stderr, 101);
+        assert!(
+            matches!(results, Err(RustTestRunnerError::CargoFailed(output)) if output == stderr)
+        );
+        // Any other failure with no doctest run is the build's.
+        let stderr = "error: could not compile `fixture`";
+        let (results, _, _) = doctests_through(&["test"], "", "", stderr, 101);
         assert!(
             matches!(results, Err(RustTestRunnerError::CargoFailed(output)) if output == stderr)
         );

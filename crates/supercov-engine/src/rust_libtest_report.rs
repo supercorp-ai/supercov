@@ -625,6 +625,24 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
             "---- tests::overflows ----\n\nrunning 1 test\nthread 'tests::overflows' has overflowed its stack\n"
         ));
         assert!(report.contains("test result: FAILED. 0 passed; 1 failed;"));
+        // One that died after libtest listed its failure but before the
+        // result: all of what it wrote is shown, not the listing alone.
+        let stdout = "\nrunning 1 test\ntest t ... FAILED\n\nfailures:\n\n---- t stdout ----\nboom\n\n\nfailures:\n    t\n\n";
+        let report = libtest_report(
+            &[CaseOutput {
+                name: "t",
+                exit: 134,
+                stdout,
+                stderr: "fatal runtime error: failed to initiate panic\n",
+            }],
+            false,
+        );
+        assert!(
+            report.contains(&format!(
+                "---- t ----\n{stdout}fatal runtime error: failed to initiate panic\n"
+            )),
+            "{report}"
+        );
     }
 
     /// A test's line is its own name's, colour is what stands around the
