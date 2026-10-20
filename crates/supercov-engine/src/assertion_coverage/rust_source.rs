@@ -1400,12 +1400,8 @@ fn tail_type(list: &ast::StmtList) -> Option<String> {
                 break;
             }
         }
-        if !(ast::IfExpr::can_cast(expression.kind())
-            || ast::MatchExpr::can_cast(expression.kind())
-            || ast::BlockExpr::can_cast(expression.kind()))
-        {
-            return None;
-        }
+        // `expression` is the block itself or the `if` or `match` it climbed
+        // to: a block's parent is only ever one of those.
         let holder = expression.parent()?;
         let list = ast::StmtList::cast(holder)?;
         if list.tail_expr().map(|t| t.syntax().clone()) != Some(expression) {
@@ -1593,7 +1589,8 @@ fn boolean(e: &str) -> bool {
     if block_like.iter().any(|k| e.starts_with(k)) {
         return false;
     }
-    if e.starts_with('!') && !e.starts_with("!=") {
+    // No expression starts with `!=`: a leading `!` is a negation.
+    if e.starts_with('!') {
         return true;
     }
     let mut depth = 0i32;
@@ -2340,6 +2337,111 @@ mod edge_shape_tests {
     /// bare `return`, a `let` with nothing to change, `let`-`else` on each
     /// variant, constructors the crate cannot call, and `Self` only as a
     /// whole word.
+    /// The readings' rarer paths: an associated type with no value, a
+    /// `let`-`else` on a pattern that is no variant, tuples of one or of
+    /// nothing known, a closure parameter called, a `match` over a call the
+    /// crate does not type, an `else if` with no `else`, an enum reached
+    /// through a module path or `Self`, and a struct of this module made
+    /// through its private constructor or its private fields.
+    #[test]
+    fn each_reading_takes_its_rarer_way() {
+        let lib = "pub enum Op { Exact, Greater }\npub struct P;\n";
+        let source = r#"impl std::str::FromStr for P {
+    type Err;
+    const C: u8 = 1;
+    fn from_str(s: Self::Err) -> Result<Self, Self::Err> {
+        let v: Self::Err = s;
+        v
+    }
+}
+fn f(a: bool, pair: (u8, u8), q: (u8,), call: impl Fn() -> u8) -> u8 {
+    let [x, y] = arr else { return 0; };
+    let u = (b, c);
+    let (o,) = q;
+    let mut = 1;
+    let w = call();
+    x = ;
+    let k = match unknown() { Ok(v) => v, Err(e) => return 0 };
+    let i = if a { 1 } else if b { 2 };
+    let my_op = my_mod::Op::Exact;
+    let o = Self::Exact;
+    let arr2 = [unknown(), 1];
+    let cl = |x| -> u8 { 1 };
+    let z = 2f64;
+    let ne = !a;
+    m + n
+}
+struct Inner { x: u8 }
+struct Made { y: u8 }
+impl Made {
+    fn new() -> Self { Made { y: 1 } }
+}
+fn g(e: E) -> Result<Inner, E> {
+    let one = (1,);
+    let c = || { return 1u8; };
+    Err(e)
+}
+fn h(e: E) -> Result<Made, E> {
+    Err(e)
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/parse.rs", source)].into_iter());
+        let r = replacements("src/parse.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(5), "Default::default()", "`type Err;` says nothing");
+        // Neither `Some`, `Ok` nor `Err`: the value's own change.
+        assert_eq!(at(10), "Default::default()");
+        assert_eq!(r[&10][1], ("return 0".to_owned(), "1".to_owned()));
+        assert_eq!(at(11), "Default::default()", "nothing in it is typed");
+        assert_eq!(at(12), "Default::default()");
+        assert_eq!(at(13), "0");
+        assert_eq!(at(14), "0", "a called parameter returns its `Fn`'s type");
+        assert!(!r.contains_key(&15), "an assignment of nothing");
+        assert_eq!(at(16), "Default::default()");
+        assert_eq!(r[&17].len(), 3, "both branches, with no `else`");
+        assert_eq!(at(18), "my_mod::Op::Greater");
+        assert_eq!(at(19), "Default::default()", "`Self` outside an impl");
+        assert_eq!(at(20), "Default::default()");
+        assert_eq!(at(21), "|x| -> u8 { 0 }");
+        assert_eq!(at(22), "0.0");
+        assert_eq!(at(23), "!(!a)");
+        assert_eq!(at(29), "Made { y: 0 }");
+        assert_eq!(at(32), "Default::default()", "a tuple of one");
+        assert_eq!(r[&33][1], ("return 1u8".to_owned(), "0u8".to_owned()));
+        assert_eq!(at(34), "Ok(Inner { x: 0 })");
+        assert_eq!(at(37), "Ok(Made::new())");
+        // An `else if` whose condition is missing is still a decision.
+        let starts = statement_starts("fn f(a: bool) {\n    if a {\n    } else if {\n    }\n}\n");
+        assert_eq!(starts[&3].len(), 1);
+    }
+
+    /// Text read word by word, brackets that close early, the output of a
+    /// callable type, and a doctest's item past more documentation.
+    #[test]
+    fn small_readings_at_their_edges() {
+        assert!(!contains_word("ab", "b"));
+        assert!(contains_word("ab b", "b"));
+        assert_eq!(enclosed("(a) (b)", '(', ')'), None);
+        assert_eq!(tuple("(a) (b)"), None);
+        assert_eq!(callable_output("u8"), None);
+        assert_eq!(callable_output("Box<dynFn()->u8>"), Some("u8"));
+        assert_eq!(float_literal_value("2f32"), Some(2.0));
+        assert!(boolean("!ready"));
+        let lines = [
+            "/// Doc",
+            "/// ```",
+            "/// f();",
+            "/// ```",
+            "/// more",
+            "//! module",
+            "#[inline]",
+            "",
+            "pub fn f() {}",
+        ];
+        let located = locate(&lines, "src/lib.rs - f (line 2)").unwrap();
+        assert_eq!((located.start, located.end), (1, 8));
+    }
+
     #[test]
     fn each_reading_takes_its_other_way() {
         let lib = r#"pub struct Point { pub x: u8 }
