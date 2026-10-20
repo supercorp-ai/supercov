@@ -4727,11 +4727,17 @@ impl<'a> StatementProbeTransformer<'a> {
         {
             ids.extend(nested);
         }
+        // Such a class always has a point: `enter_class` gives one to every
+        // class an `export default` holds but an ambient one, which a default
+        // export cannot spell, and an export is never in an unsafe function.
         if let Statement::ExportDefaultDeclaration(export) = statement
             && let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration
-            && let Some(nested) = self.targets.remove(&span_key(class.span))
         {
-            ids.extend(nested);
+            ids.extend(
+                self.targets
+                    .remove(&span_key(class.span))
+                    .unwrap_or_default(),
+            );
         }
         ids
     }
@@ -6451,10 +6457,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
                 .map(|deciders| {
                     let mut by_leaf = Vec::new();
                     if deciders.len() > 1 {
+                        // Leaves are numbered in evaluation order and the
+                        // deciders come in that order, each once, so every
+                        // one is past the end of the table so far.
                         for (leaf, points) in deciders {
-                            if by_leaf.len() <= *leaf {
-                                by_leaf.resize(*leaf + 1, Vec::new());
-                            }
+                            by_leaf.resize(*leaf + 1, Vec::new());
                             by_leaf[*leaf] = points.clone();
                         }
                     }
@@ -7165,16 +7172,11 @@ impl<'a> RequestPhaseTransformer<'a> {
         )
     }
 
-    fn already_wrapped(&self, argument: &Argument<'a>) -> bool {
-        matches!(
-            argument,
-            Argument::CallExpression(call)
-                if expression_is_identifier(&call.callee, &self.with_request_phase)
-        )
-    }
-
+    /// An argument is wrapped once: the walk has passed it by the time it is,
+    /// the route pass wraps only an export's value, and the helper's name is
+    /// one the source does not use.
     fn wrap_argument(&mut self, argument: &mut Argument<'a>, event: Option<&str>) {
-        if self.already_wrapped(argument) || !argument.is_expression() {
+        if !argument.is_expression() {
             return;
         }
         let expression = argument.to_expression_mut();
@@ -8076,9 +8078,9 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         });
         let is_root = self.value_decisions.values().any(|root| *root == key);
         walk_mut::walk_expression(self, expression);
-        if let Some(names) = self.inline_names.take()
-            && matches!(expression, Expression::ConditionalExpression(_))
-        {
+        // Only `visit_conditional_expression` sets the names, at its end, and
+        // only `walk_expression` calls it: the expression is that conditional.
+        if let Some(names) = self.inline_names.take() {
             let conditional = expression.take_in(self.ast.allocator);
             *expression = self.wrap_inline_frame(conditional, &names);
         }
@@ -9928,9 +9930,8 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
             }
             Expression::UnaryExpression(unary)
                 if unary.operator.is_not()
-                    && has_compound_boolean_decision(&unary.argument)
-                    && !compound_root(&unary.argument)
-                        .is_some_and(|root| self.in_a_decision(root.span)) =>
+                    && compound_root(&unary.argument)
+                        .is_some_and(|root| !self.in_a_decision(root.span)) =>
             {
                 Some(expression)
             }
@@ -10021,18 +10022,7 @@ fn transparent_expression<'a>(expression: &'a Expression<'a>) -> &'a Expression<
 }
 
 fn has_compound_boolean_decision(expression: &Expression<'_>) -> bool {
-    match expression {
-        Expression::ParenthesizedExpression(parenthesized) => {
-            has_compound_boolean_decision(&parenthesized.expression)
-        }
-        Expression::LogicalExpression(logical) => {
-            matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or)
-        }
-        Expression::UnaryExpression(unary) if unary.operator.is_not() => {
-            has_compound_boolean_decision(&unary.argument)
-        }
-        _ => false,
-    }
+    compound_root(expression).is_some()
 }
 
 /// A decision's and/or/not structure over its conditions, numbered as
@@ -12724,6 +12714,15 @@ mod tests {
                 "app/route.ts",
                 "export function helper(request) { return request.url; }",
             ),
+            // One framework's handler name in the other's route module.
+            (
+                "app/api/items/route.ts",
+                "export function loader(request) { return request.url; }",
+            ),
+            (
+                "app/routes/items.tsx",
+                "export function GET(request) { return request.url; }",
+            ),
         ] {
             let output = instrument_candidate(source, file).unwrap();
             assert!(
@@ -13505,5 +13504,46 @@ mod tests {
         let code = candidate(node, "src/launch.mjs");
         assert!(code.contains("__supercovRawImageBuilder"), "{code}");
         assert!(!code.contains("__supercovRawspawn"), "{code}");
+    }
+
+    #[test]
+    fn a_rendered_function_whose_source_is_read_stays_as_written() {
+        let function = "function g() { return String(g); }";
+        let source = format!("export const C = () => <A>{{{function}}}</A>;\n");
+        let output = instrument_direct_candidate(&source, "app/c.jsx").unwrap();
+        assert!(output.code.contains(function), "{}", output.code);
+    }
+
+    #[test]
+    fn optional_links_through_computed_and_private_members_behave_as_written() {
+        let printed = printed_alike(
+            concat!(
+                "class K {\n",
+                "  #x = { y: { z: 1 } };\n",
+                "  a = { b: this };\n",
+                "  m() {\n",
+                "    return [this.#x.y?.z, this.a?.b.#x?.y.z, this.a?.b?.#x.y.z, this.n?.b.#x];\n",
+                "  }\n",
+                "}\n",
+                "var o = { a: [{ b: { c: 2 } }] };\n",
+            ),
+            "print(JSON.stringify([new K().m(), o?.a?.[0].b?.c, o.z?.[0].b?.c]));",
+        );
+        assert_eq!(printed, "[[1,1,1,null],2,null]");
+    }
+
+    #[test]
+    fn a_decision_with_a_nullish_or_negated_condition_decides_the_same() {
+        let printed = printed_alike(
+            concat!(
+                "function f(a, b, c, d) { return (a && (b ?? c)) || d; }\n",
+                "function g(a, b, d) { return (a && -b) || d; }\n",
+            ),
+            concat!(
+                "for (const [a, b, c, d] of [[1, null, 2, 3], [1, 0, 2, 4], [0, 1, 1, 5], [1, 1, 0, 6]])\n",
+                "  print([f(a, b, c, d), g(a, b, d)]);\n",
+            ),
+        );
+        assert_eq!(printed, "2,3\n4,4\n5,5\n1,-1");
     }
 }
