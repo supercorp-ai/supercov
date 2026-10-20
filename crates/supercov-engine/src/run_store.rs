@@ -601,12 +601,10 @@ fn load_run(directory: &Path, entry: &str) -> Result<StoredRun, RunStoreError> {
     if evidence_metadata.len() != metadata.raw_evidence.compressed_bytes {
         return Err(RunStoreError::InvalidRun("raw evidence length"));
     }
-    if read_archive_schema_version(&evidence_path)
-        .map_err(|_| RunStoreError::InvalidRun("raw evidence archive"))?
-        != metadata.raw_evidence.schema_version
-    {
-        return Err(RunStoreError::InvalidRun("raw evidence schema mismatch"));
-    }
+    // An archive reads only under the current schema's magic, which the
+    // metadata was required to name above: reading it is the whole check.
+    read_archive_schema_version(&evidence_path)
+        .map_err(|_| RunStoreError::InvalidRun("raw evidence archive"))?;
     Ok(StoredRun {
         id: entry.into(),
         directory: directory.to_owned(),
@@ -1271,6 +1269,61 @@ mod tests {
             compare_run_integrity(None, &current).reasons,
             ["run predates integrity fingerprints"]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A store under a file cannot be looked at, which is an error, not an
+    /// empty store; nor can an index under a file, while one that is not
+    /// there is none.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_or_index_below_a_file_is_an_error_not_an_absence() {
+        let root = temporary_directory("below-a-file");
+        fs::write(root.join(".supercov"), b"not a directory").unwrap();
+        assert!(matches!(discover_runs(&root), Err(RunStoreError::Io(_))));
+        fs::remove_file(root.join(".supercov")).unwrap();
+        create_analyzable_test_run(&root, "run-a");
+        let mut run = discover_runs(&root).unwrap().runs.remove(0);
+        assert!(open_existing_query_index(&run).unwrap().is_none());
+        run.query_index_path = run.metadata_path.join("index");
+        assert!(open_existing_query_index(&run).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Pruning keeps the most recently used filtered indexes, never the one
+    /// just written however old it looks, and nothing that is not one.
+    #[test]
+    fn pruning_keeps_the_newest_filtered_indexes_and_the_one_just_written() {
+        let root = temporary_directory("prune");
+        let at = |seconds: u64| UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + seconds);
+        let write = |name: &str, seconds: u64| {
+            let path = root.join(name);
+            fs::write(&path, b"index").unwrap();
+            fs::File::options()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at(seconds))
+                .unwrap();
+            path
+        };
+        let kept = write("filtered-kept.index", 0);
+        for n in 1..=KEPT_FILTERED_INDEXES as u64 + 2 {
+            write(&format!("filtered-{n:02}.index"), n);
+        }
+        write("filtered-notes.txt", 0);
+        prune_filtered_indexes(&kept);
+        let mut left = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        left.sort();
+        let mut expected = (3..=KEPT_FILTERED_INDEXES as u64 + 2)
+            .map(|n| format!("filtered-{n:02}.index"))
+            .collect::<Vec<_>>();
+        expected.extend(["filtered-kept.index".into(), "filtered-notes.txt".into()]);
+        expected.sort();
+        assert_eq!(left, expected);
         fs::remove_dir_all(root).unwrap();
     }
 
