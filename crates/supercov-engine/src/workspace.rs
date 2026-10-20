@@ -621,9 +621,17 @@ fn clone_directory(source: &Path, destination: &Path) -> bool {
     false
 }
 
+/// `source` at `destination` without copying bytes: cloned where the file
+/// system clones directories, hard-linked where it cannot.
+#[cfg(target_os = "macos")]
+fn linked_directory(source: &Path, destination: &Path) -> bool {
+    clone_directory(source, destination) || hard_link_tree(source, destination)
+}
+
+/// Linux has no directory reflink, so a tree is only ever hard-linked.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn clone_directory(_source: &Path, _destination: &Path) -> bool {
-    false
+fn linked_directory(source: &Path, destination: &Path) -> bool {
+    hard_link_tree(source, destination)
 }
 
 /// Materialise `source` at `destination` without copying bytes: real
@@ -672,6 +680,8 @@ fn hard_link_tree(source: &Path, destination: &Path) -> bool {
 struct CopyRoots<'a> {
     source: &'a Path,
     destination: &'a Path,
+    /// Read only for a Windows junction, which names its target absolutely.
+    #[cfg_attr(not(windows), allow(dead_code))]
     final_destination: &'a Path,
     canonical_source: &'a Path,
 }
@@ -739,7 +749,7 @@ fn copy_tree<Operations: WorkspaceOperations>(
             // Never the root's: that one is excluded above.
             #[cfg(unix)]
             if name_text == "node_modules" {
-                if clone_directory(&from, &to) || hard_link_tree(&from, &to) {
+                if linked_directory(&from, &to) {
                     // A workspace package's own tools are started from its
                     // own `.bin`, which comes before the root's on PATH.
                     crate::source_tools::place_launchers(&from.join(".bin"), &to.join(".bin"))
@@ -764,6 +774,8 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 continue;
             }
             copy_tree(&from, &to, roots, false, operations)?;
+            // On Unix a nested node_modules was linked above.
+            #[cfg(not(unix))]
             if name_text == "node_modules" {
                 crate::source_tools::place_launchers(&from.join(".bin"), &to.join(".bin"))
                     .map_err(|error| io_error(&to, error))?;
@@ -806,25 +818,36 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 .map_err(|_| WorkspaceError::UnsafePath(lexical_target.clone()))?;
             let relocated = roots.destination.join(local_target);
             let Some(canonical_target) = canonical_target else {
-                if cfg!(windows) {
-                    // Windows link creation needs the target's type, which a
-                    // dangling link cannot provide; the entry resolves to
-                    // nothing either way.
+                // Windows link creation needs the target's type, which a
+                // dangling link cannot provide; the entry resolves to
+                // nothing either way.
+                #[cfg(windows)]
+                continue;
+                #[cfg(not(windows))]
+                {
+                    let isolated_link = if link.is_absolute() {
+                        pathdiff(&to, &relocated)?
+                    } else {
+                        link
+                    };
+                    create_link(&isolated_link, &to, false)
+                        .map_err(|error| io_error(&to, error))?;
                     continue;
                 }
-                let isolated_link = if link.is_absolute() {
-                    pathdiff(&to, &relocated)?
-                } else {
-                    link
-                };
-                create_link(&isolated_link, &to, false).map_err(|error| io_error(&to, error))?;
-                continue;
             };
             let target_metadata = fs::metadata(&canonical_target)
                 .map_err(|error| io_error(&canonical_target, error))?;
-            let isolated_link = if cfg!(windows) && target_metadata.is_dir() {
+            // A Windows directory junction names its target absolutely.
+            #[cfg(windows)]
+            let isolated_link = if target_metadata.is_dir() {
                 roots.final_destination.join(local_target)
             } else if link.is_absolute() {
+                pathdiff(&to, &relocated)?
+            } else {
+                link
+            };
+            #[cfg(not(windows))]
+            let isolated_link = if link.is_absolute() {
                 pathdiff(&to, &relocated)?
             } else {
                 link
@@ -4165,6 +4188,80 @@ mod tests {
         assert!(workspace.join(".supercov/helpers.js").is_dir());
         lock.release().unwrap();
         crate::lifecycle::sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Linking the repository around a copy is best effort: where the
+    /// copy's parents are not there, nothing is linked, copied or refused.
+    #[cfg(unix)]
+    #[test]
+    fn the_repository_is_not_linked_around_a_copy_with_nowhere_to_go() {
+        let repository = project();
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::write(repository.join("tsconfig.base.json"), "{}").unwrap();
+        fs::create_dir_all(repository.join("cmd/server")).unwrap();
+        let root = repository.join("packages/web");
+        fs::create_dir_all(&root).unwrap();
+        let elsewhere = project();
+        let workspace = elsewhere.join("missing/repository/packages/web");
+        link_repository_around(&root, &workspace);
+        assert!(!elsewhere.join("missing").exists());
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
+    }
+
+    /// A link that cannot be resolved for a reason other than leading
+    /// nowhere -- here a name longer than any file system allows -- stops
+    /// the copy rather than being mirrored or dropped unseen.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_cannot_be_resolved_stops_the_copy() {
+        let source = project();
+        std::os::unix::fs::symlink("x".repeat(300), source.join("src/long")).unwrap();
+        let destination = source.with_extension("copy");
+        let canonical = fs::canonicalize(&source).unwrap();
+        let error = copy_tree(
+            &source,
+            &destination,
+            CopyRoots {
+                source: &source,
+                destination: &destination,
+                final_destination: &destination,
+                canonical_source: &canonical,
+            },
+            true,
+            &mut OrdinaryCopyOperations,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, WorkspaceError::Io { path, .. } if path.ends_with("src/long")),
+            "{error}"
+        );
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn a_built_file_that_is_gone_is_not_instrumented_and_one_unreadable_is_an_error() {
+        let root = project();
+        assert!(!built_from_instrumented_source(&root.join("dist/gone.js"), true).unwrap());
+        assert!(matches!(
+            built_from_instrumented_source(&root.join("src"), true),
+            Err(WorkspaceError::Io { .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn node_modules_that_cannot_be_looked_at_is_an_error() {
+        // A project root that is a file: its node_modules is a path below a
+        // file, which is neither there nor missing.
+        let root = project();
+        let file = root.join("package.json");
+        assert!(matches!(
+            link_node_modules(&file, &root.join("workspace"), &mut OrdinaryCopyOperations),
+            Err(WorkspaceError::Io { .. })
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 }
