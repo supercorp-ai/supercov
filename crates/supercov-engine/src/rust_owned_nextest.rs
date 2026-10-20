@@ -970,6 +970,7 @@ mod tests {
             Path::new("/r"),
             &RunnerPlan {
                 targets: Vec::new(),
+                token: "0123456789abcdef".into(),
             },
         )
         .unwrap_err();
