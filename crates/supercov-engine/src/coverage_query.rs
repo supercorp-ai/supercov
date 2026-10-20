@@ -6277,4 +6277,36 @@ mod tests {
             .unwrap_or_else(|| panic!("{covers:?}"));
         assert_eq!((anchor.covered, anchor.covering_tests), (bare, 0));
     }
+
+    /// Tests that reached nothing measured, in a run with nothing to
+    /// measure, leave no area to break down.
+    #[test]
+    fn a_run_with_nothing_to_measure_has_no_areas() {
+        let mut request = two_runner_request();
+        request.manifest.decisions.clear();
+        request.manifest.points.clear();
+        request.manifest.branches.clear();
+        for raw in &mut request.raw_results {
+            raw.runtime[0].decisions.clear();
+            raw.runtime[0].hits.clear();
+        }
+        let report = analyze_coverage_results(&request).unwrap();
+        let (_root, container) = index_of(&report);
+        let index = CoverageIndex::new(&container).unwrap();
+        let (data, _) = coverage_areas_query(
+            &index,
+            CoverageAreasQueryOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                metric: MinimizeMetric::All,
+                kind: None,
+                runner: None,
+                depth: 1,
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert!(data.areas.is_empty(), "{data:?}");
+    }
 }
