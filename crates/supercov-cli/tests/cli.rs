@@ -11244,6 +11244,25 @@ fn a_browser_suite_beside_servers_with_nothing_to_measure_measures_its_javascrip
     );
 }
 
+/// Source roots named for a browser suite's JavaScript leave the Python and
+/// Ruby beside it no server to measure: the run measures its JavaScript
+/// instead of refusing the roots as a Python or Ruby run of its own would.
+#[test]
+fn source_roots_naming_only_javascript_leave_no_python_or_ruby_server() {
+    let project = Project::cart("roots-javascript-only");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write("server.py", "def handle():\n    return 1\n");
+    project.write("app.rb", "def handle\n  1\nend\n");
+    let run = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_SOURCE_ROOTS", "src")],
+    );
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(!run.stderr().contains("left no"), "{}", run.stderr());
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("76.92%"), "{summary}");
+}
+
 /// A script standing in for rustdoc while Supercov stands in for it during
 /// `cargo test --doc`. It reads what to do from the files of the scenario
 /// directory `FAKE_RUSTDOC_DIR` names: `standalone` and `merged` are the
