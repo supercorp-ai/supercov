@@ -2759,4 +2759,345 @@ mod tests {
             ]
         );
     }
+
+    /// The request a `command` makes of a one-test JavaScript run, and the
+    /// answer a real index of that run gives it, for the renderings below to
+    /// start from.
+    fn answered(
+        command: &str,
+        edit: impl FnOnce(&mut IndexedQueryRequest),
+    ) -> (IndexedQueryRequest, IndexedQueryOutput) {
+        use supercov_engine::coverage_analysis::{McdcVector, PointKind};
+        use supercov_engine::coverage_index::coverage_index_sections;
+        use supercov_engine::coverage_report::{
+            CoverageManifest, CoverageReportRequest, DecisionMeta, DecisionSnapshot, ExitCodeInput,
+            PointMeta, RawTestResult, RuntimeSnapshot, TestProvenance, analyze_coverage_results,
+        };
+        use supercov_engine::query_index::{QueryIndex, QueryIndexIdentity, write_query_index};
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let decision = DecisionMeta {
+            id: "d".into(),
+            file: "src/a.js".into(),
+            line: 1,
+            column: 1,
+            source: "a && b".into(),
+            conditions: vec!["a".into(), "b".into()],
+            kind: "if".into(),
+        };
+        let mut report = analyze_coverage_results(&CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: vec![decision.clone()],
+                points: vec![PointMeta {
+                    id: "point".into(),
+                    kind: PointKind::Statement,
+                    file: "src/a.js".into(),
+                    line: 2,
+                    column: 3,
+                    source: "work();".into(),
+                    label: None,
+                }],
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+            },
+            raw_results: vec![RawTestResult {
+                span: None,
+                test_id: Some("test".into()),
+                scope: None,
+                test: "works".into(),
+                test_file: Some("tests/a.js".into()),
+                title: None,
+                retry: Some(0),
+                status: Some("passed".into()),
+                expected_status: None,
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "node:test".into(),
+                    kind: "unit".into(),
+                    project: None,
+                    source: "runner-default".into(),
+                    tags: Vec::new(),
+                },
+                role: "test".into(),
+                attribution: supercov_engine::coverage_report::ATTRIBUTION_EXACT.into(),
+                phases: Vec::new(),
+                runtime: vec![RuntimeSnapshot {
+                    decisions: vec![DecisionSnapshot {
+                        meta: decision,
+                        vectors: vec![McdcVector {
+                            values: vec![Some(false), None],
+                            outcome: false,
+                        }],
+                    }],
+                    hits: vec!["point".into()],
+                    events: Vec::new(),
+                    logicals: Vec::new(),
+                    phase_id: None,
+                }],
+                browser: Vec::new(),
+                server: Vec::new(),
+            }],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(0)),
+        })
+        .unwrap();
+        let scope = serde_json::json!({
+            "version": 1,
+            "mode": "automatic",
+            "roots": ["."],
+            "entries": [{"file": "src/a.js", "status": "included", "reason": "javascript source", "packageRoot": "."}]
+        });
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            view.scope = Some(scope.clone());
+        }
+        let identity = QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-human-query-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("query-index.v1.bin");
+        write_query_index(&coverage_index_sections(&report).unwrap(), &identity, &path).unwrap();
+        let mut request = request();
+        request.command = command.into();
+        edit(&mut request);
+        let output = {
+            let container = QueryIndex::open(&path, &identity).unwrap();
+            let index = supercov_engine::coverage_index::CoverageIndex::new(&container).unwrap();
+            supercov_engine::indexed_query::query_indexed(&index, Some(&report), &request, None)
+        };
+        std::fs::remove_dir_all(&directory).unwrap();
+        (request, output.unwrap())
+    }
+
+    #[test]
+    fn a_run_with_no_source_files_says_so_instead_of_an_empty_list() {
+        let page = AgentPagination {
+            offset: 0,
+            limit: DEFAULT_LIMIT,
+            returned: 0,
+            total: 0,
+            has_more: false,
+            next_offset: None,
+        };
+        let text = render_files(&[], &request(), &page, "files", "run_1");
+        assert!(
+            text.starts_with("Coverage files — every included source file"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n\nNo source files are included in this run.\n\n"),
+            "{text}"
+        );
+    }
+
+    /// An incomplete run with nothing blocked in a file blames the
+    /// transport or the run; a run read with no command, no assessment and
+    /// no lines covered says nothing of them, and shares nothing of zero.
+    #[test]
+    fn a_summary_leaves_out_what_the_run_does_not_have() {
+        let (request, mut output) = answered("summary", |_| {});
+        let IndexedQueryData::Summary(data) = &mut output.data else {
+            panic!("a summary");
+        };
+        data.measurement.complete = false;
+        data.measurement.blocking = 1;
+        data.measurement.files = 0;
+        data.command = Vec::new();
+        data.assertion_coverage = None;
+        data.coverage.lines.covered = 0;
+        let nothing = supercov_engine::coverage_index::IndexedGapDimensions {
+            lines: 0,
+            statements: 0,
+            functions: 0,
+            branches: 0,
+            mcdc_conditions: 0,
+        };
+        data.e2e_gap_context = Some(supercov_engine::coverage_query::CoverageKindGapContext {
+            kind: "e2e".into(),
+            other_kinds: vec!["unit".into()],
+            covered_elsewhere: nothing.clone(),
+            uncovered_everywhere: nothing,
+        });
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("Incomplete — 1 blocking transport or run limitation(s)"),
+            "{text}"
+        );
+        assert!(!text.contains("command:"), "{text}");
+        assert!(!text.contains("Assertions"), "{text}");
+        assert!(
+            text.contains("  Other test kinds only  0 lines (0.00% of all covered lines)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_complete_scope_counts_its_declared_boundaries() {
+        let (request, mut output) = answered("scope", |_| {});
+        let IndexedQueryData::Scope(data) = &mut output.data else {
+            panic!("a scope");
+        };
+        data.measurement.complete = true;
+        data.measurement.declared = 2;
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("measurement complete, 2 declared boundary(ies)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_nothing_measured_says_where_to_ask_why() {
+        let (request, mut output) = answered("file-detail", |request| {
+            request.file = Some("src/a.js".into());
+        });
+        let IndexedQueryData::FileDetail(data) = &mut output.data else {
+            panic!("a file");
+        };
+        data.counts.total_lines = 0;
+        output.pagination.as_mut().unwrap().total = 0;
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("  Nothing measured: the run counts no obligation in this file."),
+            "{text}"
+        );
+    }
+
+    /// A line every anchored obligation of which is complete, with
+    /// something still unobserved, is partial; where its source was read is
+    /// said, and an empty list of details is not shown.
+    #[test]
+    fn a_covered_line_with_something_left_is_partial() {
+        let (request, mut output) = answered("line", |request| {
+            request.file = Some("src/a.js".into());
+            request.line = Some(2);
+        });
+        let IndexedQueryData::Line(data) = &mut output.data else {
+            panic!("a line");
+        };
+        let CoverageCoversData::Line(line) = data.as_mut() else {
+            panic!("a line with a record");
+        };
+        let anchor = line.anchored.first().cloned().expect("the statement");
+        line.covered = true;
+        line.covered_anchored = line.total_anchored;
+        line.total_limitations = 0;
+        line.total_remaining = 1;
+        line.source_origin = Some("working-tree".into());
+        line.anchored.clear();
+        let text = render_coverage(&request, &output);
+        assert!(text.contains("  PARTIAL"), "{text}");
+        assert!(
+            text.contains("(read from the current working tree)"),
+            "{text}"
+        );
+        assert!(!text.contains("Coverage details"), "{text}");
+        // An anchor whose source is unknown is named without it.
+        let mut bare = anchor;
+        bare.source = None;
+        let rendered = render_anchor(&bare);
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
+        assert!(
+            rendered[0].starts_with("  Statement at column 3"),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_partially_attributed_test_s_coverage_is_a_lower_bound() {
+        let (request, mut output) = answered("test", |request| {
+            request.selector = Some("test".into());
+        });
+        let IndexedQueryData::Test(data) = &mut output.data else {
+            panic!("a test");
+        };
+        let CoverageTestData::Detail(detail) = data.as_mut() else {
+            panic!("one test's detail");
+        };
+        detail.tests[0].attribution = "partial".into();
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("at least ")
+                && text.contains(
+                    "(a line already recorded for an earlier test is not recorded again)"
+                ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_coverage_could_not_be_read_is_listed_as_invalid() {
+        let entry = supercov_engine::run_query::RunListEntry {
+            id: "run_1".into(),
+            generated_at: "2026-10-16T10:29:02.377Z".into(),
+            lines: None,
+            branches: None,
+            mcdc: None,
+            coverage_error: Some("index refused".into()),
+            tests: Some(1),
+            command: vec!["npm".into(), "test".into()],
+            duration_ms: 1.0,
+            timings: None,
+            test_exit_code: Some(0),
+            build_reused: None,
+            raw_evidence: supercov_engine::run_store::RawEvidenceMetadata {
+                schema_version: 1,
+                format: "gzip".into(),
+                file: "evidence.raw.gz".into(),
+                files: 1,
+                uncompressed_bytes: 1,
+                compressed_bytes: 1,
+            },
+            stale: None,
+            reasons: Vec::new(),
+        };
+        let page = AgentPagination {
+            offset: 0,
+            limit: DEFAULT_LIMIT,
+            returned: 1,
+            total: 1,
+            has_more: false,
+            next_offset: None,
+        };
+        let text = render_human(
+            &PublicQueryInvocation::Runs {
+                filter: "all".into(),
+                offset: 0,
+                limit: DEFAULT_LIMIT,
+                json: false,
+            },
+            &PublicQueryOutput::Runs {
+                data: supercov_engine::run_query::RunListData {
+                    filters: supercov_engine::coverage_query::CoverageQueryFilters {
+                        outcome: "all".into(),
+                        kind: None,
+                        runner: None,
+                    },
+                    runs: vec![entry],
+                },
+                pagination: page,
+            },
+        );
+        assert!(
+            text.contains("2026-10-16 10:29:02 UTC  INVALID COVERAGE"),
+            "{text}"
+        );
+    }
 }
