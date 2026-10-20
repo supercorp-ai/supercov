@@ -839,8 +839,9 @@ impl<'a> Collector<'a> {
 
     // -- edits --------------------------------------------------------------
 
+    /// No edit holds a newline, so every line keeps its number; the tests
+    /// check this of every shape they probe.
     fn edit(&mut self, offset: usize, rank: EditRank, text: String, scope: usize) {
-        debug_assert!(!text.contains('\n'));
         let order = match rank {
             EditRank::Opener => self.depth,
             EditRank::Closer => -self.depth,
@@ -1120,29 +1121,17 @@ impl<'a> Collector<'a> {
         let mut not = 0;
         loop {
             if let Some(parens) = current.as_parentheses_node() {
-                // Prism flags parentheses holding more than one statement, so
-                // an unflagged body's first statement is its only one.
-                if !parens.is_multiple_statements()
-                    && let Some(body) = parens.body()
-                    && let Some(statements) = body.as_statements_node()
-                    && let Some(inner) = statements.body().iter().next()
-                {
-                    current = inner;
-                    continue;
-                }
-                break;
-            }
-            if let Some(call) = current.as_call_node()
-                && call.name().as_slice() == b"!"
-                && call.arguments().is_none()
-                && call.block().is_none()
-                && let Some(receiver) = call.receiver()
-            {
-                not += 1;
-                current = receiver;
+                let Some(inner) = sole_statement(&parens) else {
+                    break;
+                };
+                current = inner;
                 continue;
             }
-            break;
+            let Some(receiver) = negated(&current) else {
+                break;
+            };
+            not += 1;
+            current = receiver;
         }
         (current, not)
     }
@@ -1418,15 +1407,14 @@ impl<'a> Collector<'a> {
         let mut current = subsequent;
         loop {
             let node = current?;
-            if let Some(elsif) = node.as_if_node() {
-                ids.push(self.first_statement_id(&elsif.statements())?);
-                current = elsif.subsequent();
-            } else if let Some(else_node) = node.as_else_node() {
+            // What follows an `if` is an `elsif` or an `else`.
+            let Some(elsif) = node.as_if_node() else {
+                let else_node = node.as_else_node()?;
                 ids.push(self.first_statement_id(&else_node.statements())?);
                 return Some(ids);
-            } else {
-                return None;
-            }
+            };
+            ids.push(self.first_statement_id(&elsif.statements())?);
+            current = elsif.subsequent();
         }
     }
 
@@ -1543,14 +1531,7 @@ impl<'a> Collector<'a> {
         let else_index = self.stdlib("if", "else", else_span, else_kind, Vec::new());
         if kind == "ternary" {
             // A ternary's arms are expressions, not statements.
-            if let Some(statements) = node.statements() {
-                self.expression_lists
-                    .insert(statements.location().start_offset());
-            }
-            if let Some(subsequent) = node.subsequent()
-                && let Some(else_node) = subsequent.as_else_node()
-                && let Some(statements) = else_node.statements()
-            {
+            for statements in arm_statements(node) {
                 self.expression_lists
                     .insert(statements.location().start_offset());
             }
@@ -1758,17 +1739,8 @@ impl<'a> Collector<'a> {
         ) else {
             return;
         };
-        let first = block.body().and_then(|body| {
-            if let Some(statements) = body.as_statements_node() {
-                statements.body().iter().next()
-            } else if let Some(begin) = body.as_begin_node() {
-                begin
-                    .statements()
-                    .and_then(|statements| statements.body().iter().next())
-            } else {
-                None
-            }
-        });
+        let first =
+            body_statements(block.body()).and_then(|statements| statements.body().iter().next());
         let Some(first) = first else {
             // An empty block never enters; both alternatives stay declared
             // but nothing can witness them.
@@ -2136,7 +2108,7 @@ impl<'a> Collector<'a> {
         self.cases.push(CasePlan { clauses, no_match });
     }
 
-    fn safe_navigation(&mut self, node: &CallNode<'_>) {
+    fn safe_navigation(&mut self, node: &CallNode<'_>, receiver: &Node<'_>) {
         let location = node.location();
         let Some(id) = self.branch(
             location.start_offset(),
@@ -2174,20 +2146,18 @@ impl<'a> Collector<'a> {
         );
         self.stdlib("&.", "else", span, KeyKind::Node, vec![format!("{id}:nil")]);
         // Ruby 3.4+: the receiver's value decides, so the receiver is probed.
-        if let Some(receiver) = node.receiver() {
-            let key = self.probe_key(ProbeTarget::SafeNavigation {
-                nil: format!("{id}:nil"),
-                called: format!("{id}:called"),
-            });
-            let receiver = receiver.location();
-            self.depth += 1;
-            self.wrap(
-                receiver.start_offset(),
-                receiver.end_offset(),
-                format!("{RUBY_PROBE_RECEIVER}.n({key}, ("),
-            );
-            self.depth -= 1;
-        }
+        let key = self.probe_key(ProbeTarget::SafeNavigation {
+            nil: format!("{id}:nil"),
+            called: format!("{id}:called"),
+        });
+        let receiver = receiver.location();
+        self.depth += 1;
+        self.wrap(
+            receiver.start_offset(),
+            receiver.end_offset(),
+            format!("{RUBY_PROBE_RECEIVER}.n({key}, ("),
+        );
+        self.depth -= 1;
     }
 
     /// `&&` and `||` used as a value: the left operand is read as a boolean,
@@ -2798,13 +2768,7 @@ impl<'a> Collector<'a> {
         });
         // Ruby 3.4+: the body's first statement runs exactly when the method
         // is entered; a body with none gets a probe after the signature.
-        let body_statements = node.body().and_then(|body| {
-            if let Some(statements) = body.as_statements_node() {
-                Some(statements)
-            } else {
-                body.as_begin_node().and_then(|begin| begin.statements())
-            }
-        });
+        let body_statements = body_statements(node.body());
         let signature_end = node
             .rparen_loc()
             .map(|rparen| rparen.end_offset())
@@ -2819,11 +2783,9 @@ impl<'a> Collector<'a> {
         {
             self.begin_node(&begin, node.end_keyword_loc().map(|loc| loc.start_offset()));
         }
-        if node.equal_loc().is_some()
-            && let Some(body) = node.body()
-            && let Some(statements) = body.as_statements_node()
-        {
-            for statement in statements.body().iter() {
+        if node.equal_loc().is_some() {
+            // An endless method's body is always a statement list.
+            for statement in body_statements.iter().flat_map(|list| list.body().iter()) {
                 self.endless_bodies
                     .insert(statement.location().start_offset());
             }
@@ -3041,6 +3003,45 @@ impl<'a> Collector<'a> {
     }
 }
 
+/// The statement lists of a ternary's two arms.
+fn arm_statements<'n>(node: &IfNode<'n>) -> Vec<StatementsNode<'n>> {
+    let otherwise = node
+        .subsequent()
+        .and_then(|subsequent| subsequent.as_else_node())
+        .and_then(|else_node| else_node.statements());
+    node.statements().into_iter().chain(otherwise).collect()
+}
+
+/// The statements of a block's or a method's body, `begin`-less `rescue`
+/// included: Prism makes such a body a statement list or a `begin`.
+fn body_statements<'n>(body: Option<Node<'n>>) -> Option<StatementsNode<'n>> {
+    let body = body?;
+    match body.as_statements_node() {
+        Some(statements) => Some(statements),
+        None => body.as_begin_node()?.statements(),
+    }
+}
+
+/// The one statement parentheses hold, if they hold exactly one. Prism flags
+/// parentheses holding more than one, so an unflagged body's first statement
+/// is its only one. Only parentheses in a pattern (`in (1 | 2)`) hold
+/// something other than statements.
+fn sole_statement<'n>(parens: &ruby_prism::ParenthesesNode<'n>) -> Option<Node<'n>> {
+    if parens.is_multiple_statements() {
+        return None;
+    }
+    parens.body()?.as_statements_node()?.body().iter().next()
+}
+
+/// The operand of `!x` or `not x`: a `!` called with neither arguments nor a
+/// block. Prism gives every `!` a receiver, `not()` its parentheses.
+fn negated<'n>(node: &Node<'n>) -> Option<Node<'n>> {
+    let call = node.as_call_node()?;
+    let plain =
+        call.name().as_slice() == b"!" && call.arguments().is_none() && call.block().is_none();
+    plain.then(|| call.receiver())?
+}
+
 fn limitation(id: &str, file: &str, line: usize, source: &str, reason: &str) -> serde_json::Value {
     json!({
         "id": id,
@@ -3107,14 +3108,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             // `true ? :yes : :no` became `true ? hit; :yes : :no`, which Ruby
             // refuses, and the whole file lost its branches.
             if node.if_keyword_loc().is_none() {
-                if let Some(statements) = node.statements() {
-                    self.expression_lists
-                        .insert(statements.location().start_offset());
-                }
-                if let Some(subsequent) = node.subsequent()
-                    && let Some(else_node) = subsequent.as_else_node()
-                    && let Some(statements) = else_node.statements()
-                {
+                for statements in arm_statements(node) {
                     self.expression_lists
                         .insert(statements.location().start_offset());
                 }
@@ -3126,9 +3120,11 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             } else if let Some(subsequent) = node.subsequent() {
                 match subsequent.as_if_node() {
                     Some(elsif) => self.visit_if_node(&elsif),
+                    // Not an `elsif`, so an `else`.
                     None => {
-                        if let Some(else_node) = subsequent.as_else_node()
-                            && let Some(statements) = else_node.statements()
+                        if let Some(statements) = subsequent
+                            .as_else_node()
+                            .and_then(|else_node| else_node.statements())
                         {
                             self.visit_statements_node(&statements);
                         }
@@ -3290,8 +3286,9 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             self.refine_blocks
                 .push([location.start_offset(), location.end_offset()]);
         }
-        if node.is_safe_navigation() {
-            self.safe_navigation(node);
+        // `&.` always follows a receiver.
+        if let Some(receiver) = node.is_safe_navigation().then(|| node.receiver()).flatten() {
+            self.safe_navigation(node, &receiver);
         }
         if let Some(block) = node.block()
             && let Some(block) = block.as_block_node()
@@ -3626,6 +3623,7 @@ mod tests {
             let mut next = 0;
             let obligations = build_ruby_obligations("lib/l.rb", source.as_bytes(), &mut next)
                 .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+            assert_no_edit_breaks_a_line(&obligations.plan.edits);
             let probed = apply_edits(source.as_bytes(), &obligations.plan.edits);
             let parsed = ruby_prism::parse(&probed);
             let errors = parsed
@@ -3643,6 +3641,13 @@ mod tests {
             build_ruby_obligations("lib/l.rb", b"def broken(\n", &mut next),
             Err(RubyInstrumenterError::Parse(_))
         ));
+    }
+
+    /// Every line keeps its number once probed.
+    fn assert_no_edit_breaks_a_line(edits: &[Edit]) {
+        for edit in edits {
+            assert!(!edit.text.contains('\n'), "{edit:?}");
+        }
     }
 
     #[test]
@@ -4213,6 +4218,7 @@ end
         let mut probe = 0;
         let obligations =
             build_ruby_obligations("lib/p.rb", source.as_bytes(), &mut probe).unwrap();
+        assert_no_edit_breaks_a_line(&obligations.plan.edits);
         let transformed =
             String::from_utf8(apply_edits(source.as_bytes(), &obligations.plan.edits)).unwrap();
         assert!(
@@ -4433,5 +4439,172 @@ end
                 "unless false"
             ]
         );
+    }
+
+    /// Stands in for the runtime: every probe passes its value through.
+    const STUB_RUNTIME: &str = "$__supercov = Object.new\nclass << $__supercov\n  def c(_k, _i, v) = v\n  %i[d w f l n ok hm].each { |m| define_method(m) { |_k, v| v } }\n  %i[fb pre es s hs h hm0 p ok0].each { |m| define_method(m) { |*| nil } }\nend\n";
+
+    fn ruby_prints(program: &str) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("ruby")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(program.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{program}");
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// The probed program prints what the original printed.
+    fn runs_alike(source: &str) -> (RubyFileObligations, String) {
+        let (obligations, transformed) = probed(source);
+        assert_eq!(
+            ruby_prints(&format!("{STUB_RUNTIME}{transformed}")),
+            ruby_prints(source),
+            "{transformed}"
+        );
+        (obligations, transformed)
+    }
+
+    #[test]
+    fn negations_ternaries_and_bodies_with_a_rescue_still_run_once_probed() {
+        let source = "def pick(x, a, b)\n  return :neg if !(x) && not(a)\n  y = (a || b) ? :yes : :no\n  [y, x&.size]\nend\ndef total(xs)\n  n = 0\n  xs.each do |v|\n    n += v\n  rescue StandardError\n    n = -1\n  end\n  n\nend\ndef twice(x) = x * 2\np pick(nil, nil, 1), pick('ab', 1, nil), pick(nil, 1, nil)\np total([1, 2]), total([nil]), total([]), twice(3)\nv = if false then 1 else 2 end\nw = false ? 3 : (4 if v)\np v, w\n";
+        let (obligations, transformed) = runs_alike(source);
+        // A block whose body is a `begin` without the keyword is entered at
+        // its first statement.
+        assert!(
+            transformed.contains("$__supercov.fb(3); $__supercov.ok(4, (n += v))"),
+            "{transformed}"
+        );
+        let conditions = obligations
+            .manifest
+            .decisions
+            .iter()
+            .map(|decision| decision.conditions.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            conditions.contains(&vec!["!x".to_owned(), "!a".to_owned()]),
+            "{conditions:?}"
+        );
+    }
+
+    #[test]
+    fn only_parentheses_holding_one_statement_are_seen_through() {
+        let parsed = ruby_prism::parse(b"case x\nin (1 | 2) then (y)\nend\nnot()\n");
+        let mut parentheses = Vec::new();
+        let mut negations = Vec::new();
+        struct Find<'a>(&'a mut Vec<String>, &'a mut Vec<Option<String>>);
+        impl<'pr> Visit<'pr> for Find<'_> {
+            fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'pr>) {
+                let text = |node: Node<'_>| {
+                    String::from_utf8_lossy(node.location().as_slice()).into_owned()
+                };
+                self.0
+                    .push(sole_statement(node).map_or("-".to_owned(), text));
+                ruby_prism::visit_parentheses_node(self, node);
+            }
+            fn visit_call_node(&mut self, node: &CallNode<'pr>) {
+                let operand = negated(&node.as_node());
+                self.1.push(
+                    operand.map(|n| String::from_utf8_lossy(n.location().as_slice()).into_owned()),
+                );
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+        Find(&mut parentheses, &mut negations).visit(&parsed.node());
+        // A pattern's parentheses hold a pattern; `(y)` holds `y`; `not()`
+        // negates its empty parentheses.
+        assert_eq!(parentheses, ["-", "y", "-"]);
+        assert_eq!(negations, [None, None, Some("()".to_owned())]);
+    }
+
+    #[test]
+    fn registering_the_same_node_twice_declares_it_once() {
+        let source = b"def m(a, b)\n  a || b\nend\nif a\n  1\nend\n";
+        let parsed = ruby_prism::parse(source);
+        let program = parsed.node();
+        let statements = program
+            .as_program_node()
+            .unwrap()
+            .statements()
+            .body()
+            .iter()
+            .collect::<Vec<_>>();
+        let def = statements[0].as_def_node().unwrap();
+        let or = || {
+            body_statements(def.body())
+                .unwrap()
+                .body()
+                .iter()
+                .next()
+                .unwrap()
+        };
+        let predicate = || statements[1].as_if_node().unwrap().predicate();
+        let mut next = 0;
+        let mut collector = Collector::new("lib/t.rb", source, &mut next);
+        let span = collector.point_span(0);
+        let then_index = collector.stdlib("if", "then", span, KeyKind::Point, Vec::new());
+        let else_index = collector.stdlib("if", "else", span, KeyKind::Point, Vec::new());
+        for _ in 0..2 {
+            collector.def_node(&def);
+            collector.statement(&statements[1]);
+            collector.stdlib_decision(
+                predicate(),
+                "if",
+                then_index,
+                else_index,
+                true,
+                DecisionProof::default(),
+            );
+        }
+        let first = collector.probe_decision(or(), "value", None, "d");
+        assert!(first.is_some());
+        assert_eq!(collector.probe_decision(or(), "value", None, "d"), None);
+        assert_eq!(collector.manifest.points.len(), 2);
+        assert_eq!(collector.manifest.decisions.len(), 2);
+        let alternatives = [("a", "a")];
+        assert!(collector.branch(0, 1, "k", alternatives).is_some());
+        assert_eq!(collector.branch(0, 1, "k", alternatives), None);
+        // Each decision's outcome, the `||`, and the one above.
+        assert_eq!(collector.manifest.branches.len(), 4);
+    }
+
+    #[test]
+    fn a_decision_whose_right_operand_already_has_a_branch_derives_no_second_one() {
+        let source = b"a || b\n";
+        let parsed = ruby_prism::parse(source);
+        let program = parsed.node();
+        let or = program
+            .as_program_node()
+            .unwrap()
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .unwrap();
+        let mut next = 0;
+        let mut collector = Collector::new("lib/t.rb", source, &mut next);
+        let declared = collector.branch(5, 6, "logical-or", [("x", "x")]);
+        let key = collector.probe_decision(or, "value", None, "d").unwrap();
+        let Some(ProbeTarget::Decision { logical, .. }) = collector.probes.get(&key) else {
+            panic!("{:?}", collector.probes);
+        };
+        assert!(logical.is_empty());
+        let ids = collector
+            .manifest
+            .branches
+            .iter()
+            .map(|branch| Some(branch.id.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&declared));
     }
 }
