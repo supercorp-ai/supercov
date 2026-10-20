@@ -400,10 +400,8 @@ fn temporary_path(destination: &Path, sequence: u64) -> Result<PathBuf, Evidence
     Ok(destination.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence,)))
 }
 
-fn sync_parent(path: &Path) {
-    if let Some(parent) = path.parent()
-        && let Ok(directory) = File::open(parent)
-    {
+fn sync_directory(directory: &Path) {
+    if let Ok(directory) = File::open(directory) {
         let _ = directory.sync_all();
     }
 }
@@ -499,7 +497,7 @@ fn write_archive_version(
         let compressed_bytes = file.metadata()?.len();
         drop(file);
         fs::rename(&temporary, destination)?;
-        sync_parent(destination);
+        sync_directory(parent);
         Ok(EvidenceArchiveMetadata {
             schema_version,
             format: "framed+gzip",
@@ -578,9 +576,8 @@ fn read_framed_entries<R: Read>(
                 });
             }
         }
-        if !seen.insert(header.path.clone()) {
-            return Err(EvidenceArchiveError::DuplicatePath(header.path));
-        }
+        // Each path follows the one before in order, so none is seen twice.
+        seen.insert(header.path.clone());
         let payload_size =
             usize::try_from(header.bytes).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
         previous = Some(header.path.clone());
@@ -953,6 +950,132 @@ mod tests {
         assert!(write_archive(vec![entry("result.json", b"{}")], &destination).is_err());
         assert!(!destination.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Each identity file an archive lacks, or a path written twice, is
+    /// named, and nothing is left behind.
+    #[test]
+    fn an_archive_missing_or_doubling_an_entry_is_refused_by_name() {
+        let root = temporary_directory("archive-named");
+        let destination = root.join("evidence.raw.gz");
+        let [model, frontend, manifest] = <[EvidenceArchiveEntry; 3]>::try_from(identity_entries())
+            .ok()
+            .unwrap();
+        let doubled = vec![
+            model.clone(),
+            frontend.clone(),
+            manifest.clone(),
+            manifest.clone(),
+        ];
+        assert!(matches!(
+            write_archive(doubled, &destination),
+            Err(EvidenceArchiveError::DuplicatePath(path)) if path == "manifest.json"
+        ));
+        assert!(matches!(
+            write_archive(vec![model, frontend.clone()], &destination),
+            Err(EvidenceArchiveError::MissingManifest)
+        ));
+        assert!(matches!(
+            write_archive(vec![frontend, manifest.clone()], &destination),
+            Err(EvidenceArchiveError::MissingCoverageModel)
+        ));
+        assert!(matches!(
+            write_archive(vec![manifest], &destination),
+            Err(EvidenceArchiveError::MissingFrontend)
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A header of no bytes, or one not ended by a newline, is refused.
+    #[test]
+    fn an_empty_or_unterminated_header_is_refused() {
+        let root = temporary_directory("archive-headers");
+        let header = b"{\"path\":\"manifest.json\",\"bytes\":0}";
+        for (bytes, said) in [
+            (
+                [EVIDENCE_ARCHIVE_MAGIC.as_bytes(), &0_u32.to_be_bytes()].concat(),
+                "empty header",
+            ),
+            (
+                [
+                    EVIDENCE_ARCHIVE_MAGIC.as_bytes(),
+                    &(header.len() as u32).to_be_bytes(),
+                    header,
+                ]
+                .concat(),
+                "header is not newline terminated",
+            ),
+        ] {
+            let path = write_compressed(&root, &bytes);
+            assert!(
+                matches!(
+                    read_archive(&path),
+                    Err(EvidenceArchiveError::InvalidHeader(why)) if why == said
+                ),
+                "{said}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A directory source that is a file, or a file source that is a
+    /// directory, is refused; one that is missing adds nothing; one that
+    /// cannot be looked at is an error.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_of_the_wrong_kind_is_refused() {
+        let root = temporary_directory("archive-kinds");
+        let manifest = root.join("manifest.json");
+        fs::write(&manifest, b"{}").unwrap();
+        let file = |file: &Path| EvidenceArchiveSource::File {
+            file: file.to_owned(),
+            path: "manifest.json".to_owned(),
+        };
+        let directory = |directory: PathBuf| EvidenceArchiveSource::Directory {
+            directory,
+            prefix: None,
+        };
+        assert!(matches!(
+            collect_sources(&[directory(manifest.clone()), file(&manifest)]),
+            Err(EvidenceArchiveError::UnsupportedSource(_))
+        ));
+        assert!(matches!(
+            collect_sources(&[directory(manifest.join("below")), file(&manifest)]),
+            Err(EvidenceArchiveError::Io(_))
+        ));
+        assert_eq!(
+            collect_sources(&[directory(root.join("missing")), file(&manifest)])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            collect_sources(&[file(&root)]),
+            Err(EvidenceArchiveError::UnsupportedSource(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A temporary name another writer holds is passed over for the next;
+    /// one the file system cannot make fails the write.
+    #[test]
+    fn a_temporary_name_in_use_is_passed_over() {
+        let root = temporary_directory("archive-temporary");
+        let destination = root.join("evidence.raw.gz");
+        let next = TEMPORARY_SEQUENCE.load(Ordering::Relaxed);
+        for sequence in next..next + 256 {
+            fs::write(temporary_path(&destination, sequence).unwrap(), b"held").unwrap();
+        }
+        write_archive(identity_entries(), &destination).unwrap();
+        assert_eq!(read_archive(&destination).unwrap(), identity_entries());
+        let long = root.join("e".repeat(250));
+        assert!(matches!(
+            write_archive(identity_entries(), &long),
+            Err(EvidenceArchiveError::Io(_))
+        ));
+        assert!(!long.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
