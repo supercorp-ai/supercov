@@ -128,6 +128,17 @@ pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
 }
 
 pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -> bool {
+    elides_type_imports_in(root, file, command, |name| std::env::var_os(name))
+}
+
+/// `elides_type_imports` with the environment passed in, so a test can name
+/// a loader override without changing the process's own.
+fn elides_type_imports_in(
+    root: &Path,
+    file: &str,
+    command: &[String],
+    environment: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> bool {
     let root_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     let root = root_path.as_path();
     let commands = [expanded_command(root, command)];
@@ -215,7 +226,7 @@ pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -
             "TSX_TSCONFIG_PATH",
         ]
         .iter()
-        .any(|s| std::env::var_os(s).is_some())
+        .any(|s| environment(s).is_some())
     {
         return false;
     }
@@ -247,16 +258,16 @@ pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -
     if !explicit_configs.iter().all(|path| permits_elision(path)) {
         return false;
     }
-    let mut directory = root.join(file).parent().map(Path::to_path_buf);
-    while let Some(dir) = directory {
-        if !dir.starts_with(root) {
-            break;
-        }
+    let target = root.join(file);
+    for dir in target
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(root))
+    {
         let config = dir.join("tsconfig.json");
         if config.exists() {
             return permits_elision(&config);
         }
-        directory = dir.parent().map(Path::to_path_buf);
     }
     false
 }
@@ -452,6 +463,14 @@ mod tests {
         // An override on the command line, or a bundler beside the compiler.
         assert!(!elides("src/main.ts", "tsc --verbatimModuleSyntax"));
         assert!(!elides("src/main.ts", "tsc && vite build"));
+        // Or an override in the environment a loader reads.
+        let overridden = |name: &str| (name == "TS_NODE_PROJECT").then(|| "other.json".into());
+        assert!(!elides_type_imports_in(
+            &root,
+            "src/main.ts",
+            &words("tsx src/main.ts"),
+            overridden
+        ));
         // The nearest tsconfig decides for a file below it.
         write(
             "src/nested/tsconfig.json",

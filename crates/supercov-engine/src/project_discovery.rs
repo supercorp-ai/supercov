@@ -1004,6 +1004,8 @@ mod tests {
         );
         assert_eq!(expanded(&["node", "x.js"]), "node x.js");
         assert_eq!(expanded(&["npm"]), "npm");
+        // `run` names no script of its own, even with none after it.
+        assert_eq!(expanded(&["npm", "run"]), "npm run");
         assert_eq!(expanded(&["npm", "missing"]), "npm missing ");
         // A script started from a command string names the script it runs.
         for (program, script) in [

@@ -92,11 +92,10 @@ fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'s
     }
 
     // Maven and Gradle name themselves unambiguously, so the word is enough;
-    // a wrapper script is how most projects invoke Gradle.
+    // a wrapper script is how most projects invoke Gradle. `tokens` splits on
+    // `/`, so `./mvnw` arrives here as `mvnw`.
     let jvm_command = command_tokens.iter().any(|token| {
-        matches!(token.as_str(), "mvn" | "mvnw" | "maven" | "gradle")
-            || token.ends_with("gradlew")
-            || token.ends_with("/mvnw")
+        matches!(token.as_str(), "mvn" | "mvnw" | "maven" | "gradle") || token.ends_with("gradlew")
     });
     if jvm_command {
         launched.push((
@@ -574,6 +573,7 @@ mod tests {
             ("python manage.py test", vec![Python]),
             ("m test/a_test.rb", vec![Ruby]),
             ("rake spec", vec![Ruby]),
+            ("bundle exec rake test", vec![Ruby]),
             ("rails test", vec![Ruby]),
             ("ruby a_spec.rb", vec![Ruby]),
             ("ruby -Itest a.rb", vec![Ruby]),
