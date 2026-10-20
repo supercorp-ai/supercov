@@ -180,8 +180,9 @@ struct RelayTargets {
     stderr: Option<std::fs::File>,
     /// Both streams go to one place (`2>&1`, a CI log), and the command
     /// writes both down this one pipe: two pipes read by two threads would
-    /// pass its lines on in an order it did not write them in.
-    both: Option<io::PipeReader>,
+    /// pass its lines on in an order it did not write them in. Passed on
+    /// through the stderr handle.
+    both: Option<(io::PipeReader, std::fs::File)>,
     /// Streams that are a terminal, each read from a terminal of its own.
     #[cfg(unix)]
     terminals: Vec<Terminal>,
@@ -348,7 +349,7 @@ impl Relays {
             && let Ok(second) = writer.try_clone()
         {
             command.stdout(writer).stderr(second);
-            targets.both = Some(reader);
+            targets.both = targets.stderr.take().map(|to| (reader, to));
             return targets;
         }
         if targets.stdout.is_some() {
@@ -373,10 +374,8 @@ impl Relays {
         for terminal in targets.terminals {
             relays.push(relay_terminal(terminal, names.clone()));
         }
-        if let Some(pipe) = targets.both {
-            if let Some(to) = targets.stderr.or(targets.stdout) {
-                relays.push(relay(pipe, to, names.clone()));
-            }
+        if let Some((pipe, to)) = targets.both {
+            relays.push(relay(pipe, to, names.clone()));
             return Self(relays);
         }
         if let (Some(pipe), Some(to)) = (child.stdout.take(), targets.stdout) {
@@ -2596,6 +2595,237 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.exit_code(), 0);
+    }
+
+    /// A terminal of the user's: what is written to the second shows at the
+    /// first.
+    #[cfg(unix)]
+    fn user_terminal() -> (std::fs::File, std::fs::File) {
+        let (mut screen, mut users) = (-1, -1);
+        // SAFETY: the two descriptors are owned by nothing else.
+        unsafe {
+            assert_eq!(
+                libc::openpty(
+                    &mut screen,
+                    &mut users,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut::<libc::termios>(),
+                    std::ptr::null_mut::<libc::winsize>(),
+                ),
+                0
+            );
+            (
+                std::fs::File::from_raw_fd(screen),
+                std::fs::File::from_raw_fd(users),
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_terminal_is_copied_and_only_one_file_is_one_place() {
+        let null = || {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")
+                .unwrap()
+        };
+        assert!(Terminal::like(null()).is_none());
+        let root = scratch_directory("one-place");
+        let first = std::fs::File::create(root.join("first")).unwrap();
+        let second = std::fs::File::create(root.join("second")).unwrap();
+        assert!(one_place(&first, &first.try_clone().unwrap()));
+        // Another file on the same device, and a device elsewhere.
+        assert!(!one_place(&first, &second));
+        assert!(!one_place(&first, &null()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A user's terminal that has gone takes nothing more: the relay ends at
+    /// the next line, or the next piece of a long one, though the command
+    /// still holds its end. Its size, asked for while it waits, is not
+    /// there to give.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_the_user_has_closed_ends_the_relay_at_its_next_write() {
+        for written in [b"a line\n".to_vec(), vec![b'x'; RELAY_LINE_LIMIT * 2]] {
+            let (screen, users) = user_terminal();
+            let (terminal, mut theirs) = Terminal::like(users).expect("a terminal");
+            drop(screen);
+            let ended = relay_terminal(terminal, ConsoleNames::default());
+            assert!(
+                ended
+                    .recv_timeout(TERMINAL_SIZE_EVERY + Duration::from_millis(50))
+                    .is_err(),
+                "nothing written, nothing ended"
+            );
+            let writer = thread::spawn(move || {
+                let _ = theirs.write_all(&written);
+                theirs
+            });
+            ended
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the relay ends with the user's terminal");
+            drop(writer.join().unwrap());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_line_longer_than_the_limit_reaches_the_terminal_whole() {
+        let (mut screen, users) = user_terminal();
+        let (terminal, mut theirs) = Terminal::like(users).expect("a terminal");
+        let ended = relay_terminal(terminal, ConsoleNames::default());
+        let expected = RELAY_LINE_LIMIT * 2 + 2;
+        let shown = thread::spawn(move || {
+            let mut shown = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            while shown.len() < expected {
+                match screen.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => shown.extend_from_slice(&buffer[..read]),
+                }
+            }
+            shown
+        });
+        theirs.write_all(&vec![b'x'; RELAY_LINE_LIMIT * 2]).unwrap();
+        theirs.write_all(b"\n").unwrap();
+        drop(theirs);
+        ended
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the relay ends when the command has gone");
+        let shown = shown.join().unwrap();
+        assert_eq!(shown.len(), expected);
+        assert!(shown.ends_with(b"x\r\n"));
+    }
+
+    #[test]
+    fn an_empty_program_is_refused_before_anything_starts() {
+        let spec = CommandSpec {
+            program: OsString::new(),
+            arguments: Vec::new(),
+            cwd: std::env::current_dir().unwrap(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        assert!(matches!(
+            spec.command(),
+            Err(SupervisionError::EmptyCommand)
+        ));
+    }
+
+    #[test]
+    fn a_diagnostic_says_what_it_does_not_know() {
+        assert_eq!(
+            format_process_diagnostic(20, Duration::from_millis(1_500), &[]),
+            "[supercov] command still running after 2s\n  pid=20 process details unavailable"
+        );
+        assert_eq!(
+            format_process_diagnostic(
+                20,
+                Duration::from_millis(500),
+                &[ProcessSnapshot {
+                    pid: 20,
+                    parent_pid: 10,
+                    executable: "node".into(),
+                    state: None,
+                    cpu_tenths: None,
+                }],
+            ),
+            "[supercov] command still running after 500ms\n  pid=20 ppid=10 exe=node"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_watchdog_that_is_not_a_file_is_refused() {
+        let root = scratch_directory("watchdog");
+        assert!(matches!(
+            ProcessSupervisor::new_crash_safe(&root),
+            Err(SupervisionError::PlatformOperation {
+                operation: "validate parent-death watchdog executable",
+                ..
+            })
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Separate capture is refused beside merged capture, and a command is
+    /// not started once the run has been told to stop.
+    #[cfg(unix)]
+    #[test]
+    fn a_captured_command_is_not_started_merged_or_after_a_signal() {
+        let root = scratch_directory("captured");
+        let marker = root.join("ran");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec!["-c".into(), format!("touch '{}'", marker.display()).into()],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let supervisor = ProcessSupervisor::new().unwrap();
+        let merged = CommandSpec {
+            captured_output: Some(root.join("output")),
+            ..spec.clone()
+        };
+        assert!(matches!(
+            supervisor.supervise_captured(&merged, SupervisionOptions::default(), &mut Vec::new()),
+            Err(SupervisionError::PlatformOperation { .. })
+        ));
+        RECEIVED_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
+        let output = supervisor
+            .supervise_captured(&spec, SupervisionOptions::default(), &mut Vec::new())
+            .unwrap();
+        drop(supervisor);
+        assert_eq!(
+            output.result.interrupted_signal,
+            Some(ForwardedSignal::Sigterm)
+        );
+        assert_eq!(output.result.exit_code(), 143);
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+        assert!(!marker.exists() && !root.join("output").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Without a terminal to lend, a command stopped for one is left as it
+    /// stands, as is one stopped by Ctrl-Z or stopped again once lent it.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_stopped_for_a_terminal_that_cannot_be_lent_is_left_stopped() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut keyboard = Keyboard {
+            terminal: Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("/dev/null")
+                    .unwrap(),
+            ),
+            lent: false,
+        };
+        assert!(!keyboard.command_stopped(&mut child, libc::SIGTTIN));
+        assert!(!keyboard.lent);
+        assert!(!keyboard.command_stopped(&mut child, libc::SIGTSTP));
+        keyboard.lent = true;
+        assert!(!keyboard.command_stopped(&mut child, libc::SIGTTOU));
+        drop(keyboard);
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    /// A command that is no process group's leader is signalled itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_without_a_group_of_its_own_is_signalled_alone() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        signal_process_group(&mut child, libc::SIGKILL);
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 }
 
