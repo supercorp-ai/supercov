@@ -956,6 +956,24 @@ mod tests {
                 "Cannot merge run run-b: it measured python, and run run-a measured javascript; runs of different languages are not merged".into(),
             ),
             (
+                "another instrumenter, the first run's language unread",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.instrumenter_version = "x".into());
+                    rewrite_entry(root, "run-a", "frontend.json", Some(b"[]".to_vec()));
+                }),
+                "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0".into(),
+            ),
+            (
+                "the same domains run another way",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.combined = "4".repeat(64)
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: integrity fingerprint"
+                    .into(),
+            ),
+            (
                 "dependencies",
                 Box::new(|root| {
                     edit_metadata(root, "run-b", |m| {
