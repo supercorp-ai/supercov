@@ -106,6 +106,9 @@ const TAKE: &str = r#"(() => {
 /// between two tests is what lets each be credited its own.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// How long a take may go unanswered before it is given up.
+const TAKE_PATIENCE: Duration = Duration::from_secs(5);
+
 /// A wrangler configuration Supercov can point at its entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkerConfig {
@@ -356,6 +359,11 @@ pub(crate) fn wasm_target_cfg(
         .current_dir(crate_directory)
         .output()
         .ok()?;
+    target_cfg_of(&output)
+}
+
+/// The cfg values `rustc --print cfg` answered with, if it answered.
+fn target_cfg_of(output: &std::process::Output) -> Option<crate::rust_instrumenter::TargetCfg> {
     if !output.status.success() {
         return None;
     }
@@ -439,6 +447,16 @@ fn poll(port: u16, windows: &Path, stop: &AtomicBool) {
 /// execution context, and take its regions on the clock. Returns when the
 /// connection ends, or after the last take once the run is over.
 fn session(socket: &mut tungstenite::WebSocket<TcpStream>, file: &mut fs::File, stop: &AtomicBool) {
+    session_with_patience(socket, file, stop, TAKE_PATIENCE);
+}
+
+/// `session`, giving up on a take unanswered for `patience`.
+fn session_with_patience(
+    socket: &mut tungstenite::WebSocket<TcpStream>,
+    file: &mut fs::File,
+    stop: &AtomicBool,
+    patience: Duration,
+) {
     use tungstenite::{Error, Message};
     let send = |socket: &mut tungstenite::WebSocket<TcpStream>, message: Value| {
         socket
@@ -525,7 +543,7 @@ fn session(socket: &mut tungstenite::WebSocket<TcpStream>, file: &mut fs::File, 
         }
         // A take the Worker never answered (it was replaced mid-evaluation)
         // is given up; the next one covers the same span.
-        if awaiting.is_some_and(|(_, sent)| sent.elapsed() > Duration::from_secs(5)) {
+        if awaiting.is_some_and(|(_, sent)| sent.elapsed() > patience) {
             awaiting = None;
         }
     }
@@ -956,8 +974,20 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
         eprintln!("[supercov] {WRANGLER_COMMAND} runs only as the wrangler of a measured test");
         return 127;
     };
-    let mut arguments = arguments;
-    let evidence = std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR").map(PathBuf::from);
+    let arguments = watched_arguments(
+        arguments,
+        std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR").map(PathBuf::from),
+    );
+    exec_wrangler(&real, &arguments)
+}
+
+/// The arguments the real `wrangler` gets. Under a test, whose `evidence`
+/// directory is named, `wrangler dev` gets an inspector port and a poller
+/// writing into that directory; a remote one, a note of why it has none.
+fn watched_arguments(
+    mut arguments: Vec<std::ffi::OsString>,
+    evidence: Option<PathBuf>,
+) -> Vec<std::ffi::OsString> {
     if starts_dev(&arguments)
         && let Some(evidence) = evidence
     {
@@ -968,7 +998,7 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
                 evidence.join(format!("{REMOTE_NOTE}{}", std::process::id())),
                 "",
             );
-            return exec_wrangler(&real, &arguments);
+            return arguments;
         }
         let port = match named_inspector_port(&arguments) {
             Some(port) => Some(port),
@@ -977,6 +1007,8 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
                 arguments.push(port.to_string().into());
             }),
         };
+        // Neither fails short of the system running out of ports or losing
+        // track of this program's own file.
         if let (Some(port), Ok(supercov)) = (port, std::env::current_exe()) {
             let windows = evidence.join(format!("worker-{}.windows", std::process::id()));
             let _ = std::process::Command::new(supercov)
@@ -990,7 +1022,7 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
                 .spawn();
         }
     }
-    exec_wrangler(&real, &arguments)
+    arguments
 }
 
 /// Becomes the real `wrangler`, so the test keeps the process and the
@@ -1634,20 +1666,25 @@ mod tests {
 
     /// An inspector standing in for wrangler's: it plays `script` against
     /// one connection, each step receiving the message the session sent
-    /// (or none) and answering with messages of its own.
+    /// (or none) and answering with messages of its own. The script holds
+    /// the session's end of the connection too, to break it.
     fn inspect_with(
         stop: Arc<AtomicBool>,
-        script: impl FnOnce(&mut tungstenite::WebSocket<TcpStream>, &AtomicBool) + Send + 'static,
+        patience: Duration,
+        script: impl FnOnce(&mut tungstenite::WebSocket<TcpStream>, &AtomicBool, &TcpStream)
+        + Send
+        + 'static,
     ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server_stop = Arc::clone(&stop);
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let client = stream.try_clone().unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut socket = tungstenite::accept(stream).unwrap();
-            script(&mut socket, &server_stop);
+            script(&mut socket, &server_stop, &client);
         });
-        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
@@ -1659,7 +1696,7 @@ mod tests {
             now_ms()
         ));
         let mut file = fs::File::create(&path).unwrap();
-        session(&mut socket, &mut file, &stop);
+        session_with_patience(&mut socket, &mut file, &stop, patience);
         // As the poller does once a session ends.
         let _ = socket.close(None);
         drop(socket);
@@ -1691,51 +1728,55 @@ mod tests {
     fn a_session_takes_the_last_context_and_once_more_when_told_to_stop() {
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let regions = json!([["key", 4, [[0, encode(&[1, 2])]]]]);
-        let written = inspect_with(Arc::new(AtomicBool::new(false)), move |socket, stop| {
-            assert_eq!(receive(socket)["method"], "Runtime.enable");
-            // Notices without the id they are about change nothing.
-            answer(
-                socket,
-                json!({"method": "Runtime.executionContextCreated", "params": {"context": {}}}),
-            );
-            answer(
-                socket,
-                json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
-            );
-            answer(
-                socket,
-                json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 8}}}),
-            );
-            answer(
-                socket,
-                json!({"method": "Runtime.executionContextDestroyed", "params": {}}),
-            );
-            answer(
-                socket,
-                json!({"method": "Runtime.executionContextDestroyed", "params": {"executionContextId": 8}}),
-            );
-            let take = receive(socket);
-            assert_eq!(take["method"], "Runtime.evaluate");
-            assert_eq!(take["params"]["contextId"], 7);
-            // The run ends while this take is unanswered: the session waits
-            // for it, then takes once more.
-            stop.store(true, Ordering::Release);
-            std::thread::sleep(Duration::from_millis(100));
-            answer(
-                socket,
-                json!({"id": take["id"], "result": {"result": {"value": regions}}}),
-            );
-            let last = receive(socket);
-            assert_eq!(last["method"], "Runtime.evaluate");
-            answer(
-                socket,
-                json!({"id": last["id"], "result": {"result": {"value": []}}}),
-            );
-            // Nothing more is asked before the connection closes.
-            while let Ok(message) = socket.read() {
-                assert!(message.is_close(), "{message}");
-            }
-        });
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            TAKE_PATIENCE,
+            move |socket, stop, _| {
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                // Notices without the id they are about change nothing.
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {}}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 8}}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextDestroyed", "params": {}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextDestroyed", "params": {"executionContextId": 8}}),
+                );
+                let take = receive(socket);
+                assert_eq!(take["method"], "Runtime.evaluate");
+                assert_eq!(take["params"]["contextId"], 7);
+                // The run ends while this take is unanswered: the session waits
+                // for it, then takes once more.
+                stop.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(100));
+                answer(
+                    socket,
+                    json!({"id": take["id"], "result": {"result": {"value": regions}}}),
+                );
+                let last = receive(socket);
+                assert_eq!(last["method"], "Runtime.evaluate");
+                answer(
+                    socket,
+                    json!({"id": last["id"], "result": {"result": {"value": []}}}),
+                );
+                // Nothing more is asked before the connection closes.
+                while let Ok(message) = socket.read() {
+                    assert!(message.is_close(), "{message}");
+                }
+            },
+        );
         let lines = written.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 1, "{written}");
         let window = window_from(&serde_json::from_str(lines[0]).unwrap()).unwrap();
@@ -1745,7 +1786,7 @@ mod tests {
     #[test]
     fn a_session_with_no_worker_left_ends_without_a_take() {
         let stop = Arc::new(AtomicBool::new(false));
-        let written = inspect_with(Arc::clone(&stop), |socket, stop| {
+        let written = inspect_with(Arc::clone(&stop), TAKE_PATIENCE, |socket, stop, _| {
             assert_eq!(receive(socket)["method"], "Runtime.enable");
             answer(
                 socket,
@@ -1760,5 +1801,145 @@ mod tests {
             }
         });
         assert_eq!(written, "");
+    }
+
+    /// A take the Worker never answers is given up, and the next one asked.
+    #[test]
+    fn a_take_left_unanswered_is_given_up_for_the_next() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let regions = json!([["key", 4, [[0, encode(&[3])]]]]);
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(50),
+            move |socket, stop, _| {
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+                );
+                let ignored = receive(socket);
+                let next = receive(socket);
+                assert!(next["id"].as_u64() > ignored["id"].as_u64(), "{next}");
+                answer(
+                    socket,
+                    json!({"id": next["id"], "result": {"result": {"value": regions}}}),
+                );
+                stop.store(true, Ordering::Release);
+                let last = receive(socket);
+                answer(
+                    socket,
+                    json!({"id": last["id"], "result": {"result": {"value": []}}}),
+                );
+                while socket.read().is_ok() {}
+            },
+        );
+        assert_eq!(written.lines().count(), 1, "{written}");
+    }
+
+    /// A connection that can no longer be written to ends the session: no
+    /// take can be asked.
+    #[test]
+    fn a_session_ends_when_its_connection_cannot_be_written() {
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            TAKE_PATIENCE,
+            |socket, _, client| {
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                client.shutdown(std::net::Shutdown::Write).unwrap();
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+                );
+                while socket.read().is_ok() {}
+            },
+        );
+        assert_eq!(written, "");
+        // Nor can the runtime be enabled.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            while socket.read().is_ok() {}
+        });
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (mut socket, _) = tungstenite::client::client(
+            format!("ws://127.0.0.1:{port}/ws"),
+            stream.try_clone().unwrap(),
+        )
+        .unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "supercov-inspector-unwritable-{}-{port}.windows",
+            std::process::id()
+        ));
+        let mut file = fs::File::create(&path).unwrap();
+        session(&mut socket, &mut file, &AtomicBool::new(false));
+        drop(socket);
+        drop(stream);
+        server.join().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        fs::remove_file(path).unwrap();
+    }
+
+    /// A poller whose thread never started has nothing to wait for.
+    #[test]
+    fn a_poller_without_its_thread_finishes_at_once() {
+        let stop = Arc::new(AtomicBool::new(false));
+        Poller {
+            stop: Arc::clone(&stop),
+            thread: None,
+        }
+        .finish();
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_target_rustc_cannot_print_has_no_cfg() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |code: i32, stdout: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        };
+        assert!(target_cfg_of(&output(1, "")).is_none());
+        let cfg = target_cfg_of(&output(0, "target_arch=\"wasm32\"\nnot a cfg ==\n")).unwrap();
+        assert_eq!(
+            cfg,
+            crate::rust_instrumenter::TargetCfg::new(&["target_arch=\"wasm32\"".parse().unwrap()])
+        );
+    }
+
+    /// Only `wrangler dev` under a test is watched; a remote one is noted
+    /// instead, its arguments as they were.
+    #[test]
+    fn only_a_measured_tests_wrangler_dev_is_watched() {
+        let words = |text: &str| {
+            text.split(' ')
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(watched_arguments(words("dev"), None), words("dev"));
+        let evidence = std::env::temp_dir().join(format!(
+            "supercov-wrangler-remote-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        assert_eq!(
+            watched_arguments(words("deploy"), Some(evidence.clone())),
+            words("deploy")
+        );
+        assert!(!evidence.exists());
+        assert_eq!(
+            watched_arguments(words("dev --remote"), Some(evidence.clone())),
+            words("dev --remote")
+        );
+        assert!(
+            evidence
+                .join(format!("{REMOTE_NOTE}{}", std::process::id()))
+                .exists()
+        );
+        fs::remove_dir_all(evidence).unwrap();
     }
 }
