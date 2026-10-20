@@ -85,6 +85,16 @@ pub(crate) fn root_paths(project: &mut PreparedRustProject, relative: &Path) {
     project.source_files.iter_mut().for_each(rooted);
 }
 
+/// A test's provenance, naming Playwright when its journal names no runner:
+/// a runner the run does not declare fails the whole run's validation.
+fn provenance_of(test: &ServedTest) -> TestProvenance {
+    let mut provenance = test.provenance.clone();
+    if provenance.runner.is_empty() {
+        provenance.runner = "playwright".into();
+    }
+    provenance
+}
+
 /// Who a take belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Owner {
@@ -190,15 +200,12 @@ pub(crate) fn publish(
     .map_err(|error| error.to_string())?;
     // The runners the tests came from: Playwright for a browser suite, or
     // whichever runs a Node suite. Each test's work reached the module in its
-    // own runner's process or page, named by its attempt or its time.
-    let mut names = served
+    // own runner's process or page, named by its attempt or its time. There
+    // is at least one test, so at least one runner.
+    let names = served
         .iter()
-        .map(|test| test.provenance.runner.clone())
-        .filter(|runner| !runner.is_empty())
+        .map(|test| provenance_of(test).runner)
         .collect::<BTreeSet<_>>();
-    if names.is_empty() {
-        names.insert("playwright".into());
-    }
     let background_runner = names.iter().next().cloned().unwrap_or_default();
     let run_id = &metadata.id;
     let mut raw_results = Vec::new();
@@ -232,7 +239,7 @@ pub(crate) fn publish(
             expected_status: Some(test.expected_status.clone()),
             flaky: false,
             span: None,
-            provenance: test.provenance.clone(),
+            provenance: provenance_of(test),
             role: "test".into(),
             attribution: if attributed && by_time {
                 crate::coverage_report::ATTRIBUTION_BY_TIME
@@ -424,6 +431,7 @@ mod tests {
     use super::*;
     use crate::coverage_analysis::PointKind;
     use crate::coverage_report::PointMeta;
+    use crate::run_store::RawEvidenceMetadata;
 
     /// A crate below the project's root names its files from the project's
     /// root: its points, limitations and scope entries. A limitation or an
@@ -472,5 +480,218 @@ mod tests {
                 ]
             }))
         );
+    }
+
+    const TOKEN: &str = "0123456789ab";
+
+    /// A region of one hit probe, `id`, recorded first by thread 1.
+    fn region_with_one_hit(probes: &crate::rust_instrumenter::RustProbeLayout) -> Vec<u8> {
+        let mut bytes = vec![0u8; 256 + 4096];
+        bytes[..8].copy_from_slice(b"SCVRGN01");
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&128u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&(probes.hits.len() as u32).to_le_bytes());
+        bytes[32..36].copy_from_slice(&256u32.to_le_bytes());
+        bytes[56..56 + TOKEN.len()].copy_from_slice(TOKEN.as_bytes());
+        // The first page touched, and the first hit at sequence 1.
+        bytes[128] = 1;
+        bytes[256..264].copy_from_slice(&((1u64 << 32) | 1).to_le_bytes());
+        bytes
+    }
+
+    fn metadata(id: &str, exit: i32) -> RunMetadata {
+        let digest = |character: char| std::iter::repeat_n(character, 64).collect::<String>();
+        RunMetadata {
+            id: id.into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            duration_ms: 1.0,
+            command: vec!["npx".into(), "playwright".into(), "test".into()],
+            test_exit_code: Some(exit),
+            integrity: RunIntegrity {
+                schema_version: 2,
+                instrumenter_version: "test".into(),
+                git: None,
+                fingerprint: crate::run_store::RunFingerprint {
+                    algorithm: "sha256".into(),
+                    source: digest('a'),
+                    tests: digest('b'),
+                    dependencies: digest('c'),
+                    configuration: digest('d'),
+                    instrumenter: digest('e'),
+                    execution: digest('f'),
+                    combined: digest('0'),
+                    source_files: 1,
+                    test_files: 1,
+                },
+                stale: None,
+                stale_reasons: None,
+            },
+            raw_evidence: RawEvidenceMetadata {
+                schema_version: 2,
+                format: "supercov-evidence-archive".into(),
+                file: "evidence.raw.gz".into(),
+                files: 0,
+                uncompressed_bytes: 0,
+                compressed_bytes: 0,
+            },
+            isolated_build: None,
+            instrumented_build_cache: None,
+            timings: None,
+            merged: None,
+            parents: None,
+            source_roots: None,
+            copy: None,
+            merged_across: None,
+            recorded_by: None,
+            companions: None,
+        }
+    }
+
+    fn served(index: usize, window: (i64, i64)) -> ServedTest {
+        ServedTest {
+            worker: "playwright:0".into(),
+            test_id: format!("t{index}"),
+            retry: 0,
+            name: format!("test {index}"),
+            title: format!("test {index}"),
+            file: "e2e/app.spec.ts".into(),
+            status: "passed".into(),
+            expected_status: "passed".into(),
+            provenance: TestProvenance {
+                runner: String::new(),
+                kind: "e2e".into(),
+                project: None,
+                source: "playwright".into(),
+                tags: Vec::new(),
+            },
+            window: Some(window),
+            attempt_id: None,
+        }
+    }
+
+    /// Work taken while two tests ran is neither's: it is the run's, under
+    /// the runner a test that names none is taken to have come from, and it
+    /// counts as passed only if the run did. Without a test or a take there
+    /// is no run to publish.
+    #[test]
+    fn work_two_tests_overlap_is_the_run_s_and_fails_with_it() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-wasm-publish-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let id = "rs:statement:000000000000000000000000";
+        let mut project = PreparedRustProject::empty(root.clone());
+        project.source_files = vec!["src/lib.rs".into()];
+        project.manifest.points.push(PointMeta {
+            id: id.into(),
+            kind: PointKind::Statement,
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 0,
+            source: "work();".into(),
+            label: None,
+        });
+        project.probes.token = TOKEN.into();
+        project.probes.hits = vec![id.into()];
+        let integrity = metadata("x", 0).integrity;
+        let inputs = crate::source_manifest::Inputs {
+            language: "rust".into(),
+            files: Default::default(),
+        };
+        let wasm = || WasmRun {
+            language: "Rust wasm",
+            archive: "rust-wasm-evidence.raw.gz",
+            project: &project,
+            integrity: &integrity,
+            source_inputs: &inputs,
+            source_roots: None,
+        };
+        let records = || {
+            vec![WasmRecord {
+                owner: Owner::Window(6, 7),
+                regions: vec![("crate".into(), region_with_one_hit(&project.probes))],
+            }]
+        };
+        let tests = [served(0, (0, 10)), served(1, (5, 15))];
+        let run_id = "2026-01-01T00-00-00-000Z";
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            publish(
+                &root,
+                wasm(),
+                records(),
+                metadata(run_id, 1),
+                &[],
+                &mut diagnostics
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            publish(
+                &root,
+                wasm(),
+                Vec::new(),
+                metadata(run_id, 1),
+                &tests,
+                &mut diagnostics
+            ),
+            Ok(None)
+        );
+        assert!(diagnostics.is_empty());
+        let (directory, _) = publish(
+            &root,
+            wasm(),
+            records(),
+            metadata(run_id, 1),
+            &tests,
+            &mut diagnostics,
+        )
+        .unwrap()
+        .unwrap();
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics
+                .contains("2 test(s), 0 credited, across 1 source file(s), credited by time"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("2 of those test(s) had its work only while another test ran too"),
+            "{diagnostics}"
+        );
+        let archive = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_string_lossy().ends_with(".raw.gz"))
+            .unwrap();
+        let results = crate::evidence_archive::read_archive(&archive)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.path.ends_with("/mcdc.json"))
+            .map(|entry| serde_json::from_slice::<serde_json::Value>(&entry.contents).unwrap())
+            .map(|result| {
+                (
+                    result["role"].as_str().unwrap().to_owned(),
+                    result["status"].as_str().unwrap().to_owned(),
+                    result["provenance"]["runner"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let named = |role: &str, status: &str| {
+            (role.to_owned(), status.to_owned(), "playwright".to_owned())
+        };
+        assert_eq!(
+            results,
+            [
+                named("test", "passed"),
+                named("test", "passed"),
+                named("background", "failed")
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
