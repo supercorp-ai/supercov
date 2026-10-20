@@ -359,13 +359,9 @@ pub(crate) fn publish(
     };
     validate_frontend_report_request(&run.declaration, &run.request)
         .map_err(|error| error.to_string())?;
-    let archive_path = root
-        .join(".supercov/work")
-        .join(&metadata.id)
-        .join(wasm.archive);
-    if let Some(parent) = archive_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
+    let work = root.join(".supercov/work").join(&metadata.id);
+    fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    let archive_path = work.join(wasm.archive);
     let raw = write_archive(
         crate::source_capture::append(
             run.archive_entries().map_err(|error| error.to_string())?,
@@ -421,4 +417,60 @@ pub(crate) fn publish(
         .map_err(|error| error.to_string())?;
     }
     Ok(Some((run_directory, metadata)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coverage_analysis::PointKind;
+    use crate::coverage_report::PointMeta;
+
+    /// A crate below the project's root names its files from the project's
+    /// root: its points, limitations and scope entries. A limitation or an
+    /// entry that names no file is left as it is, as is a manifest with no
+    /// scope; a crate at the root changes nothing.
+    #[test]
+    fn a_crate_below_the_root_names_its_files_from_the_root() {
+        let mut project = PreparedRustProject::empty(PathBuf::from("/nonexistent"));
+        project.source_files = vec!["src/lib.rs".into()];
+        project.manifest.points.push(PointMeta {
+            id: "p".into(),
+            kind: PointKind::Statement,
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            source: "x".into(),
+            label: None,
+        });
+        project.manifest.limitations = vec![
+            serde_json::json!({"id": "a", "file": "src/lib.rs"}),
+            serde_json::json!({"id": "b"}),
+        ];
+        root_paths(&mut project, Path::new(""));
+        assert_eq!(project.source_files, ["src/lib.rs"]);
+        root_paths(&mut project, Path::new("worker"));
+        assert_eq!(project.source_files, ["worker/src/lib.rs"]);
+        assert_eq!(project.manifest.points[0].file, "worker/src/lib.rs");
+        assert_eq!(
+            project.manifest.limitations,
+            [
+                serde_json::json!({"id": "a", "file": "worker/src/lib.rs"}),
+                serde_json::json!({"id": "b"}),
+            ]
+        );
+        assert!(project.manifest.scope.is_none());
+        project.manifest.scope = Some(serde_json::json!({
+            "entries": [{"file": "src/lib.rs", "status": "included"}, {"status": "excluded"}]
+        }));
+        root_paths(&mut project, Path::new("crates"));
+        assert_eq!(
+            project.manifest.scope,
+            Some(serde_json::json!({
+                "entries": [
+                    {"file": "crates/src/lib.rs", "status": "included"},
+                    {"status": "excluded"}
+                ]
+            }))
+        );
+    }
 }
