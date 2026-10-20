@@ -771,13 +771,9 @@ impl PythonServer {
                 scope.run_id = metadata.id.clone();
             }
             run.request.integrity = serde_json::to_value(&self.integrity).ok();
-            let archive_path = root
-                .join(".supercov/work")
-                .join(&metadata.id)
-                .join("python-evidence.raw.gz");
-            if let Some(parent) = archive_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
+            let work = root.join(".supercov/work").join(&metadata.id);
+            fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+            let archive_path = work.join("python-evidence.raw.gz");
             let Archive { raw, analysed, .. } =
                 archive_python_run(&run, &self.source_inputs, &archive_path, started, 0.0)?;
             let tests = run.tests;
@@ -953,5 +949,222 @@ mod tests {
             "a first-party file changing does"
         );
         fs::remove_dir_all(root).ok();
+    }
+
+    fn python_request(root: &Path, command: &[&str]) -> DirectPythonRunRequest {
+        DirectPythonRunRequest {
+            root: root.to_owned(),
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            run_id: "2026-01-02T00-00-00-000Z".into(),
+            started_at: "2026-01-02T00:00:00Z".into(),
+        }
+    }
+
+    /// A run whose process died before it cleaned up.
+    fn abandoned_run(root: &Path) -> &'static str {
+        let abandoned = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/work").join(abandoned)).unwrap();
+        crate::lifecycle::write_run_state(
+            root,
+            &crate::lifecycle::RunState {
+                id: abandoned.into(),
+                pid: u32::MAX,
+                root: root.display().to_string(),
+                workspace: root.display().to_string(),
+                started_at: "start".into(),
+                updated_at: "update".into(),
+                status: crate::lifecycle::RunStateStatus::Testing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        abandoned
+    }
+
+    #[test]
+    fn a_python_run_refuses_an_empty_command() {
+        let root = std::env::temp_dir().join("supercov-python-empty-command-never-created");
+        let error = run_direct_python(&python_request(&root, &[]), &mut Vec::new()).unwrap_err();
+        assert_eq!(error, "test command must not be empty");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_command_that_started_no_hooked_python_publishes_nothing() {
+        let root = fixture("no-interpreter");
+        let abandoned = abandoned_run(&root);
+        let mut diagnostics = Vec::new();
+        let error =
+            run_direct_python(&python_request(&root, &["true"]), &mut diagnostics).unwrap_err();
+        assert!(
+            error.starts_with("no Supercov-hooked Python interpreter ran"),
+            "{error}"
+        );
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains(&format!("recovered abandoned run(s): {abandoned}")),
+            "{diagnostics}"
+        );
+        assert!(!root.join(".supercov/failed-evidence").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn evidence_that_cannot_be_read_after_measuring_is_kept() {
+        let root = fixture("unreadable-evidence");
+        let request = python_request(
+            &root,
+            &[
+                "sh",
+                "-c",
+                "echo x > \"$SUPERCOV_PYTHON_EVIDENCE_DIR/notes.txt\"",
+            ],
+        );
+        let error = run_direct_python(&request, &mut Vec::new()).unwrap_err();
+        assert!(error.contains("notes.txt"), "{error}");
+        assert!(
+            error.contains("the tests were measured and the run could not be published"),
+            "{error}"
+        );
+        assert!(
+            root.join(".supercov/failed-evidence")
+                .join(&request.run_id)
+                .join("notes.txt")
+                .exists()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_tree_is_copied_whole_and_a_path_list_keeps_what_it_held() {
+        let root = fixture("copied");
+        let copy = root.with_extension("copy");
+        fs::create_dir_all(&copy).unwrap();
+        copy_tree(&root, &copy).unwrap();
+        assert_eq!(
+            fs::read_to_string(copy.join("vendor/pkg/b.py")).unwrap(),
+            "def g():\n    return 1\n"
+        );
+        let separator = if cfg!(windows) { ";" } else { ":" };
+        assert_eq!(
+            prepend_path_list(Some("/site".into()), Path::new("/runtime")),
+            OsString::from(format!("/runtime{separator}/site"))
+        );
+        assert_eq!(
+            prepend_path_list(Some("".into()), Path::new("/runtime")),
+            OsString::from("/runtime")
+        );
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&copy).ok();
+    }
+
+    fn served_test() -> crate::served_tests::ServedTest {
+        crate::served_tests::ServedTest {
+            worker: "playwright:w0".into(),
+            test_id: "one".into(),
+            retry: 0,
+            name: "one".into(),
+            title: "one".into(),
+            file: "tests/a.spec.js".into(),
+            status: "passed".into(),
+            expected_status: "passed".into(),
+            provenance: Default::default(),
+            window: Some((100, 200)),
+            attempt_id: None,
+        }
+    }
+
+    fn server_metadata(server: &PythonServer) -> RunMetadata {
+        RunMetadata {
+            id: "2026-01-03T00-00-00-000Z".into(),
+            started_at: "2026-01-03T00:00:00Z".into(),
+            duration_ms: 1.0,
+            command: vec!["npx".into(), "playwright".into(), "test".into()],
+            test_exit_code: Some(0),
+            integrity: server.integrity.clone(),
+            raw_evidence: RawEvidenceMetadata {
+                schema_version: 2,
+                format: "supercov-evidence-archive".into(),
+                file: "evidence.raw.gz".into(),
+                files: 0,
+                uncompressed_bytes: 0,
+                compressed_bytes: 0,
+            },
+            isolated_build: None,
+            instrumented_build_cache: None,
+            timings: None,
+            merged: None,
+            parents: None,
+            source_roots: None,
+            copy: None,
+            merged_across: None,
+            recorded_by: None,
+            companions: None,
+        }
+    }
+
+    #[test]
+    fn a_server_publishes_only_what_a_browser_test_s_request_reached() {
+        let root = fixture("server");
+        let command = ["npx".to_owned(), "playwright".to_owned(), "test".to_owned()];
+        let run_id = "2026-01-02T00-00-00-000Z";
+        let prepare = || {
+            PythonServer::prepare(&root, &root, run_id, &command)
+                .unwrap()
+                .unwrap()
+        };
+        // No browser test reported.
+        let server = prepare();
+        let metadata = server_metadata(&server);
+        assert!(
+            server
+                .publish(&root, run_id, metadata, &[], &mut Vec::new())
+                .unwrap()
+                .is_none()
+        );
+        // A Python process ran, and only at import: no request reached it.
+        let server = prepare();
+        let statement = server.project.manifest.points[0].id.clone();
+        crate::python_evidence::tests::write_transport(
+            &server.directory.join("evidence/main.1.mmap"),
+            &[
+                serde_json::json!({"t":"process","v":1,"run":run_id,"pid":1,"worker":"main","python":"3.13.1","executable":"python","argv":["app.py"]}),
+                serde_json::json!({"t":"hit","ctx":0,"id":statement}),
+                serde_json::json!({"t":"exit","at":300}),
+            ],
+            0,
+        );
+        let metadata = server_metadata(&server);
+        let mut diagnostics = Vec::new();
+        assert!(
+            server
+                .publish(&root, run_id, metadata, &[served_test()], &mut diagnostics)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            String::from_utf8(diagnostics)
+                .unwrap()
+                .contains("no request a test sent reached measured Python code")
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_server_of_python_that_does_not_parse_is_no_server() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-run-{}-unparseable",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("app.py"), "def (\n").unwrap();
+        let command = ["npx".to_owned(), "playwright".to_owned(), "test".to_owned()];
+        assert!(
+            PythonServer::prepare(&root, &root, "2026-01-02T00-00-00-000Z", &command)
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(&root).ok();
     }
 }

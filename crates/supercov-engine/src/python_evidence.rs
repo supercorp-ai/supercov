@@ -2376,7 +2376,7 @@ pub(crate) fn decision_vector(v: &str, o: u8) -> Result<(Vec<Option<bool>>, bool
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -2766,7 +2766,7 @@ mod tests {
         assert_eq!(read(&uncommitted), "accepted");
     }
 
-    fn write_transport(path: &Path, records: &[serde_json::Value], dropped: u64) {
+    pub(crate) fn write_transport(path: &Path, records: &[serde_json::Value], dropped: u64) {
         write_transport_version(path, records, dropped, TRANSPORT_VERSION, None);
     }
 
