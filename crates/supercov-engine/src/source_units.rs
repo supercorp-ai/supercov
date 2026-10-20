@@ -890,7 +890,9 @@ fn erase_blank(text: &str, strings: &[(usize, usize)]) -> (String, Vec<usize>) {
     let mut map = vec![0usize; text.len() + 1];
     let mut cursor = 0;
     let mut line_start = 0;
-    while line_start <= bytes.len() {
+    // Each pass ends a line; the last one, which ends at the text's end,
+    // breaks out below, so `line_start` never passes `bytes.len()`.
+    loop {
         let line_end = text[line_start..]
             .find('\n')
             .map_or(bytes.len(), |i| line_start + i);
@@ -1212,6 +1214,9 @@ fn python(source: &str) -> Option<Outline> {
 
     use ruff_python_ast::token::TokenKind;
     let parsed = ruff_python_parser::parse_module(source).ok()?;
+    // In a module that parses, a line break inside a token is inside one of
+    // these: elsewhere it is a `Newline` or `NonLogicalNewline` token of its
+    // own, and a backslash continuation is trivia between tokens.
     let strings = parsed
         .tokens()
         .iter()
@@ -1219,11 +1224,7 @@ fn python(source: &str) -> Option<Outline> {
             matches!(
                 t.kind(),
                 TokenKind::String | TokenKind::FStringMiddle | TokenKind::TStringMiddle
-            ) || (!matches!(
-                t.kind(),
-                TokenKind::Comment | TokenKind::Newline | TokenKind::NonLogicalNewline
-            ) && source[t.range().start().to_usize()..t.range().end().to_usize()]
-                .contains('\n'))
+            )
         })
         .map(|t| (t.range().start().to_usize(), t.range().end().to_usize()))
         .collect();
@@ -1340,11 +1341,13 @@ fn rust(source: &str) -> Option<Outline> {
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::WHITESPACE => {}
             NodeOrToken::Token(token) => {
                 flush(&mut doc_block, &mut comments);
+                // In a file that parses, a line break outside whitespace and
+                // comments is inside a string literal: raw ones are lexed
+                // as these kinds too.
                 if matches!(
                     token.kind(),
                     SyntaxKind::STRING | SyntaxKind::BYTE_STRING | SyntaxKind::C_STRING
-                ) || token.text().contains('\n')
-                {
+                ) {
                     let range = token.text_range();
                     strings.push((
                         u32::from(range.start()) as usize,
@@ -1613,6 +1616,14 @@ fn first_child_of_kind<'t>(
     node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
 
+/// What a Go declaration is named. The grammar requires a name of each kind
+/// this is asked of, and tree-sitter builds a node only with all its required
+/// children, one it had to invent as a zero-width stand-in: the name is
+/// always there, even in a tree with errors.
+fn go_name(node: tree_sitter::Node<'_>, source: &str) -> String {
+    field_text(node, "name", source).unwrap_or_default()
+}
+
 fn go(source: &str) -> Option<Outline> {
     let tree = crate::go_instrumenter::parse(source).ok()?;
     let mut comments = Vec::new();
@@ -1639,17 +1650,13 @@ fn go(source: &str) -> Option<Outline> {
                     comments.push((node.start_byte(), node.end_byte()));
                 }
             }
-            "function_declaration" => {
-                if let Some(name) = field_text(node, "name", source) {
-                    declarations.push(Item {
-                        name,
-                        kind: "function",
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        inert: false,
-                    });
-                }
-            }
+            "function_declaration" => declarations.push(Item {
+                name: go_name(node, source),
+                kind: "function",
+                start: node.start_byte(),
+                end: node.end_byte(),
+                inert: false,
+            }),
             "method_declaration" => {
                 let receiver = node
                     .child_by_field_name("receiver")
@@ -1662,30 +1669,25 @@ fn go(source: &str) -> Option<Outline> {
                             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
                             .collect::<String>()
                     });
-                if let Some(name) = field_text(node, "name", source) {
-                    declarations.push(Item {
-                        name: match receiver {
-                            Some(r) if !r.is_empty() => format!("{r}.{name}"),
-                            _ => name,
-                        },
-                        kind: "method",
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        inert: false,
-                    });
-                }
+                let name = go_name(node, source);
+                declarations.push(Item {
+                    name: match receiver {
+                        Some(r) if !r.is_empty() => format!("{r}.{name}"),
+                        _ => name,
+                    },
+                    kind: "method",
+                    start: node.start_byte(),
+                    end: node.end_byte(),
+                    inert: false,
+                });
             }
-            "type_spec" | "type_alias" => {
-                if let Some(name) = field_text(node, "name", source) {
-                    declarations.push(Item {
-                        name,
-                        kind: "type",
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        inert: false,
-                    });
-                }
-            }
+            "type_spec" | "type_alias" => declarations.push(Item {
+                name: go_name(node, source),
+                kind: "type",
+                start: node.start_byte(),
+                end: node.end_byte(),
+                inert: false,
+            }),
             _ => {}
         }
     }
@@ -2337,6 +2339,62 @@ mod tests {
     }
 
     #[test]
+    fn a_named_class_expression_keeps_its_own_name() {
+        let x = code("c.js", "const A = class B {\n  m() {}\n};\n").unwrap();
+        assert_eq!(paths(&x), [("class", "B"), ("method", "B.m")]);
+    }
+
+    /// `build` takes spans as a parser reports them; nested, repeated or
+    /// overlapping ones are each built once, and inertness is inherited.
+    #[test]
+    fn declarations_are_built_once_and_inherit_inertness() {
+        let item = |name: &str, start: usize, end: usize, inert: bool| Item {
+            name: name.into(),
+            kind: "type",
+            start,
+            end,
+            inert,
+        };
+        let built = |source: &str, declarations: Vec<Item>| {
+            build(
+                source,
+                Outline {
+                    comments: vec![],
+                    strings: vec![],
+                    declarations,
+                    separator: ".",
+                },
+            )
+        };
+        let source = "type A = { b: 1 };\nlet c = 2;\n";
+        // Same start, different ends: two declarations, the shorter inside.
+        let nested = built(
+            source,
+            vec![item("A", 0, 18, false), item("inner", 0, 9, false)],
+        );
+        assert_eq!(nested.units.len(), 3);
+        assert_eq!(nested.units[2].parent, Some(1));
+        // A declaration inside an inert one is inert, and an inert one inside
+        // it is erased with it, once.
+        let outer = built(source, vec![item("A", 0, 18, true)]);
+        let inner = built(
+            source,
+            vec![item("A", 0, 18, true), item("b", 11, 15, false)],
+        );
+        assert!(inner.units[2].inert);
+        assert_eq!(inner.semantic, outer.semantic);
+        // One that starts in the blank the inert one's line ends with leaves
+        // the file's text as it was without it.
+        let source = "type A = 1; \nlet b = 2;\n";
+        let alone = built(source, vec![item("A", 0, 11, true)]);
+        let overlapping = built(
+            source,
+            vec![item("A", 0, 11, true), item("b", 11, 23, false)],
+        );
+        assert_eq!(overlapping.units[0].digest, alone.units[0].digest);
+    }
+
+    #[test]
     fn decorators_belong_to_what_they_decorate() {
         let py = code("d.py", "@app.route('/x')\ndef handler():\n    return 1\n").unwrap();
         assert_eq!(
@@ -2460,6 +2518,14 @@ mod tests {
                 ("function", "New")
             ]
         );
+        // A receiver is named by its type as written, qualified or not; one
+        // that is no named type leaves the method its own name.
+        let x = code(
+            "r.go",
+            "package p\n\nfunc (s *pkg.T) Start() {}\n\nfunc (s []int) Len() int { return 0 }\n",
+        )
+        .unwrap();
+        assert_eq!(paths(&x), [("method", "pkg.T.Start"), ("method", "Len")]);
     }
 
     #[test]
@@ -3309,6 +3375,8 @@ mod edge_unit_tests {
     fn source_that_does_not_parse_has_no_units() {
         assert!(code("a.js", "const x = ;\n").is_none());
         assert!(code("a.rb", "def (\n").is_none());
+        // An error the parser recovers from is an error all the same.
+        assert!(code("a.js", "a ?? b || c;\n").is_none());
         assert!(code("a.js", "let a = 1;\n").is_some());
     }
 
