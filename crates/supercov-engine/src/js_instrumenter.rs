@@ -13538,12 +13538,13 @@ mod tests {
             concat!(
                 "function f(a, b, c, d) { return (a && (b ?? c)) || d; }\n",
                 "function g(a, b, d) { return (a && -b) || d; }\n",
+                "function h(a, b) { if (!(a ?? b) || !-a) return 1; return 0; }\n",
             ),
             concat!(
                 "for (const [a, b, c, d] of [[1, null, 2, 3], [1, 0, 2, 4], [0, 1, 1, 5], [1, 1, 0, 6]])\n",
-                "  print([f(a, b, c, d), g(a, b, d)]);\n",
+                "  print([f(a, b, c, d), g(a, b, d), h(a, b)]);\n",
             ),
         );
-        assert_eq!(printed, "2,3\n4,4\n5,5\n1,-1");
+        assert_eq!(printed, "2,3,0\n4,4,0\n5,5,1\n1,-1,0");
     }
 }
