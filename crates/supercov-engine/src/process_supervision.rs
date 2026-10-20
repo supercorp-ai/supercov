@@ -2919,23 +2919,32 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_watchdog_that_never_says_it_is_ready_refuses_the_command() {
-        let supervisor = ProcessSupervisor::new_crash_safe(Path::new("/bin/true")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
         let root = scratch_directory("never-ready");
-        let marker = root.join("ran");
-        let spec = CommandSpec {
-            program: "touch".into(),
-            arguments: vec![marker.clone().into()],
-            cwd: root.clone(),
-            environment: None,
-            captured_output: None,
-            console: None,
-        };
-        let refused = supervisor.supervise(&spec, SupervisionOptions::default(), &mut Vec::new());
-        assert!(
-            matches!(refused, Err(SupervisionError::Spawn { .. })),
-            "{refused:?}"
-        );
-        assert!(!marker.exists());
+        // One that ends saying nothing, and one that says something else.
+        let other = root.join("other-watchdog");
+        std::fs::write(&other, "#!/bin/sh\nprintf x >&3\n").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for watchdog in [Path::new("/bin/true"), &other] {
+            let supervisor = ProcessSupervisor::new_crash_safe(watchdog).unwrap();
+            let marker = root.join("ran");
+            let spec = CommandSpec {
+                program: "touch".into(),
+                arguments: vec![marker.clone().into()],
+                cwd: root.clone(),
+                environment: None,
+                captured_output: None,
+                console: None,
+            };
+            let refused =
+                supervisor.supervise(&spec, SupervisionOptions::default(), &mut Vec::new());
+            assert!(
+                matches!(refused, Err(SupervisionError::Spawn { .. })),
+                "{}: {refused:?}",
+                watchdog.display()
+            );
+            assert!(!marker.exists());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
