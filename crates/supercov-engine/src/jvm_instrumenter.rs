@@ -516,10 +516,9 @@ fn body_block<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
     })?;
     match language {
         JvmLanguage::Java => (body.kind() == "block").then_some(body),
+        // A Kotlin function's body is always a `function_body`, holding its
+        // block or its expression.
         JvmLanguage::Kotlin => {
-            if body.kind() == "block" {
-                return Some(body);
-            }
             let mut cursor = body.walk();
             body.children(&mut cursor)
                 .find(|child| child.kind() == "block")
@@ -695,11 +694,11 @@ fn arms<'t>(node: Node<'t>, language: JvmLanguage) -> (Option<Node<'t>>, Option<
     }
 }
 
-/// The expression inside `if (...)`. Java parenthesises its condition; Kotlin
-/// does not.
+/// The expression inside `if (...)`. Java's grammar makes its condition a
+/// parenthesized expression; Kotlin's holds the expression itself.
 fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
     let condition = node.child_by_field_name("condition")?;
-    if language == JvmLanguage::Java && condition.kind() == "parenthesized_expression" {
+    if language == JvmLanguage::Java {
         let mut cursor = condition.walk();
         return condition
             .children(&mut cursor)
@@ -1745,5 +1744,58 @@ class Outer {
         );
         // A labelled loop and one without braces have nowhere for the flag.
         assert_eq!(obligations.manifest.limitations.len(), 2);
+    }
+
+    #[test]
+    fn a_constructor_line_is_joined_only_to_a_class_header_through_plain_modifiers() {
+        // An annotation counts among the modifiers before `constructor`.
+        assert_eq!(
+            constructor_prefix("@Inject constructor(val n: Int)"),
+            Some("@Inject constructor".len())
+        );
+        // A modifier has to be followed by a space.
+        assert_eq!(constructor_prefix("private\tconstructor(x)"), None);
+        assert_eq!(constructor_prefix("private(x)"), None);
+        assert!(ends_class_header("class My_Box"));
+        assert!(ends_class_header("  data class Box<T>"));
+        for line in ["fun f(", "subclass Box", "my_class Box", "class"] {
+            assert!(!ends_class_header(line), "{line}");
+        }
+        // A file that still fails once its constructor is joined is refused.
+        let source = "class Outer {\n  class Inner\n  private constructor(val n: Int) {\n    fun f(): Int {\n      return n )\n    }\n  }\n}\n";
+        assert!(constructors_joined(source).is_some());
+        assert!(parse(source, JvmLanguage::Kotlin).is_err());
+    }
+
+    #[test]
+    fn a_logical_value_is_one_decision_wherever_it_stands() {
+        // In a static initializer, and in an `if`'s body; the `&&` inside a
+        // measured condition's `||` is a condition of that one.
+        let (obligations, _) = java(
+            "class X { static boolean S; static { S = a() && b() || a(); } boolean f(boolean a, boolean b, boolean c) { if (a && b || c) { boolean d = a && c; return d; } return false; } static boolean a() { return true; } static boolean b() { return false; } }",
+        );
+        let decisions = obligations
+            .manifest
+            .decisions
+            .iter()
+            .map(|d| (d.kind.as_str(), d.source.as_str(), d.conditions.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decisions,
+            [
+                ("value", "a() && b() || a()", 3),
+                ("if", "a && b || c", 3),
+                ("value", "a && c", 2),
+            ]
+        );
+        // A Kotlin call that implies no smart cast is a condition like any.
+        let (obligations, _) = kotlin(
+            "fun f(xs: List<Int>, a: Boolean) {\n    if (xs.isEmpty() && a) {\n        println(1)\n    }\n}\n",
+        );
+        assert_eq!(
+            obligations.manifest.decisions[0].conditions,
+            ["xs.isEmpty()", "a"]
+        );
+        assert!(obligations.manifest.limitations.is_empty());
     }
 }
