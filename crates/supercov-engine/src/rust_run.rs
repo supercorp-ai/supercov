@@ -256,6 +256,20 @@ pub fn run_direct_rust(
     request: &DirectRustRunRequest,
     diagnostics: &mut dyn Write,
 ) -> Result<DirectRustRunResult, String> {
+    run_direct_rust_timed(
+        request,
+        diagnostics,
+        std::env::var("SUPERCOV_PHASE_TIMING").as_deref() == Ok("1"),
+    )
+}
+
+/// `run_direct_rust`, saying where preparing the workspace went when
+/// `phase_timing` (`SUPERCOV_PHASE_TIMING=1`).
+fn run_direct_rust_timed(
+    request: &DirectRustRunRequest,
+    diagnostics: &mut dyn Write,
+    phase_timing: bool,
+) -> Result<DirectRustRunResult, String> {
     if request.command.is_empty() {
         return Err("test command must not be empty".into());
     }
@@ -263,16 +277,11 @@ pub fn run_direct_rust(
     // process creation on macOS, Linux and Windows; on any other host every
     // probe is a no-op, so a run there would report zero coverage without a
     // word of explanation. Refuse plainly instead.
-    if !cfg!(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    )) {
-        return Err(
-            "Rust suites are not supported on this platform: the probe transport has no implementation here, so a run would measure nothing"
-                .into(),
-        );
-    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    return Err(
+        "Rust suites are not supported on this platform: the probe transport has no implementation here, so a run would measure nothing"
+            .into(),
+    );
     let total_started = Instant::now();
     let initialization_started = Instant::now();
     let root = fs::canonicalize(&request.root)
@@ -393,7 +402,7 @@ pub fn run_direct_rust(
         fs::create_dir_all(&project.target_directory).map_err(|error| error.to_string())?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
-        if std::env::var("SUPERCOV_PHASE_TIMING").as_deref() == Ok("1") {
+        if phase_timing {
             let preparation = &project.preparation;
             writeln!(
                 diagnostics,
@@ -704,5 +713,68 @@ mod tests {
         );
         fs::remove_dir_all(&inside).unwrap();
         fs::remove_dir_all(&outside).unwrap();
+    }
+
+    fn rust_request(root: &Path, command: &[&str]) -> DirectRustRunRequest {
+        DirectRustRunRequest {
+            root: root.to_owned(),
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            run_id: "2026-01-02T00-00-00-000Z".into(),
+            started_at: "2026-01-02T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn a_rust_run_refuses_an_empty_command() {
+        let root = std::env::temp_dir().join("supercov-rust-empty-command-never-created");
+        let error = run_direct_rust(&rust_request(&root, &[]), &mut Vec::new()).unwrap_err();
+        assert_eq!(error, "test command must not be empty");
+        assert!(!root.exists());
+    }
+
+    /// A run recovers the runs abandoned before it, says where preparing
+    /// the workspace went when asked, and a command Cargo refuses leaves
+    /// nothing of the run behind.
+    #[test]
+    fn a_run_says_what_it_recovered_and_how_long_preparing_took() {
+        let root = project("recovered");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn one() -> u8 {\n    1\n}\n").unwrap();
+        let abandoned = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/work").join(abandoned)).unwrap();
+        crate::lifecycle::write_run_state(
+            &root,
+            &crate::lifecycle::RunState {
+                id: abandoned.into(),
+                pid: u32::MAX,
+                root: root.display().to_string(),
+                workspace: root.display().to_string(),
+                started_at: "start".into(),
+                updated_at: "update".into(),
+                status: crate::lifecycle::RunStateStatus::Testing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let request = rust_request(&root, &["cargo", "test", "--no-such-flag"]);
+        let mut diagnostics = Vec::new();
+        assert!(run_direct_rust_timed(&request, &mut diagnostics, true).is_err());
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains(&format!("recovered abandoned run(s): {abandoned}")),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("[supercov] workspace timings cache-check="),
+            "{diagnostics}"
+        );
+        assert!(!root.join(".supercov/work").join(&request.run_id).exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

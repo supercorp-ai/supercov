@@ -11,6 +11,9 @@
 //! `cargo test`, with the runner named on its command line and the driver's
 //! variables given to each test's runner.
 
+// On Windows `learn` refuses at once, and nothing below it is called.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -54,9 +57,21 @@ pub fn is_wasm_pack_test(command: &[String]) -> bool {
 /// Run `command`, a `wasm-pack test`, in `root` with Supercov's `cargo`
 /// first on `PATH`, and read back the `cargo test` it would have run.
 pub fn learn(root: &Path, command: &[String], scratch: &Path) -> Result<WasmPackTest, String> {
-    if cfg!(windows) {
-        return Err("`wasm-pack test` is measured on Linux and macOS; on Windows, run the `cargo test --target wasm32-unknown-unknown` it runs".into());
+    #[cfg(windows)]
+    {
+        let _ = (root, command, scratch);
+        Err("`wasm-pack test` is measured on Linux and macOS; on Windows, run the `cargo test --target wasm32-unknown-unknown` it runs".into())
     }
+    #[cfg(not(windows))]
+    learn_through_cargo(root, command, scratch)
+}
+
+#[cfg(not(windows))]
+fn learn_through_cargo(
+    root: &Path,
+    command: &[String],
+    scratch: &Path,
+) -> Result<WasmPackTest, String> {
     let cargo = which("cargo").ok_or("no `cargo` on PATH for `wasm-pack test`")?;
     let bin = scratch.join("wasm-pack-cargo");
     fs::create_dir_all(&bin).map_err(|error| format!("{}: {error}", bin.display()))?;
@@ -234,6 +249,23 @@ mod tests {
                 ("CHROMEDRIVER".to_owned(), "/c/chromedriver".to_owned()),
                 ("WASM_BINDGEN_TEST_ONLY_WEB".to_owned(), "1".to_owned()),
             ]
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A line of the environment with no `=` and a variable no runner reads
+    /// are passed over, and a crate outside the project's root is not named.
+    #[test]
+    fn a_record_keeps_only_the_runner_s_variables_and_a_crate_below_the_root() {
+        let root =
+            std::env::temp_dir().join(format!("supercov-wasm-pack-outside-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let record = "/elsewhere/web\ntest\n--env\nnot a variable\nHOME=/root\nNO_HEADLESS=1\n";
+        let learned = parse_record(&root, record).unwrap();
+        assert_eq!(learned.command, ["cargo", "test"]);
+        assert_eq!(
+            learned.runner_environment,
+            [("NO_HEADLESS".to_owned(), "1".to_owned())]
         );
         fs::remove_dir_all(&root).unwrap();
     }

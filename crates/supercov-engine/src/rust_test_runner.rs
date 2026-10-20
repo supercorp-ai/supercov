@@ -1729,7 +1729,15 @@ fn colour_flag(arguments: &[String]) -> Option<String> {
 /// Whether output to this stream can be coloured: a terminal whose `TERM`
 /// is not empty or `dumb` (Windows consoles need no `TERM`).
 fn shows_colours(terminal: bool, term: Option<&str>) -> bool {
-    terminal && (cfg!(windows) || term.is_some_and(|term| !term.is_empty() && term != "dumb"))
+    #[cfg(windows)]
+    {
+        let _ = term;
+        terminal
+    }
+    #[cfg(not(windows))]
+    {
+        terminal && term.is_some_and(|term| !term.is_empty() && term != "dumb")
+    }
 }
 
 /// `cargo test -q`.
