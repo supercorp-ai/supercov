@@ -775,7 +775,10 @@ mod tests {
         );
         assert!(!diagnostics.contains("workspace timings"), "{diagnostics}");
         let diagnostics = run(true);
-        assert!(!diagnostics.contains("recovered abandoned"), "{diagnostics}");
+        assert!(
+            !diagnostics.contains("recovered abandoned"),
+            "{diagnostics}"
+        );
         assert!(
             diagnostics.contains("[supercov] workspace timings cache-check="),
             "{diagnostics}"
