@@ -11263,6 +11263,30 @@ fn source_roots_naming_only_javascript_leave_no_python_or_ruby_server() {
     assert!(summary.contains("76.92%"), "{summary}");
 }
 
+/// A run whose query index cannot be written back says the index could not
+/// be opened, and why, instead of blaming the command that ran.
+#[test]
+fn a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure() {
+    let project = Project::cart("index-unwritable");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let runs = project.root.join(".supercov/runs");
+    let run = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().is_dir())
+        .unwrap()
+        .path();
+    let index = run.join("query-index.v1.bin");
+    std::fs::remove_file(&index).unwrap();
+    std::fs::create_dir(&index).unwrap();
+    let refused = project.supercov(&["runs", "latest", "files"]).exits(2);
+    assert!(
+        refused.contains("Failed to open coverage index"),
+        "{refused}"
+    );
+    assert!(!refused.contains("wrapped command"), "{refused}");
+}
+
 /// A script standing in for rustdoc while Supercov stands in for it during
 /// `cargo test --doc`. It reads what to do from the files of the scenario
 /// directory `FAKE_RUSTDOC_DIR` names: `standalone` and `merged` are the
