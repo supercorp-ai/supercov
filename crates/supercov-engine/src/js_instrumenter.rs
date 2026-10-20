@@ -13310,4 +13310,200 @@ mod tests {
         let printed = printed_alike("var both = (a, b) => a && b", "print(both(1, 2));");
         assert_eq!(printed, "2");
     }
+
+    /// A source map from `(generated line, column, source line, column,
+    /// source)` tuples.
+    fn source_map(tokens: &[(u32, u32, u32, u32, Option<u32>)]) -> oxc_sourcemap::SourceMap {
+        oxc_sourcemap::SourceMap::new(
+            None,
+            vec![],
+            None,
+            vec!["a.js".into()],
+            vec![None],
+            tokens
+                .iter()
+                .map(|&(dst_line, dst_col, src_line, src_col, source)| {
+                    oxc_sourcemap::Token::new(dst_line, dst_col, src_line, src_col, source, None)
+                })
+                .collect(),
+            None,
+        )
+    }
+
+    /// `generated` with the comments of `source` put back, by `tokens`.
+    fn restored(
+        source: &str,
+        generated: &str,
+        tokens: &[(u32, u32, u32, u32, Option<u32>)],
+    ) -> Result<String, CandidateError> {
+        let allocator = Allocator::default();
+        let program = Parser::new(&allocator, source, SourceType::mjs())
+            .parse()
+            .program;
+        restore_comment_text(&program, generated, source_map(tokens)).map(|(code, _)| code)
+    }
+
+    #[test]
+    fn comments_go_back_only_into_output_that_parses_and_matches() {
+        assert!(matches!(
+            restored("// c\nf();\n", "f(;\n", &[]),
+            Err(CandidateError::Parse(_))
+        ));
+        // A printed comment no source comment matches, after one that did.
+        let Err(CandidateError::CommentPreservation { detail, .. }) =
+            restored("/*a*/ /*b*/ /*c*/ x;\n", "/*c*/ x; /*z*/\n", &[])
+        else {
+            panic!("an unknown comment was accepted");
+        };
+        assert!(detail.contains("\"/*z*/\""), "{detail}");
+        // A map that sends a dropped comment into a printed one.
+        let Err(CandidateError::CommentPreservation { detail, .. }) = restored(
+            "/* kept */ f(); // gone\n",
+            "/* kept */ f();\n",
+            &[(0, 3, 99, 0, Some(0))],
+        ) else {
+            panic!("overlapping comments were accepted");
+        };
+        assert!(detail.contains("restored comments overlap"), "{detail}");
+    }
+
+    #[test]
+    fn a_line_comment_put_back_mid_line_opens_its_statement_at_its_indentation() {
+        assert_eq!(
+            restored(
+                "a(); b( // c\n);\n",
+                "a(); b(\n);\n",
+                &[(0, 7, 99, 0, Some(0))]
+            )
+            .unwrap(),
+            "a(); // c\nb(\n);\n"
+        );
+        assert_eq!(
+            restored("  b( // c\n);\n", "  b(\n);\n", &[(0, 4, 99, 0, Some(0))]).unwrap(),
+            "  // c\n  b(\n);\n"
+        );
+    }
+
+    #[test]
+    fn a_read_function_is_put_back_once_and_only_where_the_map_says() {
+        let source = "function f() { return 1; }\n";
+        let allocator = Allocator::default();
+        let program = Parser::new(&allocator, source, SourceType::mjs())
+            .parse()
+            .program;
+        let sensitive = HashSet::from([(0, 26)]);
+        let put_back = |generated: &str, tokens: &[(u32, u32, u32, u32, Option<u32>)]| {
+            restore_function_source(&program, &sensitive, generated, source_map(tokens))
+                .map(|(code, _)| code)
+        };
+        assert!(matches!(
+            put_back("f(;\n", &[]),
+            Err(CandidateError::Parse(_))
+        ));
+        let printed = "function f() {\n\treturn 1;\n}\nfunction g() {\n\treturn 1;\n}\n";
+        // Nothing maps into the function: the output stays as printed.
+        assert_eq!(put_back(printed, &[]).unwrap(), printed);
+        // Two printed functions map into it: the first takes its text.
+        assert_eq!(
+            put_back(printed, &[(0, 9, 0, 9, Some(0)), (3, 9, 0, 9, Some(0))]).unwrap(),
+            "function f() { return 1; }\nfunction g() {\n\treturn 1;\n}\n"
+        );
+    }
+
+    /// The `;` line before a top-level declaration maps to the declaration,
+    /// when one starts the next line and has a mapping of its own.
+    #[test]
+    fn a_separator_line_maps_only_to_a_declaration_that_starts_the_next_line() {
+        let separator = |code: &str, tokens: &[(u32, u32, u32, u32, Option<u32>)]| {
+            map_closing_lines(source_map(tokens), code, "x\n")
+                .get_tokens()
+                .find(|token| token.get_dst_line() == 0)
+                .and_then(|token| token.get_source_id())
+        };
+        assert_eq!(
+            separator(";\nx", &[(0, 0, 0, 0, None), (1, 0, 0, 0, Some(0))]),
+            Some(0)
+        );
+        assert_eq!(separator(";", &[(0, 0, 0, 0, None)]), None);
+        assert_eq!(
+            separator(";\n  x", &[(0, 0, 0, 0, None), (1, 2, 0, 0, Some(0))]),
+            None
+        );
+        assert_eq!(
+            separator(";\nx", &[(0, 0, 0, 0, None), (1, 0, 0, 0, None)]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_helper_name_that_does_not_parse_has_no_type() {
+        let allocator = Allocator::default();
+        assert!(runtime_helper_type(&allocator, SourceType::ts(), "not a name").is_none());
+        assert!(runtime_helper_type(&allocator, SourceType::ts(), "hit").is_some());
+    }
+
+    /// Bindings are by symbol, and a tree that was never analysed has none.
+    #[test]
+    fn an_identifier_without_a_symbol_binds_nothing() {
+        let allocator = Allocator::default();
+        let ast = AstBuilder::new(&allocator);
+        let identifier = ast.binding_identifier(Span::default(), ast.ident("assert"));
+        let mut bindings = NodeAssertionBindings::default();
+        bind_object(&mut bindings, &identifier, "node:assert".into());
+        bind_direct(&mut bindings, &identifier, "ok".into());
+        bind_expect(&mut bindings, &identifier);
+        assert!(bindings.objects.is_empty());
+        assert!(bindings.direct.is_empty());
+        assert!(bindings.expects.is_empty());
+    }
+
+    #[test]
+    fn an_import_used_as_a_value_too_is_not_elided() {
+        let erased = |source: &str| {
+            let allocator = Allocator::default();
+            let program = Parser::new(&allocator, source, SourceType::ts())
+                .parse()
+                .program;
+            erased_imports(&program, true).len()
+        };
+        assert_eq!(erased("import { Foo } from './foo';\nlet x: Foo;\n"), 1);
+        assert_eq!(
+            erased("import { Foo } from './foo';\nlet x: Foo;\nexport { Foo };\n"),
+            0
+        );
+    }
+
+    #[test]
+    fn capability_imports_are_wrapped_only_in_a_module_and_only_where_called() {
+        let candidate = |source: &str, file: &str| {
+            instrument_with_import_policy(source, file, "../.supercov/launchSupervisor.mjs", false)
+                .unwrap()
+                .code
+        };
+        let launch = concat!(
+            "import { ImageBuilder } from './sdk.js';\n",
+            "ImageBuilder.build({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+        );
+        assert!(candidate(launch, "src/launch.mjs").contains("__supercovRawImageBuilder"));
+        // A CommonJS file has no import to wrap.
+        let script = "const { ImageBuilder } = require('./sdk.js');\nImageBuilder.build({ hostPath: process.cwd(), guestPath: '/workspace' });\n";
+        assert!(!candidate(script, "src/launch.cjs").contains("wrapImportedCapability"));
+        // The words alone, with no imported root called with them.
+        let words = concat!(
+            "import { ImageBuilder } from './sdk.js';\n",
+            "const paths = { hostPath: 1, guestPath: 2 };\n",
+            "ImageBuilder.build();\n",
+        );
+        assert!(!candidate(words, "src/launch.mjs").contains("wrapImportedCapability"));
+        // Node's own modules are never wrapped.
+        let node = concat!(
+            "import { spawn } from 'node:child_process';\n",
+            "import { ImageBuilder } from './sdk.js';\n",
+            "spawn({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+            "ImageBuilder.build({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+        );
+        let code = candidate(node, "src/launch.mjs");
+        assert!(code.contains("__supercovRawImageBuilder"), "{code}");
+        assert!(!code.contains("__supercovRawspawn"), "{code}");
+    }
 }
