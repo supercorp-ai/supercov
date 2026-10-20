@@ -357,6 +357,18 @@ fn read_evidence_directory(
     directory: &Path,
     run_id: &str,
 ) -> Result<Evidence, PythonEvidenceError> {
+    read_evidence_directory_with(directory, run_id, &shared_slot_bytes)
+}
+
+/// Reads a slot a process kept in shared memory, by the object's name: what
+/// it held, or None when nothing holds it any more.
+type SharedSlots<'a> = &'a dyn Fn(&[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceError>;
+
+fn read_evidence_directory_with(
+    directory: &Path,
+    run_id: &str,
+    shared: SharedSlots<'_>,
+) -> Result<Evidence, PythonEvidenceError> {
     let mut evidence = Evidence::default();
     let mut files = match fs::read_dir(directory) {
         Ok(entries) => entries
@@ -398,7 +410,7 @@ fn read_evidence_directory(
                 .ok()
                 .map(|_| (format!("{stem}.slot"), format!("{transport}.mmap")))
         }) {
-            if let Some(path) = materialize_shared_slot(&entry.path(), &slot_name)? {
+            if let Some(path) = materialize_shared_slot(&entry.path(), &slot_name, shared)? {
                 slots.entry(transport).or_default().push((slot_name, path));
             }
         } else if let Some(transport) = name
@@ -483,6 +495,7 @@ fn entry_metadata(name: &str, path: &Path) -> Result<Option<fs::Metadata>, Pytho
 fn materialize_shared_slot(
     marker: &Path,
     slot_name: &str,
+    shared: SharedSlots<'_>,
 ) -> Result<Option<PathBuf>, PythonEvidenceError> {
     let slot = marker.with_file_name(slot_name);
     if fs::symlink_metadata(&slot).is_ok() {
@@ -512,7 +525,7 @@ fn materialize_shared_slot(
     {
         return Err(unsafe_marker());
     }
-    shared_slot_bytes(name)?
+    shared(name)?
         // Created and killed before it was sized: nothing was written.
         .filter(|bytes| !bytes.is_empty())
         .map(|mut bytes| {
@@ -4141,6 +4154,43 @@ pub(crate) mod tests {
         let file = base.join("file");
         fs::write(&file, b"x").unwrap();
         assert!(read(&file).starts_with("Io"), "{}", read(&file));
+        // Below a file nothing can be found, which is no race to forgive.
+        let below = file.join("p.1.slot");
+        assert!(entry_metadata("p.1.slot", &below).is_err());
+        assert!(map_slot(&below).is_err());
+        let no_marker = |marker: &Path| {
+            materialize_shared_slot(marker, "p.1.slot", &|_| unreachable!()).map_err(|_| ())
+        };
+        assert_eq!(no_marker(&base.join("missing/p.1.shm")), Ok(None));
+        assert_eq!(no_marker(&file.join("p.1.shm")), Err(()));
+    }
+
+    /// What a macOS process kept in shared memory is copied into a slot file
+    /// beside its marker, cut to the size the process gave it, and read with
+    /// the rest; an object smaller than that size was not the process's.
+    #[test]
+    fn a_shared_slot_is_copied_beside_its_marker_and_read_with_the_rest() {
+        let directory = temporary("py-shared-slot");
+        fs::write(directory.join("p.1.shm"), b"/p.1.token 3").unwrap();
+        let shared = |name: &[u8]| {
+            assert_eq!(name, b"/p.1.token");
+            Ok(Some(b"abcdef".to_vec()))
+        };
+        // Copied, then joined to its process's transport, which is missing.
+        let error = read_evidence_directory_with(&directory, "run-1", &shared).unwrap_err();
+        assert!(
+            matches!(&error, PythonEvidenceError::InvalidTransport { file, .. } if file == "p.1.slot"),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(directory.join("p.1.slot")).unwrap(), b"abc");
+        fs::remove_file(directory.join("p.1.slot")).unwrap();
+        let short = |_: &[u8]| Ok(Some(b"ab".to_vec()));
+        assert!(matches!(
+            materialize_shared_slot(&directory.join("p.1.shm"), "p.1.slot", &short),
+            Err(PythonEvidenceError::InvalidTransport { .. })
+        ));
+        assert!(!directory.join("p.1.slot").exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

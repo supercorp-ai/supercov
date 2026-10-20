@@ -2376,6 +2376,11 @@ pub(crate) mod tests {
                 serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"failed","xfail":true,"runner":"rspec"}),
                 serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":"spec/m_spec.rb[1:2]","retry":0,"phase":"call"}),
                 serde_json::json!({"t":"hit","ctx":2,"id":statement.id}),
+                // Reported as it ran, then the worker died in its teardown.
+                serde_json::json!({"t":"phase","ctx":3,"at":7,"worker":"main","test":"spec/m_spec.rb[1:3]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:3]","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"rspec"}),
+                serde_json::json!({"t":"phase","ctx":4,"at":8,"worker":"main","test":"spec/m_spec.rb[1:3]","retry":0,"phase":"teardown"}),
+                serde_json::json!({"t":"hit","ctx":4,"id":statement.id}),
             ];
             records.extend(extra.iter().cloned());
             records.push(serde_json::json!({"t":"exit","at":9}));
@@ -2410,6 +2415,18 @@ pub(crate) mod tests {
         assert!(unreported.phases.iter().any(|phase| {
             phase.error.as_deref() == Some("the phase started but the runner reported no outcome")
         }));
+        let died = result("spec/m_spec.rb[1:3]");
+        assert_eq!(died.status.as_deref(), Some("failed"));
+        let phases = died
+            .phases
+            .iter()
+            .map(|phase| (phase.kind.as_str(), phase.status.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            [("test", Some("passed")), ("teardown", Some("failed"))]
+        );
+        assert_eq!(died.runtime.len(), 1);
         assert!(run.request.manifest.unmeasured.contains(&statement.id));
         assert!(matches!(
             run_with(
