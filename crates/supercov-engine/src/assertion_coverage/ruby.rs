@@ -134,8 +134,9 @@ impl Collector<'_> {
     }
 
     fn mark_last(&mut self, body: Option<Node<'_>>) {
-        if let Some(statements) = body.and_then(|b| b.as_statements_node())
-            && let Some(last) = statements.body().iter().last()
+        if let Some(last) = body
+            .and_then(|b| b.as_statements_node())
+            .and_then(|statements| statements.body().iter().last())
         {
             self.last.insert(last.location().start_offset());
         }
@@ -557,18 +558,17 @@ pub(super) fn support_files(root: &Path, text: &str) -> Vec<String> {
         if !base.is_dir() {
             continue;
         }
-        for entry in ignore::WalkBuilder::new(&base)
+        // Every path the walk yields lies under `base`, so under `root`.
+        let relatives = ignore::WalkBuilder::new(&base)
             .build()
             .filter_map(Result::ok)
-        {
-            let path = entry.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("rb") {
+            .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_owned));
+        for relative in relatives {
+            if relative.extension().and_then(|x| x.to_str()) != Some("rb") {
                 continue;
             }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if names.contains(stem)
-                && let Ok(relative) = path.strip_prefix(root)
-            {
+            let stem = relative.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if names.contains(stem) {
                 out.push(relative.to_string_lossy().replace('\\', "/"));
             }
         }
@@ -859,5 +859,20 @@ mod tests {
                 "lib/shop.rb"
             ]
         );
+        // Only the support file a constant names.
+        assert_eq!(
+            support_files(&root, "expect(Money.parse(1)).to eq 1\n"),
+            ["spec/support/money.rb"]
+        );
+    }
+
+    /// A class nested no shallower than the test is not the test's class.
+    #[test]
+    fn a_test_belongs_to_the_class_around_it_not_a_sibling_before_it() {
+        let source =
+            "class Outer\n  class Helper\n    def x; end\n  end\n  def test_y\n  end\nend\n";
+        let lines = source.split('\n').collect::<Vec<_>>();
+        assert_eq!(class_line(&lines, 4), Some(0));
+        assert_eq!(class_line(&lines, 2), Some(1));
     }
 }

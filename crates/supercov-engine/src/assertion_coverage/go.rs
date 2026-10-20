@@ -1,27 +1,27 @@
 //! Go: statements by tree-sitter, tests by their function name.
 use super::{Change, Located, Starts, line_of, line_starts};
 use std::path::Path;
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 /// Every statement starting on each line, with its change: `if` inverted,
 /// `return x` returning zero values, an assignment or declaration with a value
 /// leaving the zero value, anything else skipped. Declarations of functions,
 /// types, constants and imports, and `var` without a value, are not assessed.
 pub(super) fn statement_starts(source: &str) -> Starts {
-    let mut parser = Parser::new();
     let mut out = Starts::new();
-    if parser
-        .set_language(&tree_sitter_go::LANGUAGE.into())
-        .is_err()
-    {
-        return out;
-    }
-    let Some(tree) = parser.parse(source, None) else {
+    let Some(tree) = parse(source) else {
         return out;
     };
     let starts = line_starts(source);
     walk(tree.root_node(), source, &starts, &mut out);
     out
+}
+
+/// The tree of a Go source, a broken one included.
+fn parse(source: &str) -> Option<Tree> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
+    parser.parse(source, None)
 }
 
 fn walk(node: Node, source: &str, starts: &[usize], out: &mut Starts) {
@@ -94,9 +94,7 @@ fn change(node: Node) -> Option<Option<Change>> {
 /// `return UUID{}, nil` (from the function's result types), `x := &T{}` ->
 /// `x := nil`. Nothing where a zero value cannot be written down.
 pub(super) fn rewrite(source: &str, line: usize, change: Change) -> Option<String> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse(source)?;
     let starts = line_starts(source);
     let text = |n: Node| source.get(n.byte_range()).unwrap_or("").to_owned();
     let node = find_statement(tree.root_node(), &starts, line, &|n| match change {
@@ -514,5 +512,28 @@ mod tests {
             ["pkg/build_test.go", "pkg/fixture_test.go"]
         );
         assert!(helpers(&root, "missing/a_test.go", &text).is_empty());
+    }
+
+    /// A file that does not compile still has its statements read; an `if`
+    /// outside any function is not one of them.
+    #[test]
+    fn an_if_outside_a_function_is_no_statement() {
+        let source = "package a\n\nif ready {\n\trun()\n}\n\nfunc f() {\n\tif ready {\n\t}\n}\n";
+        let starts = statement_starts(source);
+        assert!(!starts.contains_key(&3), "{starts:?}");
+        assert_eq!(
+            starts.get(&8).map(Vec::as_slice),
+            Some(&[("if ready {\n\t}".to_owned(), Some(Change::Invert))][..])
+        );
+    }
+
+    #[test]
+    fn a_line_between_declarations_has_nothing_to_rewrite() {
+        let source = "package a\n\nfunc f() int {\n\treturn 1\n}\n";
+        assert_eq!(rewrite(source, 2, Change::ReturnUndefined), None);
+        assert_eq!(
+            rewrite(source, 4, Change::ReturnUndefined).as_deref(),
+            Some("return 0")
+        );
     }
 }

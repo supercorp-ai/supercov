@@ -1,7 +1,7 @@
 //! Java and Kotlin: statements by tree-sitter, tests by class and method name.
 use super::{Change, Located, Starts, line_of, line_starts};
 use crate::jvm_instrumenter::JvmLanguage;
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 fn kotlin(file: &str) -> bool {
     file.ends_with(".kt") || file.ends_with(".kts")
@@ -24,16 +24,7 @@ pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
     let tree = match crate::jvm_instrumenter::parse(source, language) {
         Ok(tree) => tree,
         Err(_) => {
-            let mut parser = Parser::new();
-            let grammar = if kotlin(file) {
-                tree_sitter_kotlin_ng::LANGUAGE.into()
-            } else {
-                tree_sitter_java::LANGUAGE.into()
-            };
-            if parser.set_language(&grammar).is_err() {
-                return out;
-            }
-            let Some(tree) = parser.parse(source, None) else {
+            let Some(tree) = recovered(source, language) else {
                 return out;
             };
             tree
@@ -42,6 +33,30 @@ pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
     let starts = line_starts(source);
     walk(tree.root_node(), source, &starts, kotlin(file), &mut out);
     out
+}
+
+/// Whatever tree the grammar recovers from a source that does not parse.
+fn recovered(source: &str, language: JvmLanguage) -> Option<Tree> {
+    let mut parser = Parser::new();
+    let grammar = match language {
+        JvmLanguage::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        JvmLanguage::Java => tree_sitter_java::LANGUAGE.into(),
+    };
+    parser.set_language(&grammar).ok()?;
+    parser.parse(source, None)
+}
+
+/// What an `if` tests, out of Java's parentheses.
+fn tested(node: Node) -> Option<Node> {
+    if !matches!(node.kind(), "if_statement" | "if_expression") {
+        return None;
+    }
+    let condition = node.child_by_field_name("condition")?;
+    Some(if condition.kind() == "parenthesized_expression" {
+        condition.named_child(0).unwrap_or(condition)
+    } else {
+        condition
+    })
 }
 
 fn walk(node: Node, source: &str, starts: &[usize], kotlin: bool, out: &mut Starts) {
@@ -59,14 +74,7 @@ fn walk(node: Node, source: &str, starts: &[usize], kotlin: bool, out: &mut Star
             .push((text(node), change));
         // An `else if`, and any Kotlin `if`, may be recorded by its
         // condition alone.
-        if matches!(node.kind(), "if_statement" | "if_expression")
-            && let Some(c) = node.child_by_field_name("condition")
-        {
-            let c = if c.kind() == "parenthesized_expression" {
-                c.named_child(0).unwrap_or(c)
-            } else {
-                c
-            };
+        if let Some(c) = tested(node) {
             out.entry(line_of(starts, c.start_byte()))
                 .or_default()
                 .push((text(c), Some(Change::Invert)));
@@ -119,7 +127,8 @@ fn change(node: Node, source: &str, kotlin: bool) -> Option<Option<Change>> {
         "property_declaration" => {
             (has_value() && !text.contains(" by ")).then_some(Change::ValueUndefined)
         }
-        "expression_statement" if !kotlin => {
+        // Kotlin's grammar has no expression statement.
+        "expression_statement" => {
             let assignment = node
                 .named_child(0)
                 .filter(|c| c.kind() == "assignment_expression");
@@ -172,9 +181,8 @@ fn change(node: Node, source: &str, kotlin: bool) -> Option<Option<Change>> {
         }
         // A Kotlin `throw` the function would otherwise end on: not
         // throwing leaves it nothing to return, so it returns the default.
-        "throw_expression" if kotlin && on_final_path(node, source) => {
-            Some(Change::ReturnUndefined)
-        }
+        // Java's grammar has no throw expression.
+        "throw_expression" if on_final_path(node, source) => Some(Change::ReturnUndefined),
         _ => Some(Change::Skip),
     })
 }
@@ -526,9 +534,14 @@ mod tests {
             change_at(&starts, 4, "boolean c = x == null;", j),
             Some(Change::ValueUndefined)
         );
-        let kotlin = "fun k() {\n    val lazyOne by lazy { 1 }\n    val plain: Int = 2\n    var none: String? = null\n}\n";
+        let kotlin = "fun k() {\n    val lazyOne by lazy { 1 }\n    val plain: Int = 2\n    var none: String? = null\n    var seen by observable(0) { _, _, new -> last = new }\n}\n";
         let starts = statement_starts("K.kt", kotlin);
         assert_eq!(change_at(&starts, 2, "val lazyOne by lazy { 1 }", j), None);
+        // A delegate whose lambda assigns is still no value.
+        assert_eq!(
+            change_at(&starts, 5, "var seen by observable(0) {", j),
+            None
+        );
         assert_eq!(
             change_at(&starts, 3, "val plain: Int = 2", j),
             Some(Change::ValueUndefined)

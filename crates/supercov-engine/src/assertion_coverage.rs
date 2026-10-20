@@ -362,7 +362,8 @@ pub fn assessment_input(report: &CoverageReport) -> AssessmentInput {
     let points = view
         .points
         .iter()
-        .filter(|p| p.measured && p.meta.kind == PointKind::Statement)
+        // A view leaves out every point the run declined, so each is measured.
+        .filter(|p| p.meta.kind == PointKind::Statement)
         .map(|p| InputPoint {
             file: p.meta.file.clone(),
             line: p.meta.line,
