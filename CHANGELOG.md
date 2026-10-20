@@ -120,6 +120,7 @@
 - A `chromedriver` that never started listening was left running after Supercov gave up on it and measured the wasm tests without it; it is stopped now.
 - A Java condition that opens with a comment (`if (/* both */ a && b)`, `while (/* count */ n > 0)`) was probed in place of the comment, and the measured copy no longer compiled; a Kotlin arm written after a comment (`if (a) /* yes */ g() else h()`) no longer parsed, and a `contract` after a comment was taken for a statement and probed before. Comments are passed over now, wherever they stand.
 - The statements and decisions inside a Java or Kotlin `if` whose condition narrows a type (`if (o instanceof String s)`) were not measured at all: they were missing from the report rather than shown as uncovered. They are measured now, like those of any other `if`.
+- A Gradle build whose root holds only `settings.gradle` (each project with its own build file) got Supercov's JUnit Platform listener in every module but no launcher to compile it against, so its tests could not compile under measurement; the workspace copy now gets a root build file that adds the launcher, as one beside the settings already did.
 
 ## 4.19.0
 

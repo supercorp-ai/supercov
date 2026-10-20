@@ -1354,25 +1354,28 @@ fn instrument_workspace(
                 })
                 .map(|module| module.directory.clone())
                 .collect::<Vec<_>>();
-            for name in ["build.gradle.kts", "build.gradle"] {
-                let path = workspace.join(name);
-                let Ok(existing) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                let catalog = fs::read_to_string(workspace.join("gradle/libs.versions.toml"))
-                    .unwrap_or_default();
-                if let Some(updated) =
-                    gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog, &junit4)
-                {
-                    added_vintage |= !junit4.is_empty();
-                    write(&path, &updated)?;
-                    added_launcher = Some(if name.ends_with(".kts") {
-                        "build.gradle.kts"
-                    } else {
-                        "build.gradle"
-                    });
-                }
-                break;
+            // A build whose root holds only its settings, each project with
+            // a build file of its own, gets a root build file in the copy:
+            // Gradle reads one there as well, and the `allprojects` block
+            // reaches every project from it.
+            let name = ["build.gradle.kts", "build.gradle"]
+                .into_iter()
+                .find(|name| workspace.join(name).is_file())
+                .unwrap_or(if workspace.join("settings.gradle.kts").is_file() {
+                    "build.gradle.kts"
+                } else {
+                    "build.gradle"
+                });
+            let path = workspace.join(name);
+            let existing = fs::read_to_string(&path).unwrap_or_default();
+            let catalog =
+                fs::read_to_string(workspace.join("gradle/libs.versions.toml")).unwrap_or_default();
+            if let Some(updated) =
+                gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog, &junit4)
+            {
+                added_vintage |= !junit4.is_empty();
+                write(&path, &updated)?;
+                added_launcher = Some(name);
             }
         }
         // Nothing resolves dependencies for a plain tree; whoever compiles it
@@ -3110,6 +3113,34 @@ mod tests {
         assert!(resources("both", TESTNG_SERVICES_FILE));
         assert!(!resources("named", SERVICES_FILE));
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A Gradle build whose root holds only its settings still gets the
+    /// launcher its listeners compile against: in a root build file made in
+    /// the copy, for each settings language.
+    #[test]
+    fn a_gradle_root_with_only_its_settings_gets_the_launcher_in_a_root_build_file() {
+        for (settings, build) in [
+            ("settings.gradle", "build.gradle"),
+            ("settings.gradle.kts", "build.gradle.kts"),
+        ] {
+            let root = temporary_root("gradle-settings-only");
+            write(&root.join(settings), "include 'app'\n").unwrap();
+            write(&root.join("app/build.gradle"), "plugins { id 'java' }\n").unwrap();
+            java_module(&root, "app", true);
+            let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None)
+                .expect("instrument");
+            assert_eq!(instrumented.added_launcher, Some(build));
+            let made = fs::read_to_string(root.join(build)).unwrap();
+            assert!(made.contains(LAUNCHER_ARTIFACT), "{made}");
+            assert!(made.contains("allprojects"), "{made}");
+            assert!(
+                root.join("app/src/test/resources")
+                    .join(SERVICES_FILE)
+                    .exists()
+            );
+            fs::remove_dir_all(&root).ok();
+        }
     }
 
     #[test]
