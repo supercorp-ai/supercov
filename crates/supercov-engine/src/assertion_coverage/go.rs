@@ -406,6 +406,31 @@ mod tests {
         assert_eq!(at(9), None, "a method on a literal is not the literal");
     }
 
+    /// A bare `return` and a block of its own are skipped, a `var` with a
+    /// value or a grouped one changes its value, and a literal of a type
+    /// with `_` in its name is zeroed as one.
+    #[test]
+    fn bare_returns_blocks_and_grouped_vars_are_read() {
+        use crate::assertion_coverage::{Language, change_at};
+        let source = "package a\n\nfunc f() {\n\tvar x = 1\n\tvar (\n\t\ty = 2\n\t)\n\t{\n\t\tg()\n\t}\n\tp := my_pkg.Point_3{X: 1}\n\treturn\n}\n";
+        let starts = statement_starts(source);
+        let go = Language::Go;
+        assert_eq!(
+            change_at(&starts, 4, "var x = 1", go),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 5, "var (", go),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(change_at(&starts, 8, "{", go), Some(Change::Skip));
+        assert_eq!(change_at(&starts, 12, "return", go), Some(Change::Skip));
+        assert_eq!(
+            rewrite(source, 11, Change::ValueUndefined).as_deref(),
+            Some("p := my_pkg.Point_3{}")
+        );
+    }
+
     #[test]
     fn a_test_is_found_by_its_function_name_however_it_is_qualified() {
         let test = "package a\n\nfunc TestFormat(t *testing.T) {}\n\nfunc TestF[T any](t *testing.T) {\n}\n";
