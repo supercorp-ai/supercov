@@ -1451,6 +1451,38 @@ fn instrument_workspace(
     })
 }
 
+/// How the copy's build skips Apache RAT's license check.
+#[derive(Debug, PartialEq)]
+enum RatSkip {
+    /// A property on the command, which starts Maven itself.
+    Argument,
+    /// The `MAVEN_OPTS` a wrapper passes on to Maven.
+    MavenOpts(String),
+}
+
+/// How to skip the license check, given the user's own `MAVEN_OPTS`;
+/// nothing when the command or those options already skip it.
+fn rat_skip(command: &[String], maven_opts: Option<String>) -> Option<RatSkip> {
+    if command.iter().any(|a| a.contains("rat.skip"))
+        || maven_opts
+            .as_deref()
+            .is_some_and(|opts| opts.contains("rat.skip"))
+    {
+        return None;
+    }
+    if starts_maven(command) {
+        return Some(RatSkip::Argument);
+    }
+    Some(RatSkip::MavenOpts(
+        maven_opts
+            .filter(|opts| !opts.trim().is_empty())
+            .into_iter()
+            .chain(["-Drat.skip=true".to_owned()])
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
+}
+
 /// The fingerprint a later query compares against the stored run.
 pub fn current_jvm_integrity(
     root: &Path,
@@ -1633,21 +1665,11 @@ pub fn run_direct_jvm(
         // it reads as system properties.
         let mut maven_opts = None;
         if instrumented.license_check
-            && !command.iter().any(|a| a.contains("rat.skip"))
-            && !std::env::var("MAVEN_OPTS").is_ok_and(|opts| opts.contains("rat.skip"))
+            && let Some(skip) = rat_skip(&command, std::env::var("MAVEN_OPTS").ok())
         {
-            if starts_maven(&command) {
-                command.push("-Drat.skip=true".into());
-            } else {
-                maven_opts = Some(
-                    std::env::var("MAVEN_OPTS")
-                        .ok()
-                        .filter(|opts| !opts.trim().is_empty())
-                        .into_iter()
-                        .chain(["-Drat.skip=true".to_owned()])
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                );
+            match skip {
+                RatSkip::Argument => command.push("-Drat.skip=true".into()),
+                RatSkip::MavenOpts(opts) => maven_opts = Some(opts),
             }
             writeln!(
                 diagnostics,
@@ -3357,5 +3379,33 @@ mod tests {
             );
             fs::remove_dir_all(&root).ok();
         }
+    }
+
+    /// The user's own `MAVEN_OPTS` are kept, and one that already skips the
+    /// license check needs nothing more.
+    #[test]
+    fn the_license_check_is_skipped_once_and_after_the_user_s_own_options() {
+        let command = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        let wrapper = command(&["./build.sh", "test"]);
+        assert_eq!(
+            rat_skip(&command(&["mvn", "test"]), None),
+            Some(RatSkip::Argument)
+        );
+        assert_eq!(
+            rat_skip(&command(&["mvn", "-Drat.skip=true", "test"]), None),
+            None
+        );
+        assert_eq!(
+            rat_skip(&wrapper, Some("-Drat.skip=true -Xmx1g".into())),
+            None
+        );
+        assert_eq!(
+            rat_skip(&wrapper, Some("-Xmx1g".into())),
+            Some(RatSkip::MavenOpts("-Xmx1g -Drat.skip=true".into()))
+        );
+        assert_eq!(
+            rat_skip(&wrapper, Some(" ".into())),
+            Some(RatSkip::MavenOpts("-Drat.skip=true".into()))
+        );
     }
 }

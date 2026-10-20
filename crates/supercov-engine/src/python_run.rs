@@ -115,10 +115,16 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What separates the entries of `PYTHONPATH`.
+#[cfg(windows)]
+const PATH_LIST_SEPARATOR: &str = ";";
+#[cfg(not(windows))]
+const PATH_LIST_SEPARATOR: &str = ":";
+
 fn prepend_path_list(existing: Option<OsString>, entry: &Path) -> OsString {
     let mut value = entry.as_os_str().to_owned();
     if let Some(existing) = existing.filter(|existing| !existing.is_empty()) {
-        value.push(if cfg!(windows) { ";" } else { ":" });
+        value.push(PATH_LIST_SEPARATOR);
         value.push(existing);
     }
     value
@@ -325,6 +331,15 @@ pub fn run_direct_python(
     request: &DirectPythonRunRequest,
     diagnostics: &mut dyn Write,
 ) -> Result<DirectPythonRunResult, String> {
+    run_direct_python_in(request, &std::env::vars().collect(), diagnostics)
+}
+
+/// A run under `ambient`, the environment Supercov was started in.
+fn run_direct_python_in(
+    request: &DirectPythonRunRequest,
+    ambient: &std::collections::BTreeMap<String, String>,
+    diagnostics: &mut dyn Write,
+) -> Result<DirectPythonRunResult, String> {
     if request.command.is_empty() {
         return Err("test command must not be empty".into());
     }
@@ -353,13 +368,10 @@ pub fn run_direct_python(
         }
 
         let adapter_started = Instant::now();
-        let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
-        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(&root, &ambient)
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(&root, ambient)
             .map_err(|error| error.to_string())?;
         let project: PreparedPythonProject = prepare_python_project(&root, roots.as_ref())?;
-        let source_roots = crate::source_discovery::configured_source_roots(
-            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
-        );
+        let source_roots = crate::source_discovery::configured_source_roots(ambient);
         let mut integrity_inputs = python_integrity_inputs(&project.files, &request.command);
         crate::source_discovery::fold_roots_into_configuration(
             &mut integrity_inputs.execution_configuration,
@@ -439,9 +451,10 @@ pub fn run_direct_python(
         }
 
         let publication_started = Instant::now();
-        let verbose = std::env::var("SUPERCOV_VERBOSE")
-            .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+        let verbose = ambient
+            .get("SUPERCOV_VERBOSE")
+            .or_else(|| ambient.get("SUPERCOV_DEBUG"))
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
         measured.set(true);
         let mut run: PythonFrontendRun = match build_python_frontend_run(
             &project.manifest,
@@ -509,7 +522,10 @@ pub fn run_direct_python(
             )
             .map_err(|error| error.to_string())?;
         }
-        if std::env::var("SUPERCOV_KEEP_WORK").is_ok_and(|value| !value.is_empty()) {
+        if ambient
+            .get("SUPERCOV_KEEP_WORK")
+            .is_some_and(|value| !value.is_empty())
+        {
             let debug_directory = root.join(".supercov/python-debug").join(&request.run_id);
             fs::create_dir_all(&debug_directory).map_err(|error| error.to_string())?;
             copy_tree(&python_directory, &debug_directory)?;
@@ -1046,10 +1062,9 @@ mod tests {
             fs::read_to_string(copy.join("vendor/pkg/b.py")).unwrap(),
             "def g():\n    return 1\n"
         );
-        let separator = if cfg!(windows) { ";" } else { ":" };
         assert_eq!(
             prepend_path_list(Some("/site".into()), Path::new("/runtime")),
-            OsString::from(format!("/runtime{separator}/site"))
+            OsString::from(format!("/runtime{PATH_LIST_SEPARATOR}/site"))
         );
         assert_eq!(
             prepend_path_list(Some("".into()), Path::new("/runtime")),
@@ -1164,6 +1179,57 @@ mod tests {
             PythonServer::prepare(&root, &root, "2026-01-02T00-00-00-000Z", &command)
                 .unwrap()
                 .is_none()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// `SUPERCOV_VERBOSE` (or `SUPERCOV_DEBUG`) set to a yes prints the
+    /// publication's timings, and `SUPERCOV_KEEP_WORK` keeps the work
+    /// directory beside the project; anything else leaves both out.
+    #[test]
+    fn a_verbose_run_says_how_long_publication_took_and_a_kept_one_keeps_its_work() {
+        let root = fixture("verbose");
+        fs::write(
+            root.join("test_a.py"),
+            "import unittest\n\nfrom a import f\n\n\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertEqual(f(2), 2)\n",
+        )
+        .unwrap();
+        let command = ["python3", "-m", "unittest", "-q", "test_a"];
+        let run = |run_id: &str, ambient: &[(&str, &str)]| {
+            let request = DirectPythonRunRequest {
+                run_id: run_id.into(),
+                ..python_request(&root, &command)
+            };
+            let ambient = ambient
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect();
+            let mut diagnostics = Vec::new();
+            let result = run_direct_python_in(&request, &ambient, &mut diagnostics).unwrap();
+            assert_eq!((result.exit_code, result.tests), (0, 1));
+            let kept = root.join(".supercov/python-debug").join(run_id).exists();
+            let timed = String::from_utf8(diagnostics)
+                .unwrap()
+                .contains("[supercov] python evidence: join=");
+            (timed, kept)
+        };
+        assert_eq!(
+            run(
+                "2026-01-02T00-00-00-001Z",
+                &[("SUPERCOV_VERBOSE", "1"), ("SUPERCOV_KEEP_WORK", "1")]
+            ),
+            (true, true)
+        );
+        assert_eq!(
+            run(
+                "2026-01-02T00-00-00-002Z",
+                &[("SUPERCOV_DEBUG", "yes"), ("SUPERCOV_KEEP_WORK", "")]
+            ),
+            (true, false)
+        );
+        assert_eq!(
+            run("2026-01-02T00-00-00-003Z", &[("SUPERCOV_VERBOSE", "0")]),
+            (false, false)
         );
         fs::remove_dir_all(&root).ok();
     }

@@ -110,14 +110,16 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The test command's environment: `inherited`, the one Supercov was
+/// started with, plus what loads the runtime.
 fn environment(
+    mut variables: Vec<(OsString, OsString)>,
     root: &Path,
     run_id: &str,
     runtime_directory: &Path,
     plan_path: &Path,
     evidence_directory: &Path,
 ) -> Vec<(OsString, OsString)> {
-    let mut variables = std::env::vars_os().collect::<Vec<_>>();
     let mut take = |key: &str| {
         let position = variables.iter().position(|(name, _)| name == key);
         position.map(|index| variables.remove(index).1)
@@ -204,6 +206,15 @@ pub fn run_direct_ruby(
     request: &DirectRubyRunRequest,
     diagnostics: &mut dyn Write,
 ) -> Result<DirectRubyRunResult, String> {
+    run_direct_ruby_in(request, &std::env::vars().collect(), diagnostics)
+}
+
+/// A run under `ambient`, the environment Supercov was started in.
+fn run_direct_ruby_in(
+    request: &DirectRubyRunRequest,
+    ambient: &std::collections::BTreeMap<String, String>,
+    diagnostics: &mut dyn Write,
+) -> Result<DirectRubyRunResult, String> {
     if request.command.is_empty() {
         return Err("test command must not be empty".into());
     }
@@ -232,13 +243,10 @@ pub fn run_direct_ruby(
         }
 
         let adapter_started = Instant::now();
-        let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
-        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(&root, &ambient)
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(&root, ambient)
             .map_err(|error| error.to_string())?;
         let project: PreparedRubyProject = prepare_ruby_project(&root, roots.as_ref())?;
-        let source_roots = crate::source_discovery::configured_source_roots(
-            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
-        );
+        let source_roots = crate::source_discovery::configured_source_roots(ambient);
         let mut integrity_inputs = ruby_integrity_inputs(&project.files, &request.command);
         crate::source_discovery::fold_roots_into_configuration(
             &mut integrity_inputs.execution_configuration,
@@ -297,6 +305,7 @@ pub fn run_direct_ruby(
                     arguments: request.command[1..].iter().map(OsString::from).collect(),
                     cwd: root.clone(),
                     environment: Some(environment(
+                        std::env::vars_os().collect(),
                         &root,
                         &request.run_id,
                         &runtime_directory,
@@ -318,7 +327,10 @@ pub fn run_direct_ruby(
             ));
         }
 
-        if std::env::var("SUPERCOV_KEEP_WORK").is_ok_and(|value| !value.is_empty()) {
+        if ambient
+            .get("SUPERCOV_KEEP_WORK")
+            .is_some_and(|value| !value.is_empty())
+        {
             // Kept before the join so a rejected evidence file stays inspectable.
             let debug_directory = root.join(".supercov/ruby-debug").join(&request.run_id);
             fs::create_dir_all(&debug_directory).map_err(|error| error.to_string())?;
@@ -522,14 +534,20 @@ impl RubyServer {
     /// What the suite's environment needs for a Ruby process it starts to be
     /// measured; the run id and project root are the browser run's own.
     pub fn environment(&self) -> std::collections::BTreeMap<String, String> {
+        self.environment_after(std::env::var("RUBYOPT").ok())
+    }
+
+    /// The environment, with `existing`, the suite's own `RUBYOPT`, kept
+    /// after the runtime.
+    fn environment_after(
+        &self,
+        existing: Option<String>,
+    ) -> std::collections::BTreeMap<String, String> {
         let mut rubyopt = format!(
             "-r{}",
             self.directory.join("runtime/supercov_runtime.rb").display()
         );
-        if let Some(existing) = std::env::var("RUBYOPT")
-            .ok()
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(existing) = existing.filter(|value| !value.is_empty()) {
             rubyopt.push(' ');
             rubyopt.push_str(&existing);
         }
@@ -923,6 +941,69 @@ mod tests {
             RubyServer::prepare(&root, &root, run_id, &command)
                 .unwrap()
                 .is_none()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The suite's own `RUBYOPT` follows the runtime, in the test command
+    /// and in a server's environment alike.
+    #[test]
+    fn a_suite_s_own_rubyopt_is_kept_after_the_runtime() {
+        let variables = environment(
+            vec![
+                ("RUBYOPT".into(), "-w".into()),
+                ("HOME".into(), "/h".into()),
+            ],
+            Path::new("/p"),
+            "run",
+            Path::new("/r"),
+            Path::new("/r/plan.rb"),
+            Path::new("/r/evidence"),
+        );
+        let rubyopt = variables
+            .iter()
+            .filter(|(name, _)| name == "RUBYOPT")
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(rubyopt, [OsString::from("-r/r/supercov_runtime.rb -w")]);
+        assert!(variables.contains(&("HOME".into(), "/h".into())));
+        let root = project("rubyopt");
+        let command = ["npx".to_owned(), "playwright".to_owned(), "test".to_owned()];
+        let server = RubyServer::prepare(&root, &root, "2026-01-02T00-00-00-000Z", &command)
+            .unwrap()
+            .unwrap();
+        let runtime = server.directory.join("runtime/supercov_runtime.rb");
+        assert_eq!(
+            server.environment_after(Some("-w".into()))["RUBYOPT"],
+            format!("-r{} -w", runtime.display())
+        );
+        assert_eq!(
+            server.environment_after(Some(String::new()))["RUBYOPT"],
+            format!("-r{}", runtime.display())
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// `SUPERCOV_KEEP_WORK` keeps the work directory before the evidence is
+    /// read, so evidence the run rejects can still be looked at.
+    #[test]
+    fn a_kept_run_keeps_its_work_even_when_its_evidence_is_rejected() {
+        let root = project("kept");
+        let request = ruby_request(
+            &root,
+            &[
+                "sh",
+                "-c",
+                "echo x > \"$SUPERCOV_RUBY_EVIDENCE_DIR/notes.txt\"",
+            ],
+        );
+        let ambient = [("SUPERCOV_KEEP_WORK".to_owned(), "1".to_owned())].into();
+        run_direct_ruby_in(&request, &ambient, &mut Vec::new()).unwrap_err();
+        assert!(
+            root.join(".supercov/ruby-debug")
+                .join(&request.run_id)
+                .join("evidence/notes.txt")
+                .exists()
         );
         fs::remove_dir_all(&root).ok();
     }
