@@ -2799,18 +2799,17 @@ pub fn instrument_rust_file_numbered(
         );
     }
     for guard in root.descendants().filter_map(ast::MatchGuard::cast) {
-        let Some(condition) = guard.condition() else {
-            continue;
-        };
-        let frame_name = allocate_frame_name(file, &condition, "match-guard", &mut identifiers);
-        instrument_decision(
-            &mut insertions,
-            runtime_path,
-            file,
-            &condition,
-            "match-guard",
-            &frame_name,
-        );
+        if let Some(condition) = guard.condition() {
+            let frame_name = allocate_frame_name(file, &condition, "match-guard", &mut identifiers);
+            instrument_decision(
+                &mut insertions,
+                runtime_path,
+                file,
+                &condition,
+                "match-guard",
+                &frame_name,
+            );
+        }
     }
     // `assert!(cond, ...)`: the condition decides whether the program goes
     // on, and the macro takes an instrumented expression like any other.
