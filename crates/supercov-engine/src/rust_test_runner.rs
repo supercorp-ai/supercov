@@ -1037,6 +1037,21 @@ impl ArtifactLauncher {
         invocation: &CargoTestInvocation,
         hook_directory: &Path,
     ) -> Result<Self, RustTestRunnerError> {
+        Self::for_invocation_with(
+            project,
+            invocation,
+            hook_directory,
+            std::env::var_os("NODE_OPTIONS"),
+        )
+    }
+
+    /// `for_invocation`, with the user's own `NODE_OPTIONS`.
+    fn for_invocation_with(
+        project: &PreparedRustProject,
+        invocation: &CargoTestInvocation,
+        hook_directory: &Path,
+        user_node_options: Option<OsString>,
+    ) -> Result<Self, RustTestRunnerError> {
         let Ok(plan) = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
             &project.workspace_root,
             &project.workspace_root,
@@ -1063,7 +1078,7 @@ impl ArtifactLauncher {
             fs::create_dir_all(hook_directory).map_err(io_error)?;
             let hook = hook_directory.join("rust-wasm-node.mjs");
             fs::write(&hook, RUST_WASM_NODE_HOOK).map_err(io_error)?;
-            let mut options = std::env::var_os("NODE_OPTIONS").unwrap_or_default();
+            let mut options = user_node_options.unwrap_or_default();
             if !options.is_empty() {
                 options.push(" ");
             }
@@ -1089,16 +1104,25 @@ impl ArtifactLauncher {
 
     /// The runner's variables; and, for tests `wasm-bindgen-test-runner`
     /// runs in Chrome, the reader of their pages.
-    pub(crate) fn with_environment(mut self, environment: &[(String, String)]) -> Self {
+    pub(crate) fn with_environment(self, environment: &[(String, String)]) -> Self {
+        self.with_environment_from(environment, &|name| std::env::var_os(name))
+    }
+
+    /// `with_environment`, with `ambient` as the process's own variables.
+    fn with_environment_from(
+        mut self,
+        environment: &[(String, String)],
+        ambient: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Self {
         self.environment = environment.to_vec();
         let in_node = environment
             .iter()
             .any(|(name, _)| name == "WASM_BINDGEN_TEST_ONLY_NODE")
-            || std::env::var_os("WASM_BINDGEN_TEST_ONLY_NODE").is_some();
+            || ambient("WASM_BINDGEN_TEST_ONLY_NODE").is_some();
         if !self.wasm_bindgen_runner || in_node {
             return self;
         }
-        match crate::rust_wasm_browser::browser(environment) {
+        match crate::rust_wasm_browser::browser_from(environment, ambient) {
             Some(crate::rust_wasm_browser::Browser::Chrome(driver, arguments)) => {
                 match crate::rust_wasm_browser::BrowserReader::start(
                     &driver,
@@ -1125,7 +1149,7 @@ impl ArtifactLauncher {
                 .iter()
                 .any(|variable| {
                     environment.iter().any(|(key, _)| key == variable)
-                        || std::env::var_os(variable).is_some()
+                        || ambient(variable).is_some()
                 });
                 if named {
                     self.unmeasured_browser = Some(name);
@@ -1476,7 +1500,12 @@ pub(crate) fn rust_coverage_model() -> CoverageModelDeclaration {
 /// instrumented process gets 16 MiB unless the user chose a size. The
 /// reservation is virtual; only touched pages cost memory.
 pub(crate) fn instrumented_stack_environment() -> Vec<(&'static str, &'static str)> {
-    if std::env::var_os("RUST_MIN_STACK").is_some() {
+    stack_environment(std::env::var_os("RUST_MIN_STACK").is_some())
+}
+
+/// `instrumented_stack_environment`, knowing whether the user chose a size.
+fn stack_environment(chosen: bool) -> Vec<(&'static str, &'static str)> {
+    if chosen {
         Vec::new()
     } else {
         vec![("RUST_MIN_STACK", "16777216")]
@@ -1540,12 +1569,28 @@ pub(crate) fn dynamic_library_environment(
     target_libdir: &Path,
     executable: &Path,
 ) -> Vec<(&'static str, OsString)> {
-    #[cfg(target_os = "macos")]
-    let variable = "DYLD_FALLBACK_LIBRARY_PATH";
-    #[cfg(windows)]
-    let variable = "PATH";
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let variable = "LD_LIBRARY_PATH";
+    library_path_environment(
+        target_libdir,
+        executable,
+        std::env::var_os(LIBRARY_PATH_VARIABLE),
+    )
+}
+
+/// The variable a platform's loader searches for libraries.
+#[cfg(target_os = "macos")]
+const LIBRARY_PATH_VARIABLE: &str = "DYLD_FALLBACK_LIBRARY_PATH";
+#[cfg(windows)]
+const LIBRARY_PATH_VARIABLE: &str = "PATH";
+#[cfg(not(any(target_os = "macos", windows)))]
+const LIBRARY_PATH_VARIABLE: &str = "LD_LIBRARY_PATH";
+
+/// `dynamic_library_environment`, with the user's own path, `existing`.
+fn library_path_environment(
+    target_libdir: &Path,
+    executable: &Path,
+    existing: Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    let variable = LIBRARY_PATH_VARIABLE;
     let mut entries = Vec::new();
     if let Some(deps) = executable.parent() {
         entries.push(deps.to_path_buf());
@@ -1554,7 +1599,7 @@ pub(crate) fn dynamic_library_environment(
         }
     }
     entries.push(target_libdir.to_path_buf());
-    if let Some(existing) = std::env::var_os(variable) {
+    if let Some(existing) = existing {
         entries.extend(std::env::split_paths(&existing));
     }
     match std::env::join_paths(entries) {
@@ -2856,6 +2901,44 @@ mod tests {
             ]),
             None
         );
+        // The same, said in Supercov's own environment rather than the
+        // runner's.
+        let ambient = |variables: &[(&str, &str)]| {
+            let variables = variables
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), OsString::from(value)))
+                .collect::<BTreeMap<_, _>>();
+            launcher()
+                .with_environment_from(&[], &|name| variables.get(name).cloned())
+                .unmeasured_browser()
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            ambient(&[("GECKODRIVER", "/opt/geckodriver")]),
+            Some("geckodriver".into())
+        );
+        assert_eq!(
+            ambient(&[
+                ("GECKODRIVER", "/opt/geckodriver"),
+                ("WASM_BINDGEN_TEST_ONLY_NODE", "1")
+            ]),
+            None
+        );
+    }
+
+    /// The user's own stack size and library path are kept: a size they
+    /// chose is not overridden, and their path follows Supercov's.
+    #[test]
+    fn the_user_s_stack_size_and_library_path_are_kept() {
+        assert_eq!(stack_environment(true), []);
+        assert_eq!(stack_environment(false), [("RUST_MIN_STACK", "16777216")]);
+        let user = std::env::join_paths(["/user/a", "/user/b"]).unwrap();
+        let environment =
+            library_path_environment(Path::new("/lib"), Path::new("/fixture"), Some(user));
+        assert_eq!(
+            std::env::split_paths(&environment[0].1).collect::<Vec<_>>(),
+            ["/", "/lib", "/user/a", "/user/b"].map(PathBuf::from)
+        );
     }
 
     #[cfg(unix)]
@@ -2910,6 +2993,105 @@ mod tests {
         assert!(
             error.contains("several targets, one of them with a target runner"),
             "{error}"
+        );
+        // Several targets, none with a runner: each test binary runs itself.
+        fs::remove_file(root.join(".cargo/config.toml")).unwrap();
+        let launcher = ArtifactLauncher::for_invocation(
+            &project,
+            &invocation(&[
+                "cargo",
+                "test",
+                &format!("--target={host}"),
+                "--target=wasm32-unknown-unknown",
+            ]),
+            &root,
+        )
+        .unwrap();
+        let command = launcher.command(Path::new("/target/debug/deps/fixture"), None);
+        assert_eq!(command.get_program(), "/target/debug/deps/fixture");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run whose wasm tests a browser other than Chrome would run says
+    /// they go unmeasured, before it runs anything.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_names_the_browser_whose_wasm_it_cannot_read() {
+        let root = scratch("wasm-unmeasured-browser");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn one() -> u8 {\n    1\n}\n").unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.wasm32-unknown-unknown]\nrunner = 'wasm-bindgen-test-runner'\n",
+        )
+        .unwrap();
+        let project = prepare_rust_project(&root, None).unwrap();
+        let mut diagnostics = Vec::new();
+        // Whatever becomes of the doctests, which need wasm's standard library.
+        let _ = run_prepared_rust_tests(
+            &project,
+            &["cargo", "test", "--doc", "--target=wasm32-unknown-unknown"].map(String::from),
+            "rust-fixture-browser",
+            "2026-08-26T00:00:00.000Z",
+            None,
+            &[("GECKODRIVER".into(), "/opt/geckodriver".into())],
+            &mut diagnostics,
+        );
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains("[supercov] wasm tests run in geckodriver are not measured"),
+            "{diagnostics}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A wasm test's runner loads Supercov's hook after the user's own
+    /// `NODE_OPTIONS`.
+    #[cfg(unix)]
+    #[test]
+    fn a_wasm_runner_loads_the_hook_after_the_user_s_node_options() {
+        let root = scratch("wasm-node-options");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.wasm32-unknown-unknown]\nrunner = 'wasm-bindgen-test-runner'\n",
+        )
+        .unwrap();
+        let project = PreparedRustProject::empty(root.clone());
+        let invocation = cargo_invocation(
+            &root,
+            &["cargo", "test", "--target=wasm32-unknown-unknown"].map(String::from),
+        )
+        .unwrap();
+        let hooks = root.join("hooks");
+        let launcher = ArtifactLauncher::for_invocation_with(
+            &project,
+            &invocation,
+            &hooks,
+            Some("--max-old-space-size=64".into()),
+        )
+        .unwrap();
+        let command = launcher.command(Path::new("/target/fixture.wasm"), None);
+        assert_eq!(command.get_program(), "wasm-bindgen-test-runner");
+        let options = command
+            .get_envs()
+            .find(|(name, _)| *name == "NODE_OPTIONS")
+            .and_then(|(_, value)| value)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            options,
+            format!(
+                "--max-old-space-size=64 --import={}",
+                file_url(&hooks.join("rust-wasm-node.mjs"))
+            )
         );
         fs::remove_dir_all(root).unwrap();
     }
