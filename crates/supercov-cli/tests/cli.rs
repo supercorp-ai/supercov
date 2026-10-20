@@ -11343,6 +11343,8 @@ fn wrap_rustdoc(
             ("FAKE_RUSTDOC_DIR", directory.to_str().unwrap()),
             ("CARGO_PKG_NAME", "fixture"),
             ("CARGO_MANIFEST_DIR", project.root.to_str().unwrap()),
+            // The run that starts rustdoc names its instrumentation.
+            ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
         ],
     );
     let recorded = ["00000000.json", "00000000.error"]
@@ -11568,6 +11570,7 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
                 // by both variables.
                 ("SUPERCOV_DOCTEST_WRAPPER_ROOT", directory.to_str().unwrap()),
                 ("RUSTDOC_DOCTEST_RUN_NB_TEST", "0"),
+                ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
             ],
         );
         let record = std::fs::read_to_string(directory.join("invocations/00000000.json"))
