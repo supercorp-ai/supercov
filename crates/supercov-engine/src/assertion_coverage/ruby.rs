@@ -258,6 +258,17 @@ struct Specs<'s> {
     loops: usize,
 }
 
+impl Specs<'_> {
+    /// A runnable of the group being read. The file's own level is pushed
+    /// first and only `rspec` pops it, so there is always one.
+    fn push(&mut self, runnable: Runnable) {
+        self.stack
+            .last_mut()
+            .expect("the file's level")
+            .push(runnable);
+    }
+}
+
 impl<'pr> Visit<'pr> for Specs<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let name = node.name().as_slice();
@@ -278,36 +289,30 @@ impl<'pr> Visit<'pr> for Specs<'_> {
                 self.visit(&block);
             }
             let children = self.stack.pop().unwrap_or_default();
-            if let Some(level) = self.stack.last_mut() {
-                level.push(Runnable {
-                    lines,
-                    children,
-                    group: true,
-                    uncounted: self.loops > 0,
-                });
-            }
+            self.push(Runnable {
+                lines,
+                children,
+                group: true,
+                uncounted: self.loops > 0,
+            });
             return;
         }
         if bare && EXAMPLES.contains(&name) && (node.block().is_some() || name != b"skip") {
-            if let Some(level) = self.stack.last_mut() {
-                level.push(Runnable {
-                    lines,
-                    children: Vec::new(),
-                    group: false,
-                    uncounted: self.loops > 0,
-                });
-            }
+            self.push(Runnable {
+                lines,
+                children: Vec::new(),
+                group: false,
+                uncounted: self.loops > 0,
+            });
             return;
         }
         if bare && (name == b"include_examples" || name == b"include_context") {
-            if let Some(level) = self.stack.last_mut() {
-                level.push(Runnable {
-                    lines,
-                    children: Vec::new(),
-                    group: false,
-                    uncounted: true,
-                });
-            }
+            self.push(Runnable {
+                lines,
+                children: Vec::new(),
+                group: false,
+                uncounted: true,
+            });
             return;
         }
         if bare
@@ -637,6 +642,38 @@ mod tests {
     /// block; `it_behaves_like` is a group whose body is elsewhere; and once
     /// `include_examples` stands before an example, its id no longer says
     /// which it is and the group holding it is what is known.
+    /// An `it` with no block is a pending example RSpec numbers, a group
+    /// with no block holds nothing, and `shared_examples_for` defines
+    /// rather than runs.
+    #[test]
+    fn pending_examples_empty_groups_and_shared_definitions_are_numbered_as_rspec_does() {
+        let spec = "RSpec.describe A do\n  shared_examples_for \"s\" do\n    it \"in shared\" do\n    end\n  end\n  it \"pending\"\n  describe \"empty\"\n  it \"last\" do\n  end\nend\n";
+        let lines = spec.split('\n').collect::<Vec<_>>();
+        let at = |id: &str| {
+            let found = locate(spec, &lines, "rspec", &format!("spec/a_spec.rb[{id}]")).unwrap();
+            (found.start + 1, found.end + 1)
+        };
+        assert_eq!(at("1:1"), (6, 6));
+        assert_eq!(at("1:2"), (7, 7));
+        assert_eq!(at("1:3"), (8, 9));
+    }
+
+    /// A ternary that is not a method's value is skipped; empty parentheses
+    /// and an empty interpolation hold no statement of their own.
+    #[test]
+    fn a_ternary_mid_method_and_empty_lists_are_read() {
+        let source = "def f(x)\n  x ? 1 : 2\n  ()\n  \"#{}\"\n  3\nend\n";
+        let starts = statement_starts(source);
+        let rb = Language::Ruby;
+        assert_eq!(change_at(&starts, 2, "x ? 1 : 2", rb), Some(Change::Skip));
+        assert_eq!(change_at(&starts, 3, "()", rb), Some(Change::Skip));
+        assert_eq!(change_at(&starts, 4, "\"#{}\"", rb), Some(Change::Skip));
+        assert_eq!(
+            change_at(&starts, 5, "3", rb),
+            Some(Change::ReturnUndefined)
+        );
+    }
+
     #[test]
     fn rspec_ids_count_only_what_rspec_numbers() {
         let spec = "RSpec.shared_examples \"s\" do\n  it \"in shared\" do\n  end\nend\ndescribe A do\n  skip \"no block\"\n  skip \"with block\" do\n  end\n  it_behaves_like \"s\"\n  include_examples \"s\"\n  it \"after include\" do\n  end\nend\n";
@@ -781,6 +818,10 @@ mod tests {
         let lines = feature.split('\n').collect::<Vec<_>>();
         let one = locate(feature, &lines, "cucumber", "features/f.feature:2").unwrap();
         assert_eq!((one.start, one.end), (1, 2));
+        let feature = "Feature: f\n  Scenario: one\n    Given x\n  Scenario: two\n";
+        let lines = feature.split('\n').collect::<Vec<_>>();
+        let one = locate(feature, &lines, "cucumber", "features/f.feature:2").unwrap();
+        assert_eq!((one.start, one.end), (1, 2), "up to the next scenario");
         assert!(locate(feature, &lines, "cucumber", "features/f.feature:x").is_none());
         let tests = "class Bare\n  def test_args(a)\n    assert a\n  end\n  test \"adds two\" do\n    assert true\n  end\nend\n";
         let lines = tests.split('\n').collect::<Vec<_>>();
@@ -802,6 +843,7 @@ mod tests {
         for file in [
             "spec/spec_helper.rb",
             "spec/support/money.rb",
+            "spec/support/unrequired.rb",
             "spec/local.rb",
             "lib/shop.rb",
         ] {

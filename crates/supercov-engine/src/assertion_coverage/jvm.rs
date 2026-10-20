@@ -443,6 +443,57 @@ mod tests {
     }
     use crate::assertion_coverage::{Language, change_at};
 
+    /// A Kotlin file the instrumenter cannot parse is still read; a comment
+    /// is no statement; a bare `return` and a delegated property change
+    /// nothing; a statement before the last ends no function; and a `throw`
+    /// ends its function only on the path the function ends on.
+    #[test]
+    fn statements_off_the_final_path_and_in_broken_files_are_read() {
+        let j = Language::Jvm;
+        let broken = statement_starts(
+            "A.kt",
+            "fun f(): Int {\n    val x by lazy { 1 }\n    return\n    val y = (\n}\n",
+        );
+        assert_eq!(change_at(&broken, 2, "val x by lazy { 1 }", j), None);
+        assert_eq!(change_at(&broken, 3, "return", j), Some(Change::Skip));
+        let java = statement_starts(
+            "A.java",
+            "class A {\n    int f() {\n        // c\n        try { g(); } finally { h(); }\n        return;\n    }\n}\n",
+        );
+        assert!(!java.contains_key(&3), "{java:?}");
+        assert_eq!(
+            change_at(&java, 4, "try { g(); } finally { h(); }", j),
+            Some(Change::Skip)
+        );
+        assert_eq!(change_at(&java, 5, "return;", j), Some(Change::Skip));
+        let kotlin = statement_starts(
+            "A.kt",
+            "fun k(a: Boolean): Int {\n    if (a) {\n        throw E()\n    } else {\n        g()\n    }\n    return 1\n}\nfun m(a: Boolean): Int {\n    try {\n        g()\n        throw E()\n    } catch (e: E) {\n        throw E()\n    }\n}\nfun h() {\n    throw E()\n    g()\n}\n",
+        );
+        assert_eq!(change_at(&kotlin, 3, "throw E()", j), Some(Change::Skip));
+        assert_eq!(
+            change_at(&kotlin, 12, "throw E()", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&kotlin, 14, "throw E()", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(change_at(&kotlin, 18, "throw E()", j), Some(Change::Skip));
+    }
+
+    /// A class is found by its whole name at the start of a line, and not
+    /// inside a longer word or before more of a name.
+    #[test]
+    fn a_nested_class_is_named_by_its_whole_word_anywhere_on_its_line() {
+        let text = "class T {\nsubclass Inner {\n}\nclass Inner2 {\n    void run() {}\n}\nclass Inner {\n    void run() {}\n}\n}\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        assert_eq!(
+            locate(&lines, "app.T$Inner#run()").map(|found| found.start + 1),
+            Some(8)
+        );
+    }
+
     #[test]
     fn null_changed_to_null_is_not_asked() {
         let source = "class A {\n    String f(String x) {\n        String y = null;\n        x = null;\n        if (x == null) {\n            return null;\n        }\n        return y;\n    }\n}\n";
