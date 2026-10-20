@@ -936,4 +936,98 @@ mod tests {
         assert!(!is_llvm_profile(&magic(b'x')));
         assert!(!is_llvm_profile(&magic(b'r')[..7]));
     }
+
+    /// Line evidence goes into a run with no scope and no record of its
+    /// source, for a measured file the checkout no longer holds and for a
+    /// file it adds; a second import under the same kind of credit declares
+    /// its runner once. An LLVM profile is refused for what it is.
+    #[test]
+    fn line_evidence_is_imported_into_a_run_with_no_scope_or_source_record() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-import-lines-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(base);
+        crate::run_store::create_analyzable_test_run(&root, "run-a");
+        std::fs::write(root.join("src/new.js"), "one();\ntwo();\n").unwrap();
+        let evidence = root.join("lines.info");
+        std::fs::write(
+            &evidence,
+            "SF:src/app.js\nDA:1,1\nend_of_record\nSF:src/new.js\nDA:1,1\nDA:2,0\nend_of_record\n",
+        )
+        .unwrap();
+        let import = |parent: &str, credit: Credit, run_id: &str, evidence: &Path| {
+            import_line_evidence(&ImportRequest {
+                root: &root,
+                run: Some(parent),
+                evidence,
+                credit,
+                status: None,
+                run_id,
+                started_at: "2026-01-01T00:00:00.000Z",
+            })
+        };
+        let runners = |run: &str| {
+            let entries = crate::evidence_archive::read_archive(
+                &root
+                    .join(".supercov/runs")
+                    .join(run)
+                    .join("evidence.raw.gz"),
+            )
+            .unwrap();
+            let declaration: FrontendRunDeclaration = serde_json::from_slice(
+                &entries
+                    .iter()
+                    .find(|entry| entry.path == "frontend.json")
+                    .unwrap()
+                    .contents,
+            )
+            .unwrap();
+            declaration
+                .runners
+                .into_iter()
+                .map(|runner| runner.runner)
+                .collect::<Vec<_>>()
+        };
+        let first = import("run-a", Credit::Test("smoke".into()), "run-b", &evidence).unwrap();
+        assert_eq!(first.added_files, ["src/new.js"]);
+        assert_eq!(first.lines_run, 2);
+        import("run-b", Credit::Test("again".into()), "run-c", &evidence).unwrap();
+        let imported = runners("run-c");
+        assert_eq!(
+            imported
+                .iter()
+                .filter(|runner| *runner == IMPORTED_RUNNER)
+                .count(),
+            1,
+            "{imported:?}"
+        );
+        import("run-c", Credit::Background, "run-d", &evidence).unwrap();
+        import("run-d", Credit::Background, "run-e", &evidence).unwrap();
+        let background = runners("run-e");
+        assert_eq!(
+            background
+                .iter()
+                .filter(|runner| *runner == BACKGROUND_RUNNER)
+                .count(),
+            1,
+            "{background:?}"
+        );
+        let profile = root.join("default.profraw");
+        std::fs::write(
+            &profile,
+            [0x81, b'r', b'f', b'o', b'r', b'p', b'l', 0xff, 0],
+        )
+        .unwrap();
+        assert!(
+            import("run-a", Credit::Background, "run-f", &profile)
+                .unwrap_err()
+                .contains("is an LLVM profile")
+        );
+    }
 }
