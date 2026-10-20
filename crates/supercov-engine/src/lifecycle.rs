@@ -272,14 +272,12 @@ pub fn remove_stored_tree_deferred(
     }
     let store = root.join(".supercov");
     let trash = root.join(TRASH);
-    let in_store = lexical_descendant(&store, &target) && !lexical_descendant(&trash, &target);
-    let container = crate::workspace::workspace_container(&root);
-    let in_workspace = owned_workspace_container(&root)
-        && (target == container || lexical_descendant(&container, &target));
-    if !in_store && !in_workspace {
+    // The workspace container is a directory of the store, so its copies are
+    // stored trees like any other.
+    if !lexical_descendant(&store, &target) || lexical_descendant(&trash, &target) {
         return Err(LifecycleError::UnsafePath(target));
     }
-    reject_linked_ancestors(if in_store { &store } else { &container }, &target, false)?;
+    reject_linked_ancestors(&store, &target, false)?;
     reject_linked_ancestors(&root, &trash, true)?;
     fs::create_dir_all(&trash).map_err(|source| io_error(&trash, source))?;
     let destination = trash.join(unique_name());
@@ -307,9 +305,10 @@ pub fn sweep_trash_in_background(project_root: &Path) {
     let sweep = std::thread::spawn(move || {
         let _ = sweep_trash(&root);
     });
-    if let Ok(mut running) = BACKGROUND_SWEEP.lock() {
-        *running = Some(sweep);
-    }
+    // Never poisoned: nothing that holds it can panic.
+    *BACKGROUND_SWEEP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sweep);
 }
 
 /// Wait for the sweep the run started, for as long as `patience`. True when
@@ -1348,8 +1347,8 @@ pub fn cleanup_storage_locked(
         }
         let has_run = published.contains(&id);
         let remove_history = has_run && !retained.contains(&id);
-        if work.contains(&id) && read_state(root, &id)?.is_none_or(|state| state.status.terminal())
-        {
+        // A run whose state is not terminal is active, and passed over above.
+        if work.contains(&id) {
             result.removed_workspaces.push(id.clone());
             if !options.dry_run {
                 remove_stored_tree_deferred(root, &work_root.join(&id))?;
@@ -1402,31 +1401,17 @@ pub fn cleanup_storage_locked(
     Ok(result)
 }
 
-fn cleanup_storage(
-    root: &Path,
-    options: CleanupOptions,
-    remove_build_cache: bool,
-    updated_at: &str,
-) -> Result<CleanupResult, LifecycleError> {
-    let operation = if remove_build_cache {
-        "clean"
-    } else {
-        "retention"
-    };
-    let lock_id = format!("{operation}-{}-{}", std::process::id(), unique_name());
-    let mut lock = ProjectLock::acquire_alone(root, &lock_id, updated_at)?;
-    recover_abandoned_runs(root, updated_at)?;
-    let result = cleanup_storage_locked(root, options, remove_build_cache);
-    lock.release()?;
-    result
-}
-
 pub fn clean_storage(
     root: &Path,
     options: CleanupOptions,
     updated_at: &str,
 ) -> Result<CleanupResult, LifecycleError> {
-    cleanup_storage(root, options, true, updated_at)
+    let lock_id = format!("clean-{}-{}", std::process::id(), unique_name());
+    let mut lock = ProjectLock::acquire_alone(root, &lock_id, updated_at)?;
+    recover_abandoned_runs(root, updated_at)?;
+    let result = cleanup_storage_locked(root, options, true);
+    lock.release()?;
+    result
 }
 
 #[cfg(test)]
@@ -2592,6 +2577,152 @@ mod tests {
             vec!["run_cleaned".to_string()]
         );
         assert!(!kept.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_or_a_name_too_long_on_the_way_to_a_write_refuses_it() {
+        let root = project();
+        fs::create_dir_all(root.join(".supercov")).unwrap();
+        fs::write(root.join(".supercov/file"), "").unwrap();
+        assert!(matches!(
+            atomic_write(&root, &root.join(".supercov/file/x/state.json"), b"{}"),
+            Err(LifecycleError::UnsafePath(path)) if path == root.join(".supercov/file")
+        ));
+        let long = "x".repeat(300);
+        assert!(matches!(
+            atomic_write(&root, &root.join(".supercov").join(&long).join("state.json"), b"{}"),
+            Err(LifecycleError::Io { path, .. }) if path == root.join(".supercov").join(&long)
+        ));
+        // A name that fits, but not with the temporary's suffix.
+        let near = "x".repeat(250);
+        assert!(matches!(
+            atomic_write(&root, &root.join(".supercov").join(&near), b"{}"),
+            Err(LifecycleError::Io { path, .. }) if path.extension().is_some_and(|extension| extension == "tmp")
+        ));
+        assert!(!root.join(".supercov").join(&near).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_write_onto_a_directory_fails_and_leaves_no_temporary() {
+        let root = project();
+        let directory = root.join(".supercov/work/run_dir/state.json");
+        fs::create_dir_all(directory.join("inside")).unwrap();
+        assert!(matches!(
+            atomic_write(&root, &directory, b"{}"),
+            Err(LifecycleError::Io { path, .. }) if path == directory
+        ));
+        let left = fs::read_dir(directory.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(left, ["state.json"]);
+        // The same directory is no state to read.
+        assert!(matches!(
+            update_run_state(&root, "run_dir", RunStateStatus::Failed, "now", None),
+            Err(LifecycleError::Io { .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_stored_tree_under_a_file_is_an_error_not_already_gone() {
+        let root = project();
+        fs::create_dir_all(root.join(".supercov/runs")).unwrap();
+        fs::write(root.join(".supercov/runs/file"), "").unwrap();
+        assert!(matches!(
+            remove_stored_tree_deferred(&root, &root.join(".supercov/runs/file/run_x")),
+            Err(LifecycleError::Io { .. })
+        ));
+        assert!(root.join(".supercov/runs/file").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn waiting_for_the_trash_sweep_gives_up_only_past_its_patience() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        *BACKGROUND_SWEEP.lock().unwrap() = Some(std::thread::spawn(move || {
+            let _ = wait.recv();
+        }));
+        assert!(!finish_background_sweep(Duration::ZERO));
+        drop(release);
+        *BACKGROUND_SWEEP.lock().unwrap() = Some(std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+        }));
+        assert!(finish_background_sweep(Duration::from_secs(30)));
+        assert!(finish_background_sweep(Duration::ZERO));
+    }
+
+    /// An owner file naming this process is not another run's: a run takes
+    /// the copy, and cleaning is not refused for it.
+    #[test]
+    fn a_copy_this_process_is_named_beside_is_not_held_by_another_run() {
+        let root = project();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let mine = LockOwner {
+            run_id: "run_earlier".into(),
+            pid: std::process::id(),
+            started_at: "earlier".into(),
+        };
+        fs::write(
+            locks.join(format!("{}.json", copy_lock_name(1))),
+            serde_json::to_vec(&mine).unwrap(),
+        )
+        .unwrap();
+        let mut alone = ProjectLock::acquire_alone(&root, "clean-1", "now").unwrap();
+        alone.release().unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run_mine", "now").unwrap();
+        assert_eq!(lock.copy(), 1);
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_run_named_but_without_its_evidence_is_not_published() {
+        let root = project();
+        let run = root.join(".supercov/runs/run_bare");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(run.join("run.json"), r#"{"id":"run_bare"}"#).unwrap();
+        fs::create_dir_all(root.join(".supercov/work/run_bare")).unwrap();
+        assert!(!finalize_published_run(&root, "run_bare").unwrap());
+        assert!(root.join(".supercov/work/run_bare").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn evidence_that_cannot_all_be_copied_is_not_kept_in_part() {
+        let root = project();
+        let evidence = root.join(".supercov/work/run_link/python/evidence");
+        fs::create_dir_all(&evidence).unwrap();
+        fs::write(evidence.join("main.jsonl"), "what the run saw").unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), evidence.join("zz.jsonl")).unwrap();
+        assert!(keep_failed_evidence(&root, &evidence, "run_link").is_none());
+        assert!(!root.join(FAILED_EVIDENCE).join("run_link").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_idle_copy_with_part_of_it_gone_is_removed_as_far_as_it_is_there() {
+        let root = project();
+        let container = root.join(".supercov/workspaces");
+        fs::create_dir_all(container.join("workspace-2/project")).unwrap();
+        fs::write(
+            container.join(".supercov-workspace-store"),
+            b"Supercov instrumented workspace. Safe to delete.\n",
+        )
+        .unwrap();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        File::create(locks.join("active-2.lock"))
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60))
+            .unwrap();
+        recover_abandoned_runs(&root, "now").unwrap();
+        assert!(!container.join("workspace-2").exists());
+        sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }
