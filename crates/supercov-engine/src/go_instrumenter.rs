@@ -646,19 +646,22 @@ impl<'a> Collector<'a> {
     /// Returns the runtime's index for this decision, or `None` when the
     /// expression has a single condition and needs no independence obligation.
     fn add_decision(&mut self, node: Node, kind: &str) -> Option<usize> {
-        self.add_decision_wrapping(node, kind, false)
-    }
-
-    /// `add_decision`, with each operand of a decision used as a value
-    /// wrapped so it keeps its type: a typed operand through the generic
-    /// `CV`, an untyped one (a comparison, `true`) as `C(...) == true`, which
-    /// is untyped again.
-    fn add_decision_wrapping(&mut self, node: Node, kind: &str, value: bool) -> Option<usize> {
         let mut leaves = Vec::new();
         condition_nodes(node, self.source, &mut leaves);
-        if leaves.len() < 2 {
-            return None;
-        }
+        (leaves.len() >= 2).then(|| self.add_decision_wrapping(node, &leaves, kind, false))
+    }
+
+    /// `add_decision` over its two or more `leaves`, with each operand of a
+    /// decision used as a value wrapped so it keeps its type: a typed operand
+    /// through the generic `CV`, an untyped one (a comparison, `true`) as
+    /// `C(...) == true`, which is untyped again.
+    fn add_decision_wrapping(
+        &mut self,
+        node: Node,
+        leaves: &[Node],
+        kind: &str,
+        value: bool,
+    ) -> usize {
         let conditions = leaves
             .iter()
             .map(|leaf| self.source[leaf.byte_range()].trim().to_owned())
@@ -704,7 +707,7 @@ impl<'a> Collector<'a> {
             conditions,
             kind: kind.to_owned(),
         });
-        Some(index_of_decision)
+        index_of_decision
     }
 
     fn walk(&mut self, node: Node) {
@@ -924,21 +927,22 @@ impl<'a> Collector<'a> {
                     let typed = leaves
                         .iter()
                         .any(|leaf| !untyped_boolean(*leaf, self.source));
-                    if let Some(index) = self.add_decision_wrapping(node, "value", true) {
-                        let (open, close) = if typed {
-                            (
-                                format!("{alias}.BV({}, {}, {index}, ", probes[0], probes[1]),
-                                ")",
-                            )
-                        } else {
-                            (
-                                format!("({alias}.BD({}, {}, {index}, ", probes[0], probes[1]),
-                                ") == true)",
-                            )
-                        };
-                        self.edit(node.start_byte(), 5, open);
-                        self.edit(node.end_byte(), 5, close.to_owned());
-                    }
+                    // A logical has an operand on each side: two leaves at
+                    // least.
+                    let index = self.add_decision_wrapping(node, &leaves, "value", true);
+                    let (open, close) = if typed {
+                        (
+                            format!("{alias}.BV({}, {}, {index}, ", probes[0], probes[1]),
+                            ")",
+                        )
+                    } else {
+                        (
+                            format!("({alias}.BD({}, {}, {index}, ", probes[0], probes[1]),
+                            ") == true)",
+                        )
+                    };
+                    self.edit(node.start_byte(), 5, open);
+                    self.edit(node.end_byte(), 5, close.to_owned());
                 } else {
                     let (line, column) = self.position(node);
                     let id = self.limitation_id(node, "value-decision-before-generics");
@@ -1114,10 +1118,8 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
         .collect::<Vec<_>>();
     let mut out = source.to_owned();
     let mut placed = None;
+    // Every edit is placed at an offset of a node parsed from `source`.
     for edit in ordered {
-        if edit.at > source.len() {
-            continue;
-        }
         if placed != Some(edit.at) {
             placed = Some(edit.at);
             let line = lines.partition_point(|start| *start <= edit.at);
@@ -2117,5 +2119,66 @@ func classify(a int, b bool) string {
         parse(&rewritten).expect("rewritten Go parses");
         // The bare loop, a comment and all, is still one with nothing to test.
         assert_eq!(obligations.manifest.limitations.len(), 1);
+    }
+
+    #[test]
+    fn new_is_the_builtin_only_where_no_identifier_runs_into_it() {
+        let source = "x := new(T)";
+        assert_eq!(builtin_new_at(source.as_bytes(), 5), Some(8));
+        for (source, at) in [("my_new(1)", 3), ("naïvenew(1)", 6)] {
+            assert_eq!(builtin_new_at(source.as_bytes(), at), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_logical_value_is_measured_only_inside_a_function_and_with_generics() {
+        let source = "package m; var ready = a && b\n\nfunc f(a, b bool) bool {\n\tif (a) {\n\t\treturn true\n\t}\n\treturn a && b\n}\n";
+        let build = |generics: bool| {
+            let mut next = 0;
+            let mut decisions = 0;
+            build_go_obligations_for("m.go", source, &mut next, &mut decisions, "rt", generics)
+                .expect("go")
+        };
+        // At package level a probe has nowhere to run.
+        let measured = build(true);
+        let values = measured
+            .manifest
+            .decisions
+            .iter()
+            .map(|decision| decision.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["a && b"]);
+        assert_eq!(measured.manifest.decisions[0].line, 7);
+        let rewritten = rewrite(source, &measured.edits);
+        assert!(
+            rewritten.starts_with("package m; import rt "),
+            "{rewritten}"
+        );
+        assert!(rewritten.contains("if rt.B("), "{rewritten}");
+        // Before generics the value is declared once for the file instead.
+        let declared = build(false);
+        assert!(declared.manifest.decisions.is_empty());
+        let [limitation] = &declared.manifest.limitations[..] else {
+            panic!("{:?}", declared.manifest.limitations);
+        };
+        assert_eq!(limitation["kind"], "value-decision-before-generics");
+        assert_eq!(limitation["line"], 7);
+    }
+
+    #[test]
+    fn a_file_without_a_package_clause_gains_no_import() {
+        // Not Go a build would take, but the grammar reads it.
+        let source = "func f(x int) bool {\n\tif x > 1 && x < 5 {\n\t\treturn true\n\t}\n\treturn false\n}\n";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations =
+            build_go_obligations("m.go", source, &mut next, &mut decisions).expect("go");
+        assert!(!obligations.edits.is_empty());
+        assert!(
+            obligations
+                .edits
+                .iter()
+                .all(|edit| !edit.text.contains("import"))
+        );
     }
 }
