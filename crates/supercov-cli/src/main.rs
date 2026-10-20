@@ -4080,6 +4080,7 @@ mod tests {
         assert_ne!(first, second);
         assert!(!public_run_id("2026-08-25T23-33-12-211Z"));
         assert!(!public_run_id("run_35c35ceeaf4b843Z"));
+        assert!(!public_run_id("abc_35c35ceeaf4b8430"));
         assert!(first_started_at.contains('T'));
         assert!(second_started_at.contains('T'));
     }

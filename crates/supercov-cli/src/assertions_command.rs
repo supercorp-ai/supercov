@@ -101,15 +101,18 @@ fn tokens(value: &Value) -> usize {
 /// its questions, and a test whose request is over even with one question is
 /// not asked about that statement. Supercov's own suite, whose tests hold
 /// long inline fixtures, had every request refused and the pass stopped.
+///
+/// `request` is the request asking test `t` about `asked`; a statement and
+/// test whose request is over even so go in `refused`.
 fn within_limits(
-    population: &Population,
-    pass: &mut Pass,
+    request: impl Fn(usize, &[usize]) -> Value,
+    refused: &mut BTreeSet<(usize, usize)>,
     batch: Vec<(usize, Vec<usize>)>,
 ) -> Vec<(usize, Vec<usize>)> {
     let mut out = Vec::new();
     let mut pending = batch;
     while let Some((t, asked)) = pending.pop() {
-        let request = population.request(t, &asked, pass.model);
+        let request = request(t, &asked);
         let state = tokens(&request["state"]);
         let longest = request["questions"]
             .as_object()
@@ -129,7 +132,7 @@ fn within_limits(
         } else {
             // A plan asks a test about something, and a split leaves each
             // half something: this is the one statement left.
-            pass.refused.insert((asked[0], t));
+            refused.insert((asked[0], t));
         }
     }
     out
@@ -598,7 +601,12 @@ fn run_pass(
             }
             continue;
         }
-        let batch = within_limits(population, pass, planned);
+        let model = pass.model;
+        let batch = within_limits(
+            |t, asked| population.request(t, asked, model),
+            &mut pass.refused,
+            planned,
+        );
         if batch.is_empty() {
             continue;
         }
@@ -707,7 +715,12 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     if options.dry_run {
         let undecided = (0..n).filter(|&s| pass.undecided(s)).count();
         let planned = pass.plan(usize::MAX);
-        let plan = within_limits(&population, &mut pass, planned);
+        let model = pass.model;
+        let plan = within_limits(
+            |t, asked| population.request(t, asked, model),
+            &mut pass.refused,
+            planned,
+        );
         let bytes: usize = plan
             .iter()
             .map(|(t, asked)| tokens(&population.request(*t, asked, pass.model)))
@@ -1305,7 +1318,11 @@ pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
 /// The lines of the statements judged asserted in a run, by file; `None`
 /// when the run has no saved assessment.
 pub(crate) fn asserted_lines(run: &StoredRun) -> Option<BTreeMap<String, BTreeSet<u64>>> {
-    let result = saved(run)?;
+    Some(asserted_in(&saved(run)?))
+}
+
+/// The lines of the statements an assessment judged asserted, by file.
+fn asserted_in(result: &Value) -> BTreeMap<String, BTreeSet<u64>> {
     let mut out = BTreeMap::<String, BTreeSet<u64>>::new();
     for s in result["statements"].as_array().into_iter().flatten() {
         if s["asserted"] == true
@@ -1314,7 +1331,7 @@ pub(crate) fn asserted_lines(run: &StoredRun) -> Option<BTreeMap<String, BTreeSe
             out.entry(file.to_owned()).or_default().insert(line);
         }
     }
-    Some(out)
+    out
 }
 
 /// What the run's saved assessment says about one file, for the coverage
@@ -2350,6 +2367,74 @@ mod tests {
         assert!(returned < 4000);
         assert_eq!(parsed["data"]["page"]["nextOffset"], returned);
         assert!(parsed["data"]["truncated"].is_string());
+    }
+
+    /// A request over the limit for all its questions is split by them, and
+    /// one over it with a single question is refused for that statement.
+    #[test]
+    fn a_request_over_the_limit_is_split_and_one_question_over_it_refused() {
+        // Just over 20,000 tokens: two fit beside the state, three do not.
+        let mut words = 1_000;
+        let question = loop {
+            let text = "a ".repeat(words);
+            if tokens(&json!(text)) > 20_000 {
+                break text;
+            }
+            words += 1_000;
+        };
+        // Statements 0 to 2 are each one such question; statement 9 is too
+        // long on its own.
+        let request = |_t: usize, asked: &[usize]| {
+            let questions = asked
+                .iter()
+                .map(|s| {
+                    let text = if *s == 9 {
+                        question.repeat(2)
+                    } else {
+                        question.clone()
+                    };
+                    (s.to_string(), json!(text))
+                })
+                .collect::<serde_json::Map<_, _>>();
+            json!({"state": "the test", "questions": questions})
+        };
+        let mut refused = BTreeSet::new();
+        let mut planned = within_limits(
+            request,
+            &mut refused,
+            vec![(7, vec![0, 1, 2]), (8, vec![9])],
+        );
+        planned.sort();
+        assert_eq!(planned, [(7, vec![0]), (7, vec![1, 2])]);
+        assert_eq!(refused, BTreeSet::from([(9, 8)]));
+    }
+
+    /// Only a statement judged asserted and saying where it is counts.
+    #[test]
+    fn asserted_lines_are_those_judged_asserted_that_say_where_they_are() {
+        let result = json!({"statements": [
+            {"file": "a.js", "line": 1, "asserted": true},
+            {"file": "a.js", "line": 2, "asserted": false},
+            {"file": "a.js", "asserted": true},
+            {"line": 4, "asserted": true},
+        ]});
+        assert_eq!(
+            asserted_in(&result),
+            BTreeMap::from([("a.js".to_owned(), BTreeSet::from([1]))])
+        );
+    }
+
+    /// A saved result from before the summary existed, or a statement that
+    /// is not an object, is shown as it is.
+    #[test]
+    fn a_result_without_a_summary_or_with_an_odd_statement_is_shown_as_it_is() {
+        assert_eq!(slim(&json!("x")), json!("x"));
+        let result = json!({"run": "run_x", "statements": [
+            {"file": "a.js", "line": 1, "text": "x;", "change": "skipped", "asserted": true, "answer": 0.6, "answers": []},
+        ]});
+        let files = view(result, &Target::Overview, 0, Some(PAGE)).unwrap();
+        assert!(files.get("summary").is_none(), "{files}");
+        assert_eq!(files["files"][0]["file"], "a.js");
     }
 
     #[test]

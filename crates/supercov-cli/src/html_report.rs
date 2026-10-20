@@ -833,8 +833,8 @@ fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<Timeli
 }
 
 /// Exact assessed scope and source bytes. Missing digests cannot prove equality.
-fn assessment_source(assessment: &ReportQuality) -> Option<BTreeMap<String, String>> {
-    let files = assessment.files.as_array()?;
+fn assessment_source(files: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+    let files = files.as_array()?;
     if files.is_empty() {
         return None;
     }
@@ -860,7 +860,7 @@ fn attach_security(
     let mut seen_sources = BTreeSet::new();
     for security in securities {
         let superseded =
-            assessment_source(security).is_some_and(|source| !seen_sources.insert(source));
+            assessment_source(&security.files).is_some_and(|source| !seen_sources.insert(source));
         let mut paired = false;
         for item in timeline.iter_mut() {
             if item.security_id.is_none()
@@ -1218,6 +1218,70 @@ mod tests {
         write_atomic(&root.join("r.html"), b"report").unwrap();
         assert_eq!(fs::read_to_string(root.join("r.html")).unwrap(), "report");
         assert_eq!(fs::read_to_string(&held).unwrap(), "held");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A temporary file that cannot be made fails the write, and an
+    /// assessment that names no file names no source.
+    #[test]
+    fn a_report_whose_temporary_file_cannot_be_made_is_not_written() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-long-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        // The name fits; the temporary name beside it does not.
+        let path = root.join("r".repeat(250));
+        let error = write_atomic(&path, b"report").unwrap_err();
+        assert!(error.contains(".tmp: "), "{error}");
+        assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(assessment_source(&serde_json::json!([])), None);
+    }
+
+    /// A source that is a directory is named as left out.
+    #[test]
+    fn a_source_that_is_a_directory_is_left_out() {
+        use supercov_engine::coverage_index::IndexedGapDimensions;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-directory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src.js")).unwrap();
+        let none = IndexedGapDimensions {
+            lines: 0,
+            statements: 0,
+            functions: 0,
+            branches: 0,
+            mcdc_conditions: 0,
+        };
+        let gap = IndexedFileGap {
+            view: CoverageViewId::All,
+            file: "src.js".into(),
+            uncovered_lines: 0,
+            uncovered_statements: 0,
+            uncovered_functions: 0,
+            missing_branches: 0,
+            missing_mcdc_conditions: 0,
+            measurement_limitations: 0,
+            limitation_kinds: Vec::new(),
+            covered_by_other_tests: none.clone(),
+            uncovered_everywhere: none.clone(),
+            totals: none.clone(),
+            covered: none,
+            score: 0,
+        };
+        let (sources, omitted) = collect_sources(&root, &[gap], true);
+        assert!(sources.is_empty());
+        assert_eq!(omitted, ["src.js"]);
         fs::remove_dir_all(root).unwrap();
     }
 

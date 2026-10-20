@@ -134,19 +134,19 @@ pub fn command(arguments: &[String]) -> ExitCode {
                 path.display()
             );
         }
-        None => {
-            let mut stdout = std::io::stdout().lock();
-            if let Err(error) = stdout
-                .write_all(lines.as_bytes())
-                .and_then(|()| stdout.flush())
-            {
-                // A reader that stopped early, as `head` does, needs no word.
-                if error.kind() != std::io::ErrorKind::BrokenPipe {
-                    eprintln!("[supercov] could not write the gaps to standard output: {error}");
-                }
-                return ExitCode::from(2);
-            }
+        None => return printed(&mut std::io::stdout().lock(), &lines),
+    }
+    ExitCode::SUCCESS
+}
+
+/// The gaps written to standard output, `out`.
+fn printed(out: &mut dyn Write, lines: &str) -> ExitCode {
+    if let Err(error) = out.write_all(lines.as_bytes()).and_then(|()| out.flush()) {
+        // A reader that stopped early, as `head` does, needs no word.
+        if error.kind() != std::io::ErrorKind::BrokenPipe {
+            eprintln!("[supercov] could not write the gaps to standard output: {error}");
         }
+        return ExitCode::from(2);
     }
     ExitCode::SUCCESS
 }
@@ -235,6 +235,31 @@ struct Row<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A writer that fails as `kind`.
+    struct Failing(std::io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Gaps that could not all be printed fail the command, whether the
+    /// reader stopped early or the output failed otherwise.
+    #[test]
+    fn gaps_that_could_not_be_printed_fail_the_command() {
+        let mut out = Vec::new();
+        assert_eq!(printed(&mut out, "{}\n"), ExitCode::SUCCESS);
+        assert_eq!(out, b"{}\n");
+        for kind in [std::io::ErrorKind::BrokenPipe, std::io::ErrorKind::Other] {
+            assert_eq!(printed(&mut Failing(kind), "{}\n"), ExitCode::from(2));
+        }
+    }
 
     #[test]
     fn an_exported_obligation_names_its_file_and_line_source() {
