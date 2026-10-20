@@ -327,6 +327,20 @@ fn neighbourhood(path: &str) -> Option<(String, String)> {
 }
 
 /// Build the shared view from a run's coverage view.
+fn empty_file(file: &str) -> FileView {
+    FileView {
+        file: file.to_owned(),
+        metrics: Vec::new(),
+        measured_lines: Vec::new(),
+        uncovered_lines: Vec::new(),
+        missing_branches: Vec::new(),
+        missing_conditions: Vec::new(),
+        functions: Vec::new(),
+        branches: Vec::new(),
+        conditions: Vec::new(),
+    }
+}
+
 pub fn build(
     run: &str,
     generated_at: &str,
@@ -337,56 +351,45 @@ pub fn build(
 ) -> Result<RunView, ReportError> {
     let mut files = BTreeMap::<String, FileView>::new();
     for line in &view.lines {
-        files
+        let file = files
             .entry(line.file.clone())
-            .or_insert_with(|| FileView {
-                file: line.file.clone(),
-                metrics: Vec::new(),
-                measured_lines: Vec::new(),
-                uncovered_lines: Vec::new(),
-                missing_branches: Vec::new(),
-                missing_conditions: Vec::new(),
-                functions: Vec::new(),
-                branches: Vec::new(),
-                conditions: Vec::new(),
-            })
-            .measured_lines
+            .or_insert_with(|| empty_file(&line.file));
+        file.measured_lines
             .extend(line.measured.then_some(line.line));
-        if line.measured
-            && !line.covered
-            && let Some(file) = files.get_mut(&line.file)
-        {
+        if line.measured && !line.covered {
             file.uncovered_lines.push(line.line);
         }
     }
-    for branch in &view.branches {
+    for (block, branch) in view.branches.iter().enumerate() {
         let entry = files
             .entry(branch.meta.file.clone())
-            .or_insert_with(|| FileView {
-                file: branch.meta.file.clone(),
-                metrics: Vec::new(),
-                measured_lines: Vec::new(),
-                uncovered_lines: Vec::new(),
-                missing_branches: Vec::new(),
-                missing_conditions: Vec::new(),
-                functions: Vec::new(),
-                branches: Vec::new(),
-                conditions: Vec::new(),
-            });
-        for alternative in branch.alternatives.iter().filter(|a| !a.covered) {
-            entry.missing_branches.push(Location {
+            .or_insert_with(|| empty_file(&branch.meta.file));
+        for (index, alternative) in branch.alternatives.iter().enumerate() {
+            if !alternative.covered {
+                entry.missing_branches.push(Location {
+                    line: branch.meta.line,
+                    column: branch.meta.column,
+                });
+            }
+            entry.branches.push(BranchRecord {
                 line: branch.meta.line,
-                column: branch.meta.column,
+                block,
+                index,
+                taken: alternative.covered,
             });
-            let _ = alternative;
         }
     }
     for point in &view.points {
         if point.meta.kind != crate::coverage_analysis::PointKind::Function {
             continue;
         }
-        if let Some(file) = files.get_mut(&point.meta.file) {
-            file.functions.push(FunctionRecord {
+        // A view folds every point, declined ones too, into its lines, so
+        // the point's file is already here.
+        files
+            .entry(point.meta.file.clone())
+            .or_insert_with(|| empty_file(&point.meta.file))
+            .functions
+            .push(FunctionRecord {
                 line: point.meta.line,
                 name: point
                     .meta
@@ -395,34 +398,11 @@ pub fn build(
                     .unwrap_or_else(|| format!("{}:{}", point.meta.line, point.meta.column)),
                 covered: point.covered,
             });
-        }
-    }
-    for (block, branch) in view.branches.iter().enumerate() {
-        if let Some(file) = files.get_mut(&branch.meta.file) {
-            for (index, alternative) in branch.alternatives.iter().enumerate() {
-                file.branches.push(BranchRecord {
-                    line: branch.meta.line,
-                    block,
-                    index,
-                    taken: alternative.covered,
-                });
-            }
-        }
     }
     for decision in &view.decisions {
         let entry = files
             .entry(decision.meta.file.clone())
-            .or_insert_with(|| FileView {
-                file: decision.meta.file.clone(),
-                metrics: Vec::new(),
-                measured_lines: Vec::new(),
-                uncovered_lines: Vec::new(),
-                missing_branches: Vec::new(),
-                missing_conditions: Vec::new(),
-                functions: Vec::new(),
-                branches: Vec::new(),
-                conditions: Vec::new(),
-            });
+            .or_insert_with(|| empty_file(&decision.meta.file));
         for _ in decision.conditions.iter().filter(|c| !c.covered) {
             entry.missing_conditions.push(Location {
                 line: decision.meta.line,
@@ -823,6 +803,130 @@ mod tests {
         assert_eq!((violations[0].covered, violations[0].eligible), (7, 10));
         assert_eq!(violations[1].file.as_deref(), Some("src/a.ts"));
         assert_eq!(violations[1].uncovered_lines, [2, 3, 4]);
+    }
+
+    /// A declined line is neither measured nor uncovered, and leaves every
+    /// total it would count in incomplete; a function and a branch are filed
+    /// under their file.
+    #[test]
+    fn a_declined_line_leaves_the_totals_incomplete() {
+        use crate::coverage_analysis::PointKind;
+        use crate::coverage_report::{
+            BranchAlternativeMeta, BranchMeta, CoverageManifest, PointMeta, RawTestResult,
+            RuntimeSnapshot, TestProvenance, create_coverage_view,
+        };
+        let point = |id: &str, kind, line, label: Option<&str>| PointMeta {
+            id: id.into(),
+            kind,
+            file: "src/a.js".into(),
+            line,
+            column: 1,
+            source: "x".into(),
+            label: label.map(Into::into),
+        };
+        let manifest = CoverageManifest {
+            unmeasured: vec!["declined".into()],
+            decisions: Vec::new(),
+            points: vec![
+                point("f", PointKind::Function, 1, Some("total")),
+                point("ran", PointKind::Statement, 1, None),
+                point("missed", PointKind::Statement, 2, None),
+                point("declined", PointKind::Statement, 3, None),
+            ],
+            branches: vec![BranchMeta {
+                id: "b".into(),
+                kind: "if".into(),
+                file: "src/a.js".into(),
+                line: 1,
+                column: 1,
+                source: "if (x)".into(),
+                alternatives: vec![
+                    BranchAlternativeMeta {
+                        id: "then".into(),
+                        label: "then".into(),
+                    },
+                    BranchAlternativeMeta {
+                        id: "else".into(),
+                        label: "else".into(),
+                    },
+                ],
+            }],
+            limitations: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let raw = RawTestResult {
+            span: None,
+            test_id: Some("t".into()),
+            scope: None,
+            test: "t".into(),
+            test_file: Some("tests/a.js".into()),
+            title: None,
+            retry: Some(0),
+            status: Some("passed".into()),
+            expected_status: None,
+            flaky: false,
+            provenance: TestProvenance {
+                runner: "node:test".into(),
+                kind: "unit".into(),
+                project: None,
+                source: "runner-default".into(),
+                tags: Vec::new(),
+            },
+            role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
+            phases: Vec::new(),
+            runtime: vec![RuntimeSnapshot {
+                decisions: Vec::new(),
+                hits: vec!["f".into(), "ran".into(), "then".into()],
+                events: Vec::new(),
+                logicals: Vec::new(),
+                phase_id: None,
+            }],
+            browser: Vec::new(),
+            server: Vec::new(),
+        };
+        let coverage = create_coverage_view(&manifest, &[raw], "now").unwrap();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
+        let file = built.file("src/a.js").unwrap();
+        assert_eq!(file.measured_lines, [1, 2]);
+        assert_eq!(file.uncovered_lines, [2]);
+        assert_eq!(file.functions.len(), 1);
+        assert_eq!(file.functions[0].name, "total");
+        assert_eq!(
+            file.branches
+                .iter()
+                .map(|branch| branch.taken)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(file.missing_branches.len(), 1);
+        assert_eq!(
+            built.metric(Metric::Lines).applicability,
+            Applicability::Incomplete { unmeasured: 1 }
+        );
+    }
+
+    #[test]
+    fn a_stale_run_with_no_reason_given_still_says_why_it_blocks() {
+        let mut stale = view(vec![metric(10, 10)], Vec::new());
+        stale.stale = true;
+        assert_eq!(
+            stale
+                .blockers()
+                .into_iter()
+                .map(|blocker| blocker.reason)
+                .collect::<Vec<_>>(),
+            ["the run no longer matches the current checkout"]
+        );
+    }
+
+    #[test]
+    fn a_percentage_with_no_whole_part_is_read_and_a_bad_fraction_refused() {
+        assert_eq!(parse_percentage(".5").unwrap(), 5_000);
+        for refused in [".", "1.x"] {
+            assert!(parse_percentage(refused).is_err(), "{refused} was accepted");
+        }
     }
 
     #[test]
