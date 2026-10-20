@@ -3155,3 +3155,38 @@ fn quality_targets_are_refused_by_what_they_are_and_where_they_lead() {
         assert!(error.contains(said), "{path}: {error}");
     }
 }
+
+/// One file read from the tree is one that was, and a few callers not
+/// asked are each named with no remainder to count.
+#[test]
+fn one_file_read_and_a_few_callers_not_asked_are_told_in_full() {
+    let quality = human_quality(&json!({
+        "counts": {"assessed": 0},
+        "files": [],
+        "scope_resolved": {"asked": 1, "ships": 1, "does_not": 0}
+    }));
+    assert!(
+        quality.contains(
+            "1 file under no source root was read by the model from the tree: 1 ships, 0 do not."
+        ),
+        "{quality}"
+    );
+    let path = json!({
+        "caller": {"file": "src/a.ts", "line": 3, "function": "a"},
+        "callee": {"file": "src/b.ts", "line": 9, "function": "b"}
+    });
+    let security = human_security(&json!({
+        "counts": {"assessed": 1, "flagged": 0},
+        "files": [],
+        "paths_not_asked": [path.clone(), path]
+    }));
+    assert!(
+        security.contains("2 more caller(s) ran with a flagged function"),
+        "{security}"
+    );
+    assert_eq!(
+        security.matches("  src/a.ts:3 a -> src/b.ts:9 b\n").count(),
+        2
+    );
+    assert!(!security.contains("... and"), "{security}");
+}
