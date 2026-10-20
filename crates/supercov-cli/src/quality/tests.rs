@@ -681,6 +681,19 @@ fn the_band_totals_count_each_file_by_the_band_it_prints() {
     assert!(printed.contains("  1 good, 1 fair, 1 weak.\n"), "{printed}");
 }
 
+#[test]
+fn files_under_no_source_root_are_counted_in_the_plural() {
+    let printed = human_quality(&serde_json::json!({
+        "scope_resolved": {"asked": 3, "ships": 2, "does_not": 1},
+    }));
+    assert!(
+        printed.contains(
+            "  3 files under no source root were read by the model from the tree: 2 ship, 1 does not.\n"
+        ),
+        "{printed}"
+    );
+}
+
 fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
     Answers {
         lines: Vec::new(),
@@ -2660,6 +2673,25 @@ fn a_file_view_reports_what_the_summary_flagged() {
         summary.contains("0.64  sensitive_data_exposure"),
         "{summary}"
     );
+}
+
+#[test]
+fn an_older_security_snapshot_judges_each_check_at_its_own_cut() {
+    // Snapshots from before the assessment recorded what fired keep no
+    // `present` list; each check is judged at the security cut it has.
+    let temp = Temp::new();
+    let (id, _) = store::identity().unwrap();
+    let manifest = json!({
+        "created_at": "2026-09-01T00-00-00-000000Z", "instrument": "security",
+        "catalog_version": "security-v3", "model": "jev-1.13.0",
+        "counts": {"assessed": 1, "flagged": 1}, "by_check": {"secret_in_source": 1},
+    });
+    let files = json!({"files": [{"path": "src/k.ts", "status": "completed",
+        "checks": {"secret_in_source": 0.99, "injection_sink": 0.01}}]});
+    store::write(&temp.0, "security", &id, &manifest, &files).unwrap();
+    let text = query::render(&query::file(&temp.0, "security", "src/k.ts", None).unwrap());
+    assert!(text.contains("  yes  0.99  secret_in_source\n"), "{text}");
+    assert!(text.contains("   no  0.01  injection_sink\n"), "{text}");
 }
 
 #[test]

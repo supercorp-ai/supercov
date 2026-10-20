@@ -773,12 +773,14 @@ pub fn nodes(path: &Path, source: &str) -> Option<Vec<Node>> {
     Some(spread(found))
 }
 
-/// The pattern candidates for a file no parser reads, deduplicated by line
-/// and check, capped at [`MAX_CANDIDATES`] spread across checks.
+/// The pattern candidates for a file no parser reads, in order, capped at
+/// [`MAX_CANDIDATES`] spread across checks.
 pub fn candidates(source: &str) -> Vec<Candidate> {
     let mut all = from_patterns(source);
+    // No line and check come twice: a line is a candidate once per pattern
+    // check, and the two checks matched otherwise are no pattern's (a test
+    // below holds this).
     all.sort();
-    all.dedup_by(|a, b| a.line == b.line && a.check == b.check);
     if all.len() <= MAX_CANDIDATES {
         return all;
     }
@@ -810,6 +812,23 @@ pub fn candidates(source: &str) -> Vec<Candidate> {
 
 #[cfg(test)]
 mod tests {
+    /// Each pattern check is listed once and is neither of the checks
+    /// matched apart from the patterns, so a line is never a candidate for
+    /// one check twice.
+    #[test]
+    fn no_line_is_a_pattern_candidate_for_one_check_twice() {
+        let mut checks = super::PATTERNS
+            .iter()
+            .map(|(check, _)| *check)
+            .collect::<Vec<_>>();
+        checks.sort_unstable();
+        let listed = checks.len();
+        checks.dedup();
+        assert_eq!(checks.len(), listed);
+        assert!(!checks.contains(&"secret_in_source"));
+        assert!(!checks.contains(&"missing_authorization"));
+    }
+
     use super::*;
 
     /// A fake key in a live-key shape, assembled so no source line holds the

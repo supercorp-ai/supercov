@@ -772,6 +772,29 @@ before it arrives, does not count.",
         use super::*;
         use std::collections::BTreeSet;
 
+        /// A line with nothing above it in its window but comments and
+        /// blank lines has no line to say the value enters on, and is asked
+        /// only whether it is a weakness.
+        #[test]
+        fn a_line_with_only_comments_above_it_has_no_source_question() {
+            use super::super::super::candidates::{Candidate, Structure};
+            let candidate = |line: usize| Candidate {
+                line,
+                check: "injection_sink".into(),
+                text: "query(input)".into(),
+            };
+            let request = confirm_request(
+                "a.py",
+                "# where the input comes from\n\n\nquery(input)\n",
+                &[candidate(2), candidate(4)],
+                &Structure::default(),
+            );
+            let questions = request["questions"].as_object().unwrap();
+            assert!(!questions.contains_key("s0"), "{request}");
+            assert!(questions.contains_key("s1"), "{request}");
+            assert!(questions.contains_key("t0") && questions.contains_key("t1"));
+        }
+
         #[test]
         fn twelve_checks_with_ids_that_collide_with_no_other_catalog() {
             let ids: BTreeSet<&str> = checks().iter().map(|c| c.id.as_str()).collect();

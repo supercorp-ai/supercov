@@ -827,7 +827,7 @@ mod tests {
             ("dist/b.js", ""),
             (
                 "Cargo.toml",
-                "[package]\nname = \"x\"\n[[bin]]\npath = \"src/main.rs\"\n",
+                "[package]\nname = \"x\"\npathological = true\n[[bin]]\npath = \"src/main.rs\"\n",
             ),
             ("src/main.rs", ""),
             ("build.rs", ""),
