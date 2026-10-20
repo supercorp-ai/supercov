@@ -191,7 +191,9 @@ pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -
                     return false;
                 }
                 explicit_configs.push(path);
-            } else if word.starts_with("-p") && !word.starts_with("--") {
+            } else if word.starts_with("-p") {
+                // `-pconfig.json`, a form not read. (No word starting `-p`
+                // starts `--`, so `--project` never reaches here.)
                 return false;
             }
         }
@@ -327,6 +329,62 @@ mod tests {
             &["node".into(), "script.js".into(), "tsx".into()]
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A config chain that leaves the project, runs past 32 configs or
+    /// names something that is not JSON keeps imports; the fingerprint
+    /// follows a chain no further than 257 configs, nor outside the project.
+    #[test]
+    fn config_chains_that_leave_the_project_or_run_long_are_not_followed() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-imports-chains-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("project");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let write = |name: &str, text: &str| fs::write(root.join(name), text).unwrap();
+        let tsx = vec!["tsx".to_owned(), "src/main.ts".to_owned()];
+        let elides = || elides_type_imports(&root, "src/main.ts", &tsx);
+        let configs = || config_paths(&root, &["src/main.ts".to_owned()]);
+        // No tsconfig up to the project's root.
+        assert!(!elides());
+        fs::write(base.join("shared.json"), r#"{"compilerOptions":{}}"#).unwrap();
+        write("tsconfig.json", r#"{"extends":"../shared.json"}"#);
+        assert!(!elides());
+        assert_eq!(configs(), BTreeSet::from([root.join("tsconfig.json")]));
+        let chain = |length: usize| {
+            for n in 0..length {
+                write(
+                    &format!("c{n}.json"),
+                    &format!(r#"{{"extends":"./c{}"}}"#, n + 1),
+                );
+            }
+            write(&format!("c{length}.json"), "{}");
+            write("tsconfig.json", r#"{"extends":"./c0"}"#);
+        };
+        chain(10);
+        assert!(elides());
+        assert!(configs().contains(&root.join("c10.json")));
+        chain(40);
+        assert!(!elides());
+        chain(300);
+        assert_eq!(configs().len(), 257);
+        for n in 0..=300 {
+            fs::remove_file(root.join(format!("c{n}.json"))).unwrap();
+        }
+        write("tsconfig.json", "not json");
+        write("tsconfig.txt", "{}");
+        assert!(!elides());
+        // Named by a file whose directory is gone, too.
+        assert_eq!(
+            config_paths(&root, &["gone/main.ts".to_owned()]),
+            BTreeSet::from([root.join("tsconfig.json")])
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
