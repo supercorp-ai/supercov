@@ -18,7 +18,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use memmap2::{Mmap, MmapOptions};
@@ -318,12 +318,6 @@ struct Observations {
     vectors: BTreeMap<String, ObservedVectors>,
 }
 
-impl Observations {
-    fn is_empty(&self) -> bool {
-        self.hits.is_empty() && self.slot_hits.is_empty() && self.vectors.is_empty()
-    }
-}
-
 #[derive(Debug, Clone)]
 struct RuntimeLimitation {
     id: String,
@@ -376,16 +370,12 @@ fn read_evidence_directory(
     let mut slots = BTreeMap::<String, Vec<(String, PathBuf)>>::new();
     let mut layout_path = None;
     for entry in files {
+        // A listed name is one component, never `.` or `..`: it cannot
+        // reach outside the directory.
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| PythonEvidenceError::UnsafeEntry("<non-utf8>".into()))?;
-        if Path::new(&name)
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(PythonEvidenceError::UnsafeEntry(name));
-        }
         // A layout write cut short by the process dying; another process of
         // the run, or none, published the whole file.
         if name.starts_with(SLOT_LAYOUT_NAME) && name.ends_with(".partial") {
@@ -1269,8 +1259,8 @@ fn apply_transport(
                 .insert(id);
             }
             // An empty record names no phase evidence: it must not make one.
+            // (Slot hits are made only from a slot that had some.)
             Record::Hits { ids, .. } if ids.is_empty() => {}
-            Record::SlotHits { positions, .. } if positions.is_empty() => {}
             Record::SlotHits { ctx, positions } => {
                 if let Some(before) = before_assertion.get_mut(&ctx) {
                     before.slot_hits.extend(&positions);
@@ -1797,7 +1787,8 @@ fn mark_by_time(run: &mut PythonFrontendRun, by_time: &BTreeSet<(String, String,
             scope.test_id.clone(),
             raw.retry.unwrap_or(0),
         );
-        if by_time.contains(&key) && raw.attribution == crate::coverage_report::ATTRIBUTION_EXACT {
+        // Every result `build_from_evidence` makes is exact until now.
+        if by_time.contains(&key) {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
     }
@@ -2141,10 +2132,9 @@ fn build_from_evidence(
             server: Vec::new(),
         });
     }
+    // A background entry is made only to hold what was observed: the empty
+    // records that name nothing are passed over before one is.
     for (worker, observations) in &background {
-        if observations.is_empty() {
-            continue;
-        }
         let test = format!("__supercov_background__:{worker}");
         let identity = Identity {
             worker: worker.clone(),
@@ -4133,6 +4123,24 @@ mod tests {
         let unnamed = fresh("unnamed");
         fs::write(unnamed.join("p.1.shm"), b"").unwrap();
         assert!(read(&unnamed).starts_with("ok"), "{}", read(&unnamed));
+        // A well-named object nothing holds any more, and one an earlier
+        // read already copied into the slot file beside its marker.
+        for (label, copied) in [("named", false), ("copied", true)] {
+            let directory = fresh(label);
+            fs::write(directory.join("p.1.shm"), b"/p.1.token 64").unwrap();
+            if copied {
+                fs::write(directory.join("p.1.slot"), b"").unwrap();
+            }
+            assert!(
+                read(&directory).starts_with("ok"),
+                "{label}: {}",
+                read(&directory)
+            );
+        }
+        // Evidence that is not a directory cannot be listed.
+        let file = base.join("file");
+        fs::write(&file, b"x").unwrap();
+        assert!(read(&file).starts_with("Io"), "{}", read(&file));
     }
 
     #[test]
@@ -4149,5 +4157,79 @@ mod tests {
         ] {
             assert_eq!(decision_vector(v, o), Err(reason), "{v} {o}");
         }
+    }
+
+    #[test]
+    fn work_spread_over_threads_comes_back_in_order() {
+        let items = (0..1000).collect::<Vec<u32>>();
+        assert_eq!(
+            parallel_map(&items, |item| item * 2),
+            items.iter().map(|item| item * 2).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_records_make_no_background_and_a_phase_left_unreported_fails() {
+        let source = "def f(a):\n    return a\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let statement = &obligations.plan.statements[0].id;
+        let test = "tests/test_m.py::test_a";
+        let directory = temporary("py-unreported-phase");
+        write_transport(
+            &directory.join("main.1.mmap"),
+            &[
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]}),
+                json!({"t":"hits","ctx":0,"ids":[]}),
+                json!({"t":"decs","ctx":0,"v":[]}),
+                json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":test,"retry":0,"phase":"setup"}),
+                json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"setup","outcome":"passed","xfail":false}),
+                // The worker died inside the call.
+                json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":test,"retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":2,"id":statement}),
+                // One limitation, the second time under the id the first
+                // was given.
+                json!({"t":"limitation","id":"python-x","reason":"r","file":""}),
+                json!({"t":"limitation","id":stable_id("python-x", &["", ""]),"reason":"r"}),
+            ],
+            0,
+        );
+        let run = build_python_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            1,
+            Path::new(""),
+        )
+        .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        let roles = run
+            .request
+            .raw_results
+            .iter()
+            .map(|raw| raw.role.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["test"]);
+        let result = &run.request.raw_results[0];
+        assert_eq!(result.status.as_deref(), Some("failed"));
+        let call = result
+            .phases
+            .iter()
+            .find(|phase| phase.kind == "test")
+            .unwrap();
+        assert_eq!(
+            call.error.as_deref(),
+            Some("the phase started but the runner reported no outcome")
+        );
+        assert_eq!(
+            run.request
+                .manifest
+                .limitations
+                .iter()
+                .filter(|limitation| limitation["reason"] == "r")
+                .count(),
+            1
+        );
     }
 }
