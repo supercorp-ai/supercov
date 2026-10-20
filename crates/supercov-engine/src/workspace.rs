@@ -784,9 +784,11 @@ fn copy_tree<Operations: WorkspaceOperations>(
             // real monorepo on first touch. It resolves to nothing, so it can
             // leak nothing; the LEXICAL containment check still applies, and
             // the link is preserved as-is so the workspace matches the source.
+            // A link in a loop of links, or whose path runs through a file,
+            // resolves to nothing too.
             let canonical_target = match canonicalize_simplified(&from) {
                 Ok(target) => Some(target),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) if resolves_to_nothing(&error) => None,
                 Err(error) => return Err(io_error(&from, error)),
             };
             let escapes = !inside(roots.source, &lexical_target)
@@ -836,6 +838,25 @@ fn copy_tree<Operations: WorkspaceOperations>(
         // copy.
     }
     Ok(())
+}
+
+/// Whether a link could not be resolved because it leads nowhere: to
+/// nothing, through a file, or round a loop of links.
+fn resolves_to_nothing(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) || link_loop(error)
+}
+
+#[cfg(unix)]
+fn link_loop(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ELOOP)
+}
+
+#[cfg(not(unix))]
+fn link_loop(_error: &io::Error) -> bool {
+    false
 }
 
 fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
@@ -3124,6 +3145,29 @@ mod tests {
             fs::read_link(&mirrored).unwrap(),
             PathBuf::from("../../../../packages/react/node_modules/@scope/pkg")
         );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A link that resolves to nothing for another reason than a missing
+    /// target -- a loop of links, or a path through a file -- is a dangling
+    /// link like any other: preserved as it is, and the run goes on.
+    #[test]
+    #[cfg(unix)]
+    fn a_link_in_a_loop_or_through_a_file_is_preserved_as_dangling() {
+        let root = project();
+        let lib = root.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        std::os::unix::fs::symlink("cycle", lib.join("cycle")).unwrap();
+        std::os::unix::fs::symlink("../package.json/inside", lib.join("through")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        for (name, target) in [("cycle", "cycle"), ("through", "../package.json/inside")] {
+            assert_eq!(
+                fs::read_link(workspace.join("lib").join(name)).unwrap(),
+                PathBuf::from(target)
+            );
+        }
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
