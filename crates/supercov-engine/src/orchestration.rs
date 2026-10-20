@@ -89,14 +89,22 @@ fn duration_milliseconds(started: Instant) -> u64 {
 
 const CAPTURED_OUTPUT_LIMIT: u64 = 1024 * 1024;
 
-fn verbose_output() -> bool {
-    std::env::var("SUPERCOV_VERBOSE")
-        .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+/// Whether `SUPERCOV_VERBOSE`, or failing it `SUPERCOV_DEBUG`, asks for every
+/// phase's output, read through `variable` so tests need not set either.
+fn verbose_output(variable: impl Fn(&str) -> Option<String>) -> bool {
+    variable("SUPERCOV_VERBOSE")
+        .or_else(|| variable("SUPERCOV_DEBUG"))
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
-fn publish_captured_output(path: &Path, phase: &str, failed: bool, writer: &mut dyn Write) {
-    if failed || verbose_output() {
+fn publish_captured_output(
+    path: &Path,
+    phase: &str,
+    failed: bool,
+    verbose: bool,
+    writer: &mut dyn Write,
+) {
+    if failed || verbose {
         let result = (|| -> std::io::Result<()> {
             let mut file = File::open(path)?;
             let length = file.metadata()?.len();
@@ -164,6 +172,7 @@ pub fn execute_plan_with_supervisor(
     mut before_phase: impl FnMut(&ExecutionPhase, &mut dyn Write) -> Result<(), OrchestrationError>,
 ) -> Result<ExecutionResult, OrchestrationError> {
     validate(plan)?;
+    let verbose = verbose_output(|name| std::env::var(name).ok());
     // One guard spans every external phase. Signals received after a build
     // exits but before the test spawns remain pending and prevent that spawn.
     let mut executions = Vec::new();
@@ -174,14 +183,14 @@ pub fn execute_plan_with_supervisor(
             Ok(result) => result,
             Err(error) => {
                 if let Some(path) = &phase.command.captured_output {
-                    publish_captured_output(path, &phase.name, true, writer);
+                    publish_captured_output(path, &phase.name, true, verbose, writer);
                 }
                 return Err(error.into());
             }
         };
         let exit_code = result.exit_code();
         if let Some(path) = &phase.command.captured_output {
-            publish_captured_output(path, &phase.name, exit_code != 0, writer);
+            publish_captured_output(path, &phase.name, exit_code != 0, verbose, writer);
         }
         let interrupted_signal = result.interrupted_signal;
         executions.push(PhaseExecution {
@@ -425,7 +434,7 @@ mod tests {
         output.extend_from_slice(b"the end");
         fs::write(&log, &output).unwrap();
         let mut writer = Vec::new();
-        publish_captured_output(&log, "build", true, &mut writer);
+        publish_captured_output(&log, "build", true, false, &mut writer);
         let text = String::from_utf8(writer).unwrap();
         assert!(
             text.starts_with("[supercov] build output truncated to the final 1048576 bytes\n"),
@@ -436,13 +445,50 @@ mod tests {
         assert_eq!(text.len(), 61 + CAPTURED_OUTPUT_LIMIT as usize);
         assert!(!log.exists());
         let mut writer = Vec::new();
-        publish_captured_output(&root.join("missing.log"), "build", true, &mut writer);
+        publish_captured_output(&root.join("missing.log"), "build", true, false, &mut writer);
         assert!(
             String::from_utf8(writer)
                 .unwrap()
                 .starts_with("[supercov] could not read build output: ")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A phase that passed shows its output only when asked to, and either
+    /// way its log is removed.
+    #[test]
+    fn passing_output_is_shown_only_when_verbose_output_is_asked_for() {
+        let root = temporary();
+        let log = root.join("build.log");
+        for verbose in [false, true] {
+            fs::write(&log, "built").unwrap();
+            let mut writer = Vec::new();
+            publish_captured_output(&log, "build", false, verbose, &mut writer);
+            assert_eq!(writer, if verbose { &b"built"[..] } else { b"" });
+            assert!(!log.exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verbose_output_is_asked_for_by_either_variable() {
+        let environment = |pairs: &'static [(&str, &str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        assert!(!verbose_output(environment(&[])));
+        assert!(verbose_output(environment(&[("SUPERCOV_VERBOSE", "yes")])));
+        assert!(verbose_output(environment(&[("SUPERCOV_DEBUG", "1")])));
+        assert!(!verbose_output(environment(&[("SUPERCOV_DEBUG", "0")])));
+        // The first variable set is the one that answers.
+        assert!(!verbose_output(environment(&[
+            ("SUPERCOV_VERBOSE", "no"),
+            ("SUPERCOV_DEBUG", "true"),
+        ])));
     }
 
     /// A phase that cannot start fails the plan, and its captured output

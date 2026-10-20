@@ -6,7 +6,7 @@
 
 use std::{
     fs::{self, File},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -718,15 +718,27 @@ pub fn compare_run_integrity(
     stored: Option<&RunIntegrity>,
     current: &RunIntegrity,
 ) -> IntegrityComparison {
+    let mut stderr = io::stderr();
+    let debug = std::env::var_os("SUPERCOV_DEBUG_INTEGRITY").map(|_| &mut stderr as &mut dyn Write);
+    compare_run_integrity_to(stored, current, debug)
+}
+
+/// [`compare_run_integrity`], writing both fingerprints to `debug` when
+/// `SUPERCOV_DEBUG_INTEGRITY` asks for them.
+fn compare_run_integrity_to(
+    stored: Option<&RunIntegrity>,
+    current: &RunIntegrity,
+    debug: Option<&mut dyn Write>,
+) -> IntegrityComparison {
     let Some(stored) = stored else {
         return IntegrityComparison {
             stale: true,
             reasons: vec!["run predates integrity fingerprints".into()],
         };
     };
-    if std::env::var_os("SUPERCOV_DEBUG_INTEGRITY").is_some() {
-        eprintln!("[integrity] stored : {stored:?}");
-        eprintln!("[integrity] current: {current:?}");
+    if let Some(debug) = debug {
+        let _ = writeln!(debug, "[integrity] stored : {stored:?}");
+        let _ = writeln!(debug, "[integrity] current: {current:?}");
     }
     let mut reasons = Vec::new();
     if stored.schema_version != current.schema_version {
@@ -1124,7 +1136,6 @@ pub fn read_assessment_input(
 }
 
 pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
-    use std::io::Write;
     let bytes = serde_json::to_vec(&crate::assertion_coverage::assessment_input(report))
         .map_err(io::Error::other)?;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -1669,6 +1680,28 @@ mod tests {
         let mut rebuilt = integrity();
         rebuilt.fingerprint.instrumenter = digest('1');
         assert!(!compare_run_integrity(Some(&integrity()), &rebuilt).stale);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn integrity_debugging_writes_both_fingerprints() {
+        let mut debug = Vec::new();
+        let comparison =
+            compare_run_integrity_to(Some(&integrity()), &integrity(), Some(&mut debug));
+        assert!(!comparison.stale);
+        let debug = String::from_utf8(debug).unwrap();
+        let lines = debug.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "{debug}");
+        assert!(lines[0].starts_with("[integrity] stored : RunIntegrity"));
+        assert!(lines[1].starts_with("[integrity] current: RunIntegrity"));
+    }
+
+    #[test]
+    fn touching_an_index_that_is_gone_does_not_create_it() {
+        let root = temporary_directory("touch-gone");
+        let path = root.join("filtered-00.index");
+        touch(&path);
+        assert!(!path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
