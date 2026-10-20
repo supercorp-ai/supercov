@@ -288,10 +288,10 @@ fn ignored_by_the_toolchain(
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
             ignored_by_the_toolchain(root, &path, files)?;
-        } else if file_type.is_file()
-            && path.extension().is_some_and(|extension| extension == "go")
-            && let Ok(relative) = path.strip_prefix(root)
+        } else if file_type.is_file() && path.extension().is_some_and(|extension| extension == "go")
         {
+            // Every path here was joined onto `root`.
+            let relative = path.strip_prefix(root).unwrap_or(&path);
             files.excluded.push((
                 relative.to_string_lossy().replace('\\', "/"),
                 IGNORED_BY_THE_TOOLCHAIN,
@@ -1025,5 +1025,38 @@ mod tests {
             files.excluded
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_files_links_and_what_an_ignored_directory_holds_are_read_as_go_reads_them() {
+        let root = fixture("hidden");
+        write(&root, "go.mod", "module example.com/m\n\ngo 1.22\n");
+        write(
+            &root,
+            "m.go",
+            "package m\n\nfunc F() int {\n\treturn 1\n}\n",
+        );
+        write(&root, ".scratch.go", "package m\n");
+        write(&root, "_old/a.go", "package old\n");
+        write(&root, "_old/notes.txt", "kept\n");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("m.go"), root.join("link.go")).unwrap();
+            std::os::unix::fs::symlink(root.join("m.go"), root.join("_old/link.go")).unwrap();
+        }
+        let files = discover_go_files(&root).unwrap();
+        assert_eq!(files.sources, ["m.go"]);
+        let excluded = files
+            .excluded
+            .iter()
+            .map(|(file, _)| file.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(excluded, [".scratch.go", "_old/a.go"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_file_no_module_is_found_for_reads_as_go_1_16() {
+        assert!(!has_generics(Path::new(""), "m.go", "package m\n"));
     }
 }
