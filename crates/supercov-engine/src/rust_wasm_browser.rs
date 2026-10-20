@@ -549,6 +549,21 @@ mod tests {
             )),
             Some((200, b"x".to_vec()))
         );
+        // Another transfer coding is no chunking.
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nContent-Length: 1\r\n\r\nx"
+            )),
+            Some((200, b"x".to_vec()))
+        );
+        assert_eq!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\nContent-Length: 1\r\n\r\nx"
+            ))
+            .unwrap()
+            .body,
+            b"x"
+        );
         assert!(read_response(&mut bytes("garbage\r\n\r\n")).is_none());
         // A length no sender meant is a body cut short, not an allocation.
         assert!(
@@ -563,5 +578,106 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    /// The relay between the runner and its WebDriver: a new session gets
+    /// the region registry installed, under W3C's answer or the older one;
+    /// closing it writes the page's regions that carry the run's token to the
+    /// test's evidence; and anything else, a failure included, is passed on
+    /// as WebDriver answered it.
+    #[test]
+    fn the_relay_installs_the_registry_and_takes_the_runs_regions_on_close() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        let token = "0123456789abcdef";
+        let mut ours = vec![0u8; 80];
+        ours[56..72].copy_from_slice(token.as_bytes());
+        let mut theirs = vec![0u8; 80];
+        theirs[56..60].copy_from_slice(b"else");
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let regions = json!({"value": [[0, encode(&ours)], [1, encode(&theirs)], [2, 7]]});
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = upstream.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in upstream.incoming() {
+                let mut stream = stream.unwrap();
+                let request =
+                    read_request(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
+                log.lock()
+                    .unwrap()
+                    .push(format!("{} {}", request.method, request.path));
+                let (status, body) = match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/session") if request.body == b"old" => {
+                        (200, json!({"sessionId": "s2", "value": {}}))
+                    }
+                    ("POST", "/session") => (200, json!({"value": {"sessionId": "s1"}})),
+                    ("POST", "/session/s1/execute/sync") => (200, regions.clone()),
+                    ("GET", "/status") => (500, json!({"value": "down"})),
+                    _ => (200, json!({"value": null})),
+                };
+                let body = body.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let evidence = std::env::temp_dir().join(format!(
+            "supercov-wasm-relay-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let hex = evidence
+            .to_str()
+            .unwrap()
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ask = |method: &str, path: &str, body: &str| {
+            let mut client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+            write!(
+                client,
+                "{method} /e/{hex}{path} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let (stream, _) = proxy.accept().unwrap();
+            relay(stream, address, token).unwrap();
+            read_response(&mut BufReader::new(client)).unwrap()
+        };
+        assert_eq!(ask("POST", "/session", "{}").0, 200);
+        assert_eq!(ask("POST", "/session", "old").0, 200);
+        let (status, body) = ask("GET", "/status", "");
+        assert_eq!((status, body), (500, br#"{"value":"down"}"#.to_vec()));
+        assert_eq!(ask("DELETE", "/session/s1/window", "").0, 200);
+        assert_eq!(ask("DELETE", "/session/other/deeper", "").0, 200);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [
+                "POST /session",
+                "POST /session/s1/goog/cdp/execute",
+                "POST /session",
+                "POST /session/s2/goog/cdp/execute",
+                "GET /status",
+                "POST /session/s1/execute/sync",
+                "DELETE /session/s1/window",
+                "DELETE /session/other/deeper",
+            ]
+        );
+        let written = std::fs::read_dir(&evidence)
+            .unwrap()
+            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(written, [ours]);
+        std::fs::remove_dir_all(evidence).unwrap();
     }
 }
