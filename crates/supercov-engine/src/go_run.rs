@@ -229,9 +229,9 @@ fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
 const LINE_DIRECTIVE: &str = "/*line ";
 
 fn write(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
-    }
+    // Every path written is a name joined onto a directory.
+    let parent = path.parent().unwrap_or(path);
+    fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     fs::write(path, contents).map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -265,14 +265,11 @@ impl InstrumentedSources {
 }
 
 /// The runtime a file imports, of the modules' runtimes longest first.
+/// `relative` names a file, never a module's directory itself.
 fn runtime_for<'a>(runtimes: &'a [(String, String)], relative: &str) -> &'a str {
     runtimes
         .iter()
-        .find(|(directory, _)| {
-            directory == "."
-                || relative == directory
-                || relative.starts_with(&format!("{directory}/"))
-        })
+        .find(|(directory, _)| directory == "." || relative.starts_with(&format!("{directory}/")))
         .map(|(_, import)| import.as_str())
         .unwrap_or_default()
 }
@@ -1046,7 +1043,8 @@ impl GoServer {
                 ),
             )?;
         }
-        if mains == 0 || sources.project.instrumented.is_empty() {
+        // A directory has a package only for a file instrumented in it.
+        if mains == 0 {
             return Ok(None);
         }
         let directory = root.join(".supercov/work").join(run_id).join("go");
@@ -1269,5 +1267,276 @@ mod tests {
             runtime_for(&[("svc".to_owned(), "r".to_owned())], "other/x.go"),
             ""
         );
+    }
+
+    fn temporary_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write(&root.join("go.mod"), "module example.com/m\n\ngo 1.22\n").unwrap();
+        root
+    }
+
+    fn go_request(root: &Path, command: &[&str]) -> DirectGoRunRequest {
+        DirectGoRunRequest {
+            root: root.to_owned(),
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            run_id: "2026-01-02T00-00-00-000Z".into(),
+            started_at: "2026-01-02T00:00:00Z".into(),
+            exact_attribution: false,
+        }
+    }
+
+    const SOURCE: &str = "package m\n\nfunc One() int {\n\treturn 1\n}\n";
+
+    #[test]
+    fn a_file_already_named_by_a_line_directive_is_left_as_it_is() {
+        let text = "/*line elsewhere.go:1:1*/package m\n";
+        assert_eq!(named_for_the_project(Path::new("/p"), "m.go", text), text);
+    }
+
+    #[test]
+    fn a_package_s_files_vote_its_probe_file_s_package_and_its_tests_its_harness() {
+        let root = temporary_root("go-votes");
+        // A test behind a constraint names another package; two sources
+        // outvote it.
+        write(
+            &root.join("lib/a.go"),
+            "package lib\n\nfunc A() int {\n\treturn 1\n}\n",
+        )
+        .unwrap();
+        write(
+            &root.join("lib/b.go"),
+            "package lib\n\nfunc B() int {\n\treturn 2\n}\n",
+        )
+        .unwrap();
+        write(
+            &root.join("lib/tool_test.go"),
+            "//go:build tools\n\npackage main\n",
+        )
+        .unwrap();
+        // Only external tests: the harness joins the first.
+        write(&root.join("ext.go"), SOURCE).unwrap();
+        for name in ["a_test.go", "b_test.go"] {
+            write(
+                &root.join(name),
+                "package m_test\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n",
+            )
+            .unwrap();
+        }
+        // A test file with no package clause votes for nothing and joins no
+        // harness.
+        write(&root.join("none/n.go"), "package none\n\nfunc N() {}\n").unwrap();
+        write(&root.join("none/n_test.go"), "// nothing here\n").unwrap();
+        let instrumented =
+            instrument_workspace(&root, &root, &root.join("evidence"), false, None).unwrap();
+        let probes = fs::read_to_string(root.join("lib").join(PROBE_FILE)).unwrap();
+        assert!(probes.contains("package lib\n"), "{probes}");
+        let harness = fs::read_to_string(root.join(HARNESS_FILE)).unwrap();
+        assert!(harness.contains("package m_test\n"), "{harness}");
+        assert!(!root.join("none").join(HARNESS_FILE).exists());
+        let packages = instrumented
+            .packages
+            .iter()
+            .map(|package| package.directory.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(packages, [".", "lib"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_go_run_refuses_an_empty_command() {
+        let root = std::env::temp_dir().join("supercov-go-empty-command-never-created");
+        let error = run_direct_go(&go_request(&root, &[]), &mut Vec::new()).unwrap_err();
+        assert_eq!(error, "test command must not be empty");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_project_without_test_packages_is_refused_before_its_command_runs() {
+        let root = temporary_root("go-no-tests");
+        write(&root.join("m.go"), SOURCE).unwrap();
+        // A run whose process died before it cleaned up.
+        let abandoned = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/work").join(abandoned)).unwrap();
+        crate::lifecycle::write_run_state(
+            &root,
+            &crate::lifecycle::RunState {
+                id: abandoned.into(),
+                pid: u32::MAX,
+                root: root.display().to_string(),
+                workspace: root.display().to_string(),
+                started_at: "start".into(),
+                updated_at: "update".into(),
+                status: crate::lifecycle::RunStateStatus::Testing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let marker = root.join("ran");
+        let command = format!("touch {}", marker.display());
+        let mut diagnostics = Vec::new();
+        let error = run_direct_go(
+            &go_request(&root, &["sh", "-c", &command]),
+            &mut diagnostics,
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("no Go test packages were found"),
+            "{error}"
+        );
+        assert!(!marker.exists());
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains(&format!("recovered abandoned run(s): {abandoned}")),
+            "{diagnostics}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn parallel_tests_that_reached_nothing_are_named_in_the_refusal() {
+        let root = temporary_root("go-parallel");
+        write(&root.join("m.go"), SOURCE).unwrap();
+        write(
+            &root.join("m_test.go"),
+            "package m\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tt.Parallel()\n\tOne()\n}\n",
+        )
+        .unwrap();
+        // Told not to cache, the run adds no -count=1 of its own.
+        let mut diagnostics = Vec::new();
+        let error =
+            run_direct_go(&go_request(&root, &["true", "-count=1"]), &mut diagnostics).unwrap_err();
+        assert!(
+            error.contains("1 test(s) ran without being able to announce themselves"),
+            "{error}"
+        );
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(!diagnostics.contains("added -count=1"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("1 test package(s) wrote no evidence"),
+            "{diagnostics}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_project_of_tests_alone_runs_its_command() {
+        let root = temporary_root("go-tests-only");
+        write(
+            &root.join("m_test.go"),
+            "package m\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {}\n",
+        )
+        .unwrap();
+        let error = run_direct_go(&go_request(&root, &["true"]), &mut Vec::new()).unwrap_err();
+        assert!(error.starts_with("no Go test recorded evidence"), "{error}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Evidence of `probes` probes, the first reached, and no test.
+    fn evidence_reaching_the_first_of(probes: usize) -> Vec<u8> {
+        let mut bytes = (probes as u64).to_le_bytes().to_vec();
+        for index in 0..probes {
+            bytes.extend(u64::from(index == 0).to_le_bytes());
+        }
+        bytes.extend(0_u64.to_le_bytes());
+        bytes.extend(0_u64.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn code_reached_with_no_test_to_name_is_still_a_run() {
+        // Every test called t.Parallel(): nothing could be credited, and what
+        // they reached is the run's.
+        let root = temporary_root("go-unnamed");
+        write(&root.join("m.go"), SOURCE).unwrap();
+        write(
+            &root.join("m_test.go"),
+            "package m\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tt.Parallel()\n}\n",
+        )
+        .unwrap();
+        let probes = crate::go_project::prepare_go_project(&root, None)
+            .unwrap()
+            .probes
+            .len();
+        let prepared = root.with_extension("bin");
+        fs::write(&prepared, evidence_reaching_the_first_of(probes)).unwrap();
+        let request = go_request(&root, &["cp", "", ""]);
+        let evidence = root
+            .join(".supercov/work")
+            .join(&request.run_id)
+            .join("go/evidence/_.bin");
+        let command = [
+            "cp".to_owned(),
+            prepared.display().to_string(),
+            evidence.display().to_string(),
+        ];
+        let request = DirectGoRunRequest {
+            command: command.to_vec(),
+            ..request
+        };
+        let result = run_direct_go(&request, &mut Vec::new()).unwrap();
+        assert_eq!(result.tests, 0);
+        assert_eq!(result.unattributed, 1);
+        assert!(result.run_directory.exists());
+
+        // Measured and then not published: what was measured is kept.
+        let run_id = "2026-01-03T00-00-00-000Z";
+        let evidence = root
+            .join(".supercov/work")
+            .join(run_id)
+            .join("go/evidence/_.bin");
+        let runs = root.join(".supercov/runs");
+        let command = format!(
+            "cp {} {} && rm -rf {runs} && touch {runs}",
+            prepared.display(),
+            evidence.display(),
+            runs = runs.display()
+        );
+        let request = DirectGoRunRequest {
+            command: vec!["sh".into(), "-c".into(), command],
+            run_id: run_id.into(),
+            ..request
+        };
+        let error = run_direct_go(&request, &mut Vec::new()).unwrap_err();
+        assert!(
+            error.contains("the tests were measured and the run could not be published"),
+            "{error}"
+        );
+        fs::remove_file(&prepared).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_server_needs_a_module_sources_and_a_main_package() {
+        let root = temporary_root("go-server");
+        let command = ["npm".to_owned(), "test".to_owned()];
+        let prepare = |root: &Path| {
+            GoServer::prepare(root, root, "2026-01-02T00-00-00-000Z", &command)
+                .unwrap()
+                .is_none()
+        };
+        // A module with nothing in it.
+        assert!(prepare(&root));
+        // A library is no server.
+        write(&root.join("m.go"), SOURCE).unwrap();
+        assert!(prepare(&root));
+        // No module at all, then only a workspace's.
+        fs::remove_file(root.join("go.mod")).unwrap();
+        assert!(prepare(&root));
+        write(&root.join("go.work"), "go 1.22\n\nuse ./svc\n").unwrap();
+        write(
+            &root.join("svc/go.mod"),
+            "module example.com/svc\n\ngo 1.22\n",
+        )
+        .unwrap();
+        assert!(prepare(&root));
+        fs::remove_dir_all(&root).ok();
     }
 }
