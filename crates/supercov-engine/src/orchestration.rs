@@ -370,4 +370,105 @@ mod tests {
         assert!(!failed_log.exists());
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// A plan whose test or preparation phase has no name, or that prepares
+    /// with a test phase, is refused before anything runs.
+    #[test]
+    fn a_plan_with_an_unnamed_phase_or_an_early_test_is_refused() {
+        let root = temporary();
+        let refusal = |plan: &ExecutionPlan| match execute_plan(
+            plan,
+            SupervisionOptions::default(),
+            &mut Vec::new(),
+            |_, _| Ok(()),
+        ) {
+            Err(OrchestrationError::InvalidPlan(reason)) => reason,
+            other => panic!("{other:?}"),
+        };
+        let mut unnamed = shell(&root, "test", "touch incorrectly-started");
+        unnamed.name = " ".into();
+        assert_eq!(
+            refusal(&ExecutionPlan {
+                preparation: Vec::new(),
+                test: unnamed.clone(),
+            }),
+            "phase names must not be empty"
+        );
+        let mut early = shell(&root, "build", "touch incorrectly-started");
+        early.kind = PhaseKind::Test;
+        assert_eq!(
+            refusal(&ExecutionPlan {
+                preparation: vec![early],
+                test: shell(&root, "test", "touch incorrectly-started"),
+            }),
+            "a test phase cannot appear before the terminal test command"
+        );
+        unnamed.kind = PhaseKind::Build;
+        assert_eq!(
+            refusal(&ExecutionPlan {
+                preparation: vec![unnamed],
+                test: shell(&root, "test", "touch incorrectly-started"),
+            }),
+            "phase names must not be empty"
+        );
+        assert!(!root.join("incorrectly-started").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A failed phase's output past a mebibyte is cut to its end and says
+    /// so; output that cannot be read says that instead.
+    #[test]
+    fn failed_output_is_cut_to_its_end_or_said_to_be_unreadable() {
+        let root = temporary();
+        let log = root.join("build.log");
+        let mut output = vec![b'a'; CAPTURED_OUTPUT_LIMIT as usize];
+        output.extend_from_slice(b"the end");
+        fs::write(&log, &output).unwrap();
+        let mut writer = Vec::new();
+        publish_captured_output(&log, "build", true, &mut writer);
+        let text = String::from_utf8(writer).unwrap();
+        assert!(
+            text.starts_with("[supercov] build output truncated to the final 1048576 bytes\n"),
+            "{}",
+            &text[..80]
+        );
+        assert!(text.ends_with("the end"));
+        assert_eq!(text.len(), 61 + CAPTURED_OUTPUT_LIMIT as usize);
+        assert!(!log.exists());
+        let mut writer = Vec::new();
+        publish_captured_output(&root.join("missing.log"), "build", true, &mut writer);
+        assert!(
+            String::from_utf8(writer)
+                .unwrap()
+                .starts_with("[supercov] could not read build output: ")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A phase that cannot start fails the plan, and its captured output
+    /// is published as a failure's would be.
+    #[cfg(unix)]
+    #[test]
+    fn a_phase_that_cannot_start_fails_the_plan() {
+        let root = temporary();
+        let log = root.join("test.log");
+        let mut test = shell(&root, "test", "exit 0");
+        test.command.program = OsString::from(root.join("no-such-program"));
+        test.command.captured_output = Some(log.clone());
+        fs::write(&log, "partial").unwrap();
+        let mut writer = Vec::new();
+        let result = execute_plan(
+            &ExecutionPlan {
+                preparation: Vec::new(),
+                test,
+            },
+            SupervisionOptions::default(),
+            &mut writer,
+            |_, _| Ok(()),
+        );
+        assert!(result.is_err());
+        assert_eq!(String::from_utf8(writer).unwrap(), "partial");
+        assert!(!log.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
