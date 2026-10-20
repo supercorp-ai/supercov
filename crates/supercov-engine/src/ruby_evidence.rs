@@ -11,7 +11,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    path::{Component, Path},
+    path::Path,
 };
 
 use memmap2::MmapOptions;
@@ -349,15 +349,13 @@ fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, R
     };
     files.sort_by_key(|entry| entry.file_name());
     for entry in files {
+        // A listed name is one component, never `.` or `..`: it cannot
+        // reach outside the directory.
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| RubyEvidenceError::UnsafeEntry("<non-utf8>".into()))?;
-        if Path::new(&name)
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-            || !name.ends_with(".mmap")
-        {
+        if !name.ends_with(".mmap") {
             return Err(RubyEvidenceError::UnsafeEntry(name));
         }
         let metadata = fs::symlink_metadata(entry.path())
@@ -2547,5 +2545,207 @@ mod tests {
             .unwrap();
         assert_eq!(good.hits, ["alt".to_owned()]);
         assert_eq!(good.decisions.len(), 1);
+    }
+
+    #[test]
+    fn an_evidence_directory_holds_only_transports_and_a_path_only_project_files() {
+        let root = Path::new("/project");
+        assert_eq!(relative(root, "/project"), None);
+        assert_eq!(relative(root, "../lib/m.rb"), None);
+        assert_eq!(relative(root, "./lib/m.rb").as_deref(), Some("lib/m.rb"));
+        let base = temporary("entries");
+        let read = |directory: &Path| match read_evidence_directory(directory, "run-1") {
+            Ok(evidence) => format!("ok {}", evidence.interpreters),
+            Err(error) => format!("{error:?}"),
+        };
+        assert_eq!(read(&base.join("missing")), "ok 0");
+        fs::write(base.join("file"), b"x").unwrap();
+        assert!(read(&base.join("file")).starts_with("Io"));
+        for (label, make) in [("notes", "notes.txt"), ("nested", "inner.mmap")] {
+            let directory = base.join(label);
+            fs::create_dir(&directory).unwrap();
+            if label == "nested" {
+                fs::create_dir(directory.join(make)).unwrap();
+            } else {
+                fs::write(directory.join(make), b"x").unwrap();
+            }
+            assert_eq!(read(&directory), format!("UnsafeEntry({make:?})"));
+        }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_transport_without_a_process_record_declares_no_lost_process() {
+        let mut evidence = Evidence::default();
+        read_evidence_file(
+            "main.7.a.mmap",
+            &transport(&[serde_json::json!({"t":"exit","at":9})]),
+            "run-1",
+            &mut evidence,
+        )
+        .unwrap();
+        assert_eq!(evidence.interpreters, 0);
+        assert!(evidence.limitations.is_empty());
+    }
+
+    #[test]
+    fn background_reads_only_what_it_observed_and_an_unexpected_pass_fails_its_assertions() {
+        let source = "def f(a, b)\n  return 1 if a && b\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let run = |label: &str, background: serde_json::Value| {
+            let directory = temporary(label);
+            let records = [
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"],"lines":"exact"}),
+                // Every file stays probed test by test.
+                serde_json::json!({"t":"lines","mode":"exact"}),
+                serde_json::json!({"t":"ids","first":0,"names":[statement.id]}),
+                background,
+                serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"assert","ctx":1}),
+                serde_json::json!({"t":"hit","ctx":1,"id":statement.id}),
+                // Pending, and it passed.
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"passed","xfail":true,"runner":"rspec"}),
+                serde_json::json!({"t":"exit","at":9}),
+            ];
+            fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+            let run = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            )
+            .unwrap();
+            fs::remove_dir_all(directory).unwrap();
+            validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+            run
+        };
+        let empty = run(
+            "empty-background",
+            serde_json::json!({"t":"hits","ctx":0,"n":[]}),
+        );
+        assert_eq!(empty.request.raw_results.len(), 1);
+        let test = &empty.request.raw_results[0];
+        assert_eq!(test.attribution, crate::coverage_report::ATTRIBUTION_EXACT);
+        let assertion = test
+            .phases
+            .iter()
+            .find(|phase| phase.kind == "assertion")
+            .unwrap();
+        assert_eq!(assertion.status.as_deref(), Some("failed"));
+        // A vector alone is something observed.
+        let vectors = run(
+            "vector-background",
+            serde_json::json!({"t":"dec","ctx":0,"id":obligations.manifest.decisions[0].id,"v":"11","o":1}),
+        );
+        let roles = vectors
+            .request
+            .raw_results
+            .iter()
+            .map(|raw| raw.role.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["test", "background"]);
+    }
+
+    #[test]
+    fn a_request_credited_by_time_keeps_the_partial_attribution_one_shot_lines_gave() {
+        let source = "def f(a)\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = &obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap()
+            .id;
+        let attribution = |run: &RubyFrontendRun| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|raw| raw.role == "test")
+                .unwrap()
+                .attribution
+                .clone()
+        };
+        // A suite's own process, answering a request while its test runs.
+        let directory = temporary("by-time-partial");
+        fs::write(
+            directory.join("main.7.a.mmap"),
+            transport(&[
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.3.6","executable":"ruby","argv":["rspec"]}),
+                serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":REQUEST_WORKER,"test":"1","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"hit","ctx":2,"id":statement}),
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"rspec"}),
+                serde_json::json!({"t":"exit","at":9}),
+            ]),
+        )
+        .unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(
+            attribution(&run),
+            crate::coverage_report::ATTRIBUTION_PARTIAL
+        );
+
+        // A server's process, answering a browser test's request.
+        let directory = temporary("server-partial");
+        fs::write(
+            directory.join("main.7.a.mmap"),
+            transport(&[
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.3.6","executable":"ruby","argv":["puma"]}),
+                serde_json::json!({"t":"phase","ctx":1,"at":150,"worker":REQUEST_WORKER,"test":"1","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"hit","ctx":1,"id":statement}),
+                serde_json::json!({"t":"exit","at":300}),
+            ]),
+        )
+        .unwrap();
+        let served = ServedTest {
+            worker: "playwright:w0".into(),
+            test_id: "one".into(),
+            retry: 0,
+            name: "one".into(),
+            title: "one".into(),
+            file: "tests/a.spec.js".into(),
+            status: "passed".into(),
+            expected_status: "passed".into(),
+            provenance: TestProvenance::default(),
+            window: Some((100, 200)),
+            attempt_id: None,
+        };
+        let run = build_ruby_server_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+            &[served],
+        )
+        .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(
+            attribution(&run),
+            crate::coverage_report::ATTRIBUTION_PARTIAL
+        );
     }
 }
