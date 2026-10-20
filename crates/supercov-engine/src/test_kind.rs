@@ -133,6 +133,8 @@ mod tests {
             from_path(Some("spec/apiIntegration_spec.rb")),
             "integration"
         );
+        // A capital after a digit starts a word too.
+        assert_eq!(from_path(Some("spec/v2Integration_spec.rb")), "integration");
         // A word inside another word is not a kind.
         assert_eq!(from_path(Some("tests/interior/test_x.py")), "unit");
         assert_eq!(from_path(None), "unit");

@@ -501,6 +501,30 @@ mod tests {
     }
 
     #[test]
+    fn xml_keeps_the_whitespace_controls_xml_allows() {
+        // Tab, line feed and carriage return are legal XML characters; only
+        // the other control characters are unencodable.
+        assert_eq!(xml("a\tb\nc\rd\u{1}e"), "a\tb\nc\rde");
+    }
+
+    #[test]
+    fn a_condition_without_source_is_named_by_its_place_in_the_group() {
+        let conditions = [ConditionRecord {
+            line: 7,
+            column: 1,
+            index: 0,
+            covered: false,
+            source: " \n ".into(),
+        }];
+        let mut out = String::new();
+        assert_eq!(mcdc_records(&conditions, &mut out), (2, 0));
+        assert_eq!(
+            out,
+            "MCDC:7,1,t,0,0,condition 0\nMCDC:7,1,f,0,0,condition 0\n"
+        );
+    }
+
+    #[test]
     fn an_empty_denominator_does_not_become_a_zero_rate() {
         // Cobertura has no "not applicable", and reporting 0% for a file with
         // no branches would look like a regression that never happened.

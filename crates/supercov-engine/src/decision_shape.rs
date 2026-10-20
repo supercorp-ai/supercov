@@ -226,4 +226,33 @@ mod tests {
         // A source that is not conditions and operators is not guessed at.
         assert!(possible_vectors("a ? b : c", &["a", "b", "c"]).is_none());
     }
+
+    #[test]
+    fn a_keyword_inside_a_longer_name_is_not_an_operator() {
+        // `android` and `or_else` begin with `and` and `or` but are names.
+        assert!(possible_vectors("a && android", &["a", "b"]).is_none());
+        assert!(possible_vectors("a && or_else", &["a", "b"]).is_none());
+        assert!(possible_vectors("a and b", &["a", "b"]).is_some());
+    }
+
+    #[test]
+    fn an_empty_condition_text_never_matches_the_source() {
+        // An empty condition would match anywhere and loop without consuming
+        // the source; it leaves the source unread instead.
+        assert!(possible_vectors("a && b", &["a", ""]).is_none());
+    }
+
+    #[test]
+    fn a_decision_with_no_conditions_or_too_many_is_not_enumerated() {
+        assert!(possible_vectors("", &[]).is_none());
+        let names = (0..=MAX_CONDITIONS)
+            .map(|index| format!("c{index}"))
+            .collect::<Vec<_>>();
+        let conditions = names.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(possible_vectors(&names.join(" || "), &conditions).is_none());
+        assert!(
+            possible_vectors(&names[1..].join(" || "), &conditions[1..]).is_some(),
+            "sixteen conditions are still enumerated"
+        );
+    }
 }

@@ -458,7 +458,7 @@ router.get('/x/:id', async (req, res) => {{
     #[test]
     fn each_javascript_shape_is_read_for_what_it_can_be() {
         let source = format!(
-            "import './side-effect'\napp.get('*', (req, res) => res.send(1))\napp.get('name', (req, res) => res.send(2))\nconst k = `{FAKE_KEY}`\nconst t = `${{k}}{FAKE_KEY}`\nconst a = {{ ...defaults }}\nconst b = {{ ...req.params }}\nexport default class {{\n  @Get() find() {{ return 1 }}\n}}\nconst c = require(name)\nconst d = load('./x')\nexports.f = function () {{ return 2 }}\nthis.handle = (req, res) => 3\nwindow.flag = 1\n"
+            "import './side-effect'\napp.get('*', (req, res) => res.send(1))\napp.get('name', (req, res) => res.send(2))\nconst k = `{FAKE_KEY}`\nconst t = `${{k}}{FAKE_KEY}`\nconst a = {{ ...defaults }}\nconst b = {{ ...req.params }}\nexport default class {{\n  @Get() find() {{ return 1 }}\n}}\nconst c = require(name)\nconst d = load('./x')\nexports.f = function () {{ return 2 }}\nthis.handle = (req, res) => 3\nwindow.flag = 1\nconst e = {{ ...req.query }}\n"
         );
         let found = nodes(Path::new("a.ts"), &source).unwrap();
         let at =
@@ -469,6 +469,7 @@ router.get('/x/:id', async (req, res) => {{
         assert!(!at(5, NodeKind::Literal), "{found:?}");
         assert!(!at(6, NodeKind::Spread), "{found:?}");
         assert!(at(7, NodeKind::Spread), "{found:?}");
+        assert!(at(16, NodeKind::Spread), "{found:?}");
         assert!(at(9, NodeKind::Handler), "{found:?}");
         let s = structure(Path::new("a.ts"), &source).unwrap();
         assert!(s.imports.is_empty(), "{:?}", s.imports);
@@ -516,7 +517,7 @@ router.get('/x/:id', async (req, res) => {{
         // an expression is not one literal.
         let found = nodes(
             Path::new("a.js"),
-            "const a = `my-secret-thing`;\nconst b = `x ${y} my-secret-thing`;\n",
+            "const a = `my-secret-thing`;\nconst b = `x ${y} my-secret-thing`;\nconst c = `plain words`;\n",
         )
         .unwrap();
         let literal_lines = found

@@ -1230,4 +1230,12 @@ mod tests {
             assert!(validate_archive_path(bad).is_err(), "{bad:?}");
         }
     }
+
+    #[test]
+    fn syncing_a_directory_that_cannot_be_opened_is_skipped() {
+        // Syncing the parent is best effort: the archive is already renamed
+        // into place, so a parent that cannot be opened must not fail it.
+        sync_directory(Path::new("/proc/self/no-such-directory"));
+        sync_directory(Path::new("/proc/self"));
+    }
 }
