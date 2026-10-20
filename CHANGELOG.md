@@ -118,6 +118,8 @@
 - A Go loop that names only its condition (`for x < n {`, Go's while), or whose clause tests a plain name (`for i := 0; ok; i++ {`), was reported as a loop with no condition to observe, so its branch and MC/DC were never measured. Both are measured now, like any other loop condition.
 - A JavaScript run whose test command could not start its watchdog -- Supercov itself, started again to end the command if Supercov dies, which fails when the `supercov` executable was replaced or removed since the run began -- waited for good before the tests began. The run now fails saying the command could not be started.
 - A `chromedriver` that never started listening was left running after Supercov gave up on it and measured the wasm tests without it; it is stopped now.
+- A Java condition that opens with a comment (`if (/* both */ a && b)`, `while (/* count */ n > 0)`) was probed in place of the comment, and the measured copy no longer compiled; a Kotlin arm written after a comment (`if (a) /* yes */ g() else h()`) no longer parsed, and a `contract` after a comment was taken for a statement and probed before. Comments are passed over now, wherever they stand.
+- The statements and decisions inside a Java or Kotlin `if` whose condition narrows a type (`if (o instanceof String s)`) were not measured at all: they were missing from the report rather than shown as uncovered. They are measured now, like those of any other `if`.
 
 ## 4.19.0
 
