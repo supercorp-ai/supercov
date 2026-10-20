@@ -1353,12 +1353,11 @@ fn scope_entry_records(
     view: &CoverageView,
     strings: &mut StringTable,
 ) -> Result<Vec<[u8; SCOPE_ENTRY_RECORD_SIZE]>, CoverageIndexError> {
+    // The view's projection record, written first, refused a scope with no
+    // mode (`scope_projection`): this one has one.
     let Some(scope) = &view.scope else {
         return Ok(Vec::new());
     };
-    if scope.get("mode").is_none() {
-        return Ok(Vec::new());
-    }
     let entries = scope
         .get("entries")
         .and_then(serde_json::Value::as_array)
@@ -4069,6 +4068,11 @@ mod tests {
     }
 
     fn report() -> CoverageReport {
+        report_with_phases(Vec::new())
+    }
+
+    /// The test report, its test's attempt holding these phases.
+    fn report_with_phases(phases: Vec<crate::coverage_report::CoveragePhase>) -> CoverageReport {
         let decision = DecisionMeta {
             id: "d".into(),
             file: "src/a.js".into(),
@@ -4125,7 +4129,7 @@ mod tests {
                 },
                 role: "test".into(),
                 attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
-                phases: Vec::new(),
+                phases,
                 runtime: vec![RuntimeSnapshot {
                     decisions: vec![crate::coverage_report::DecisionSnapshot {
                         meta: decision,
@@ -4864,6 +4868,22 @@ mod tests {
                 "projection reserved bytes",
                 set(vec![(512, 0u32.to_le_bytes().to_vec())]),
             ),
+            // Where an assertion map kept its credited lines and conditions.
+            (
+                "projection reserved bytes",
+                set(vec![(304, 1u64.to_le_bytes().to_vec())]),
+            ),
+            (
+                "projection reserved bytes",
+                set(vec![(312, 1u64.to_le_bytes().to_vec())]),
+            ),
+            (
+                "duplicate coverage projection",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    duplicate(s, kind, record, size);
+                }),
+            ),
             (
                 "scope presence flag",
                 Box::new(move |s: &mut Vec<QueryIndexSection>| {
@@ -5029,8 +5049,19 @@ mod tests {
             (0..section.count as usize)
                 .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
         };
+        let phased = report_with_phases(vec![crate::coverage_report::CoveragePhase {
+            id: "assertion".into(),
+            kind: "assertion".into(),
+            operation: "equal".into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms: 100,
+            ended_at_ms: Some(120),
+            status: Some("passed".into()),
+            error: None,
+        }]);
         let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
-            let (_root, container) = index_with(edit);
+            let (_root, container) = index_of(&phased, edit);
             let index = CoverageIndex::new(&container).unwrap();
             [
                 index.phase_summaries(CoverageViewId::All).map(|_| ()),
@@ -5050,7 +5081,7 @@ mod tests {
         let (phases, phase_size) = (SECTION_PHASE_SUMMARIES, PHASE_SUMMARY_RECORD_SIZE);
         let (details, detail_size) = (SECTION_DECISION_DETAILS, DECISION_DETAIL_RECORD_SIZE);
         let has = |kind: u32, size: usize| {
-            let sections = coverage_index_sections(&report()).unwrap();
+            let sections = coverage_index_sections(&phased).unwrap();
             first_all(&sections, kind, size).is_some()
         };
         let mut cases: Vec<(&str, Edit)> = Vec::new();
@@ -5072,11 +5103,133 @@ mod tests {
                 set(details, detail_size, 1, vec![2]),
             ));
         }
-        assert!(cases.len() >= 3, "the test report has decisions");
+        assert_eq!(cases.len(), 5, "the test report has phases and decisions");
         for (said, edit) in &cases {
             let got = read(edit.as_ref());
             assert!(got.contains(said), "{said}: {got}");
         }
+    }
+
+    /// The section of `kind` with its `record`th record written twice.
+    fn duplicate(sections: &mut [QueryIndexSection], kind: u32, record: usize, size: usize) {
+        let section = sections
+            .iter_mut()
+            .find(|section| section.kind == kind)
+            .unwrap();
+        let copy = section.bytes[record * size..(record + 1) * size].to_vec();
+        section.bytes.extend_from_slice(&copy);
+        section.count += 1;
+    }
+
+    /// An index whose sections hold records of another size, a model
+    /// written twice, or a line or test written twice is refused, as is a
+    /// line whose reserved bytes are set.
+    #[test]
+    fn records_of_another_size_or_written_twice_are_refused() {
+        let refused =
+            |edit: Edit, read: &dyn Fn(&CoverageIndex<'_>) -> Result<(), CoverageIndexError>| {
+                let (_root, container) = index_with(edit.as_ref());
+                match CoverageIndex::new(&container).and_then(|index| read(&index)) {
+                    Ok(()) => "accepted".to_owned(),
+                    Err(error) => format!("{error:?}"),
+                }
+            };
+        let resize = |kind: u32, record_size: u32| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let section = s.iter_mut().find(|section| section.kind == kind).unwrap();
+                section.record_size = record_size;
+                section.count = (section.bytes.len() / record_size as usize) as u64;
+            })
+        };
+        let opened = |_: &CoverageIndex<'_>| Ok(());
+        assert_eq!(refused(Box::new(|_| {}), &opened), "accepted");
+        assert!(refused(resize(SECTION_STRINGS, 1), &opened).contains("\"record size\""));
+        assert!(
+            refused(resize(SECTION_STRING_RELATIONS, 2), &opened)
+                .contains("string-relation record size")
+        );
+        let model = |index: &CoverageIndex<'_>| index.model().map(|_| ());
+        assert_eq!(refused(Box::new(|_| {}), &model), "accepted");
+        assert!(
+            refused(
+                Box::new(|s| duplicate(s, SECTION_COVERAGE_MODEL, 0, COVERAGE_MODEL_RECORD_SIZE)),
+                &model
+            )
+            .contains("coverage model record count")
+        );
+
+        // The whole view's first line, read by its place.
+        let (kind, size) = (SECTION_LINES, LINE_RECORD_SIZE);
+        let first_line = move |s: &[QueryIndexSection]| {
+            let section = s.iter().find(|section| section.kind == kind).unwrap();
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                .unwrap()
+        };
+        let line = |index: &CoverageIndex<'_>| {
+            let lines = index.lines(CoverageViewId::All)?;
+            let first = lines.first().expect("the report has lines");
+            index
+                .line(CoverageViewId::All, &first.file, first.line)?
+                .map(|_| ())
+                .ok_or(CoverageIndexError::InvalidRecord("line not found"))
+        };
+        assert_eq!(refused(Box::new(|_| {}), &line), "accepted");
+        let set = move |at: usize| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first_line(s);
+                patch(s, kind, record, size, at, &[1]);
+            })
+        };
+        assert!(refused(set(3), &line).contains("\"line record\""));
+        assert!(refused(set(56), &line).contains("\"line record\""));
+        assert!(
+            refused(
+                Box::new(move |s| {
+                    let record = first_line(s);
+                    duplicate(s, kind, record, size);
+                }),
+                &line
+            )
+            .contains("duplicate line")
+        );
+
+        let details =
+            |index: &CoverageIndex<'_>| index.test_details(CoverageViewId::All).map(|_| ());
+        assert_eq!(refused(Box::new(|_| {}), &details), "accepted");
+        let (kind, size) = (SECTION_TEST_SUMMARIES, TEST_SUMMARY_RECORD_SIZE);
+        assert!(
+            refused(
+                Box::new(move |s| {
+                    let section = s.iter().find(|section| section.kind == kind).unwrap();
+                    let record = (0..section.count as usize)
+                        .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                        .unwrap();
+                    duplicate(s, kind, record, size);
+                }),
+                &details
+            )
+            .contains("duplicate test summary")
+        );
+    }
+
+    /// A limitation must say where it is: one without a file is refused,
+    /// not left out of the file it would count against.
+    #[test]
+    fn a_limitation_without_a_file_is_refused() {
+        let mut report = report();
+        report.view.limitations = vec![serde_json::json!({
+            "id": "dynamic",
+            "kind": "dynamic-code",
+            "line": 3,
+            "column": 1,
+            "source": "eval(code)",
+            "reason": "dynamic source"
+        })];
+        assert!(matches!(
+            coverage_index_sections(&report),
+            Err(CoverageIndexError::InvalidRecord("coverage limitation"))
+        ));
     }
 
     /// The first record of `kind` in the whole view, for the tables below.
