@@ -1722,7 +1722,7 @@ fn build_from_evidence(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         coverage_analysis::PointKind, frontend_protocol::validate_frontend_report_request,
@@ -1741,7 +1741,7 @@ mod tests {
         bytes
     }
 
-    fn transport(records: &[serde_json::Value]) -> Vec<u8> {
+    pub(crate) fn transport(records: &[serde_json::Value]) -> Vec<u8> {
         let mut body = Vec::new();
         for record in records {
             body.extend(frame(record.to_string().as_bytes()));

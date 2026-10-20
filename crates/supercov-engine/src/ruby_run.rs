@@ -609,13 +609,9 @@ impl RubyServer {
             {
                 scope.run_id = metadata.id.clone();
             }
-            let archive_path = root
-                .join(".supercov/work")
-                .join(&metadata.id)
-                .join("ruby-evidence.raw.gz");
-            if let Some(parent) = archive_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
+            let work = root.join(".supercov/work").join(&metadata.id);
+            fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+            let archive_path = work.join("ruby-evidence.raw.gz");
             let entries = run.archive_entries().map_err(|error| error.to_string())?;
             let entries = crate::source_capture::append(entries, &self.source_inputs)?;
             let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
@@ -720,5 +716,214 @@ mod literal_tests {
             literal,
             "{\"a\"=>[1,2.5,-3,true,false,nil],\"text\"=>\"quote \\\" backslash \\\\ interpolation \\#{x} tab \\t unicode \u{e9}\",\"nested\"=>{\"k\"=>[]}}\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-ruby-run-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(root.join("lib/m.rb"), "def f(a)\n  a ? 1 : 2\nend\n").unwrap();
+        root
+    }
+
+    fn ruby_request(root: &Path, command: &[&str]) -> DirectRubyRunRequest {
+        DirectRubyRunRequest {
+            root: root.to_owned(),
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            run_id: "2026-01-02T00-00-00-000Z".into(),
+            started_at: "2026-01-02T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn a_ruby_run_refuses_an_empty_command() {
+        let root = std::env::temp_dir().join("supercov-ruby-empty-command-never-created");
+        let error = run_direct_ruby(&ruby_request(&root, &[]), &mut Vec::new()).unwrap_err();
+        assert_eq!(error, "test command must not be empty");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_command_that_failed_before_any_test_is_its_own_failure() {
+        let root = project("failed-command");
+        // A run whose process died before it cleaned up.
+        let abandoned = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/work").join(abandoned)).unwrap();
+        crate::lifecycle::write_run_state(
+            &root,
+            &crate::lifecycle::RunState {
+                id: abandoned.into(),
+                pid: u32::MAX,
+                root: root.display().to_string(),
+                workspace: root.display().to_string(),
+                started_at: "start".into(),
+                updated_at: "update".into(),
+                status: crate::lifecycle::RunStateStatus::Testing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let mut diagnostics = Vec::new();
+        let error =
+            run_direct_ruby(&ruby_request(&root, &["false"]), &mut diagnostics).unwrap_err();
+        assert!(
+            error.starts_with("the test command exited 1 before any test reported an outcome"),
+            "{error}"
+        );
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains(&format!("recovered abandoned run(s): {abandoned}")),
+            "{diagnostics}"
+        );
+        assert!(!root.join(".supercov/failed-evidence").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn evidence_that_cannot_be_read_after_measuring_is_kept() {
+        let root = project("unreadable-evidence");
+        let request = ruby_request(
+            &root,
+            &[
+                "sh",
+                "-c",
+                "echo x > \"$SUPERCOV_RUBY_EVIDENCE_DIR/notes.txt\"",
+            ],
+        );
+        let error = run_direct_ruby(&request, &mut Vec::new()).unwrap_err();
+        assert!(error.contains("notes.txt"), "{error}");
+        assert!(
+            error.contains("the tests were measured and the run could not be published"),
+            "{error}"
+        );
+        assert!(
+            root.join(".supercov/failed-evidence")
+                .join(&request.run_id)
+                .join("notes.txt")
+                .exists()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_tree_is_copied_whole() {
+        let root = project("copied");
+        let copy = root.with_extension("copy");
+        fs::create_dir_all(&copy).unwrap();
+        copy_tree(&root, &copy).unwrap();
+        assert_eq!(
+            fs::read_to_string(copy.join("lib/m.rb")).unwrap(),
+            "def f(a)\n  a ? 1 : 2\nend\n"
+        );
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&copy).ok();
+    }
+
+    fn server_metadata(server: &RubyServer) -> RunMetadata {
+        RunMetadata {
+            id: "2026-01-03T00-00-00-000Z".into(),
+            started_at: "2026-01-03T00:00:00Z".into(),
+            duration_ms: 1.0,
+            command: vec!["npx".into(), "playwright".into(), "test".into()],
+            test_exit_code: Some(0),
+            integrity: server.integrity.clone(),
+            raw_evidence: RawEvidenceMetadata {
+                schema_version: 2,
+                format: "supercov-evidence-archive".into(),
+                file: "evidence.raw.gz".into(),
+                files: 0,
+                uncompressed_bytes: 0,
+                compressed_bytes: 0,
+            },
+            isolated_build: None,
+            instrumented_build_cache: None,
+            timings: None,
+            merged: None,
+            parents: None,
+            source_roots: None,
+            copy: None,
+            merged_across: None,
+            recorded_by: None,
+            companions: None,
+        }
+    }
+
+    #[test]
+    fn a_server_publishes_only_what_a_browser_test_s_request_reached() {
+        let root = project("server");
+        let command = ["npx".to_owned(), "playwright".to_owned(), "test".to_owned()];
+        let run_id = "2026-01-02T00-00-00-000Z";
+        let prepare = || {
+            RubyServer::prepare(&root, &root, run_id, &command)
+                .unwrap()
+                .unwrap()
+        };
+        // No browser test reported.
+        let server = prepare();
+        let metadata = server_metadata(&server);
+        assert!(
+            server
+                .publish(&root, run_id, metadata, &[], &mut Vec::new())
+                .unwrap()
+                .is_none()
+        );
+        // A Ruby process ran, and only as it loaded: no request reached it.
+        let server = prepare();
+        let statement = server.project.manifest.points[0].id.clone();
+        fs::write(
+            server.directory.join("evidence/main.7.a.mmap"),
+            crate::ruby_evidence::tests::transport(&[
+                serde_json::json!({"t":"process","v":1,"run":run_id,"pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["puma"],"lines":"exact"}),
+                serde_json::json!({"t":"hit","ctx":0,"id":statement}),
+                serde_json::json!({"t":"exit","at":300}),
+            ]),
+        )
+        .unwrap();
+        let served = crate::served_tests::ServedTest {
+            worker: "playwright:w0".into(),
+            test_id: "one".into(),
+            retry: 0,
+            name: "one".into(),
+            title: "one".into(),
+            file: "tests/a.spec.js".into(),
+            status: "passed".into(),
+            expected_status: "passed".into(),
+            provenance: Default::default(),
+            window: Some((100, 200)),
+            attempt_id: None,
+        };
+        let metadata = server_metadata(&server);
+        let mut diagnostics = Vec::new();
+        assert!(
+            server
+                .publish(&root, run_id, metadata, &[served], &mut diagnostics)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            String::from_utf8(diagnostics)
+                .unwrap()
+                .contains("no request a test sent reached measured Ruby code")
+        );
+        // Ruby that does not parse makes no server.
+        fs::write(root.join("lib/m.rb"), "def broken(\n").unwrap();
+        assert!(
+            RubyServer::prepare(&root, &root, run_id, &command)
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(&root).ok();
     }
 }
