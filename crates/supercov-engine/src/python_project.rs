@@ -6,7 +6,7 @@
 //! unparseable so the run can say exactly what its denominator covers.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -89,22 +89,19 @@ fn is_venv(directory: &Path) -> bool {
     fs::symlink_metadata(directory.join("pyvenv.cfg")).is_ok()
 }
 
+/// Asked only of a `.py` file.
 fn is_test_path(relative: &str) -> Option<&'static str> {
-    let mut components = relative.split('/').peekable();
-    let mut file_name = "";
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            file_name = component;
-            break;
-        }
-        if matches!(component, "tests" | "test" | "testing" | "__tests__") {
-            return Some("inside a test directory");
-        }
+    let (directories, file_name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    if directories
+        .split('/')
+        .any(|component| matches!(component, "tests" | "test" | "testing" | "__tests__"))
+    {
+        return Some("inside a test directory");
     }
     if file_name == "conftest.py" {
         return Some("pytest conftest");
     }
-    if file_name.starts_with("test_") && file_name.ends_with(".py") {
+    if file_name.starts_with("test_") {
         return Some("test module by name");
     }
     if file_name.ends_with("_test.py") || file_name.ends_with("_tests.py") {
@@ -265,7 +262,6 @@ fn prepare(
         assertion_sites: Vec::new(),
     };
     let mut plan_files = BTreeMap::<String, PythonFilePlan>::new();
-    let mut limitation_ids = BTreeSet::new();
     let mut unparseable = Vec::new();
     for relative in &files.sources {
         let path = root.join(relative);
@@ -280,24 +276,17 @@ fn prepare(
                 manifest.decisions.extend(obligations.manifest.decisions);
                 manifest.branches.extend(obligations.manifest.branches);
                 manifest.unmeasured.extend(obligations.manifest.unmeasured);
-                for item in obligations.manifest.limitations {
-                    let id = item
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
-                    if limitation_ids.insert(id) {
-                        manifest.limitations.push(item);
-                    }
-                }
+                // The Python instrumenter declares no limitations of its own,
+                // so the file-level one below is the only one.
+                manifest
+                    .limitations
+                    .extend(obligations.manifest.limitations);
                 plan_files.insert(relative.clone(), obligations.plan);
             }
             Err(error) => unparseable.push((relative.clone(), error.to_string())),
         }
     }
-    if let Some((file, reason)) = unparseable.first()
-        && limitation_ids.insert(UNPARSEABLE_LIMITATION.into())
-    {
+    if let Some((file, reason)) = unparseable.first() {
         manifest.limitations.push(limitation(
             UNPARSEABLE_LIMITATION,
             "source-scope",
@@ -403,6 +392,8 @@ mod tests {
         assert_eq!(inputs.execution_configuration, b"pytest\0-q");
     }
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use std::collections::BTreeSet;
 
     use super::*;
 
@@ -668,5 +659,51 @@ mod tests {
                 .all(|point| point.file.starts_with("src/"))
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tests_requirements_and_build_output_are_known_by_their_names() {
+        let root = fixture("names");
+        write(&root, "pkg/core.py", "x = 1\n");
+        write(&root, "pkg/core_test.py", "x = 1\n");
+        write(&root, "pkg/core_tests.py", "x = 1\n");
+        write(&root, "requirements-dev.txt", "pytest\n");
+        write(&root, "requirements.in", "pytest\n");
+        // `target` is a build's output only beside a build that writes it.
+        write(&root, "target/gen.py", "x = 1\n");
+        write(&root, "rust/Cargo.toml", "[package]\n");
+        write(&root, "rust/target/gen.py", "x = 1\n");
+        let files = discover_python_files(&root).unwrap();
+        assert_eq!(files.sources, ["pkg/core.py", "target/gen.py"]);
+        assert_eq!(files.tests, ["pkg/core_test.py", "pkg/core_tests.py"]);
+        assert_eq!(
+            files.dependency_files,
+            [PathBuf::from("requirements-dev.txt")]
+        );
+        assert!(
+            files
+                .excluded
+                .contains(&("rust/target".to_owned(), "tooling or environment directory"))
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_project_of_tests_alone_is_prepared_and_one_of_nothing_is_refused() {
+        let root = fixture("tests-alone");
+        assert!(
+            prepare_python_project(&root, None)
+                .unwrap_err()
+                .starts_with("no Python source files were found")
+        );
+        write(
+            &root,
+            "tests/test_core.py",
+            "def test_x():\n    assert True\n",
+        );
+        let project = prepare_python_project(&root, None).unwrap();
+        assert!(project.plan.files.is_empty());
+        assert_eq!(project.files.tests, ["tests/test_core.py"]);
+        fs::remove_dir_all(&root).unwrap();
     }
 }

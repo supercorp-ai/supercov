@@ -72,22 +72,19 @@ pub struct PreparedRubyProject {
     pub unparseable: Vec<(String, String)>,
 }
 
+/// Asked only of a `.rb` file.
 fn is_test_path(relative: &str) -> Option<&'static str> {
-    let mut components = relative.split('/').peekable();
-    let mut file_name = "";
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            file_name = component;
-            break;
-        }
-        if TEST_DIRECTORIES.contains(&component) {
-            return Some("inside a test directory");
-        }
+    let (directories, file_name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    if directories
+        .split('/')
+        .any(|component| TEST_DIRECTORIES.contains(&component))
+    {
+        return Some("inside a test directory");
     }
     if file_name.ends_with("_spec.rb") || file_name.ends_with("_test.rb") {
         return Some("test module by name");
     }
-    if file_name.starts_with("test_") && file_name.ends_with(".rb") {
+    if file_name.starts_with("test_") {
         return Some("test module by name");
     }
     if matches!(
@@ -247,9 +244,8 @@ fn prepare(
             Err(error) => unparseable.push((relative.clone(), error.to_string())),
         }
     }
-    if let Some((file, reason)) = unparseable.first()
-        && limitation_ids.insert(UNPARSEABLE_LIMITATION.into())
-    {
+    // No limitation the instrumenter declares is the file-level one.
+    if let Some((file, reason)) = unparseable.first() {
         manifest.limitations.push(json!({
             "id": UNPARSEABLE_LIMITATION,
             "kind": "source-scope",
@@ -572,5 +568,50 @@ mod tests {
         let unique = keys.iter().collect::<BTreeSet<_>>();
         assert_eq!(keys.len(), unique.len());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tests_helpers_and_gemspecs_are_known_by_their_names() {
+        let root = fixture("names");
+        write(&root, "lib/a.rb", "A = 1\n");
+        write(&root, "lib/a_test.rb", "A = 1\n");
+        write(&root, "test_b.rb", "B = 1\n");
+        write(&root, "spec_helper.rb", "require 'rspec'\n");
+        write(&root, "thing.gemspec", "Gem::Specification.new\n");
+        let files = discover_ruby_files(&root).unwrap();
+        assert_eq!(files.sources, ["lib/a.rb"]);
+        assert_eq!(
+            files.tests,
+            ["lib/a_test.rb", "spec_helper.rb", "test_b.rb"]
+        );
+        assert_eq!(files.dependency_files, [PathBuf::from("thing.gemspec")]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_limitation_two_constructs_share_is_declared_once() {
+        let root = fixture("limitations");
+        assert!(
+            prepare_ruby_project(&root, None)
+                .unwrap_err()
+                .starts_with("no Ruby source files were found")
+        );
+        // Tests alone are a project.
+        write(&root, "test/a_test.rb", "A = 1\n");
+        assert!(prepare_ruby_project(&root, None).is_ok());
+        write(
+            &root,
+            "lib/workers.rb",
+            "def run(x)\n  a = Ractor.new(x) { |y| y ? 1 : 2 }\n  b = Ractor.new(x) { |y| y ? 3 : 4 }\n  [a.take, b.take]\nend\n",
+        );
+        let project = prepare_ruby_project(&root, None).unwrap();
+        let ids = project
+            .manifest
+            .limitations
+            .iter()
+            .map(|limitation| limitation["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [crate::ruby_instrumenter::RACTOR_BLOCK_LIMITATION]);
+        fs::remove_dir_all(&root).unwrap();
     }
 }
