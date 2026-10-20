@@ -1417,6 +1417,101 @@ fn main() {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A region header for `probes`, its body at the end of the header.
+    fn empty_region(probes: &RustProbeLayout) -> Vec<u8> {
+        let mut bytes = vec![0u8; 4096];
+        bytes[..8].copy_from_slice(b"SCVRGN01");
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&128u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&(probes.hits.len() as u32).to_le_bytes());
+        bytes[24..28].copy_from_slice(&(probes.decisions.len() as u32).to_le_bytes());
+        bytes[32..36].copy_from_slice(&128u32.to_le_bytes());
+        bytes[56..56 + TOKEN.len()].copy_from_slice(TOKEN.as_bytes());
+        bytes[72..76].copy_from_slice(&(probes.cfgs.len() as u32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn an_overflow_record_of_another_kind_is_refused() {
+        let probes = layout(&["rs:point:a"], &[]);
+        assert_eq!(
+            parse_rust_region(
+                &empty_region(&probes),
+                Some(b"X\t1\t1\t0\t1\t1\n"),
+                TOKEN,
+                &probes
+            ),
+            Err(RustProbeReadError::InvalidRecord(1))
+        );
+    }
+
+    /// A run's regions are found at any depth; anything else under the root,
+    /// a link among it, is passed over; and a root that is a file is an
+    /// error, as an absent one is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_cfg_settlement_reads_every_region_of_the_run_below_its_root() {
+        let mut probes = layout(&[], &[]);
+        let root = temporary_directory("cfgs");
+        // No gate: nothing to read, wherever the root is.
+        assert_eq!(
+            read_rust_cfg_settlement(&root.join("absent"), TOKEN, &probes),
+            Ok(Vec::new())
+        );
+        probes.cfgs.push(crate::rust_instrumenter::RustCfgGate {
+            file: "src/lib.rs".into(),
+            predicate: "feature = \"x\"".into(),
+            line: 1,
+            end_line: 2,
+            obligations: vec!["rs:point:a".into()],
+        });
+        assert_eq!(
+            read_rust_cfg_settlement(&root.join("absent"), TOKEN, &probes),
+            Ok(vec![0])
+        );
+        let mut region = empty_region(&probes);
+        region[128] = 2;
+        fs::create_dir(root.join("test-1")).unwrap();
+        fs::write(root.join(format!("test-1/{TOKEN}-1.region")), &region).unwrap();
+        region[128] = 1;
+        fs::write(root.join(format!("{TOKEN}-2.overflow")), &region).unwrap();
+        std::os::unix::fs::symlink(
+            root.join(format!("test-1/{TOKEN}-1.region")),
+            root.join(format!("{TOKEN}-3.region")),
+        )
+        .unwrap();
+        assert_eq!(read_rust_cfg_settlement(&root, TOKEN, &probes), Ok(vec![2]));
+        let file = root.join(format!("{TOKEN}-2.overflow"));
+        assert!(matches!(
+            read_rust_cfg_settlement(&file, TOKEN, &probes),
+            Err(RustProbeReadError::Io(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_region_directory_that_cannot_be_read_is_an_error() {
+        let probes = layout(&["rs:point:a"], &[]);
+        let directory = temporary_directory("unreadable");
+        fs::write(directory.join("file"), b"").unwrap();
+        assert!(matches!(
+            read_rust_region_directory(&directory.join("file"), TOKEN, &probes),
+            Err(RustProbeReadError::Io(_))
+        ));
+        // An overflow that is no file.
+        fs::write(
+            directory.join(format!("{TOKEN}-1.region")),
+            empty_region(&probes),
+        )
+        .unwrap();
+        fs::create_dir(directory.join(format!("{TOKEN}-1.overflow"))).unwrap();
+        assert!(matches!(
+            read_rust_region_directory(&directory, TOKEN, &probes),
+            Err(RustProbeReadError::Io(_))
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn combinations_beyond_a_decisions_entries_overflow_and_are_all_read_back() {
         // `(a || b) && (c || d) && e` reaches eleven distinct (vector,

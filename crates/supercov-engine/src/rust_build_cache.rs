@@ -305,6 +305,11 @@ mod tests {
         assert!(artifacts_match(&target, &fingerprints));
         assert!(fingerprint_artifacts(&target, &[root.join("outside")]).is_err());
         assert!(fingerprint_artifacts(&target, &[target.join("debug")]).is_err());
+        // The target directory itself names no artifact inside it.
+        assert_eq!(
+            fingerprint_artifacts(&target, std::slice::from_ref(&target)),
+            Err("unsafe cached Rust artifact: ".into())
+        );
         assert!(!artifacts_match(&target, &[]));
         let reversed = fingerprints.iter().rev().cloned().collect::<Vec<_>>();
         assert!(!artifacts_match(&target, &reversed));
@@ -372,13 +377,30 @@ mod tests {
         assert_eq!(written.source_files, ["src/lib.rs", "tests/test.rs"]);
         assert_eq!(
             read_rust_build_cache(&workspace, &target, "key"),
-            Some(written)
+            Some(written.clone())
         );
         assert!(read_rust_build_cache(&workspace, &target, "other").is_none());
         fs::write(workspace.join("src/lib.rs"), "fn changed() {}\n").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_none());
         fs::write(workspace.join("src/lib.rs"), "fn work() {}\n").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_some());
+        // A record of another schema, with no sources, no points or its
+        // sources out of order is no cache.
+        let tampered = |change: &dyn Fn(&mut RustBuildCacheMetadata)| {
+            let mut metadata = written.clone();
+            change(&mut metadata);
+            fs::write(
+                workspace.join(CACHE_FILE),
+                serde_json::to_vec(&metadata).unwrap(),
+            )
+            .unwrap();
+            read_rust_build_cache(&workspace, &target, "key")
+        };
+        assert!(tampered(&|metadata| metadata.schema_version += 1).is_none());
+        assert!(tampered(&|metadata| metadata.source_files.clear()).is_none());
+        assert!(tampered(&|metadata| metadata.manifest.points.clear()).is_none());
+        assert!(tampered(&|metadata| metadata.source_files.reverse()).is_none());
+        assert!(tampered(&|_| {}).is_some());
         fs::write(target.join("debug/test-bin"), b"tamper").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_none());
         fs::remove_dir_all(target).unwrap();
