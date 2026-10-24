@@ -7,7 +7,10 @@
 // the run is the server's Ruby run, each request credited to the test that
 // sent it -- by header from the request fixture, by cookie from a page -- a
 // Ruby process a test starts credited to that test, and a webhook an
-// unmeasured mock sends credited by time. The same app under WEBrick.
+// unmeasured mock sends credited by time. The same app under WEBrick. A
+// Python server beside it publishes a run of its own; a failing test, a test
+// that reaches no server and a filter that matches none each say what they
+// published.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -20,7 +23,8 @@ const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/
 const ruby = process.env.SUPERCOV_RUBY ?? ['/opt/homebrew/opt/ruby/bin/ruby'].find((candidate) => existsSync(candidate)) ?? 'ruby';
 const rubyBin = ruby.includes('/') ? dirname(ruby) : undefined;
 const root = resolve(repository, 'target', `ruby-server-playwright-${process.pid}-${Date.now()}`);
-const [port, stripe] = await freePorts(2);
+const [port, stripe, ping] = await freePorts(3);
+const python = process.env.SUPERCOV_PYTHON ?? 'python3';
 
 if (process.platform === 'win32') {
   console.log('[ruby-server-playwright] skipped on Windows: the fixture starts its mock through env -u');
@@ -152,6 +156,11 @@ try {
     assert.deepEqual(lines('a low score fails'), ['app/grades.rb:2', 'app/grades.rb:3', 'app/grades.rb:4', 'app/grades.rb:6'], server);
     assert.deepEqual(lines('the page asks for the top grade'), ['app/grades.rb:2', 'app/grades.rb:3'], server);
     assert.deepEqual(lines('a test that sends nothing'), [], server);
+    // A browser runner's test reaches the app over HTTP: whether its file
+    // imports measured source is left unsaid.
+    const unlinked = page('tests', 'without-evidence');
+    assert.match(unlinked, /a test that sends nothing/u, unlinked);
+    assert.doesNotMatch(unlinked, /; its file imports no measured source/u, unlinked);
     // Its own process loads the file too: the module's lines ran under it.
     assert.ok(lines('a script the test runs').includes('app/grades.rb:4'), `${server}: ${lines('a script the test runs')}`);
     const paid = page('test', 'a checkout is paid when the webhook arrives');
@@ -167,6 +176,66 @@ try {
   assert.match(low, /credited by time/u, low);
   // Branches come from probes, which Bootsnap's compile cache skipped.
   assert.match(low, /[1-9][0-9]* decisions/u, `the test has lines and no decisions: Bootsnap's cache ran the file without probes\n${low}`);
+
+  // A Python server beside the Ruby one, still no JavaScript source: the
+  // first server's run is the run, the other's is published beside it.
+  for (const [file, text] of Object.entries({
+    'pinger/__init__.py': '',
+    'pinger/answer.py': 'def answer(path):\n    if path == "/ping":\n        return b"pong"\n    return b"ready"\n',
+    'pinger/serve.py': 'import sys\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n\nfrom pinger.answer import answer\n\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        data = answer(self.path)\n        self.send_response(200)\n        self.send_header("content-length", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\n    def log_message(self, *args):\n        pass\n\n\nThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()\n',
+    'both.config.js': `export default {
+  testDir: 'both',
+  workers: 1,
+  reporter: 'line',
+  use: { baseURL: 'http://127.0.0.1:${port}' },
+  webServer: [
+    { command: 'bundle exec puma -b tcp://127.0.0.1:${port} -t 1:4', url: 'http://127.0.0.1:${port}/ready', reuseExistingServer: false },
+    { command: '${python} -m pinger.serve ${ping}', url: 'http://127.0.0.1:${ping}/ready', reuseExistingServer: false },
+  ],
+};
+`,
+    'both/both.spec.js': `import { expect, test } from '@playwright/test';
+
+test('both servers answer', async ({ page, request }) => {
+  expect(await (await request.get('/grade?score=95')).text()).toBe('A');
+  // Another port of the same host: the page's cookie names the test there.
+  await page.goto('http://127.0.0.1:${ping}/ping');
+  await expect(page.locator('body')).toHaveText('pong');
+});
+
+test('a grade that is not given', async ({ request }) => {
+  expect(await (await request.get('/grade?score=95')).text()).toBe('B');
+});
+
+test('a test that reaches no server', async () => {
+  expect(1).toBe(1);
+});
+`,
+  })) {
+    mkdirSync(dirname(resolve(root, file)), { recursive: true });
+    writeFileSync(resolve(root, file), text);
+  }
+  const both = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer']);
+  assert.equal(both.status, 0, both.stdout + both.stderr);
+  const ids = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs.map((entry) => entry.id);
+  const beside = both.stderr.match(/the (?:Python|Ruby) server's coverage is run (run_[0-9a-f]{16})/u)?.[1];
+  assert.ok(beside, both.stderr);
+  assert.equal(ids[1], beside, `the first server's run is the latest, the other's beside it: ${ids}`);
+  const bothId = ids[0];
+  // A failing test still publishes what it reached, and the run says it failed.
+  const failing = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given']);
+  assert.equal(failing.status, 1, failing.stdout + failing.stderr);
+  const failed = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0];
+  assert.notEqual(failed.id, bothId, failing.stderr);
+  assert.match(run(binary, ['runs', failed.id]).stdout, /status: wrapped command exited 1/u);
+  // No test reached a server: nothing to measure, and it says so.
+  const idle = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'reaches no server']);
+  assert.notEqual(idle.status, 0, idle.stdout + idle.stderr);
+  assert.match(idle.stderr, /no test's request reached measured server code/u, idle.stderr);
+  // No test ran at all: the command failed before any outcome.
+  const none = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'no such test']);
+  assert.notEqual(none.status, 0, none.stdout + none.stderr);
+  assert.match(none.stderr, /exited 1 before any test reported an outcome/u, none.stderr);
   console.log('[ruby-server-playwright] a Ruby server under browser tests is measured, each request credited to its test');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'ruby-server-playwright-'))) rmSync(root, { recursive: true, force: true });

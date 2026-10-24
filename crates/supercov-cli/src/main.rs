@@ -2116,6 +2116,13 @@ fn could_not_measure(error: &str) -> ExitCode {
     {
         // No run, and the command's own status is the answer.
         process_exit_code(code)
+    } else if let Some(signal) = supercov_engine::process_supervision::ForwardedSignal::ALL
+        .into_iter()
+        .find(|signal| error.contains(&format!("interrupted by {};", signal.name())))
+    {
+        // Interrupted, nothing published: exit as the command did, as a
+        // shell reports a signal.
+        process_exit_code(signal.exit_code())
     } else if error.contains("could not spawn") && error.contains("(os error 2)") {
         ExitCode::from(127)
     } else if error.contains("could not spawn") && error.contains("(os error 13)") {

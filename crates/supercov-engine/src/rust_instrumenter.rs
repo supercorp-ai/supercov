@@ -1451,9 +1451,8 @@ struct ParsedSource {
 }
 
 fn parse_for_instrumentation(source: &str) -> Result<ParsedSource, RustInstrumenterError> {
-    if source.len() > u32::MAX as usize {
-        return Err(RustInstrumenterError::SourceTooLarge);
-    }
+    // The syntax tree counts in u32 offsets.
+    u32::try_from(source.len()).map_err(|_| RustInstrumenterError::SourceTooLarge)?;
     let (tree, edition) = parse_any_edition(source).map_err(RustInstrumenterError::Parse)?;
     let view = expression_view(source, edition);
     let parsed_view = SourceFile::parse(&view.text, edition);

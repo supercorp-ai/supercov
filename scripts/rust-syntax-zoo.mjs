@@ -268,6 +268,13 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        // A loop the allocator runs cannot carry a probe either: a probe
+        // that allocated would re-enter it.
+        let mut freed = 0;
+        for _ in 0..1 {
+            freed += 1;
+        }
+        debug_assert_eq!(freed, 1);
         unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, pointer, layout) }
     }
 }

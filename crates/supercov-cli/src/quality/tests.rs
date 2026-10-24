@@ -144,6 +144,13 @@ fn a_subcommand_is_only_a_reserved_word_and_a_path_can_still_be_scanned() {
 }
 
 #[test]
+#[should_panic(expected = "not a snapshot id: ../outside")]
+fn only_a_snapshot_id_names_a_saved_snapshot() {
+    let temp = Temp::new();
+    let _ = store::write(&temp.0, "quality", "../outside", &json!({}), &json!({}));
+}
+
+#[test]
 fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
     let temp = Temp::new();
     let files = json!({"files": []});

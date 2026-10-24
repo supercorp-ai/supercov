@@ -10202,7 +10202,7 @@ fn private_batch_protocols_and_odd_arguments_say_what_went_wrong() {
     use std::io::Write;
     use std::process::{Command, Stdio};
     // The harnesses' batch protocols fail with a message, not a panic, when
-    // their output cannot be written.
+    // their output cannot be written: nothing reads the other end.
     for (command, says) in [
         (
             "__instrument-js",
@@ -10216,10 +10216,11 @@ fn private_batch_protocols_and_odd_arguments_say_what_went_wrong() {
         let mut child = Command::new(env!("CARGO_BIN_EXE_supercov"))
             .arg(command)
             .stdin(Stdio::piped())
-            .stdout(std::fs::File::create("/dev/full").unwrap())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        drop(child.stdout.take());
         child
             .stdin
             .take()
@@ -11007,7 +11008,11 @@ fn the_report_refuses_a_run_compared_with_itself_and_opens_when_it_can() {
     assert_eq!(left, ["supercov-report.html"]);
     // Opened the way the desktop opens a file.
     project.write_script(
-        "bin/xdg-open",
+        if cfg!(target_os = "macos") {
+            "bin/open"
+        } else {
+            "bin/xdg-open"
+        },
         "#!/bin/sh\necho \"$1\" > \"$(dirname \"$0\")/../opened.txt\"\n",
     );
     let path = format!(
@@ -11713,4 +11718,96 @@ fn a_crate_builds_with_the_rustflags_its_cargo_configuration_sets() {
     );
     assert!(output.status.success(), "{text}");
     assert!(text.contains("1 passed"), "{text}");
+}
+
+/// A Ruby new enough for Supercov's Ruby frontend (3.3 or newer).
+fn ruby() -> Option<String> {
+    let candidates = std::env::var("SUPERCOV_RUBY").ok().into_iter().chain(
+        [
+            "/opt/homebrew/opt/ruby@3.4/bin/ruby",
+            "/opt/homebrew/opt/ruby/bin/ruby",
+            "ruby",
+        ]
+        .map(str::to_owned),
+    );
+    candidates.into_iter().find(|ruby| {
+        std::process::Command::new(ruby)
+            .args(["-e", "exit(RUBY_VERSION >= '3.3' ? 0 : 1)"])
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_during_a_go_python_ruby_or_jvm_run_exits_as_the_signal_and_publishes_nothing() {
+    // As a JavaScript run does: 128 plus the signal, the signal named, and no
+    // run recorded for a suite that never finished.
+    let interrupt = |project: &Project, args: &[&str], waiting: &str| {
+        let mut terminal = common::OnTerminal::start(project, args);
+        terminal.wait_for(waiting);
+        terminal.press("\u{3}");
+        let (code, seen) = terminal.finish();
+        assert_eq!(code, 130, "{args:?}\n{seen}");
+        assert!(
+            seen.contains("the test command was interrupted by SIGINT; no run was published"),
+            "{args:?}\n{seen}"
+        );
+        let runs = project.supercov(&["runs", "--json"]).json();
+        assert_eq!(
+            runs["data"]["runs"].as_array().map(Vec::len),
+            Some(0),
+            "{runs}"
+        );
+    };
+    if let Some(go) = go() {
+        let project = Project::empty("interrupt-go");
+        project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+        project.write(
+            "w.go",
+            "package w\n\nfunc Double(n int) int { return n * 2 }\n",
+        );
+        project.write("w_test.go", "package w\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestWaits(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n\tfmt.Println(\"waiting now\")\n\ttime.Sleep(60 * time.Second)\n}\n");
+        project.git(&["init", "-q"]);
+        interrupt(&project, &["--", go, "test", "-v", "./..."], "waiting now");
+    }
+    let project = Project::empty("interrupt-python");
+    project.write("pkg/__init__.py", "");
+    project.write("pkg/w.py", "def double(n):\n    return n * 2\n");
+    project.write("tests/__init__.py", "");
+    project.write("tests/test_w.py", "import time\nimport unittest\nfrom pkg.w import double\n\nclass W(unittest.TestCase):\n    def test_waits(self):\n        self.assertEqual(double(2), 4)\n        print('waiting now', flush=True)\n        time.sleep(60)\n");
+    project.git(&["init", "-q"]);
+    interrupt(
+        &project,
+        &[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ],
+        "waiting now",
+    );
+    if let Some(ruby) = ruby() {
+        let project = Project::empty("interrupt-ruby");
+        project.write("lib/w.rb", "module W\n  def self.double(n) = n * 2\nend\n");
+        project.write("test/w_test.rb", "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_waits\n    assert_equal 4, W.double(2)\n    puts 'waiting now'\n    $stdout.flush\n    sleep 60\n  end\nend\n");
+        project.git(&["init", "-q"]);
+        interrupt(
+            &project,
+            &["--", &ruby, "-Ilib", "test/w_test.rb"],
+            "waiting now",
+        );
+    }
+    let maven = std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if maven {
+        let project = Project::empty("interrupt-jvm");
+        project.write("pom.xml", "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>example</groupId>\n  <artifactId>w</artifactId>\n  <version>1.0</version>\n  <properties>\n    <maven.compiler.source>17</maven.compiler.source>\n    <maven.compiler.target>17</maven.compiler.target>\n    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n  </properties>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n      <scope>test</scope>\n    </dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin>\n        <groupId>org.apache.maven.plugins</groupId>\n        <artifactId>maven-surefire-plugin</artifactId>\n        <version>3.2.5</version>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n");
+        project.write(
+            "src/main/java/w/W.java",
+            "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n * 2;\n    }\n}\n",
+        );
+        project.write("src/test/java/w/WTest.java", "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void waits() throws InterruptedException {\n        assertEquals(4, W.twice(2));\n        System.out.println(\"waiting now\");\n        System.out.flush();\n        Thread.sleep(60_000);\n    }\n}\n");
+        project.git(&["init", "-q"]);
+        interrupt(&project, &["--", "mvn", "test"], "waiting now");
+    }
 }

@@ -794,7 +794,8 @@ pub fn run_direct_go(
         }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
-                "the test command was interrupted by {signal:?}; no run was published"
+                "the test command was interrupted by {}; no run was published",
+                signal.name()
             ));
         }
         let exit_code = execution.exit_code;

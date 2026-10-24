@@ -397,7 +397,7 @@ fn build_run(
         &run.metadata.integrity,
         current_integrity.as_ref(),
     );
-    let stale = comparison.stale || run.metadata.integrity.stale.unwrap_or(false);
+    let stale = comparison.stale;
     let stale_reasons = comparison.reasons;
     let container = match crate::open_query_index_for(run, filter) {
         Ok(container) => container,

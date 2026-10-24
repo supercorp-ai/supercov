@@ -91,7 +91,7 @@ impl std::fmt::Display for DirectJavascriptRunError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Interrupted { signal, .. } => {
-                write!(formatter, "interrupted by {}", signal_name(*signal))
+                write!(formatter, "interrupted by {}", signal.name())
             }
             Self::Failed(message) => formatter.write_str(message),
         }
@@ -103,14 +103,6 @@ impl std::error::Error for DirectJavascriptRunError {}
 impl From<String> for DirectJavascriptRunError {
     fn from(value: String) -> Self {
         Self::Failed(value)
-    }
-}
-
-fn signal_name(signal: ForwardedSignal) -> &'static str {
-    match signal {
-        ForwardedSignal::Sighup => "SIGHUP",
-        ForwardedSignal::Sigint => "SIGINT",
-        ForwardedSignal::Sigterm => "SIGTERM",
     }
 }
 
@@ -1052,7 +1044,7 @@ pub fn run_direct_javascript(
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
     if let Some(signal) = execution.interrupted_signal {
-        interrupt_run_state(&root, &run_id, &started_at, signal_name(signal))
+        interrupt_run_state(&root, &run_id, &started_at, signal.name())
             .map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
         return Err(DirectJavascriptRunError::Interrupted {

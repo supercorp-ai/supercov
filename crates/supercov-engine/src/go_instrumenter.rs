@@ -720,22 +720,21 @@ impl<'a> Collector<'a> {
                 self.add_point(node, PointKind::Function, label);
             }
             "if_statement" => {
-                if let Some(condition) = node.child_by_field_name("condition") {
-                    let bare = unparenthesized(condition);
-                    self.conditions.insert((bare.start_byte(), bare.end_byte()));
-                    // An `if` without an else still has two outcomes: the body
-                    // ran, or control passed it by. Wrapping the condition
-                    // records the arm that was *not* taken by never setting its
-                    // bit, which is what makes an untested guard visible.
-                    let probes = self.add_branch(node, "if", &["true", "false"]);
-                    let decision = self.add_decision(condition, "if");
-                    self.edit(
-                        condition.start_byte(),
-                        5,
-                        branch_wrapper(&alias, probes[0], probes[1], decision),
-                    );
-                    self.edit(condition.end_byte(), 5, "))".to_owned());
-                }
+                let condition = field(node, "condition");
+                let bare = unparenthesized(condition);
+                self.conditions.insert((bare.start_byte(), bare.end_byte()));
+                // An `if` without an else still has two outcomes: the body
+                // ran, or control passed it by. Wrapping the condition
+                // records the arm that was *not* taken by never setting its
+                // bit, which is what makes an untested guard visible.
+                let probes = self.add_branch(node, "if", &["true", "false"]);
+                let decision = self.add_decision(condition, "if");
+                self.edit(
+                    condition.start_byte(),
+                    5,
+                    branch_wrapper(&alias, probes[0], probes[1], decision),
+                );
+                self.edit(condition.end_byte(), 5, "))".to_owned());
             }
             "for_statement" => {
                 // A `for` with a condition branches on it. A `range` loop and a
@@ -773,16 +772,12 @@ impl<'a> Collector<'a> {
                             .filter(|parent| parent.kind() == "labeled_statement")
                             .unwrap_or(node);
                         self.edit(statement.start_byte(), 90, format!("var {flag} bool; "));
-                        if let Some(body) = node.child_by_field_name("body") {
-                            self.edit(
-                                body.start_byte() + 1,
-                                100,
-                                format!(
-                                    " if !{flag} {{ {flag} = true; {alias}.A({}) }};",
-                                    probes[1]
-                                ),
-                            );
-                        }
+                        let body = field(node, "body");
+                        self.edit(
+                            body.start_byte() + 1,
+                            100,
+                            format!(" if !{flag} {{ {flag} = true; {alias}.A({}) }};", probes[1]),
+                        );
                         self.edit(
                             node.end_byte(),
                             100,
@@ -991,12 +986,8 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
                 .map(|op| &source[op.byte_range()])
                 .unwrap_or("");
             if operator == "&&" || operator == "||" {
-                if let Some(left) = node.child_by_field_name("left") {
-                    condition_nodes(left, source, out);
-                }
-                if let Some(right) = node.child_by_field_name("right") {
-                    condition_nodes(right, source, out);
-                }
+                condition_nodes(field(node, "left"), source, out);
+                condition_nodes(field(node, "right"), source, out);
                 return;
             }
             out.push(node);
@@ -1031,12 +1022,21 @@ fn logical_parent(node: Node, source: &str) -> bool {
     parent.is_some_and(|parent| is_logical(parent, source))
 }
 
+/// A field the Go grammar requires of `node`. A tree with any error or
+/// missing node is refused before anything reads it (see `parse_exactly`), so
+/// in one that was accepted the field is there: an `if` has its condition, a
+/// `for` its body, a binary expression both sides.
+fn field<'t>(node: Node<'t>, name: &str) -> Node<'t> {
+    node.child_by_field_name(name)
+        .unwrap_or_else(|| panic!("the Go grammar gives every {} a {name}", node.kind()))
+}
+
 fn unparenthesized(node: Node) -> Node {
-    if node.kind() == "parenthesized_expression"
-        && let Some(inner) = node
-            .children(&mut node.walk())
-            .find(|child| child.is_named())
-    {
+    if node.kind() == "parenthesized_expression" {
+        // The one expression the parentheses hold, in an accepted tree.
+        let inner = node
+            .named_child(0)
+            .unwrap_or_else(|| panic!("the Go grammar puts an expression in parentheses"));
         return unparenthesized(inner);
     }
     node

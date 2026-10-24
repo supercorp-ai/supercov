@@ -730,6 +730,18 @@ pub enum ForwardedSignal {
 }
 
 impl ForwardedSignal {
+    /// The signal as a shell names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sighup => "SIGHUP",
+            Self::Sigint => "SIGINT",
+            Self::Sigterm => "SIGTERM",
+        }
+    }
+
+    /// Every signal Supercov forwards, to read one back from its name.
+    pub const ALL: [Self; 3] = [Self::Sighup, Self::Sigint, Self::Sigterm];
+
     pub fn exit_code(self) -> i32 {
         match self {
             Self::Sighup => 129,

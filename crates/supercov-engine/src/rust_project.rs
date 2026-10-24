@@ -1874,9 +1874,12 @@ fn integration_choice() {
         )
         .unwrap();
         fs::write(root.join("member/src/lib.rs"), "").unwrap();
+        // Compared canonical: macOS's temporary directory is reached through
+        // a link (`/var` is `/private/var`), and Cargo names the real path.
         assert!(matches!(
             prepare_rust_project(&root.join("member"), None),
-            Err(RustProjectError::UnsafePath(path)) if Path::new(&path) == root
+            Err(RustProjectError::UnsafePath(path))
+                if Path::new(&path).canonicalize().ok() == root.canonicalize().ok()
         ));
         fs::write(
             root.join("Cargo.toml"),

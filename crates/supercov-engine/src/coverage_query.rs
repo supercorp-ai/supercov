@@ -3522,9 +3522,10 @@ pub fn coverage_areas_query(
     }
     for (position, kind) in kinds.iter().enumerate() {
         for file in index.file_gaps(options.view, Some(kind), None)? {
-            if let Some(area) = areas.get_mut(&area_directory(&file.file, options.depth)) {
-                add_dimensions(&mut area.by_kind[position].covered, &file.covered);
-            }
+            let area = areas
+                .get_mut(&area_directory(&file.file, options.depth))
+                .expect("a kind's files are among every file's");
+            add_dimensions(&mut area.by_kind[position].covered, &file.covered);
         }
     }
     if !kinds.is_empty() {
@@ -3534,12 +3535,13 @@ pub fn coverage_areas_query(
                 area.covered_by_tests = Some(NO_DIMENSIONS);
             }
             for file in tested {
-                if let Some(sum) = areas
+                let area = areas
                     .get_mut(&area_directory(&file.file, options.depth))
-                    .and_then(|area| area.covered_by_tests.as_mut())
-                {
-                    add_dimensions(sum, &file.covered);
-                }
+                    .expect("the tested files are among every file's");
+                add_dimensions(
+                    area.covered_by_tests.get_or_insert(NO_DIMENSIONS),
+                    &file.covered,
+                );
             }
         }
     }

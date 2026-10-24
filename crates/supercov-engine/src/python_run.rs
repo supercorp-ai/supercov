@@ -446,7 +446,8 @@ fn run_direct_python_in(
         let test_command_ms = elapsed_ms(test_started);
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
-                "the test command was interrupted by {signal:?}; no run was published"
+                "the test command was interrupted by {}; no run was published",
+                signal.name()
             ));
         }
 
