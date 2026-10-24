@@ -7,8 +7,6 @@ name: Next.js compatibility
 # the Node version, so both run.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '45 2 * * *'
   pull_request:
     paths:
       - 'crates/**'
@@ -32,6 +30,11 @@ jobs:
   application:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # The fixture keeps the reporter's Playwright 1.60, which predates the
+    # Ubuntu 26.04 that ubuntu-latest is: it fetches and launches the 24.04
+    # build of its browser, which runs here.
+    env:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +49,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - run: npm ci
         working-directory: tests/fixtures/next-playwright
-      - run: npx playwright install --with-deps chromium
+      # The system's own libraries, by a Playwright that knows this system.
+      - run: env -u PLAYWRIGHT_HOST_PLATFORM_OVERRIDE npx -y playwright@1.62.1 install-deps chromium
+      - run: npx playwright install chromium
         working-directory: tests/fixtures/next-playwright
       - run: cargo build -p supercov
       - run: node scripts/next-playwright-integration.mjs

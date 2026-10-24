@@ -2,8 +2,6 @@ name: React compatibility
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '15 2 * * *'
   pull_request:
     paths:
       - 'crates/**'
