@@ -218,9 +218,7 @@ pub fn html(view: &RunView, sources: &BTreeMap<String, String>, source_reason: &
 
     let mut cards = String::new();
     for metric in Metric::ALL {
-        let Some(counts) = view.metric(metric) else {
-            continue;
-        };
+        let counts = view.metric(metric);
         let _ = write!(
             cards,
             "<div class=\"card\"><div class=\"n\">{}</div><div class=\"m\">{} &middot; {}/{} &middot; {}</div></div>",
@@ -322,7 +320,19 @@ mod tests {
                     eligible: 0,
                     applicability: Applicability::NotApplicable,
                 },
-            ],
+            ]
+            .into_iter()
+            .chain(
+                [Metric::Statements, Metric::Functions, Metric::Branches].map(|metric| {
+                    MetricView {
+                        metric,
+                        covered: 0,
+                        eligible: 0,
+                        applicability: Applicability::NotApplicable,
+                    }
+                }),
+            )
+            .collect(),
             files: vec![FileView {
                 file: "src/<script>.ts".into(),
                 metrics: vec![MetricView {

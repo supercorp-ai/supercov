@@ -91,12 +91,20 @@ const DRIVERS: [&str; 4] = [
 ];
 
 pub fn browser(environment: &[(String, String)]) -> Option<Browser> {
+    browser_from(environment, &|name| std::env::var_os(name))
+}
+
+/// `browser`, with `ambient` as the process's own variables.
+pub(crate) fn browser_from(
+    environment: &[(String, String)],
+    ambient: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<Browser> {
     let variable = |name: &str| {
         environment
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.clone())
-            .or_else(|| std::env::var(name).ok())
+            .or_else(|| ambient(name)?.into_string().ok())
     };
     let arguments = |driver: &str| {
         variable(&format!("{}_ARGS", driver.to_uppercase()))
@@ -120,7 +128,7 @@ pub fn browser(environment: &[(String, String)]) -> Option<Browser> {
             return Some(pick(driver, PathBuf::from(path)));
         }
     }
-    let path = std::env::var_os("PATH")?;
+    let path = ambient("PATH")?;
     for directory in std::env::split_paths(&path) {
         for driver in DRIVERS {
             let candidate = directory
@@ -144,8 +152,24 @@ pub struct BrowserReader {
 
 impl BrowserReader {
     pub fn start(chromedriver: &Path, arguments: &[String], token: &str) -> Result<Self, String> {
+        Self::start_within(chromedriver, arguments, token, Duration::from_secs(20))
+    }
+
+    /// `start`, giving the driver `patience` to listen. A driver that never
+    /// does is stopped: left running, it outlived the run.
+    fn start_within(
+        chromedriver: &Path,
+        arguments: &[String],
+        token: &str,
+        patience: Duration,
+    ) -> Result<Self, String> {
         let port = free_port()?;
-        let driver = Command::new(chromedriver)
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let mut driver = Command::new(chromedriver)
             .args(arguments)
             .arg(format!("--port={port}"))
             .stdin(Stdio::null())
@@ -153,23 +177,26 @@ impl BrowserReader {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
+        let mut stop_driver = |error: String| {
+            let _ = driver.kill();
+            let _ = driver.wait();
+            error
+        };
         let upstream = SocketAddr::from(([127, 0, 0, 1], port));
         let started = Instant::now();
         while TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).is_err() {
-            if started.elapsed() > Duration::from_secs(20) {
-                return Err(format!("{} never listened", chromedriver.display()));
+            if started.elapsed() > patience {
+                return Err(stop_driver(format!(
+                    "{} never listened",
+                    chromedriver.display()
+                )));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-        let address = listener.local_addr().map_err(|error| error.to_string())?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| error.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let token = token.to_owned();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("supercov-browser-proxy".into())
             .spawn(move || {
                 while !flag.load(Ordering::Acquire) {
@@ -186,8 +213,8 @@ impl BrowserReader {
                         Err(_) => std::thread::sleep(Duration::from_millis(10)),
                     }
                 }
-            })
-            .map_err(|error| error.to_string())?;
+            });
+        spawned.map_err(|error| stop_driver(error.to_string()))?;
         Ok(Self {
             address,
             driver,
@@ -229,7 +256,7 @@ struct Request {
     body: Vec<u8>,
 }
 
-fn read_request(stream: &mut BufReader<TcpStream>) -> Option<Request> {
+fn read_request(stream: &mut impl BufRead) -> Option<Request> {
     let mut line = String::new();
     stream.read_line(&mut line).ok()?;
     let mut parts = line.split_whitespace();
@@ -254,24 +281,44 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Option<Request> {
             }
         }
     }
-    let mut body = Vec::new();
-    if chunked {
-        loop {
-            let mut size = String::new();
-            stream.read_line(&mut size).ok()?;
-            let size = usize::from_str_radix(size.trim(), 16).ok()?;
-            let mut chunk = vec![0; size + 2];
-            stream.read_exact(&mut chunk).ok()?;
-            if size == 0 {
-                break;
-            }
-            body.extend_from_slice(&chunk[..size]);
-        }
+    let body = if chunked {
+        read_chunked(stream)?
     } else {
-        body.resize(length, 0);
-        stream.read_exact(&mut body).ok()?;
-    }
+        read_length(stream, length)?
+    };
     Some(Request { method, path, body })
+}
+
+/// A body of a declared length, read as its bytes arrive: a length no
+/// sender meant is never allocated up front.
+fn read_length(reader: &mut impl BufRead, length: usize) -> Option<Vec<u8>> {
+    let mut body = Vec::with_capacity(length.min(1 << 20));
+    reader.take(length as u64).read_to_end(&mut body).ok()?;
+    (body.len() == length).then_some(body)
+}
+
+/// A chunked body, decoded: chunk extensions (`5;name=v`) are ignored, and
+/// trailers are read through the blank line that ends them.
+fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        let mut size = String::new();
+        if reader.read_line(&mut size).ok()? == 0 {
+            return None;
+        }
+        let size = usize::from_str_radix(size.split(';').next()?.trim(), 16).ok()?;
+        if size == 0 {
+            loop {
+                let mut trailer = String::new();
+                if reader.read_line(&mut trailer).ok()? == 0 || trailer.trim().is_empty() {
+                    return Some(body);
+                }
+            }
+        }
+        let mut chunk = vec![0; size + 2];
+        reader.read_exact(&mut chunk).ok()?;
+        body.extend_from_slice(&chunk[..size]);
+    }
 }
 
 /// One request to chromedriver; its status and body, chunked or not.
@@ -289,7 +336,12 @@ fn call(upstream: SocketAddr, method: &str, path: &str, body: &[u8]) -> Option<(
     stream.write_all(body).ok()?;
     // Read by the response's own length: chromedriver keeps the connection
     // open after answering, whatever the request asked.
-    let mut reader = BufReader::new(stream);
+    read_response(&mut BufReader::new(stream))
+}
+
+/// A response's status and body, framed by its length, by chunks, or by the
+/// connection closing.
+fn read_response(reader: &mut impl BufRead) -> Option<(u16, Vec<u8>)> {
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     let status = line.split_whitespace().nth(1)?.parse().ok()?;
@@ -312,25 +364,15 @@ fn call(upstream: SocketAddr, method: &str, path: &str, body: &[u8]) -> Option<(
             }
         }
     }
-    let mut payload = Vec::new();
-    if chunked {
-        loop {
-            let mut size = String::new();
-            reader.read_line(&mut size).ok()?;
-            let size = usize::from_str_radix(size.trim(), 16).ok()?;
-            let mut chunk = vec![0; size + 2];
-            reader.read_exact(&mut chunk).ok()?;
-            if size == 0 {
-                break;
-            }
-            payload.extend_from_slice(&chunk[..size]);
-        }
+    let payload = if chunked {
+        read_chunked(reader)?
     } else if let Some(length) = length {
-        payload.resize(length, 0);
-        reader.read_exact(&mut payload).ok()?;
+        read_length(reader, length)?
     } else {
+        let mut payload = Vec::new();
         reader.read_to_end(&mut payload).ok()?;
-    }
+        payload
+    };
     Some((status, payload))
 }
 
@@ -464,5 +506,256 @@ mod tests {
             browser(&env(&[("CHROMEDRIVER_REMOTE", "http://x/")])),
             Some(Browser::Other("a remote chromedriver".into()))
         );
+    }
+
+    fn bytes(text: &str) -> std::io::Cursor<Vec<u8>> {
+        std::io::Cursor::new(text.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn a_request_is_read_by_its_length_or_its_chunks() {
+        let sized = read_request(&mut bytes(
+            "POST /e/00/session HTTP/1.1\r\nHost: x\r\nno colon\r\nContent-Length: 2\r\n\r\n{}tail",
+        ))
+        .unwrap();
+        assert_eq!(
+            (sized.method.as_str(), sized.path.as_str()),
+            ("POST", "/e/00/session")
+        );
+        assert_eq!(sized.body, b"{}");
+        // Chunks with an extension, then trailers through the blank line.
+        let chunked = read_request(&mut bytes(
+            "POST /e/00/x HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n3;n=v\r\n{\"a\r\n3\r\n\":1\r\n1\r\n}\r\n0\r\nX-Trailer: 1\r\n\r\n",
+        ))
+        .unwrap();
+        assert_eq!(chunked.body, br#"{"a":1}"#);
+        assert!(read_request(&mut bytes("")).is_none());
+        assert!(read_request(&mut bytes("GET\r\n\r\n")).is_none());
+        assert!(read_request(&mut bytes("POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n")).is_none());
+        // A body cut short, and chunks that stop before their end.
+        assert!(
+            read_request(&mut bytes("POST / HTTP/1.1\r\nContent-Length: 9\r\n\r\nab")).is_none()
+        );
+        assert!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n"
+            ))
+            .is_none()
+        );
+        assert!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_response_is_read_by_its_length_its_chunks_or_its_close() {
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}more"
+            )),
+            Some((200, b"{}".to_vec()))
+        );
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\nbad header\r\n\r\n2\r\nno\r\n0\r\n\r\n"
+            )),
+            Some((404, b"no".to_vec()))
+        );
+        // Neither: everything until the connection closes.
+        assert_eq!(
+            read_response(&mut bytes("HTTP/1.1 500 Error\r\n\r\nall of it")),
+            Some((500, b"all of it".to_vec()))
+        );
+        // A chunked body that ends at the end of the stream, with no blank line.
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n"
+            )),
+            Some((200, b"x".to_vec()))
+        );
+        // Another transfer coding is no chunking.
+        assert_eq!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nContent-Length: 1\r\n\r\nx"
+            )),
+            Some((200, b"x".to_vec()))
+        );
+        assert_eq!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\nContent-Length: 1\r\n\r\nx"
+            ))
+            .unwrap()
+            .body,
+            b"x"
+        );
+        assert!(read_response(&mut bytes("garbage\r\n\r\n")).is_none());
+        // A length no sender meant is a body cut short, not an allocation.
+        assert!(
+            read_response(&mut bytes(
+                "HTTP/1.1 200 OK\r\nContent-Length: 999999999999999\r\n\r\n{}"
+            ))
+            .is_none()
+        );
+        assert!(
+            read_request(&mut bytes(
+                "POST / HTTP/1.1\r\nContent-Length: 999999999999999\r\n\r\n{}"
+            ))
+            .is_none()
+        );
+    }
+
+    /// The relay between the runner and its WebDriver: a new session gets
+    /// the region registry installed, under W3C's answer or the older one;
+    /// closing it writes the page's regions that carry the run's token to the
+    /// test's evidence; and anything else, a failure included, is passed on
+    /// as WebDriver answered it.
+    #[test]
+    fn the_relay_installs_the_registry_and_takes_the_runs_regions_on_close() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        let token = "0123456789abcdef";
+        let mut ours = vec![0u8; 80];
+        ours[56..72].copy_from_slice(token.as_bytes());
+        let mut theirs = vec![0u8; 80];
+        theirs[56..60].copy_from_slice(b"else");
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let regions = json!({"value": [[0, encode(&ours)], [1, encode(&theirs)], [2, 7]]});
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = upstream.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in upstream.incoming() {
+                let mut stream = stream.unwrap();
+                let request =
+                    read_request(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
+                log.lock()
+                    .unwrap()
+                    .push(format!("{} {}", request.method, request.path));
+                let (status, body) = match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/session") if request.body == b"old" => {
+                        (200, json!({"sessionId": "s2", "value": {}}))
+                    }
+                    // A session refused, an answer that is no JSON, and one
+                    // that names no session: nothing is installed.
+                    ("POST", "/session") if request.body == b"refused" => {
+                        (500, json!({"value": {"error": "session not created"}}))
+                    }
+                    ("POST", "/session") if request.body == b"text" => (200, json!("{")),
+                    ("POST", "/session") if request.body == b"nameless" => {
+                        (200, json!({"value": {}}))
+                    }
+                    ("POST", "/session") => (200, json!({"value": {"sessionId": "s1"}})),
+                    ("POST", "/session/s1/execute/sync") => (200, regions.clone()),
+                    ("GET", "/status") => (500, json!({"value": "down"})),
+                    _ => (200, json!({"value": null})),
+                };
+                // `"{"` is sent as the bare `{` it holds: no JSON at all.
+                let body = body
+                    .as_str()
+                    .map_or_else(|| body.to_string(), str::to_owned);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let evidence = std::env::temp_dir().join(format!(
+            "supercov-wasm-relay-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let hex = evidence
+            .to_str()
+            .unwrap()
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ask = |method: &str, path: &str, body: &str| {
+            let mut client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+            write!(
+                client,
+                "{method} /e/{hex}{path} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let (stream, _) = proxy.accept().unwrap();
+            relay(stream, address, token).unwrap();
+            read_response(&mut BufReader::new(client)).unwrap()
+        };
+        assert_eq!(ask("POST", "/session", "{}").0, 200);
+        assert_eq!(ask("POST", "/session", "old").0, 200);
+        assert_eq!(ask("POST", "/session", "refused").0, 500);
+        assert_eq!(ask("POST", "/session", "text"), (200, b"{".to_vec()));
+        assert_eq!(ask("POST", "/session", "nameless").0, 200);
+        let (status, body) = ask("GET", "/status", "");
+        assert_eq!((status, body), (500, br#"{"value":"down"}"#.to_vec()));
+        assert_eq!(ask("DELETE", "/session/s1/window", "").0, 200);
+        assert_eq!(ask("DELETE", "/session/other/deeper", "").0, 200);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [
+                "POST /session",
+                "POST /session/s1/goog/cdp/execute",
+                "POST /session",
+                "POST /session/s2/goog/cdp/execute",
+                "POST /session",
+                "POST /session",
+                "POST /session",
+                "GET /status",
+                "POST /session/s1/execute/sync",
+                "DELETE /session/s1/window",
+                "DELETE /session/other/deeper",
+            ]
+        );
+        let written = std::fs::read_dir(&evidence)
+            .unwrap()
+            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(written, [ours]);
+        std::fs::remove_dir_all(evidence).unwrap();
+    }
+
+    /// A driver that never listens is stopped, not left running past the
+    /// run that started it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_driver_that_never_listens_is_stopped() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-silent-driver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        // `sh -c script --port=N`: the port becomes `$0`, and is ignored.
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let error = BrowserReader::start_within(
+            Path::new("/bin/sh"),
+            &["-c".into(), script],
+            "0123456789ab",
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        assert!(error.ends_with("never listened"), "{error}");
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        assert!(
+            !Path::new(&format!("/proc/{}", pid.trim())).exists(),
+            "the driver is still running"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

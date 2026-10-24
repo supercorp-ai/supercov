@@ -12,7 +12,6 @@
 //!
 //! ```text
 //! .supercov/<lane>/
-//!   <request-sha256>.json          legacy response cache, still read
 //!   requests/<request-sha256>.json response cache
 //!   snapshots/latest               the id of the most recent completed scan
 //!   snapshots/<id>/manifest.json   what was scanned, with which rubric and model
@@ -32,15 +31,9 @@ pub fn root(project_root: &Path, lane: &str) -> PathBuf {
     project_root.join(".supercov").join(lane)
 }
 
-/// Where a response is cached now. The flat directory above it is the earlier
-/// location; [`legacy_response`] still reads from there.
+/// Where responses are cached, by request hash.
 pub fn responses(project_root: &Path, lane: &str) -> PathBuf {
     root(project_root, lane).join("requests")
-}
-
-/// Only the quality lane ever had the flat layout.
-pub fn legacy_response(project_root: &Path, hash: &str) -> PathBuf {
-    root(project_root, "quality").join(format!("{hash}.json"))
 }
 
 pub fn snapshots(project_root: &Path, lane: &str) -> PathBuf {
@@ -101,20 +94,20 @@ fn ignore_store(path: &Path) -> Result<(), String> {
 /// reader sees either the whole previous content or the whole new content.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let directory = path.parent().ok_or("invalid path")?;
-    fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+    fs::create_dir_all(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
     ignore_store(path)?;
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> std::io::Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&temp)
-            .map_err(|e| e.to_string())?;
-        file.write_all(bytes).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(&temp, path).map_err(|e| e.to_string())
-    })();
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    })()
+    .map_err(|e| format!("{}: {e}", path.display()));
     if result.is_err() {
         let _ = fs::remove_file(temp);
     }
@@ -123,7 +116,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Save one completed scan and point `latest` at it. The snapshot directory is
 /// created exclusively, so an id that somehow already exists is refused rather
-/// than overwritten.
+/// than overwritten. An error says whether the snapshot itself was saved.
 pub fn write(
     project_root: &Path,
     lane: &str,
@@ -131,21 +124,24 @@ pub fn write(
     manifest: &Value,
     files: &Value,
 ) -> Result<PathBuf, String> {
-    if !is_snapshot_id(id) {
-        return Err(format!("not a snapshot id: {id}"));
-    }
+    debug_assert!(is_snapshot_id(id), "not a snapshot id: {id}");
+    let not_saved = |error: String| format!("no snapshot was saved: {error}");
     let directory = snapshots(project_root, lane).join(id);
-    fs::create_dir_all(snapshots(project_root, lane)).map_err(|e| e.to_string())?;
-    fs::create_dir(&directory).map_err(|e| match e.kind() {
-        std::io::ErrorKind::AlreadyExists => format!("{lane} snapshot {id} already exists"),
-        _ => e.to_string(),
+    fs::create_dir_all(snapshots(project_root, lane))
+        .map_err(|e| not_saved(format!("{}: {e}", snapshots(project_root, lane).display())))?;
+    fs::create_dir(&directory).map_err(|e| {
+        not_saved(match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!("{lane} snapshot {id} already exists"),
+            _ => format!("{}: {e}", directory.display()),
+        })
     })?;
     for (name, document) in [("manifest.json", manifest), ("files.json", files)] {
-        let bytes = serde_json::to_vec(document).map_err(|e| e.to_string())?;
-        write_atomic(&directory.join(name), &bytes)?;
+        let bytes = serde_json::to_vec(document).map_err(|e| not_saved(e.to_string()))?;
+        write_atomic(&directory.join(name), &bytes).map_err(not_saved)?;
     }
     // Last, so `latest` never names a snapshot that is still being written.
-    write_atomic(&snapshots(project_root, lane).join("latest"), id.as_bytes())?;
+    write_atomic(&snapshots(project_root, lane).join("latest"), id.as_bytes())
+        .map_err(|e| format!("snapshot {id} was saved, but `latest` does not name it: {e}"))?;
     Ok(directory)
 }
 
@@ -161,6 +157,18 @@ pub fn read(project_root: &Path, lane: &str, id: &str) -> Result<(Value, Value),
     }
     let directory = snapshots(project_root, lane).join(id);
     if !directory.is_dir() {
+        // The same id under the other lane is that lane's assessment: say
+        // which command reads it.
+        let other = if lane == "security" {
+            "quality"
+        } else {
+            "security"
+        };
+        if snapshots(project_root, other).join(id).is_dir() {
+            return Err(format!(
+                "{id} is a {other} snapshot, not a {lane} one; read it with `supercov {other}`"
+            ));
+        }
         return Err(format!(
             "no {lane} snapshot {id} here; list them with: supercov {lane} snapshots"
         ));

@@ -481,14 +481,12 @@ pub struct IndexedConfidenceLines {
     pub unexecuted: usize,
     pub executed: usize,
     pub action: usize,
-    pub asserted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedSummaryConfidence {
     pub lines: IndexedConfidenceLines,
-    pub assertion_covered_mcdc_conditions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -508,13 +506,8 @@ pub struct IndexedSourceScope {
     pub kind: String,
     pub language: String,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub mode: String,
     pub roots: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub measurement_complete: Option<bool>,
     pub included: usize,
     pub excluded: usize,
     pub ambiguous: usize,
@@ -1003,21 +996,13 @@ fn dimension_record(
     Ok(record)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScopeKind {
-    SourceDiscovery = 1,
-    Compiler = 2,
-}
-
+/// A run's source scope: the files source discovery classified.
 struct ScopeProjection<'a> {
-    kind: ScopeKind,
     language: &'a str,
     model: &'a str,
-    mode: Option<&'a str>,
+    mode: &'a str,
     roots: Vec<String>,
-    unit: Option<&'a str>,
-    measurement_complete: Option<bool>,
-    entries: Option<&'a Vec<serde_json::Value>>,
+    entries: &'a Vec<serde_json::Value>,
 }
 
 fn scope_projection<'a>(
@@ -1031,10 +1016,11 @@ fn scope_projection<'a>(
     let object = scope
         .as_object()
         .ok_or(CoverageIndexError::InvalidRecord("coverage scope"))?;
-    if let Some(mode) = object.get("mode") {
-        let mode = mode
-            .as_str()
-            .ok_or(CoverageIndexError::InvalidRecord("source-scope mode"))?;
+    let mode = object
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(CoverageIndexError::InvalidRecord("source-scope mode"))?;
+    {
         let roots = object
             .get("roots")
             .and_then(serde_json::Value::as_array)
@@ -1050,46 +1036,14 @@ fn scope_projection<'a>(
             .get("entries")
             .and_then(serde_json::Value::as_array)
             .ok_or(CoverageIndexError::InvalidRecord("source-scope entries"))?;
-        return Ok(Some(ScopeProjection {
-            kind: ScopeKind::SourceDiscovery,
+        Ok(Some(ScopeProjection {
             language: coverage_language,
             model: coverage_model,
-            mode: Some(mode),
+            mode,
             roots,
-            unit: None,
-            measurement_complete: None,
-            entries: Some(entries),
-        }));
+            entries,
+        }))
     }
-
-    let language = object
-        .get("language")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(CoverageIndexError::InvalidRecord("compiler-scope language"))?;
-    let model = object
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(CoverageIndexError::InvalidRecord("compiler-scope model"))?;
-    let unit = object
-        .get("crate")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(CoverageIndexError::InvalidRecord("compiler-scope unit"))?;
-    let measurement_complete = object
-        .get("measurementComplete")
-        .and_then(serde_json::Value::as_bool)
-        .ok_or(CoverageIndexError::InvalidRecord(
-            "compiler-scope measurement completeness",
-        ))?;
-    Ok(Some(ScopeProjection {
-        kind: ScopeKind::Compiler,
-        language,
-        model,
-        mode: None,
-        roots: Vec::new(),
-        unit: Some(unit),
-        measurement_complete: Some(measurement_complete),
-        entries: None,
-    }))
 }
 
 fn projection_record(
@@ -1117,14 +1071,14 @@ fn projection_record(
 
     let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
     record[2] = u8::from(scope.is_some());
-    record[3] = scope.as_ref().map_or(0, |scope| scope.kind as u8);
+    // The scope's kind: source discovery, the only one there is.
+    record[3] = u8::from(scope.is_some());
     put_u32(
         &mut record,
         16,
         scope
             .as_ref()
-            .and_then(|scope| scope.mode)
-            .map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+            .map_or(Ok(NO_STRING), |scope| strings.intern(scope.mode))?,
     );
     let roots = scope
         .as_ref()
@@ -1202,7 +1156,9 @@ fn projection_record(
         put_u64(&mut record, 248 + index * 8, usize_u64(value)?);
     }
 
-    let confidence_levels = ["unexecuted", "executed", "action", "asserted"];
+    // 304 and 312 held the lines and MC/DC conditions an assertion map
+    // credited; reserved.
+    let confidence_levels = ["unexecuted", "executed", "action"];
     for (index, level) in confidence_levels.into_iter().enumerate() {
         put_u64(
             &mut record,
@@ -1215,17 +1171,6 @@ fn projection_record(
             )?,
         );
     }
-    put_u64(
-        &mut record,
-        312,
-        usize_u64(
-            view.decisions
-                .iter()
-                .flat_map(|decision| &decision.conditions)
-                .filter(|condition| condition.assertion_covered)
-                .count(),
-        )?,
-    );
 
     let gaps = file_gaps(view, selected)?;
     put_u64(
@@ -1347,7 +1292,10 @@ fn projection_record(
     let empty_tests = selected_tests
         .iter()
         .filter(|test| {
+            // A test whose coverage went to the run reached what it
+            // reached; that is not evidence gone missing.
             test.role == "test"
+                && crate::coverage_report::coverage_is_its_own(&test.attribution)
                 && test.lines.is_empty()
                 && test.hits.is_empty()
                 && test.decisions.is_empty()
@@ -1363,7 +1311,7 @@ fn projection_record(
             .map_or(Ok(NO_STRING), |test| strings.intern(&test.name))?,
     );
 
-    let entries = scope.as_ref().and_then(|scope| scope.entries);
+    let entries = scope.as_ref().map(|scope| scope.entries);
     for (index, status) in ["included", "excluded", "ambiguous"]
         .into_iter()
         .enumerate()
@@ -1395,19 +1343,8 @@ fn projection_record(
             .as_ref()
             .map_or(Ok(NO_STRING), |scope| strings.intern(scope.model))?,
     );
-    put_u32(
-        &mut record,
-        512,
-        scope
-            .as_ref()
-            .and_then(|scope| scope.unit)
-            .map_or(Ok(NO_STRING), |value| strings.intern(value))?,
-    );
-    if let Some(measurement_complete) = scope.as_ref().and_then(|scope| scope.measurement_complete)
-    {
-        record[516] = 1;
-        record[517] = u8::from(measurement_complete);
-    }
+    // 512..518 held a compiler scope's unit and completeness; reserved.
+    put_u32(&mut record, 512, NO_STRING);
     Ok(record)
 }
 
@@ -1416,12 +1353,11 @@ fn scope_entry_records(
     view: &CoverageView,
     strings: &mut StringTable,
 ) -> Result<Vec<[u8; SCOPE_ENTRY_RECORD_SIZE]>, CoverageIndexError> {
+    // The view's projection record, written first, refused a scope with no
+    // mode (`scope_projection`): this one has one.
     let Some(scope) = &view.scope else {
         return Ok(Vec::new());
     };
-    if scope.get("mode").is_none() {
-        return Ok(Vec::new());
-    }
     let entries = scope
         .get("entries")
         .and_then(serde_json::Value::as_array)
@@ -1508,21 +1444,16 @@ fn confidence_record(
         "unexecuted" => 0,
         "executed" => 1,
         "action" => 2,
-        "asserted" => 3,
         _ => return Err(CoverageIndexError::InvalidRecord("confidence level")),
     };
+    // Bit 2 and the second relation (24..40) held an assertion map's
+    // credit; reserved.
     record[1] = u8::from(confidence.setup_only)
         | (u8::from(confidence.background_only) << 1)
-        | (u8::from(confidence.asserted) << 2)
         | (u8::from(confidence.e2e) << 3);
-    for (index, values) in [&confidence.tests, &confidence.asserted_tests]
-        .into_iter()
-        .enumerate()
-    {
-        let (offset, count) = relations.push_ids(values, strings)?;
-        put_u64(&mut record, 8 + index * 16, offset);
-        put_u64(&mut record, 16 + index * 16, count);
-    }
+    let (offset, count) = relations.push_ids(&confidence.tests, strings)?;
+    put_u64(&mut record, 8, offset);
+    put_u64(&mut record, 16, count);
     for (index, values) in [&confidence.runners, &confidence.kinds]
         .into_iter()
         .enumerate()
@@ -1918,9 +1849,8 @@ fn decision_condition_record(
     relations: &mut StringRelations,
 ) -> Result<[u8; DECISION_CONDITION_RECORD_SIZE], CoverageIndexError> {
     let mut record = [0_u8; DECISION_CONDITION_RECORD_SIZE];
-    record[0] = u8::from(condition.covered)
-        | (u8::from(condition.assertion_covered) << 1)
-        | (u8::from(condition.witness.is_some()) << 2);
+    // Bit 1 held an assertion map's credit; reserved.
+    record[0] = u8::from(condition.covered) | (u8::from(condition.witness.is_some()) << 2);
     put_u32(&mut record, 4, strings.intern(&condition.source)?);
     put_u64(&mut record, 8, usize_u64(condition.index)?);
     if let Some((first, second)) = witness_vectors {
@@ -2770,12 +2700,21 @@ impl<'a> CoverageIndex<'a> {
             let missing_branches = number(32)?;
             let missing_mcdc_conditions = number(40)?;
             let score = number(64)?;
-            let expected_score = uncovered_lines
-                + uncovered_functions * 2
-                + missing_branches * 2
-                + missing_mcdc_conditions * 3
-                + measurement_limitations * 3;
-            if score != expected_score {
+            // Counts a damaged record could carry would overflow the sum.
+            let expected_score = [
+                (uncovered_lines, 1),
+                (uncovered_functions, 2),
+                (missing_branches, 2),
+                (missing_mcdc_conditions, 3),
+                (measurement_limitations, 3),
+            ]
+            .into_iter()
+            .try_fold(0usize, |sum, (count, weight)| {
+                count
+                    .checked_mul(weight)
+                    .and_then(|part| sum.checked_add(part))
+            });
+            if expected_score != Some(score) {
                 return Err(CoverageIndexError::InvalidRecord("file-gap score"));
             }
             let record_kind = self.optional_string(get_u32(record, 72))?;
@@ -2948,60 +2887,43 @@ impl<'a> CoverageIndex<'a> {
                 None
             };
             let has_scope = bool_field(record[2])?;
+            // The kind byte names source discovery, the only scope there is.
             let scope_kind = match record[3] {
-                0 => None,
-                1 => Some((ScopeKind::SourceDiscovery, "source-discovery")),
-                2 => Some((ScopeKind::Compiler, "compiler")),
+                0 => false,
+                1 => true,
                 _ => return Err(CoverageIndexError::InvalidRecord("coverage scope kind")),
             };
+            // Where a compiler scope kept its unit and completeness, and an
+            // assertion map its credited lines and conditions: reserved.
+            if get_u32(record, 512) != NO_STRING
+                || record[516] != 0
+                || record[517] != 0
+                || number(304)? != 0
+                || number(312)? != 0
+            {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "projection reserved bytes",
+                ));
+            }
             let scope_mode = self.optional_string(get_u32(record, 16))?;
             let scope_language = self.optional_string(get_u32(record, 504))?;
             let scope_model = self.optional_string(get_u32(record, 508))?;
-            let scope_unit = self.optional_string(get_u32(record, 512))?;
-            let has_measurement_complete = bool_field(record[516])?;
-            let measurement_complete = bool_field(record[517])?;
-            if !has_measurement_complete && measurement_complete {
-                return Err(CoverageIndexError::InvalidRecord(
-                    "scope measurement completeness flag",
-                ));
-            }
-            if has_scope
-                != (scope_kind.is_some() && scope_language.is_some() && scope_model.is_some())
-            {
+            if has_scope != (scope_kind && scope_language.is_some() && scope_model.is_some()) {
                 return Err(CoverageIndexError::InvalidRecord("scope presence flag"));
             }
-            let source_scope = if let Some((kind, kind_name)) = scope_kind {
-                match kind {
-                    ScopeKind::SourceDiscovery => {
-                        if scope_mode.is_none() || scope_unit.is_some() || has_measurement_complete
-                        {
-                            return Err(CoverageIndexError::InvalidRecord(
-                                "source-discovery scope shape",
-                            ));
-                        }
-                    }
-                    ScopeKind::Compiler => {
-                        if scope_mode.is_some()
-                            || scope_unit.is_none()
-                            || !has_measurement_complete
-                            || get_u32(record, 32) != 0
-                            || number(480)? != 0
-                            || number(488)? != 0
-                            || number(496)? != 0
-                        {
-                            return Err(CoverageIndexError::InvalidRecord("compiler scope shape"));
-                        }
-                    }
-                }
+            let source_scope = if scope_kind {
+                let Some(mode) = scope_mode else {
+                    return Err(CoverageIndexError::InvalidRecord(
+                        "source-discovery scope shape",
+                    ));
+                };
                 Some(IndexedSourceScope {
-                    kind: kind_name.into(),
+                    kind: "source-discovery".into(),
                     language: scope_language.expect("validated scope language"),
                     model: scope_model.expect("validated scope model"),
-                    mode: scope_mode,
+                    mode,
                     roots: self
                         .relation_strings(get_u64(record, 24), u64::from(get_u32(record, 32)))?,
-                    unit: scope_unit,
-                    measurement_complete: has_measurement_complete.then_some(measurement_complete),
                     included: number(480)?,
                     excluded: number(488)?,
                     ambiguous: number(496)?,
@@ -3011,8 +2933,6 @@ impl<'a> CoverageIndex<'a> {
                     || scope_mode.is_some()
                     || scope_language.is_some()
                     || scope_model.is_some()
-                    || scope_unit.is_some()
-                    || has_measurement_complete
                     || number(480)? != 0
                     || number(488)? != 0
                     || number(496)? != 0
@@ -3061,9 +2981,7 @@ impl<'a> CoverageIndex<'a> {
                         unexecuted: number(280)?,
                         executed: number(288)?,
                         action: number(296)?,
-                        asserted: number(304)?,
                     },
-                    assertion_covered_mcdc_conditions: number(312)?,
                 },
                 files_with_gaps: number(320)?,
                 files_with_coverage_gaps: number(328)?,
@@ -3263,12 +3181,14 @@ impl<'a> CoverageIndex<'a> {
     ) -> Result<crate::coverage_report::CoverageConfidence, CoverageIndexError> {
         let record = self.index.record(SECTION_CONFIDENCE, index)?;
         if record[2..8].iter().any(|byte| *byte != 0)
+            || record[24..40].iter().any(|byte| *byte != 0)
             || record[72..].iter().any(|byte| *byte != 0)
-            || record[1] & !15 != 0
+            || record[1] & !11 != 0
         {
             return Err(CoverageIndexError::InvalidRecord("confidence record"));
         }
-        let values = (0..4)
+        let values = [0, 2, 3]
+            .into_iter()
             .map(|index| {
                 self.relation_strings(
                     get_u64(record, 8 + index * 16),
@@ -3281,18 +3201,15 @@ impl<'a> CoverageIndex<'a> {
                 0 => "unexecuted",
                 1 => "executed",
                 2 => "action",
-                3 => "asserted",
                 _ => return Err(CoverageIndexError::InvalidRecord("confidence level")),
             }
             .into(),
             setup_only: record[1] & 1 != 0,
             background_only: record[1] & 2 != 0,
-            asserted: record[1] & 4 != 0,
             e2e: record[1] & 8 != 0,
             tests: values[0].iter().map(Id::from).collect(),
-            asserted_tests: values[1].iter().map(Id::from).collect(),
-            runners: values[2].clone(),
-            kinds: values[3].clone(),
+            runners: values[1].clone(),
+            kinds: values[2].clone(),
         })
     }
 
@@ -3783,7 +3700,7 @@ impl<'a> CoverageIndex<'a> {
         index: u64,
     ) -> Result<crate::coverage_report::ConditionResult, CoverageIndexError> {
         let record = self.index.record(SECTION_DECISION_CONDITIONS, index)?;
-        if record[0] & !7 != 0 || record[1..4].iter().any(|byte| *byte != 0) {
+        if record[0] & !5 != 0 || record[1..4].iter().any(|byte| *byte != 0) {
             return Err(CoverageIndexError::InvalidRecord(
                 "decision condition record",
             ));
@@ -3809,7 +3726,6 @@ impl<'a> CoverageIndex<'a> {
                 .map_err(|_| CoverageIndexError::SizeOverflow)?,
             source: self.string(get_u32(record, 4))?,
             covered: record[0] & 1 != 0,
-            assertion_covered: record[0] & 2 != 0,
             witness,
             witness_tests: has_witness.then_some([
                 first_tests.into_iter().map(Id::from).collect(),
@@ -3986,6 +3902,7 @@ impl<'a> CoverageIndex<'a> {
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
             let covered_conditions = usize::try_from(get_u64(record, 40))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let counted = total != 0 || covered_conditions != 0;
             let (kind, conditions, covered_conditions) = match record[1] {
                 0 => {
                     if total == 0 || covered_conditions > total {
@@ -4000,7 +3917,7 @@ impl<'a> CoverageIndex<'a> {
                 3 => ("function", None, None),
                 _ => return Err(CoverageIndexError::InvalidRecord("anchor kind")),
             };
-            if kind != "decision" && (total != 0 || covered_conditions.is_some()) {
+            if kind != "decision" && counted {
                 return Err(CoverageIndexError::InvalidRecord("anchor conditions"));
             }
             anchors.push(IndexedAnchor {
@@ -4151,6 +4068,11 @@ mod tests {
     }
 
     fn report() -> CoverageReport {
+        report_with_phases(Vec::new())
+    }
+
+    /// The test report, its test's attempt holding these phases.
+    fn report_with_phases(phases: Vec<crate::coverage_report::CoveragePhase>) -> CoverageReport {
         let decision = DecisionMeta {
             id: "d".into(),
             file: "src/a.js".into(),
@@ -4207,7 +4129,7 @@ mod tests {
                 },
                 role: "test".into(),
                 attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
-                phases: Vec::new(),
+                phases,
                 runtime: vec![RuntimeSnapshot {
                     decisions: vec![crate::coverage_report::DecisionSnapshot {
                         meta: decision,
@@ -4655,45 +4577,845 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A scope is source discovery's, with its mode; the compiler scope the
+    /// old Rust frontend wrote is gone, and one written that way is refused.
     #[test]
-    fn compiler_owned_scope_round_trips_without_javascript_scope_fields() {
+    fn a_scope_without_a_mode_is_refused() {
         let mut report = report();
-        let scope = serde_json::json!({
+        report.view.scope = Some(serde_json::json!({
             "language": "rust",
             "model": "rust-source-v1",
             "crate": "fixture",
             "measurementComplete": false
+        }));
+        assert!(matches!(
+            coverage_index_sections(&report),
+            Err(CoverageIndexError::InvalidRecord("source-scope mode"))
+        ));
+    }
+
+    /// A real index with one section's bytes changed, written with digests
+    /// that match: what the record readers alone must refuse.
+    fn index_with(
+        edit: &dyn Fn(&mut Vec<QueryIndexSection>),
+    ) -> (crate::test_directory::TestDirectory, QueryIndex) {
+        index_of(&report(), edit)
+    }
+
+    /// The test report with a source-discovery scope of one included file.
+    fn scoped_report() -> CoverageReport {
+        let mut report = report();
+        let scope = serde_json::json!({
+            "version": 1,
+            "mode": "automatic",
+            "roots": ["."],
+            "entries": [{"file": "src/a.py", "status": "included", "reason": "python source", "packageRoot": "."}]
         });
-        report.view.scope = Some(scope.clone());
-        report.filters.passed.scope = Some(scope.clone());
-        report.filters.failed.scope = Some(scope);
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            view.scope = Some(scope.clone());
+            view.model.language = "python".into();
+            view.model.name = "python-probes-v1".into();
+        }
+        report
+    }
+
+    fn index_of(
+        report: &CoverageReport,
+        edit: &dyn Fn(&mut Vec<QueryIndexSection>),
+    ) -> (crate::test_directory::TestDirectory, QueryIndex) {
         let root = root();
-        let path = root.join("query-index.v2.bin");
-        write_query_index(
-            &coverage_index_sections(&report).unwrap(),
-            &identity(),
-            &path,
-        )
-        .unwrap();
+        let path = root.join("query-index.v1.bin");
+        let mut sections = coverage_index_sections(report).unwrap();
+        edit(&mut sections);
+        write_query_index(&sections, &identity(), &path).unwrap();
         let container = QueryIndex::open(&path, &identity()).unwrap();
-        let index = CoverageIndex::new(&container).unwrap();
-        let projection = index.projection(CoverageViewId::All, None, None).unwrap();
-        assert_eq!(
-            projection.source_scope,
-            Some(IndexedSourceScope {
-                kind: "compiler".into(),
-                language: "rust".into(),
-                model: "rust-source-v1".into(),
-                mode: None,
-                roots: Vec::new(),
-                unit: Some("fixture".into()),
-                measurement_complete: Some(false),
-                included: 0,
-                excluded: 0,
-                ambiguous: 0,
+        (root, container)
+    }
+
+    type Edit = Box<dyn Fn(&mut Vec<QueryIndexSection>)>;
+
+    fn patch(
+        sections: &mut [QueryIndexSection],
+        kind: u32,
+        record: usize,
+        size: usize,
+        at: usize,
+        bytes: &[u8],
+    ) {
+        let section = sections
+            .iter_mut()
+            .find(|section| section.kind == kind)
+            .unwrap();
+        let start = record * size + at;
+        section.bytes[start..start + bytes.len()].copy_from_slice(bytes);
+    }
+
+    fn u64_at(
+        sections: &[QueryIndexSection],
+        kind: u32,
+        record: usize,
+        size: usize,
+        at: usize,
+    ) -> u64 {
+        let section = sections
+            .iter()
+            .find(|section| section.kind == kind)
+            .unwrap();
+        let start = record * size + at;
+        u64::from_le_bytes(section.bytes[start..start + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn a_summary_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_VIEW_SUMMARIES, SUMMARY_RECORD_SIZE);
+        let all = move |sections: &[QueryIndexSection]| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..3)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                .unwrap()
+        };
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            match CoverageIndex::new(&container)
+                .unwrap()
+                .summary(CoverageViewId::All)
+            {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let at = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = all(s);
+                patch(s, kind, record, size, offset, &bytes);
             })
+        };
+        let above = |covered_at: usize, total_at: usize| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = all(s);
+                let total = u64_at(s, kind, record, size, total_at);
+                patch(
+                    s,
+                    kind,
+                    record,
+                    size,
+                    covered_at,
+                    &(total + 1).to_le_bytes(),
+                );
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("summary reserved bytes", at(3, vec![1])),
+            ("summary reserved bytes", at(12, vec![1])),
+            ("optional boolean", at(2, vec![3])),
+            ("covered exceeds total", above(56, 64)),
+            ("covered conditions exceed total", above(48, 40)),
+            ("decision count ordering", above(32, 24)),
+            ("decision count ordering", above(24, 16)),
+            (
+                "duplicate coverage view",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = (all(s) + 1) % 3;
+                    patch(s, kind, record, size, 0, &[CoverageViewId::All as u8]);
+                }),
+            ),
+            (
+                "summary view count",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let section = s.iter_mut().find(|section| section.kind == kind).unwrap();
+                    section.count = 2;
+                    section.bytes.truncate(2 * size);
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    #[test]
+    fn a_file_gap_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_FILE_GAPS, FILE_GAP_RECORD_SIZE);
+        let first = move |sections: &[QueryIndexSection]| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                .unwrap()
+        };
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            match CoverageIndex::new(&container)
+                .unwrap()
+                .file_gaps(CoverageViewId::All, None, None)
+            {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let at = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                patch(s, kind, record, size, offset, &bytes);
+            })
+        };
+        let bump = |offset: usize| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                let value = u64_at(s, kind, record, size, offset);
+                patch(s, kind, record, size, offset, &(value + 1).to_le_bytes());
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("file-gap reserved bytes", at(1, vec![1])),
+            ("file-gap reserved bytes", at(60, vec![1])),
+            ("limitation mask", at(56, 16u32.to_le_bytes().to_vec())),
+            // A limitation counted with no kind, or a kind with none counted.
+            (
+                "limitation count and kinds disagree",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    let count = u64_at(s, kind, record, size, 48);
+                    let mask: u32 = if count == 0 { 1 } else { 0 };
+                    patch(s, kind, record, size, 56, &mask.to_le_bytes());
+                }),
+            ),
+            ("file-gap score", bump(64)),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    #[test]
+    fn a_projection_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_PROJECTIONS, PROJECTION_RECORD_SIZE);
+        // The run-wide projection of the whole view: no kind, no runner.
+        let first = move |sections: &[QueryIndexSection]| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..section.count as usize)
+                .find(|record| {
+                    let bytes = &section.bytes[record * size..(record + 1) * size];
+                    bytes[0] == CoverageViewId::All as u8
+                        && bytes[4..8] == NO_STRING.to_le_bytes()
+                        && bytes[8..12] == NO_STRING.to_le_bytes()
+                })
+                .unwrap()
+        };
+        let byte = move |sections: &[QueryIndexSection], at: usize| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            section.bytes[first(sections) * size + at]
+        };
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            match CoverageIndex::new(&container).unwrap().projection(
+                CoverageViewId::All,
+                None,
+                None,
+            ) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = |pairs: Vec<(usize, Vec<u8>)>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                for (offset, bytes) in &pairs {
+                    patch(s, kind, record, size, *offset, bytes);
+                }
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("projection reserved bytes", set(vec![(38, vec![1])])),
+            ("projection reserved bytes", set(vec![(518, vec![1])])),
+            (
+                "measurement blocking count",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    let blocking = u64_at(s, kind, record, size, 208);
+                    patch(s, kind, record, size, 208, &(blocking + 1).to_le_bytes());
+                }),
+            ),
+            (
+                "transport presence flag",
+                set(vec![(1, vec![0]), (408, 1u64.to_le_bytes().to_vec())]),
+            ),
+            ("coverage scope kind", set(vec![(3, vec![3])])),
+            // Where a compiler scope kept its unit and completeness.
+            ("projection reserved bytes", set(vec![(516, vec![1])])),
+            ("projection reserved bytes", set(vec![(517, vec![1])])),
+            (
+                "projection reserved bytes",
+                set(vec![(512, 0u32.to_le_bytes().to_vec())]),
+            ),
+            // Where an assertion map kept its credited lines and conditions.
+            (
+                "projection reserved bytes",
+                set(vec![(304, 1u64.to_le_bytes().to_vec())]),
+            ),
+            (
+                "projection reserved bytes",
+                set(vec![(312, 1u64.to_le_bytes().to_vec())]),
+            ),
+            (
+                "duplicate coverage projection",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    duplicate(s, kind, record, size);
+                }),
+            ),
+            (
+                "scope presence flag",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s);
+                    let flipped = 1 - byte(s, 2);
+                    patch(s, kind, record, size, 2, &[flipped]);
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+        // The scope's own shape, on a run that declared a source-discovery scope.
+        let scoped = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_of(&scoped_report(), edit);
+            match CoverageIndex::new(&container).unwrap().projection(
+                CoverageViewId::All,
+                None,
+                None,
+            ) {
+                Ok(projection) => format!(
+                    "accepted {:?}",
+                    projection.source_scope.map(|scope| scope.kind)
+                ),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(scoped(&|_| {}), "accepted Some(\"source-discovery\")");
+        assert!(scoped(set(vec![(3, vec![2])]).as_ref()).contains("coverage scope kind"));
+        assert!(scoped(set(vec![(2, vec![0])]).as_ref()).contains("scope presence flag"));
+        // A string any record may name: the projection's own timestamp.
+        let with_string = move |offsets: Vec<usize>, also: Vec<(usize, Vec<u8>)>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s);
+                let section = s.iter().find(|section| section.kind == kind).unwrap();
+                let at = record * size + 12;
+                let string = section.bytes[at..at + 4].to_vec();
+                for offset in &offsets {
+                    patch(s, kind, record, size, *offset, &string);
+                }
+                for (offset, bytes) in &also {
+                    patch(s, kind, record, size, *offset, bytes);
+                }
+            })
+        };
+        let none = NO_STRING.to_le_bytes().to_vec();
+        let one = 1u64.to_le_bytes().to_vec();
+        // No scope: each scope field set alone is refused.
+        for edit in [
+            set(vec![(32, 1u32.to_le_bytes().to_vec())]),
+            with_string(vec![16], vec![]),
+            with_string(vec![504], vec![]),
+            with_string(vec![508], vec![]),
+            set(vec![(480, one.clone())]),
+            set(vec![(488, one.clone())]),
+            set(vec![(496, one.clone())]),
+        ] {
+            let got = read(edit.as_ref());
+            assert!(got.contains("absent scope data"), "{got}");
+        }
+        // A scope missing its language or model is no scope.
+        for offset in [504, 508] {
+            let got = scoped(set(vec![(offset, none.clone())]).as_ref());
+            assert!(got.contains("scope presence flag"), "{offset}: {got}");
+        }
+        // Source discovery has a mode.
+        assert!(
+            scoped(set(vec![(16, none.clone())]).as_ref()).contains("source-discovery scope shape")
         );
-        assert!(index.scope_entries(CoverageViewId::All).unwrap().is_empty());
-        fs::remove_dir_all(root).unwrap();
+        // A count of tests with no evidence names its first one, and only then.
+        for edit in [set(vec![(472, one.clone()), (20, none.clone())]), {
+            with_string(vec![20], vec![(472, 0u64.to_le_bytes().to_vec())])
+        }] {
+            let got = read(edit.as_ref());
+            assert!(got.contains("empty-evidence diagnostic identity"), "{got}");
+        }
+    }
+
+    #[test]
+    fn an_anchor_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_ANCHORS, ANCHOR_RECORD_SIZE);
+        // The whole view's first anchor of this kind.
+        let first = move |sections: &[QueryIndexSection], anchor_kind: u8| {
+            let section = sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .unwrap();
+            (0..section.count as usize)
+                .find(|record| {
+                    let bytes = &section.bytes[record * size..(record + 1) * size];
+                    bytes[0] == CoverageViewId::All as u8 && bytes[1] == anchor_kind
+                })
+                .unwrap()
+        };
+        // Every line's and decision's anchors, so whichever place the record
+        // is at is read.
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            let places = index
+                .lines(CoverageViewId::All)
+                .unwrap()
+                .into_iter()
+                .map(|line| (line.file, line.line))
+                .chain(
+                    index
+                        .decision_metadata(CoverageViewId::All)
+                        .unwrap()
+                        .into_iter()
+                        .map(|decision| (decision.file, decision.line)),
+                )
+                .collect::<Vec<_>>();
+            for (file, line) in &places {
+                if let Err(error) = index.anchors(CoverageViewId::All, file, *line) {
+                    return format!("{error:?}");
+                }
+            }
+            "accepted".to_owned()
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = move |anchor_kind: u8, pairs: Vec<(usize, Vec<u8>)>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s, anchor_kind);
+                for (offset, bytes) in &pairs {
+                    patch(s, kind, record, size, *offset, bytes);
+                }
+            })
+        };
+        let (zero, one, many) = (
+            0u64.to_le_bytes().to_vec(),
+            1u64.to_le_bytes().to_vec(),
+            99u64.to_le_bytes().to_vec(),
+        );
+        let cases: Vec<(&str, Edit)> = vec![
+            ("anchor record", set(0, vec![(3, vec![1])])),
+            ("anchor record", set(0, vec![(12, vec![1])])),
+            (
+                "decision anchor conditions",
+                set(0, vec![(32, zero.clone())]),
+            ),
+            (
+                "decision anchor conditions",
+                set(0, vec![(40, many.clone())]),
+            ),
+            ("anchor kind", set(0, vec![(1, vec![4])])),
+            ("anchor conditions", set(2, vec![(32, one.clone())])),
+            // A statement claims no covered conditions either.
+            ("anchor conditions", set(2, vec![(40, one.clone())])),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    /// Phase summaries and decision details keep their reserved bytes zero,
+    /// and a decision covered is one executed.
+    #[test]
+    fn phase_and_decision_records_that_break_one_rule_are_refused() {
+        let first_all = |sections: &[QueryIndexSection], kind: u32, size: usize| {
+            let section = sections.iter().find(|section| section.kind == kind)?;
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+        };
+        let phased = report_with_phases(vec![crate::coverage_report::CoveragePhase {
+            id: "assertion".into(),
+            kind: "assertion".into(),
+            operation: "equal".into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms: 100,
+            ended_at_ms: Some(120),
+            status: Some("passed".into()),
+            error: None,
+        }]);
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_of(&phased, edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            [
+                index.phase_summaries(CoverageViewId::All).map(|_| ()),
+                index.decision_details(CoverageViewId::All).map(|_| ()),
+            ]
+            .into_iter()
+            .find_map(Result::err)
+            .map_or("accepted".to_owned(), |error| format!("{error:?}"))
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = move |kind: u32, size: usize, at: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first_all(s, kind, size).expect("a record of the whole view");
+                patch(s, kind, record, size, at, &bytes);
+            })
+        };
+        let (phases, phase_size) = (SECTION_PHASE_SUMMARIES, PHASE_SUMMARY_RECORD_SIZE);
+        let (details, detail_size) = (SECTION_DECISION_DETAILS, DECISION_DETAIL_RECORD_SIZE);
+        let has = |kind: u32, size: usize| {
+            let sections = coverage_index_sections(&phased).unwrap();
+            first_all(&sections, kind, size).is_some()
+        };
+        let mut cases: Vec<(&str, Edit)> = Vec::new();
+        if has(phases, phase_size) {
+            cases.push(("phase summary record", set(phases, phase_size, 1, vec![1])));
+            cases.push(("phase summary record", set(phases, phase_size, 48, vec![1])));
+        }
+        if has(details, detail_size) {
+            cases.push((
+                "decision detail record",
+                set(details, detail_size, 1, vec![4]),
+            ));
+            cases.push((
+                "decision detail record",
+                set(details, detail_size, 2, vec![1]),
+            ));
+            cases.push((
+                "covered unexecuted decision",
+                set(details, detail_size, 1, vec![2]),
+            ));
+        }
+        assert_eq!(cases.len(), 5, "the test report has phases and decisions");
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    /// The section of `kind` with its `record`th record written twice.
+    fn duplicate(sections: &mut [QueryIndexSection], kind: u32, record: usize, size: usize) {
+        let section = sections
+            .iter_mut()
+            .find(|section| section.kind == kind)
+            .unwrap();
+        let copy = section.bytes[record * size..(record + 1) * size].to_vec();
+        section.bytes.extend_from_slice(&copy);
+        section.count += 1;
+    }
+
+    /// An index whose sections hold records of another size, a model
+    /// written twice, or a line or test written twice is refused, as is a
+    /// line whose reserved bytes are set.
+    #[test]
+    fn records_of_another_size_or_written_twice_are_refused() {
+        let refused =
+            |edit: Edit, read: &dyn Fn(&CoverageIndex<'_>) -> Result<(), CoverageIndexError>| {
+                let (_root, container) = index_with(edit.as_ref());
+                match CoverageIndex::new(&container).and_then(|index| read(&index)) {
+                    Ok(()) => "accepted".to_owned(),
+                    Err(error) => format!("{error:?}"),
+                }
+            };
+        let resize = |kind: u32, record_size: u32| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let section = s.iter_mut().find(|section| section.kind == kind).unwrap();
+                section.record_size = record_size;
+                section.count = (section.bytes.len() / record_size as usize) as u64;
+            })
+        };
+        let opened = |_: &CoverageIndex<'_>| Ok(());
+        assert_eq!(refused(Box::new(|_| {}), &opened), "accepted");
+        assert!(refused(resize(SECTION_STRINGS, 1), &opened).contains("\"record size\""));
+        assert!(
+            refused(resize(SECTION_STRING_RELATIONS, 2), &opened)
+                .contains("string-relation record size")
+        );
+        let model = |index: &CoverageIndex<'_>| index.model().map(|_| ());
+        assert_eq!(refused(Box::new(|_| {}), &model), "accepted");
+        assert!(
+            refused(
+                Box::new(|s| duplicate(s, SECTION_COVERAGE_MODEL, 0, COVERAGE_MODEL_RECORD_SIZE)),
+                &model
+            )
+            .contains("coverage model record count")
+        );
+
+        // The whole view's first line, read by its place.
+        let (kind, size) = (SECTION_LINES, LINE_RECORD_SIZE);
+        let first_line = move |s: &[QueryIndexSection]| {
+            let section = s.iter().find(|section| section.kind == kind).unwrap();
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                .unwrap()
+        };
+        // Found in an index left whole: listing the lines of a corrupt one
+        // would refuse it before `line` read anything.
+        let (file, number) = {
+            let (_root, container) = index_with(&|_| {});
+            let index = CoverageIndex::new(&container).unwrap();
+            let lines = index.lines(CoverageViewId::All).unwrap();
+            let first = lines.first().expect("the report has lines");
+            (first.file.clone(), first.line)
+        };
+        let line = |index: &CoverageIndex<'_>| {
+            index
+                .line(CoverageViewId::All, &file, number)?
+                .map(|_| ())
+                .ok_or(CoverageIndexError::InvalidRecord("line not found"))
+        };
+        assert_eq!(refused(Box::new(|_| {}), &line), "accepted");
+        let set = move |at: usize| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first_line(s);
+                patch(s, kind, record, size, at, &[1]);
+            })
+        };
+        assert!(refused(set(3), &line).contains("\"line record\""));
+        assert!(refused(set(56), &line).contains("\"line record\""));
+        assert!(
+            refused(
+                Box::new(move |s| {
+                    let record = first_line(s);
+                    duplicate(s, kind, record, size);
+                }),
+                &line
+            )
+            .contains("duplicate line")
+        );
+
+        let details =
+            |index: &CoverageIndex<'_>| index.test_details(CoverageViewId::All).map(|_| ());
+        assert_eq!(refused(Box::new(|_| {}), &details), "accepted");
+        let (kind, size) = (SECTION_TEST_SUMMARIES, TEST_SUMMARY_RECORD_SIZE);
+        assert!(
+            refused(
+                Box::new(move |s| {
+                    let section = s.iter().find(|section| section.kind == kind).unwrap();
+                    let record = (0..section.count as usize)
+                        .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+                        .unwrap();
+                    duplicate(s, kind, record, size);
+                }),
+                &details
+            )
+            .contains("duplicate test summary")
+        );
+    }
+
+    /// A limitation must say where it is: one without a file is refused,
+    /// not left out of the file it would count against.
+    #[test]
+    fn a_limitation_without_a_file_is_refused() {
+        let mut report = report();
+        report.view.limitations = vec![serde_json::json!({
+            "id": "dynamic",
+            "kind": "dynamic-code",
+            "line": 3,
+            "column": 1,
+            "source": "eval(code)",
+            "reason": "dynamic source"
+        })];
+        assert!(matches!(
+            coverage_index_sections(&report),
+            Err(CoverageIndexError::InvalidRecord("coverage limitation"))
+        ));
+    }
+
+    /// The first record of `kind` in the whole view, for the tables below.
+    fn first_of(sections: &[QueryIndexSection], kind: u32, size: usize) -> Option<usize> {
+        let section = sections.iter().find(|section| section.kind == kind)?;
+        (0..section.count as usize).find(|record| {
+            let bytes = &section.bytes[record * size..(record + 1) * size];
+            bytes[0] == CoverageViewId::All as u8
+                && bytes[4..8] == NO_STRING.to_le_bytes()
+                && bytes[8..12] == NO_STRING.to_le_bytes()
+        })
+    }
+
+    #[test]
+    fn a_decision_gap_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_DECISION_GAPS, DECISION_GAP_RECORD_SIZE);
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_with(edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            let files = index.file_gaps(CoverageViewId::All, None, None).unwrap();
+            for file in files {
+                if let Err(error) = index.decision_gaps(CoverageViewId::All, None, None, &file.file)
+                {
+                    return format!("{error:?}");
+                }
+            }
+            "accepted".to_owned()
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        assert!(first_of(&coverage_index_sections(&report()).unwrap(), kind, size).is_some());
+        let set = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first_of(s, kind, size).unwrap();
+                patch(s, kind, record, size, offset, &bytes);
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("decision-gap reserved bytes", set(1, vec![1])),
+            ("decision-gap reserved bytes", set(28, vec![1])),
+            ("decision-gap reserved bytes", set(64, vec![1])),
+            (
+                "decision condition counts",
+                set(48, 0u64.to_le_bytes().to_vec()),
+            ),
+            (
+                "decision condition counts",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first_of(s, kind, size).unwrap();
+                    let conditions = u64_at(s, kind, record, size, 48);
+                    patch(s, kind, record, size, 56, &(conditions + 1).to_le_bytes());
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+
+    #[test]
+    fn a_scope_entry_record_that_breaks_one_rule_is_refused_for_it() {
+        let (kind, size) = (SECTION_SCOPE_ENTRIES, SCOPE_ENTRY_RECORD_SIZE);
+        let first = move |sections: &[QueryIndexSection]| {
+            let section = sections.iter().find(|section| section.kind == kind)?;
+            (0..section.count as usize)
+                .find(|record| section.bytes[record * size] == CoverageViewId::All as u8)
+        };
+        assert!(first(&coverage_index_sections(&scoped_report()).unwrap()).is_some());
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_of(&scoped_report(), edit);
+            match CoverageIndex::new(&container)
+                .unwrap()
+                .scope_entries(CoverageViewId::All)
+            {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted");
+        let set = |offset: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                let record = first(s).unwrap();
+                patch(s, kind, record, size, offset, &bytes);
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("source-scope reserved bytes", set(2, vec![1])),
+            ("source-scope reserved bytes", set(28, vec![1])),
+            ("source-scope status", set(1, vec![3])),
+            (
+                "source-scope limitation annotation",
+                set(24, 16u32.to_le_bytes().to_vec()),
+            ),
+            (
+                "source-scope limitation annotation",
+                Box::new(move |s: &mut Vec<QueryIndexSection>| {
+                    let record = first(s).unwrap();
+                    let count = u64_at(s, kind, record, size, 16);
+                    let mask: u32 = if count == 0 { 1 } else { 0 };
+                    patch(s, kind, record, size, 24, &mask.to_le_bytes());
+                }),
+            ),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+    }
+    /// Everything a query can read from an index, in every view.
+    fn read_everything(index: &CoverageIndex<'_>) -> Result<usize, CoverageIndexError> {
+        let mut read = 0;
+        index.model()?;
+        for view in [
+            CoverageViewId::All,
+            CoverageViewId::Passed,
+            CoverageViewId::Failed,
+        ] {
+            index.summary(view)?;
+            read += index.file_gaps(view, None, None)?.len();
+            for dimension in [
+                CoverageDimension::Kind,
+                CoverageDimension::Runner,
+                CoverageDimension::Tests,
+            ] {
+                read += index.dimensions(view, dimension)?.len();
+            }
+            read += index.scope_entries(view)?.len();
+            let lines = index.lines(view)?;
+            for line in &lines {
+                read += index.anchors(view, &line.file, line.line)?.len();
+            }
+            read += lines.len();
+            read += index.test_summaries(view)?.len();
+            read += index.test_details(view)?.len();
+            read += index.hit_metadata(view)?.len();
+            read += index.limitations(view)?.len();
+            read += index.decision_metadata(view)?.len();
+            read += index.decision_details(view)?.len();
+            read += index.phase_summaries(view)?.len();
+        }
+        Ok(read)
+    }
+
+    /// Whatever one byte of a correctly signed index says, every reader
+    /// returns a value or a typed error, never a panic: each byte of each
+    /// section's first record is set in turn, which is also every record
+    /// check those readers make.
+    #[test]
+    fn no_single_byte_of_a_signed_index_makes_a_reader_panic() {
+        for report in [report(), scoped_report()] {
+            let sections = coverage_index_sections(&report).unwrap();
+            {
+                let (_root, container) = index_of(&report, &|_| {});
+                read_everything(&CoverageIndex::new(&container).unwrap()).unwrap();
+            }
+            let mut refused = 0;
+            for section in &sections {
+                let size = section.record_size as usize;
+                if size == 0 || section.count == 0 || section.kind == SECTION_STRING_BYTES {
+                    continue;
+                }
+                for (offset, value) in
+                    (0..size).flat_map(|offset| [(offset, 0xffu8), (offset, 0x01)])
+                {
+                    let (kind, original) = (section.kind, section.bytes[offset]);
+                    let (_root, container) = index_of(&report, &move |s: &mut Vec<
+                        QueryIndexSection,
+                    >| {
+                        let section = s.iter_mut().find(|section| section.kind == kind).unwrap();
+                        section.bytes[offset] = if original == value { 0 } else { value };
+                    });
+                    let outcome =
+                        CoverageIndex::new(&container).and_then(|index| read_everything(&index));
+                    if outcome.is_err() {
+                        refused += 1;
+                    }
+                }
+            }
+            assert!(refused > 0);
+        }
     }
 }

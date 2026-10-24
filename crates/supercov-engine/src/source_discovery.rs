@@ -864,9 +864,10 @@ fn files_under(
         .require_git(true)
         .follow_links(false)
         .sort_by_file_name(|left, right| left.cmp(right))
+        // The walker never asks about the directory it starts from: `ignore`
+        // keeps every entry of depth 0 before it consults this filter.
         .filter_entry(move |entry| {
-            entry.depth() == 0
-                || !entry.file_type().is_some_and(|kind| kind.is_dir())
+            !entry.file_type().is_some_and(|kind| kind.is_dir())
                 || entry.file_name().to_str().is_some_and(|name| {
                     !generated_directory(name)
                         && !owned_workspace_store(entry.path())
@@ -916,8 +917,9 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
                 .map_err(|name| SourceDiscoveryError::NonUtf8Path(directory.join(name)))?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|error| io_error(&path, error))?;
+            // An entry's type is the link's own, never its target's: a link
+            // to a directory is no directory here.
             if !file_type.is_dir()
-                || file_type.is_symlink()
                 || generated_directory(&name)
                 || owned_workspace_store(&path)
                 || nested_checkout(&path)
@@ -1190,6 +1192,46 @@ fn nearest_package_root<'a>(path: &Path, packages: &'a [PathBuf]) -> Option<&'a 
         .max_by_key(|directory| directory.components().count())
 }
 
+/// Reason for a file under no root that first-party source loads.
+pub const LOADED_REASON: &str = "loaded by first-party source";
+
+/// A file under no source root that first-party source imports is code the
+/// product runs: a `shared/` folder beside `src/`. It is followed from what
+/// is known to be source, before anything runs, so nobody has to name a root
+/// for a project whose tests pass without Supercov. What only tests load
+/// stays ambiguous: tests load their own helpers, mocks and simulators, and
+/// counting those would measure test code as product.
+fn promote_loaded(
+    root: &Path,
+    entries: &mut [SourceScopeEntry],
+    included: &mut Vec<PathBuf>,
+    limitations: &mut Vec<SourceLimitation>,
+) {
+    if !entries
+        .iter()
+        .any(|entry| entry.status == SourceScopeStatus::Ambiguous)
+    {
+        return;
+    }
+    let starts = entries
+        .iter()
+        .filter(|entry| entry.status == SourceScopeStatus::Included)
+        .map(|entry| entry.file.clone())
+        .collect::<Vec<_>>();
+    let loaded = crate::test_loads::Imports::new(root)
+        .loads(starts.iter().map(String::as_str))
+        .files;
+    for entry in entries.iter_mut().filter(|entry| {
+        entry.status == SourceScopeStatus::Ambiguous && loaded.contains(&entry.file)
+    }) {
+        entry.status = SourceScopeStatus::Included;
+        entry.reason = LOADED_REASON.into();
+        included.push(root.join(&entry.file));
+        limitations.retain(|limitation| limitation.file != entry.file);
+    }
+    included.sort();
+}
+
 fn scope_limitation(file: &str) -> SourceLimitation {
     let digest = Sha256::digest(file.as_bytes());
     let id = digest[..10]
@@ -1203,7 +1245,7 @@ fn scope_limitation(file: &str) -> SourceLimitation {
         line: 1,
         column: 1,
         source: file.into(),
-        reason: "First-party JavaScript/TypeScript source could not be classified automatically. Configure SUPERCOV_SOURCE_ROOTS or move it under a discovered package source root.".into(),
+        reason: "JavaScript/TypeScript under no source root that no first-party source imports, so the run did not measure it. If it is your code, name the roots with SUPERCOV_SOURCE_ROOTS.".into(),
     }
 }
 
@@ -1387,6 +1429,7 @@ pub fn discover_source_scope(
             limitations.push(scope_limitation(&file));
         }
     }
+    promote_loaded(&root, &mut entries, &mut included, &mut limitations);
     let source_files = included
         .iter()
         .map(|path| local_path(&root, path))
@@ -1421,6 +1464,96 @@ mod tests {
 
     use super::*;
 
+    /// A bundler's output is a script under an asset directory with an
+    /// eight-character hash that has a digit or both cases.
+    #[test]
+    fn built_assets_are_known_by_directory_and_hash() {
+        for (file, built) in [
+            ("dist/assets/index-BxY3kQ9a.js", true),
+            ("public/app-AbCdEfGh.mjs", true),
+            ("static/x-ab_c-d9e.cjs", true),
+            ("public/app-abcdefgh.js", false),
+            ("public/app-ab.cd_e9.js", false),
+            ("src/app-Ab3dEfGh.js", false),
+            ("app-Ab3dEfGh.js", false),
+            ("static/a.css", false),
+            ("static/short.js", false),
+            ("static/abcdefghij.js", false),
+            // Capitals alone are a word, not a hash.
+            ("dist/assets/x-ABCDEFGH.js", false),
+        ] {
+            assert_eq!(built_asset(file), built, "{file}");
+        }
+        for (path, normal) in [
+            ("a/./b/../c", "a/c"),
+            ("../a", "../a"),
+            ("a/../../b", "../b"),
+        ] {
+            assert_eq!(
+                lexical_normalize(Path::new(path)),
+                Path::new(normal),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_under_no_root_that_source_loads_is_source_and_one_only_a_test_loads_is_not() {
+        let root = repository(
+            "loaded",
+            &[
+                ("package.json", r#"{"name":"loaded","type":"module"}"#),
+                (
+                    "src/a.js",
+                    "import { y } from '../shared/y.js';\nexport const a = y;\n",
+                ),
+                (
+                    "shared/y.js",
+                    "import { deep } from './deep';\nexport const y = deep;\n",
+                ),
+                ("shared/deep.ts", "export const deep = 1;\n"),
+                ("docs/x.js", "export const x = 1;\n"),
+                ("extra/z.js", "export const z = 1;\n"),
+                (
+                    "test/a.test.js",
+                    "import '../src/a.js';\nimport { x } from '../docs/x.js';\n",
+                ),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        // Through source, and through what that loads in turn.
+        for file in ["shared/y.js", "shared/deep.ts"] {
+            let found = entry(&discovered, file);
+            assert_eq!(found.status, SourceScopeStatus::Included, "{file}");
+            assert_eq!(found.reason, LOADED_REASON, "{file}");
+            assert!(discovered.source_files.contains(&file.to_owned()), "{file}");
+        }
+        // Only a test loads one, nothing loads the other: still questions,
+        // and still said.
+        for file in ["docs/x.js", "extra/z.js"] {
+            assert_eq!(
+                entry(&discovered, file).status,
+                SourceScopeStatus::Ambiguous,
+                "{file}"
+            );
+        }
+        assert_eq!(
+            discovered
+                .limitations
+                .iter()
+                .map(|limitation| limitation.file.as_str())
+                .collect::<Vec<_>>(),
+            ["docs/x.js", "extra/z.js"]
+        );
+        // Named roots settle it: nothing is promoted past them.
+        let named = discover_source_scope(&root, Some(&["src".to_owned()])).unwrap();
+        assert_eq!(
+            entry(&named, "docs/x.js").status,
+            SourceScopeStatus::Excluded
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn repository(label: &str, files: &[(&str, &str)]) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1437,6 +1570,127 @@ mod tests {
             fs::write(path, contents).unwrap();
         }
         root
+    }
+
+    #[test]
+    fn only_a_directory_has_source_files_under_it() {
+        let root = repository("files-under-file", &[("main.ts", "")]);
+        assert!(matches!(
+            files_under(&root, &root.join("main.ts"), &mut Vec::new()),
+            Err(SourceDiscoveryError::InvalidRoot(path)) if path == root.join("main.ts")
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_runner_files_are_tooling_and_comments_end_where_json_says() {
+        for file in [
+            "gulpfile.js",
+            "gruntfile.js",
+            "Gulpfile.mjs",
+            "vite.config.ts",
+        ] {
+            assert!(config_file(file), "{file}");
+        }
+        assert!(!config_file("gulp.js"));
+        // A config that is not JavaScript is not a config file of the source.
+        assert!(!config_file("vite.config.json"));
+        // A slash that opens no comment, and a star inside one, are text.
+        assert_eq!(
+            strip_jsonc_comments("{\"a\": 1 /* x * y */, \"b\": 2 / 1 // z\n}"),
+            "{\"a\": 1 , \"b\": 2 / 1 \n}"
+        );
+    }
+
+    /// What a package names as its entries, its include patterns and its
+    /// test setup are read as far as they reach real files of its own.
+    #[test]
+    fn declarations_are_followed_only_to_the_projects_own_files() {
+        let root = repository(
+            "declared",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"declared","workspaces":["packages/*"],
+                        "exports":{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":{"j":"./deep/x.js"}}}}}}}}}},
+                        "main":"./node_modules/dep/index.js",
+                        "jest":{"setupFiles":["<rootDir>/missing.js","<rootDir>/setup.js"]}}"#,
+                ),
+                ("setup.js", "export const s = 1;\n"),
+                ("deep/x.js", "export const x = 1;\n"),
+                ("tsconfig.json", r#"{"include":["src/**/*","!src/legacy"]}"#),
+                ("src/a.js", "export const a = 1;\n"),
+                ("packages/ui/package.json", r#"{"name":"ui"}"#),
+                ("packages/ui/index.js", "export const ui = 1;\n"),
+                ("packages/vendored/package.json", r#"{"name":"vendored"}"#),
+                ("packages/vendored/.git/HEAD", "ref: refs/heads/main\n"),
+                ("packages/vendored/index.js", "export const v = 1;\n"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        let packages = package_directories(&root).unwrap();
+        assert!(packages.contains(&root.join("packages/ui")), "{packages:?}");
+        // A package that is a checkout of its own is not this project's.
+        assert!(
+            !packages.contains(&root.join("packages/vendored")),
+            "{packages:?}"
+        );
+        // Only setup files that exist are setup.
+        assert_eq!(
+            declared_test_setup(std::slice::from_ref(&root)),
+            BTreeSet::from([root.join("setup.js")])
+        );
+        // An entry deeper than anything a manifest is read to is not a root.
+        assert!(
+            discovered
+                .scope
+                .entries
+                .iter()
+                .all(|e| e.file != "deep/x.js")
+                || entry(&discovered, "deep/x.js").reason != "package entry",
+            "{:?}",
+            discovered.scope.entries
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_root_that_is_no_directory_or_no_source_is_refused_by_name() {
+        let root = repository(
+            "refused",
+            &[
+                ("src/a.js", "export const a = 1;\n"),
+                ("docs/README.md", "# docs\n"),
+            ],
+        );
+        // A project root that is a file.
+        assert!(matches!(
+            discover_source_scope(&root.join("src/a.js"), None),
+            Err(SourceDiscoveryError::InvalidRoot(_))
+        ));
+        // A root below a file is neither missing nor a root: the error says so.
+        assert!(discover_source_scope(&root, Some(&["src/a.js/inner".into()])).is_err());
+        // A root that exists but holds no source is not called missing.
+        let environment = BTreeMap::from([(SOURCE_ROOTS_VARIABLE.to_owned(), "docs".to_owned())]);
+        let roots = ExplicitSourceRoots::from_environment(&root, &environment)
+            .unwrap()
+            .unwrap();
+        let refused = roots.refuse_if_empty(0, "JavaScript").unwrap_err();
+        assert!(refused.contains("left no JavaScript source"), "{refused}");
+        assert!(!refused.contains("does not exist"), "{refused}");
+        // Relative roots name the same file in a copy as in the project.
+        let copy = repository("refused-copy", &[("docs/README.md", "# docs\n")]);
+        let rebased = ExplicitSourceRoots::from_environment_in(&root, &copy, &environment)
+            .unwrap()
+            .unwrap();
+        assert!(
+            rebased
+                .refuse_if_empty(0, "Go")
+                .unwrap_err()
+                .contains("docs")
+        );
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&copy).unwrap();
     }
 
     fn entry<'a>(scope: &'a DiscoveredSourceScope, file: &str) -> &'a SourceScopeEntry {
@@ -2066,6 +2320,56 @@ mod tests {
                 .iter()
                 .all(|entry| !entry.file.starts_with("supercov/"))
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn declared_workspace_patterns_name_only_real_package_directories() {
+        let root = repository(
+            "workspace-patterns",
+            &[
+                (
+                    "package.json",
+                    r#"{"workspaces":{"packages":["apps/*","./libs/core/","!apps/skip","deep/**","../up","a//b","x*/y","/*","plain-file"]}}"#,
+                ),
+                (
+                    "pnpm-workspace.yaml",
+                    "packages:\n  # the tools\n\n  - 'tools/cli'\n  - \"tools/missing\"\ncatalog:\n  - not/a/package\n",
+                ),
+                ("apps/web/package.json", "{}"),
+                // A workspace store Supercov made is no package of the project's.
+                ("apps/store/package.json", "{}"),
+                (
+                    "apps/store/.supercov-workspace-store",
+                    "Supercov instrumented workspace. Safe to delete.\n",
+                ),
+                ("apps/nopkg/index.js", ""),
+                ("apps/readme.txt", ""),
+                ("libs/core/package.json", "{}"),
+                ("tools/cli/package.json", "{}"),
+                ("not/a/package/package.json", "{}"),
+                ("plain-file", ""),
+            ],
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("libs/core"), root.join("apps/linked")).unwrap();
+        let mut found = declared_workspace_packages(&root)
+            .unwrap()
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, ["apps/web", "libs/core", "tools/cli"]);
+        // A workspaces list, rather than an object, is read the same way.
+        fs::write(root.join("package.json"), r#"{"workspaces":["apps/*"]}"#).unwrap();
+        fs::remove_file(root.join("pnpm-workspace.yaml")).unwrap();
+        let listed = declared_workspace_packages(&root).unwrap();
+        assert_eq!(listed, [root.join("apps/web")]);
         fs::remove_dir_all(root).unwrap();
     }
 }

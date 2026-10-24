@@ -1,0 +1,257 @@
+name: Self Coverage
+
+# Supercov measuring itself: the workspace's tests, end-to-end gates included,
+# run under a release build of the same commit. The gates take turns through a
+# file lock, so in one process they take hours; here they are split across
+# jobs, each measured on its own, and the runs merged into one per platform.
+# Linux and macOS compile different code, so each platform is merged on its own.
+#
+# Run it by hand, or add the `self-coverage` label to a pull request: Linux
+# alone, about 25 minutes. The `self-coverage-macos` label, or `macos: true` by
+# hand, measures macOS too; the two platforms differ by a handful of gaps.
+
+on:
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: "Measure macOS as well as Linux"
+        type: boolean
+        default: false
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SLICES: 8
+
+jobs:
+  platforms:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'self-coverage')
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.os.outputs.os }}
+    steps:
+      - id: os
+        run: |
+          if [ "${{ inputs.macos }}" = true ] || [ "${{ github.event.label.name }}" = self-coverage-macos ]; then
+            echo 'os=["ubuntu-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: platforms
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: npm ci
+      - run: cargo build --release -p supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-self-${{ matrix.os }}
+          path: target/release/supercov
+          retention-days: 3
+
+  measure:
+    needs: [platforms, build]
+    name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
+        # Slice 0 is every test but the gates; slices 1..8 share the gates
+        # round-robin, in the order the harness declares them.
+        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      # The instrumented workspace, its build and the gates' toolchains do not
+      # fit a Linux runner's free space as it comes.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: tc39/test262
+          ref: 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
+          path: test262
+      # Outside the repository, as locally: the measured copy of the
+      # workspace has no business holding fifty thousand test files.
+      - run: mv test262 "$RUNNER_TEMP/test262"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v7
+      # The versions CI's wasm and worker jobs use.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0,cargo-nextest@0.9.140,worker-build@0.8.7
+      - name: Install wasmtime 49.0.3
+        run: |
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64) build=x86_64-linux ;;
+            macOS-ARM64) build=aarch64-macos ;;
+            macOS-X64) build=x86_64-macos ;;
+          esac
+          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-$build.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-v49.0.3-$build" >> "$GITHUB_PATH"
+      - run: npm ci
+      # Each fixture pins its own Playwright, and each version launches its
+      # own browser builds: install them for every version a lockfile names.
+      - name: Install every pinned Playwright's browsers
+        run: |
+          versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
+          # The system's libraries by the newest, which knows this system.
+          npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
+          for version in $versions; do
+            # A version older than the runner's OS knows no browser build for
+            # it -- the Next fixture keeps the reporter's 1.60 -- and fetches
+            # its Ubuntu 24.04 Chromium, which runs there. Every other one
+            # installs its own builds: 24.04's WebKit wants 24.04's libraries.
+            if ! npx -y "playwright@$version" install; then
+              PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npx -y "playwright@$version" install chromium
+            fi
+          done
+      - uses: actions/download-artifact@v5
+        with:
+          name: supercov-self-${{ matrix.os }}
+          path: ${{ runner.temp }}/self
+      - name: Choose this slice's tests
+        id: tests
+        run: |
+          # What this platform cannot run: the clang oracle's golden file
+          # comes from Apple's clang; macOS runners have no Docker.
+          if [ "${{ runner.os }}" = Linux ]; then
+            elsewhere="clang_mcdc_oracle"
+            tests_elsewhere=""
+          else
+            elsewhere="docker_servers docker_clients rust_region_container"
+            tests_elsewhere="rust_runtime::tests::a_region_in_a_container_is_read_live_from_the_host"
+          fi
+          all=$(sed -n '/^gates! {/,/^}/p' crates/supercov-cli/tests/e2e_gates.rs \
+            | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
+          gates=$(echo "$all" | grep -vxF -f <(echo "$elsewhere" | tr ' ' '\n'))
+          slice=${{ matrix.slice }}
+          if [ "$slice" = 0 ]; then
+            skips=$(printf -- '--skip %s ' $all $tests_elsewhere)
+            echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
+          else
+            picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '(NR - 1) % n == s - 1' | tr '\n' ' ')
+            # The whole workspace builds in every slice, so every run counts
+            # the same files; only the named gates run.
+            echo "command=cargo test --workspace -- --include-ignored --exact $picked" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Measure
+        env:
+          TEST262_DIR: ${{ runner.temp }}/test262
+          # Their tools are installed above: a gate may not skip for want of
+          # them, where locally it says so and passes.
+          SUPERCOV_REQUIRE_RUST_WASM: "1"
+          SUPERCOV_REQUIRE_RUST_WORKER: "1"
+        run: |
+          chmod +x "$RUNNER_TEMP/self/supercov"
+          echo "${{ steps.tests.outputs.command }}"
+          mkdir -p "$RUNNER_TEMP/out"
+          log="$RUNNER_TEMP/out/measure.log"
+          # A failing test still leaves a run to merge; the merge says it failed.
+          "$RUNNER_TEMP/self/supercov" -- ${{ steps.tests.outputs.command }} 2>&1 | tee "$log"
+          echo "exit ${PIPESTATUS[0]}" | tee -a "$log"
+      - name: Keep the run
+        if: always()
+        run: |
+          run=$(ls -t .supercov/runs | head -1)
+          tar -C .supercov/runs -czf "$RUNNER_TEMP/out/run.tar.gz" "$run"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run-${{ matrix.os }}-${{ matrix.slice }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+      - name: Fail the slice when a test failed
+        run: grep -qx 'exit 0' <(tail -1 "$RUNNER_TEMP/out/measure.log")
+
+  merge:
+    needs: [platforms, measure]
+    if: always() && needs.measure.result != 'skipped'
+    name: Merge ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v5
+        with:
+          name: supercov-self-${{ matrix.os }}
+          path: ${{ runner.temp }}/self
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: run-${{ matrix.os }}-*
+          path: ${{ runner.temp }}/runs
+      - name: Merge the slices
+        run: |
+          supercov="$RUNNER_TEMP/self/supercov"
+          chmod +x "$supercov"
+          out="$RUNNER_TEMP/out"
+          mkdir -p .supercov/runs "$out"
+          for slice in "$RUNNER_TEMP"/runs/run-*; do
+            tar -C .supercov/runs -xzf "$slice/run.tar.gz"
+            echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
+          done
+          ids=$(ls .supercov/runs)
+          "$supercov" merge $ids 2>&1 | tee "$out/merge.log"
+          merged=$(grep -oE 'merged run run_[0-9a-f]{16}' "$out/merge.log" | awk '{print $3}')
+          if [ -z "$merged" ]; then echo "the slices did not merge"; exit 1; fi
+          "$supercov" runs "$merged" > "$out/summary.txt"
+          "$supercov" runs "$merged" gaps --format jsonl --metric mcdc --output "$out/mcdc-gaps.jsonl"
+          {
+            echo "### ${{ matrix.os }}"
+            echo '```'
+            for slice in "$RUNNER_TEMP"/runs/run-*; do
+              echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
+            done
+            echo
+            cat "$out/summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: self-coverage-${{ matrix.os }}
+          path: ${{ runner.temp }}/out
+          retention-days: 30

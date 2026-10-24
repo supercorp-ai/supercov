@@ -704,8 +704,16 @@ mod __SUPERCOV_MODULE__ {
         use std::sync::OnceLock;
         use std::io::Write as _;
 
+        /// The test's evidence directory: the one Supercov named for this
+        /// instrumentation's code, before the one every instrumentation
+        /// reads, which a Supercov the test started may have set for its own.
+        fn evidence_directory() -> Option<std::ffi::OsString> {
+            std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR___SUPERCOV_TOKEN__")
+                .or_else(|| std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR"))
+        }
+
         fn path(extension: &str) -> Option<std::path::PathBuf> {
-            let directory = std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR")?;
+            let directory = evidence_directory()?;
             let directory = std::path::PathBuf::from(directory);
             std::fs::create_dir_all(&directory).ok()?;
             let token = std::str::from_utf8(TOKEN).ok()?;
@@ -940,6 +948,14 @@ mod __SUPERCOV_MODULE__ {
     mod channel {
         extern crate std;
         use super::*;
+
+        /// The test's evidence directory: the one Supercov named for this
+        /// instrumentation's code, before the one every instrumentation
+        /// reads, which a Supercov the test started may have set for its own.
+        fn evidence_directory() -> Option<std::ffi::OsString> {
+            std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR___SUPERCOV_TOKEN__")
+                .or_else(|| std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR"))
+        }
         use std::fs::OpenOptions;
         use std::io::{Seek as _, SeekFrom, Write as _};
         use std::sync::{Mutex, OnceLock};
@@ -955,7 +971,7 @@ mod __SUPERCOV_MODULE__ {
         /// one process's files from another's.
         fn stem() -> Option<&'static std::path::PathBuf> {
             STEM.get_or_init(|| {
-                let directory = std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR")?;
+                let directory = evidence_directory()?;
                 let token = std::str::from_utf8(TOKEN).ok()?;
                 let stamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

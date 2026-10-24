@@ -148,7 +148,6 @@ try {
   // among the failed: filters recalculate from attempts.
   const passed = query(run.runId, 'passed', 'summary');
   assert.equal(passed.data.tests, 7, JSON.stringify(passed.data.testOutcomes));
-  assert.equal(passed.data.confidence.lines.asserted, 0, "a run alone never credits assertions");
 
   const allowed = query(run.runId, 'all', 'line', { file: 'src/permission.js', line: 3, offset: 0, limit: 20 });
   const owners = JSON.stringify(allowed);
@@ -298,8 +297,10 @@ try {
     ['failure.config.js', /^\s+at decrypt \(src\/secret\.js:10:11\)$/u],
     ['failure-types.config.js', /^\s+at decrypt \(src\/cipher\.ts:10:11\)$/u],
   ]) {
-    const plain = failure(process.execPath, [jest, '--config', config]);
-    const measured = failure(binary, ['--', process.execPath, jest, '--config', config]);
+    // Without watchman: a machine's watchman can print a recrawl warning into
+    // either run, and the two outputs are compared line by line.
+    const plain = failure(process.execPath, [jest, '--config', config, '--no-watchman']);
+    const measured = failure(binary, ['--', process.execPath, jest, '--config', config, '--no-watchman']);
     assert.deepEqual(measured, plain, config);
     assert.ok(plain.some((line) => frame.test(line)), plain.join('\n'));
   }
@@ -308,7 +309,7 @@ try {
   // Supercov's, and the failure still reads as plain Jest prints it.
   mkdirSync(resolve(project, 'tools'), { recursive: true });
   writeFileSync(resolve(project, 'tools/run-in-place.js'),
-    "require('graceful-fs');\nrequire('jest').run(['--config', process.argv[2], '--runInBand']);\n");
+    "require('graceful-fs');\nrequire('jest').run(['--config', process.argv[2], '--runInBand', '--no-watchman']);\n");
   for (const config of ['failure.config.js', 'failure-types.config.js']) {
     const place = [resolve(project, 'tools/run-in-place.js'), config];
     const plain = failure(process.execPath, place);

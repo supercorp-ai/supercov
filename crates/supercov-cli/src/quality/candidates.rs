@@ -2,16 +2,19 @@
 //!
 //! Pass one asks twelve questions of a whole file and can say which file.
 //! Pass two asks one question per candidate line and can say which line. A
-//! candidate is found three ways and the union is kept, because on the
-//! held-out half of RealVuln the union moved line-level recall from 42% to
-//! 49% where either alone stayed at 42%:
+//! candidate is found one of two ways:
 //!
-//! - **patterns** on each line, the vocabulary of every SAST: `execute(`,
-//!   `eval(`, `innerHTML`, `send_file(`, `redirect(`, `verify=False`, ...;
-//! - **the JavaScript and TypeScript parser** (oxc, in the engine): every
-//!   call by its callee, every secret-shaped literal wherever it sits, the
-//!   body line of every route handler, spreads of a request body;
-//! - **Python's own parser**, through `python3 -c`, for the same shapes.
+//! - **a parser** finds the lines worth asking about, and the model names
+//!   the check each one might belong to ([`nodes`]): the JavaScript and
+//!   TypeScript parser (oxc, in the engine) and Python's own, through
+//!   `python3 -c`, give every call, every secret-shaped literal wherever it
+//!   sits, the body line of every route handler and spreads of a request
+//!   body; templates and configuration files give their expressions and
+//!   values;
+//! - where no parser reads the file, **patterns** on each line, the
+//!   vocabulary of every SAST, name the line and its check together
+//!   ([`candidates`]): `execute(`, `eval(`, `innerHTML`, `send_file(`,
+//!   `redirect(`, `verify=False`, ...
 //!
 //! What a candidate does not decide is whether anything is wrong. That is the
 //! question, and when a candidate existed near a labelled finding the model
@@ -391,82 +394,10 @@ fn from_patterns(source: &str) -> Vec<Candidate> {
     out
 }
 
-fn classify_callee(callee: &str, text: &str) -> Vec<&'static str> {
-    let probe = format!("{callee}(");
-    let mut hits: Vec<&'static str> = PATTERNS
-        .iter()
-        .filter(|(_, needles)| needles.iter().any(|n| probe.contains(n)))
-        .map(|(check, _)| *check)
-        .collect();
-    if hits.is_empty() {
-        for check in [
-            "insecure_configuration",
-            "weak_authentication",
-            "weak_cryptography",
-        ] {
-            if PATTERNS
-                .iter()
-                .find(|(c, _)| *c == check)
-                .is_some_and(|(_, needles)| needles.iter().any(|n| text.contains(n)))
-            {
-                hits.push(check);
-            }
-        }
-    }
-    hits
-}
-
-fn from_javascript(path: &Path, source: &str) -> Vec<Candidate> {
-    use supercov_engine::security_candidates::{NodeKind, nodes};
-    let Ok(found) = nodes(path, source) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for node in found {
-        let push = |out: &mut Vec<Candidate>, check: &str| {
-            out.push(Candidate {
-                line: node.line,
-                check: check.to_owned(),
-                text: node.text.clone(),
-            })
-        };
-        match node.kind {
-            NodeKind::Call => {
-                for check in classify_callee(&node.callee, &node.text) {
-                    push(&mut out, check);
-                }
-            }
-            NodeKind::Handler => push(&mut out, "missing_authorization"),
-            NodeKind::Literal => push(&mut out, "secret_in_source"),
-            NodeKind::Spread => push(&mut out, "unchecked_mass_assignment"),
-            NodeKind::Assign => {
-                for check in [
-                    "unescaped_output",
-                    "insecure_configuration",
-                    "weak_authentication",
-                    "unchecked_mass_assignment",
-                ] {
-                    if PATTERNS
-                        .iter()
-                        .find(|(c, _)| *c == check)
-                        .is_some_and(|(_, needles)| needles.iter().any(|n| node.text.contains(n)))
-                    {
-                        push(&mut out, check);
-                    }
-                }
-                if secret_assignment(&node.text) {
-                    push(&mut out, "secret_in_source");
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Python's own parser, one process per file. Calls carry their callee,
-/// decorated or request-taking functions are handlers, string constants that
-/// look like secrets are literals. A missing interpreter means no parsed
-/// candidates, and the patterns still apply.
+/// Python's own parser, one process per file: the lines of calls, of
+/// decorated or request-taking functions (handlers), and of string constants
+/// that look like secrets (literals), with the file's functions and imports.
+/// A missing interpreter means no parsed nodes, and the patterns still apply.
 const PYTHON_SCRIPT: &str = r#"
 import ast, json, re, sys
 src = sys.stdin.read()
@@ -474,7 +405,7 @@ out = []
 try:
     tree = ast.parse(src)
 except SyntaxError:
-    print('[]'); sys.exit()
+    print('null'); sys.exit()
 lines = src.splitlines()
 def text(n):
     return lines[n.lineno - 1].strip()[:160] if 0 < n.lineno <= len(lines) else ''
@@ -484,21 +415,14 @@ def secretish(s):
         or re.search(r'(?i)(password|secret|passwd)', s)) is not None
 for n in ast.walk(tree):
     if isinstance(n, ast.Call):
-        out.append({'line': n.lineno, 'kind': 'call', 'callee': ast.unparse(n.func), 'text': text(n)})
+        out.append({'line': n.lineno, 'text': text(n)})
     elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
         decos = [ast.unparse(d) for d in n.decorator_list]
         if any(re.search(r'(route|get|post|put|patch|delete|api_view|action|view|permission|login_required)', d, re.I) for d in decos) \
            or (n.args.args and n.args.args[0].arg in ('request', 'req')):
-            out.append({'line': n.lineno, 'kind': 'handler', 'callee': n.name, 'text': text(n)})
-        for d, dn in zip(n.decorator_list, decos):
-            if 'csrf_exempt' in dn:
-                out.append({'line': d.lineno, 'kind': 'assign', 'callee': '', 'text': dn})
+            out.append({'line': n.lineno, 'text': text(n)})
     elif isinstance(n, ast.Constant) and isinstance(n.value, str) and secretish(n.value):
-        out.append({'line': n.lineno, 'kind': 'literal', 'callee': '', 'text': text(n)})
-    elif isinstance(n, ast.Assign):
-        out.append({'line': n.lineno, 'kind': 'assign', 'callee': ' '.join(ast.unparse(t) for t in n.targets), 'text': text(n)})
-    elif isinstance(n, ast.Subscript) and 'session' in ast.unparse(n.value):
-        out.append({'line': n.lineno, 'kind': 'assign', 'callee': 'session[', 'text': text(n)})
+        out.append({'line': n.lineno, 'text': text(n)})
 funcs = []
 imports = []
 for n in ast.walk(tree):
@@ -517,8 +441,6 @@ print(json.dumps({'nodes': out, 'functions': funcs, 'imports': imports}))
 #[derive(Deserialize)]
 struct PyNode {
     line: usize,
-    kind: String,
-    callee: String,
     text: String,
 }
 
@@ -548,11 +470,16 @@ struct PyParse {
 /// error and every Python file would silently fall back to the pattern table.
 /// A second try asks pyenv for the system interpreter, which is what the shim
 /// resolves to outside any pinned directory.
+/// A file Python cannot parse is not tried twice.
 fn python_parse(source: &str) -> Option<PyParse> {
-    python_parse_with(source, None).or_else(|| python_parse_with(source, Some("system")))
+    python_parse_with(source, None)
+        .or_else(|| python_parse_with(source, Some("system")))
+        .flatten()
 }
 
-fn python_parse_with(source: &str, pyenv_version: Option<&str>) -> Option<PyParse> {
+/// `None` when the interpreter did not run; `Some(None)` when it read a
+/// syntax error.
+fn python_parse_with(source: &str, pyenv_version: Option<&str>) -> Option<Option<PyParse>> {
     let mut command = Command::new("python3");
     command
         .args(["-c", PYTHON_SCRIPT])
@@ -563,14 +490,16 @@ fn python_parse_with(source: &str, pyenv_version: Option<&str>) -> Option<PyPars
         command.env("PYENV_VERSION", version);
     }
     let mut child = command.spawn().ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(source.as_bytes());
-    }
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(source.as_bytes());
     let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }
-    serde_json::from_slice::<PyParse>(&output.stdout).ok()
+    serde_json::from_slice::<Option<PyParse>>(&output.stdout).ok()
 }
 
 pub use supercov_engine::security_candidates::{FunctionSpan, Import, Structure};
@@ -603,6 +532,7 @@ pub fn structure(path: &Path, source: &str) -> Structure {
                         specifier: i.specifier,
                     })
                     .collect(),
+                default_export: None,
             })
             .unwrap_or_default(),
         _ => Structure::default(),
@@ -666,50 +596,6 @@ pub fn resolve_import(root: &Path, from: &str, specifier: &str) -> Option<String
         .find(|c| c.is_file())
         .and_then(|c| relative(&c))
         .filter(|r| r != from)
-}
-
-fn from_python(source: &str) -> Vec<Candidate> {
-    let Some(parsed) = python_parse(source) else {
-        return Vec::new();
-    };
-    let found = parsed.nodes;
-    let mut out = Vec::new();
-    for node in found {
-        let push = |out: &mut Vec<Candidate>, check: &str| {
-            out.push(Candidate {
-                line: node.line,
-                check: check.to_owned(),
-                text: node.text.clone(),
-            })
-        };
-        match node.kind.as_str() {
-            "call" => {
-                for check in classify_callee(&node.callee, &node.text) {
-                    push(&mut out, check);
-                }
-            }
-            "handler" => push(&mut out, "missing_authorization"),
-            "literal" => push(&mut out, "secret_in_source"),
-            "assign" => {
-                let joined = format!("{} = {}", node.callee, node.text);
-                if node.text.contains("csrf_exempt") {
-                    push(&mut out, "insecure_configuration");
-                }
-                if node.callee.starts_with("session[") {
-                    push(&mut out, "weak_authentication");
-                }
-                if secret_assignment(&joined) {
-                    push(&mut out, "secret_in_source");
-                }
-                if node.callee.to_ascii_lowercase().ends_with("debug") && node.text.contains("True")
-                {
-                    push(&mut out, "sensitive_data_exposure");
-                }
-            }
-            _ => {}
-        }
-    }
-    out
 }
 
 /// A line the parser found worth asking about, before anyone has said which
@@ -876,7 +762,6 @@ pub fn nodes(path: &Path, source: &str) -> Option<Vec<Node>> {
         "py" => python_parse(source)?
             .nodes
             .into_iter()
-            .filter(|n| matches!(n.kind.as_str(), "call" | "handler" | "literal"))
             .map(|n| Node {
                 line: n.line,
                 text: n.text,
@@ -888,19 +773,14 @@ pub fn nodes(path: &Path, source: &str) -> Option<Vec<Node>> {
     Some(spread(found))
 }
 
-/// The union of pattern and parser candidates for one file, deduplicated by
-/// line and check, capped at [`MAX_CANDIDATES`] spread across checks.
-pub fn candidates(path: &Path, source: &str) -> Vec<Candidate> {
+/// The pattern candidates for a file no parser reads, in order, capped at
+/// [`MAX_CANDIDATES`] spread across checks.
+pub fn candidates(source: &str) -> Vec<Candidate> {
     let mut all = from_patterns(source);
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("js" | "ts" | "tsx" | "jsx" | "mjs" | "cjs" | "mts" | "cts") => {
-            all.extend(from_javascript(path, source));
-        }
-        Some("py") => all.extend(from_python(source)),
-        _ => {}
-    }
+    // No line and check come twice: a line is a candidate once per pattern
+    // check, and the two checks matched otherwise are no pattern's (a test
+    // below holds this).
     all.sort();
-    all.dedup_by(|a, b| a.line == b.line && a.check == b.check);
     if all.len() <= MAX_CANDIDATES {
         return all;
     }
@@ -911,21 +791,18 @@ pub fn candidates(path: &Path, source: &str) -> Vec<Candidate> {
             .or_default()
             .push(candidate);
     }
+    // Round by round, one of each check: there are more candidates than
+    // the cap, so the cap is reached before every list runs out.
     let mut picked = Vec::new();
     let mut round = 0;
     while picked.len() < MAX_CANDIDATES {
-        let mut progressed = false;
         for list in by_check.values() {
             if let Some(candidate) = list.get(round) {
                 picked.push(candidate.clone());
-                progressed = true;
                 if picked.len() == MAX_CANDIDATES {
                     break;
                 }
             }
-        }
-        if !progressed {
-            break;
         }
         round += 1;
     }
@@ -935,6 +812,23 @@ pub fn candidates(path: &Path, source: &str) -> Vec<Candidate> {
 
 #[cfg(test)]
 mod tests {
+    /// Each pattern check is listed once and is neither of the checks
+    /// matched apart from the patterns, so a line is never a candidate for
+    /// one check twice.
+    #[test]
+    fn no_line_is_a_pattern_candidate_for_one_check_twice() {
+        let mut checks = super::PATTERNS
+            .iter()
+            .map(|(check, _)| *check)
+            .collect::<Vec<_>>();
+        checks.sort_unstable();
+        let listed = checks.len();
+        checks.dedup();
+        assert_eq!(checks.len(), listed);
+        assert!(!checks.contains(&"secret_in_source"));
+        assert!(!checks.contains(&"missing_authorization"));
+    }
+
     use super::*;
 
     /// A fake key in a live-key shape, assembled so no source line holds the
@@ -942,17 +836,13 @@ mod tests {
     const FAKE_KEY: &str = concat!("sk_", "live_", "51H8xQ2KmNvBcdEfGhIjKlMnOpQr");
 
     #[test]
-    fn patterns_and_parser_agree_on_a_typescript_route() {
+    fn patterns_name_the_lines_of_a_typescript_route() {
         let source = format!(
             "import {{ Router }} from 'express'\nconst KEY = '{FAKE_KEY}'\nexport const router = Router()\nrouter.get('/x/:id', async (req, res) => {{\n  const row = await db.query(`select * from t where id = ${{req.params.id}}`)\n  res.redirect(req.query.next)\n}})\n"
         );
-        let found = candidates(Path::new("src/a.ts"), &source);
+        let found = candidates(&source);
         let has =
             |line: usize, check: &str| found.iter().any(|c| c.line == line && c.check == check);
-        assert!(
-            has(2, "secret_in_source"),
-            "the literal, from the parser: {found:?}"
-        );
         assert!(has(4, "missing_authorization"), "the handler body line");
         assert!(has(5, "injection_sink"));
         assert!(has(6, "destination_from_input"));
@@ -961,10 +851,7 @@ mod tests {
 
     #[test]
     fn a_comment_is_never_a_candidate_and_a_secret_needs_a_name_and_a_value() {
-        let found = candidates(
-            Path::new("a.py"),
-            "# eval(x) in a comment\npassword = 'hunter2!'\n",
-        );
+        let found = candidates("# eval(x) in a comment\npassword = 'hunter2!'\n");
         assert!(found.iter().all(|c| c.line != 1));
         assert!(
             found
@@ -1001,6 +888,14 @@ mod tests {
             Some("app/__init__.py")
         );
         assert_eq!(resolve_import(&temp, "app/views.py", "os"), None);
+        // A module importing itself, and one above the root, resolve to
+        // nothing.
+        assert_eq!(resolve_import(&temp, "app/views.py", ".views"), None);
+        std::fs::write(temp.join("outside.py"), "").unwrap();
+        assert_eq!(
+            resolve_import(&temp.join("app"), "views.py", "..outside"),
+            None
+        );
         std::fs::write(temp.join("app/routes.ts"), "").unwrap();
         assert_eq!(
             resolve_import(&temp, "app/views.ts", "./routes").as_deref(),
@@ -1042,11 +937,74 @@ mod tests {
             source.push_str(&format!("db.query(a{i})\n"));
         }
         source.push_str("res.redirect(next)\n");
-        let found = candidates(Path::new("a.js"), &source);
+        let found = candidates(&source);
         assert_eq!(found.len(), MAX_CANDIDATES);
         assert!(
             found.iter().any(|c| c.check == "destination_from_input"),
             "the last line survives the cap"
         );
+    }
+
+    /// Which extra files the security lane reads, the lines of a template or
+    /// configuration it asks about, and how many it keeps of a long file.
+    #[test]
+    fn security_extras_their_nodes_and_the_cap() {
+        for (path, extra) in [
+            ("yarn.lock", false),
+            ("package-lock.json", false),
+            ("package.json", false),
+            ("tsconfig.base.json", false),
+            ("composer.json", false),
+            ("public/app.min.js", false),
+            ("config/app.json", true),
+            ("data/strings.json", false),
+            ("app.settings.json", true),
+            ("deploy/.env.json", true),
+            ("views/index.html", true),
+            ("ci.yml", true),
+            ("README.md", false),
+        ] {
+            assert_eq!(is_security_extra(Path::new(path)), extra, "{path}");
+        }
+        let lines = |path: &str, source: &str| {
+            template_or_config_nodes(Path::new(path), source)
+                .into_iter()
+                .map(|node| node.line)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(
+                "t.html",
+                "<p>plain</p>\n<!-- {{ hidden }} -->\n<p>{{ user.name }}</p>\n\n# heading\n<a href=\"/x\">x</a>\n"
+            ),
+            [3, 6]
+        );
+        assert_eq!(
+            lines(
+                "c.yml",
+                "# note\nkey: value\nplain\n// also a comment\nother = 1\n"
+            ),
+            [2, 5]
+        );
+        let node = |line: usize| Node {
+            line,
+            text: format!("n{line}"),
+        };
+        let picked = spread_to((0..10).map(node).chain([node(4)]).collect(), 3)
+            .into_iter()
+            .map(|node| node.line)
+            .collect::<Vec<_>>();
+        assert_eq!(picked, [0, 3, 6]);
+        assert_eq!(spread_to(vec![node(2), node(1)], 5).len(), 2);
+        for (line, comment) in [
+            ("", true),
+            ("  # x", true),
+            ("// x", true),
+            (" * x", true),
+            ("/* x", true),
+            ("x = 1", false),
+        ] {
+            assert_eq!(is_comment(line), comment, "{line:?}");
+        }
     }
 }

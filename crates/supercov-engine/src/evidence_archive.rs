@@ -400,10 +400,8 @@ fn temporary_path(destination: &Path, sequence: u64) -> Result<PathBuf, Evidence
     Ok(destination.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence,)))
 }
 
-fn sync_parent(path: &Path) {
-    if let Some(parent) = path.parent()
-        && let Ok(directory) = File::open(parent)
-    {
+fn sync_directory(directory: &Path) {
+    if let Ok(directory) = File::open(directory) {
         let _ = directory.sync_all();
     }
 }
@@ -499,7 +497,7 @@ fn write_archive_version(
         let compressed_bytes = file.metadata()?.len();
         drop(file);
         fs::rename(&temporary, destination)?;
-        sync_parent(destination);
+        sync_directory(parent);
         Ok(EvidenceArchiveMetadata {
             schema_version,
             format: "framed+gzip",
@@ -578,15 +576,23 @@ fn read_framed_entries<R: Read>(
                 });
             }
         }
-        if !seen.insert(header.path.clone()) {
-            return Err(EvidenceArchiveError::DuplicatePath(header.path));
-        }
+        // Each path follows the one before in order, so none is seen twice.
+        seen.insert(header.path.clone());
         let payload_size =
             usize::try_from(header.bytes).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
         previous = Some(header.path.clone());
         if retain(&header.path) {
-            let mut contents = vec![0; payload_size];
-            read_exact_or_truncated(reader, &mut contents, "payload")?;
+            // Read as the bytes arrive: a damaged header's size is never
+            // allocated up front.
+            let mut contents = Vec::with_capacity(payload_size.min(64 << 20));
+            reader
+                .by_ref()
+                .take(header.bytes)
+                .read_to_end(&mut contents)
+                .map_err(EvidenceArchiveError::Io)?;
+            if contents.len() != payload_size {
+                return Err(EvidenceArchiveError::Truncated("payload"));
+            }
             visit(EvidenceArchiveEntry {
                 path: header.path,
                 contents,
@@ -638,16 +644,49 @@ pub(crate) fn read_archive_selected(
     Ok(entries)
 }
 
+/// The SHA-256 and length of an archive's compressed bytes: of exactly the
+/// bytes a reading of it went through, so what was read and what it is
+/// named by cannot differ, however the file changes meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveDigest {
+    pub sha256: [u8; 32],
+    pub bytes: u64,
+}
+
+/// A reader that hashes every byte it hands on.
+struct Hashing<R> {
+    inner: R,
+    hash: sha2::Sha256,
+    bytes: u64,
+}
+
+impl<R: Read> Read for Hashing<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        sha2::Digest::update(&mut self.hash, &buffer[..read]);
+        self.bytes += read as u64;
+        Ok(read)
+    }
+}
+
 /// Hand each retained entry to `visit` as it is read, validating the whole
 /// archive as [`read_archive_selected`] does. A reader that parses an entry
 /// and drops its bytes never holds the decompressed archive whole: a gigabyte
-/// on a 1,100-test run.
+/// on a 1,100-test run. The archive is read to its end, so the digest is of
+/// all of it.
 pub(crate) fn read_archive_each(
     path: &Path,
     retain: impl Fn(&str) -> bool,
     visit: impl FnMut(EvidenceArchiveEntry) -> Result<(), EvidenceArchiveError>,
-) -> Result<(), EvidenceArchiveError> {
-    let input = BufReader::new(File::open(path)?);
+) -> Result<ArchiveDigest, EvidenceArchiveError> {
+    let input = BufReader::with_capacity(
+        128 * 1024,
+        Hashing {
+            inner: File::open(path)?,
+            hash: sha2::Digest::new(),
+            bytes: 0,
+        },
+    );
     let mut decoder = GzDecoder::new(input);
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
@@ -658,7 +697,11 @@ pub(crate) fn read_archive_each(
     if input.read(&mut trailing)? != 0 {
         return Err(EvidenceArchiveError::TrailingCompressedData);
     }
-    Ok(())
+    let read = input.into_inner();
+    Ok(ArchiveDigest {
+        sha256: sha2::Digest::finalize(read.hash).into(),
+        bytes: read.bytes,
+    })
 }
 
 fn schema_version_from_magic(magic: &[u8]) -> Result<u32, EvidenceArchiveError> {
@@ -882,6 +925,24 @@ mod tests {
             );
         }
 
+        // A header claiming more than any memory holds is truncated, not
+        // allocated.
+        let huge = b"{\"path\":\"manifest.json\",\"bytes\":1000000000000000000}\n";
+        let path = write_compressed(
+            &root,
+            &[
+                EVIDENCE_ARCHIVE_MAGIC.as_bytes(),
+                &(huge.len() as u32).to_be_bytes(),
+                huge,
+                b"{}",
+            ]
+            .concat(),
+        );
+        assert!(matches!(
+            read_archive(&path),
+            Err(EvidenceArchiveError::Truncated("payload"))
+        ));
+
         let duplicate = frame(&[
             entry("coverage-model.json", b"{}"),
             entry("frontend.json", b"{}"),
@@ -926,6 +987,132 @@ mod tests {
         assert!(write_archive(vec![entry("result.json", b"{}")], &destination).is_err());
         assert!(!destination.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Each identity file an archive lacks, or a path written twice, is
+    /// named, and nothing is left behind.
+    #[test]
+    fn an_archive_missing_or_doubling_an_entry_is_refused_by_name() {
+        let root = temporary_directory("archive-named");
+        let destination = root.join("evidence.raw.gz");
+        let [model, frontend, manifest] = <[EvidenceArchiveEntry; 3]>::try_from(identity_entries())
+            .ok()
+            .unwrap();
+        let doubled = vec![
+            model.clone(),
+            frontend.clone(),
+            manifest.clone(),
+            manifest.clone(),
+        ];
+        assert!(matches!(
+            write_archive(doubled, &destination),
+            Err(EvidenceArchiveError::DuplicatePath(path)) if path == "manifest.json"
+        ));
+        assert!(matches!(
+            write_archive(vec![model, frontend.clone()], &destination),
+            Err(EvidenceArchiveError::MissingManifest)
+        ));
+        assert!(matches!(
+            write_archive(vec![frontend, manifest.clone()], &destination),
+            Err(EvidenceArchiveError::MissingCoverageModel)
+        ));
+        assert!(matches!(
+            write_archive(vec![manifest], &destination),
+            Err(EvidenceArchiveError::MissingFrontend)
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A header of no bytes, or one not ended by a newline, is refused.
+    #[test]
+    fn an_empty_or_unterminated_header_is_refused() {
+        let root = temporary_directory("archive-headers");
+        let header = b"{\"path\":\"manifest.json\",\"bytes\":0}";
+        for (bytes, said) in [
+            (
+                [EVIDENCE_ARCHIVE_MAGIC.as_bytes(), &0_u32.to_be_bytes()].concat(),
+                "empty header",
+            ),
+            (
+                [
+                    EVIDENCE_ARCHIVE_MAGIC.as_bytes(),
+                    &(header.len() as u32).to_be_bytes(),
+                    header,
+                ]
+                .concat(),
+                "header is not newline terminated",
+            ),
+        ] {
+            let path = write_compressed(&root, &bytes);
+            assert!(
+                matches!(
+                    read_archive(&path),
+                    Err(EvidenceArchiveError::InvalidHeader(why)) if why == said
+                ),
+                "{said}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A directory source that is a file, or a file source that is a
+    /// directory, is refused; one that is missing adds nothing; one that
+    /// cannot be looked at is an error.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_of_the_wrong_kind_is_refused() {
+        let root = temporary_directory("archive-kinds");
+        let manifest = root.join("manifest.json");
+        fs::write(&manifest, b"{}").unwrap();
+        let file = |file: &Path| EvidenceArchiveSource::File {
+            file: file.to_owned(),
+            path: "manifest.json".to_owned(),
+        };
+        let directory = |directory: PathBuf| EvidenceArchiveSource::Directory {
+            directory,
+            prefix: None,
+        };
+        assert!(matches!(
+            collect_sources(&[directory(manifest.clone()), file(&manifest)]),
+            Err(EvidenceArchiveError::UnsupportedSource(_))
+        ));
+        assert!(matches!(
+            collect_sources(&[directory(manifest.join("below")), file(&manifest)]),
+            Err(EvidenceArchiveError::Io(_))
+        ));
+        assert_eq!(
+            collect_sources(&[directory(root.join("missing")), file(&manifest)])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            collect_sources(&[file(&root)]),
+            Err(EvidenceArchiveError::UnsupportedSource(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A temporary name another writer holds is passed over for the next;
+    /// one the file system cannot make fails the write.
+    #[test]
+    fn a_temporary_name_in_use_is_passed_over() {
+        let root = temporary_directory("archive-temporary");
+        let destination = root.join("evidence.raw.gz");
+        let next = TEMPORARY_SEQUENCE.load(Ordering::Relaxed);
+        for sequence in next..next + 256 {
+            fs::write(temporary_path(&destination, sequence).unwrap(), b"held").unwrap();
+        }
+        write_archive(identity_entries(), &destination).unwrap();
+        assert_eq!(read_archive(&destination).unwrap(), identity_entries());
+        let long = root.join("e".repeat(250));
+        assert!(matches!(
+            write_archive(identity_entries(), &long),
+            Err(EvidenceArchiveError::Io(_))
+        ));
+        assert!(!long.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1072,5 +1259,20 @@ mod tests {
             );
         }
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn an_archive_path_is_one_relative_forward_slash_path() {
+        validate_archive_path("runs/a/evidence.json").unwrap();
+        for bad in ["", "/abs", "dir/", "a\\b", "a\0b", "a//b", "./a", "a/../b"] {
+            assert!(validate_archive_path(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn syncing_a_directory_that_cannot_be_opened_is_skipped() {
+        // Syncing the parent is best effort: the archive is already renamed
+        // into place, so a parent that cannot be opened must not fail it.
+        sync_directory(Path::new("/proc/self/no-such-directory"));
+        sync_directory(Path::new("/proc/self"));
     }
 }

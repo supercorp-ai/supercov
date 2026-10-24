@@ -10,7 +10,7 @@ use crate::{
     coverage_query::CoverageQueryFilters,
     run_store::{
         RawEvidenceMetadata, RunIndexError, RunIntegrity, RunInventory, RunTimings, StoredRun,
-        compare_run_integrity, open_or_rebuild_query_index,
+        compare_with_checkout, open_or_rebuild_query_index,
     },
 };
 
@@ -82,8 +82,8 @@ pub fn run_list_query(
                 ),
                 Err(error) => (None, None, None, None, Some(error.to_string())),
             };
-            let comparison = current_integrity(run)
-                .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
+            let comparison =
+                compare_with_checkout(&run.metadata.integrity, current_integrity(run).as_ref());
             Ok(RunListEntry {
                 id: run.id.clone(),
                 generated_at: run.metadata.started_at.clone(),
@@ -102,10 +102,8 @@ pub fn run_list_query(
                     .as_ref()
                     .map(|cache| cache.reused),
                 raw_evidence: run.metadata.raw_evidence.clone(),
-                stale: comparison.as_ref().map(|comparison| comparison.stale),
-                reasons: comparison
-                    .map(|comparison| comparison.reasons)
-                    .unwrap_or_default(),
+                stale: Some(comparison.stale),
+                reasons: comparison.reasons,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;

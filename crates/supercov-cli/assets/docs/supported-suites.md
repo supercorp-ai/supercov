@@ -424,8 +424,13 @@ Ruby 3.3 and newer support statement, method, branch and MC/DC measurement,
 including loops, iterator blocks, short-circuit operators, pattern matching,
 optional calls and exception paths.
 
-Some constructs have narrower coverage. Code in a non-main Ractor keeps line
-coverage but may lack other observations. Certain nested-return expressions
+Some constructs have narrower coverage. Code written inside a `Ractor.new`
+block keeps line coverage but may lack other observations. Code a non-main
+Ractor calls elsewhere runs as it would without Supercov, but what it runs
+there is not recorded: the run says so, and a line only a Ractor reached reads
+as not executed. A project whose code or tests mention `Ractor` gets probes a
+Ractor can call, which cost more than the usual ones (about a fifth more in a
+tight loop). Certain nested-return expressions
 limit normal-completion measurement. Constant predicates are folded as Ruby
 folds them, so unreachable alternatives do not become obligations.
 
@@ -508,8 +513,10 @@ beyond one deferred line per test that binds it to its evidence.
 
 `go test` builds one binary per package, so each test package records its own
 evidence and Supercov merges them. It also caches packages that passed, and a
-cached package does not run — so Supercov adds `-count=1` unless your command
-already says otherwise, and tells you it did.
+cached package does not run — so Supercov adds `-count=1` to `GOFLAGS` unless
+your command or `GOFLAGS` already says otherwise, and tells you it did. Through
+`GOFLAGS` it reaches `go test` however your command starts it, `make test`
+included.
 
 A test that calls `t.Parallel()` runs alongside others. Probes are a store into
 one array shared by the process, so nothing can say which of two concurrent

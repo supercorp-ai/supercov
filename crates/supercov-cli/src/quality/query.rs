@@ -96,7 +96,7 @@ pub fn gaps(
     if !is_catalog(&snapshot) {
         return Err(format!(
             "snapshot {} was written by the rubric, which has no findings to narrow to; \
-             run `supercov quality` to assess with the catalog",
+             run `supercov {lane}` to assess with the catalog",
             snapshot.id
         ));
     }
@@ -430,13 +430,16 @@ fn band(health: Option<f64>) -> &'static str {
 fn render_quality(view: &Value) -> String {
     let empty = Vec::new();
     let mut out = String::new();
-    let health = view["health"].as_f64();
-    out.push_str(&format!(
-        "Quality {} ({:.1}/10) over {}.\n",
-        band(health),
-        health.unwrap_or(0.0),
-        super::files(view["counts"]["scored"].as_u64().unwrap_or(0))
-    ));
+    // As the assessment that wrote it said: with no file scored there is no
+    // health, and a 0.0 would read as the worst one.
+    match view["health"].as_f64() {
+        Some(health) => out.push_str(&format!(
+            "Quality {} ({health:.1}/10) over {}.\n",
+            band(Some(health)),
+            super::files(view["counts"]["scored"].as_u64().unwrap_or(0))
+        )),
+        None => out.push_str("Quality not scored: no file was assessed.\n"),
+    }
     out.push_str(&format!(
         "Catalog {}, model {}, snapshot {}.\n\n",
         view["catalog_version"].as_str().unwrap_or("?"),
@@ -550,6 +553,13 @@ fn render_gaps(view: &Value) -> String {
             ));
         }
     }
+    let total = view["total"].as_u64().unwrap_or(0) as usize;
+    if total > files.len() {
+        out.push_str(&format!(
+            "... and {} more; --limit 0 lists every one\n",
+            total - files.len()
+        ));
+    }
     out
 }
 
@@ -616,8 +626,11 @@ fn render_scope(view: &Value) -> String {
             roots.join(", ")
         }
     ));
-    if let Some(reasons) = summary["reasons"].as_object() {
-        out.push('\n');
+    if let Some(reasons) = summary["reasons"]
+        .as_object()
+        .filter(|reasons| !reasons.is_empty())
+    {
+        out.push_str("\nFiles left out, by reason:\n");
         for (reason, count) in reasons {
             out.push_str(&format!("  {:>5}  {reason}\n", count.as_u64().unwrap_or(0)));
         }
@@ -693,7 +706,17 @@ fn render_quality_diff(view: &Value) -> String {
         ));
     }
     let none: Vec<Value> = Vec::new();
-    let section = |out: &mut String, title: &str, rows: &Vec<Value>| {
+    // A section --limit cut short says how many more it holds.
+    let more = |out: &mut String, key: &str, shown: usize| {
+        let total = view["counts"][key].as_u64().unwrap_or(0) as usize;
+        if total > shown {
+            out.push_str(&format!(
+                "  ... and {} more; --limit 0 lists every one\n",
+                total - shown
+            ));
+        }
+    };
+    let section = |out: &mut String, title: &str, key: &str, rows: &Vec<Value>| {
         if rows.is_empty() {
             return;
         }
@@ -724,15 +747,18 @@ fn render_quality_diff(view: &Value) -> String {
                 );
             }
         }
+        more(out, key, rows.len());
     };
     section(
         &mut out,
         "Declined:",
+        "declined",
         view["declined"].as_array().unwrap_or(&empty),
     );
     section(
         &mut out,
         "Improved:",
+        "improved",
         view["improved"].as_array().unwrap_or(&empty),
     );
     // A refactor that extracts code lands in new files, so they are listed
@@ -764,6 +790,7 @@ fn render_quality_diff(view: &Value) -> String {
                 }
             ));
         }
+        more(&mut out, "added", added.len());
     }
     let removed = view["removed"].as_array().unwrap_or(&empty);
     if !removed.is_empty() {
@@ -771,6 +798,7 @@ fn render_quality_diff(view: &Value) -> String {
         for row in removed {
             out.push_str(&format!("  {}\n", row["path"].as_str().unwrap_or("?")));
         }
+        more(&mut out, "removed", removed.len());
     }
     out
 }
@@ -817,8 +845,10 @@ fn render_snapshots(view: &Value) -> String {
         );
     }
     let mut text = format!(
-        "{} {lane} snapshots, most recent first (showing {}).\n",
-        view["total"], view["shown"]
+        "{} {lane} snapshot{}, most recent first (showing {}).\n",
+        view["total"],
+        if view["total"] == 1 { "" } else { "s" },
+        view["shown"]
     );
     for row in rows {
         let counts = &row["counts"];

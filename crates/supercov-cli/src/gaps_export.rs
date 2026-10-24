@@ -6,7 +6,9 @@
 
 use std::{io::Write, path::PathBuf, process::ExitCode};
 
+use serde::Serialize;
 use serde_json::Value;
+use supercov_engine::coverage_query::{CoverageFileDetailData, CoverageFileObligation};
 
 /// Options of `gaps` that `file` shares, passed on to each file.
 const SHARED: &[&str] = &[
@@ -105,9 +107,16 @@ pub fn command(arguments: &[String]) -> ExitCode {
     let mut lines = String::new();
     let mut written = 0usize;
     for (file, detail) in files.iter().zip(&details) {
-        for gap_line in detail["gapLines"].as_array().into_iter().flatten() {
-            for obligation in gap_line["obligations"].as_array().into_iter().flatten() {
-                lines.push_str(&row(file, gap_line, obligation).to_string());
+        for gap_line in &detail.gap_lines {
+            for obligation in &gap_line.obligations {
+                let row = Row {
+                    file,
+                    obligation,
+                    line_source: gap_line.source.as_deref(),
+                };
+                lines.push_str(
+                    &serde_json::to_string(&row).expect("a row is fields named by strings"),
+                );
                 lines.push('\n');
                 written += 1;
             }
@@ -125,12 +134,19 @@ pub fn command(arguments: &[String]) -> ExitCode {
                 path.display()
             );
         }
-        None => {
-            let mut stdout = std::io::stdout().lock();
-            if stdout.write_all(lines.as_bytes()).is_err() {
-                return ExitCode::from(2);
-            }
+        None => return printed(&mut std::io::stdout().lock(), &lines),
+    }
+    ExitCode::SUCCESS
+}
+
+/// The gaps written to standard output, `out`.
+fn printed(out: &mut dyn Write, lines: &str) -> ExitCode {
+    if let Err(error) = out.write_all(lines.as_bytes()).and_then(|()| out.flush()) {
+        // A reader that stopped early, as `head` does, needs no word.
+        if error.kind() != std::io::ErrorKind::BrokenPipe {
+            eprintln!("[supercov] could not write the gaps to standard output: {error}");
         }
+        return ExitCode::from(2);
     }
     ExitCode::SUCCESS
 }
@@ -142,7 +158,7 @@ fn file_details(
     run: &str,
     files: &[String],
     shared: &[String],
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<CoverageFileDetailData>, String> {
     let Some(first) = files.first() else {
         return Ok(Vec::new());
     };
@@ -182,7 +198,7 @@ fn file_details(
                 },
             )
             .map_err(|error| format!("{file}: {error:?}"))?;
-            serde_json::to_value(detail).map_err(|error| error.to_string())
+            Ok(detail)
         })
         .collect()
 }
@@ -206,33 +222,68 @@ fn shared_options(arguments: &[String]) -> Vec<String> {
 
 /// One exported obligation: what `file` says of it, with its file and the
 /// source of its line.
-fn row(file: &str, gap_line: &Value, obligation: &Value) -> Value {
-    let mut row = serde_json::Map::new();
-    row.insert("file".into(), Value::String(file.to_owned()));
-    if let Some(fields) = obligation.as_object() {
-        for (key, value) in fields {
-            row.insert(key.clone(), value.clone());
-        }
-    }
-    if let Some(source) = gap_line["source"].as_str() {
-        row.insert("lineSource".into(), Value::String(source.to_owned()));
-    }
-    Value::Object(row)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Row<'a> {
+    file: &'a str,
+    #[serde(flatten)]
+    obligation: &'a CoverageFileObligation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_source: Option<&'a str>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A writer that fails as `kind`.
+    struct Failing(std::io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Gaps that could not all be printed fail the command, whether the
+    /// reader stopped early or the output failed otherwise.
+    #[test]
+    fn gaps_that_could_not_be_printed_fail_the_command() {
+        let mut out = Vec::new();
+        assert_eq!(printed(&mut out, "{}\n"), ExitCode::SUCCESS);
+        assert_eq!(out, b"{}\n");
+        for kind in [std::io::ErrorKind::BrokenPipe, std::io::ErrorKind::Other] {
+            assert_eq!(printed(&mut Failing(kind), "{}\n"), ExitCode::from(2));
+        }
+    }
+
     #[test]
     fn an_exported_obligation_names_its_file_and_line_source() {
-        let gap_line = serde_json::json!({ "line": 28, "source": "if (!context) {" });
-        let obligation =
-            serde_json::json!({ "kind": "mcdc", "line": 28, "missingCondition": "!context" });
-        let exported = row("src/chart.tsx", &gap_line, &obligation);
+        use supercov_engine::coverage_query::{CoverageLineObligation, CoverageOtherCoverage};
+        let obligation = CoverageFileObligation::Line(CoverageLineObligation {
+            kind: "line".into(),
+            id: "line:src/chart.tsx:28".into(),
+            line: 28,
+            other_coverage: CoverageOtherCoverage {
+                covered_elsewhere: false,
+                kinds: Vec::new(),
+                runners: Vec::new(),
+                tests: Vec::new(),
+            },
+        });
+        let exported = serde_json::to_value(Row {
+            file: "src/chart.tsx",
+            obligation: &obligation,
+            line_source: Some("if (!context) {"),
+        })
+        .unwrap();
         assert_eq!(exported["file"], "src/chart.tsx");
-        assert_eq!(exported["kind"], "mcdc");
-        assert_eq!(exported["missingCondition"], "!context");
+        assert_eq!(exported["kind"], "line");
+        assert_eq!(exported["line"], 28);
         assert_eq!(exported["lineSource"], "if (!context) {");
         let options = shared_options(&[
             "run_1".into(),

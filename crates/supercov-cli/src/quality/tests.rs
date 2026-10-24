@@ -144,6 +144,13 @@ fn a_subcommand_is_only_a_reserved_word_and_a_path_can_still_be_scanned() {
 }
 
 #[test]
+#[should_panic(expected = "not a snapshot id: ../outside")]
+fn only_a_snapshot_id_names_a_saved_snapshot() {
+    let temp = Temp::new();
+    let _ = store::write(&temp.0, "quality", "../outside", &json!({}), &json!({}));
+}
+
+#[test]
 fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
     let temp = Temp::new();
     let files = json!({"files": []});
@@ -681,12 +688,24 @@ fn the_band_totals_count_each_file_by_the_band_it_prints() {
     assert!(printed.contains("  1 good, 1 fair, 1 weak.\n"), "{printed}");
 }
 
+#[test]
+fn files_under_no_source_root_are_counted_in_the_plural() {
+    let printed = human_quality(&serde_json::json!({
+        "scope_resolved": {"asked": 3, "ships": 2, "does_not": 1},
+    }));
+    assert!(
+        printed.contains(
+            "  3 files under no source root were read by the model from the tree: 2 ship, 1 does not.\n"
+        ),
+        "{printed}"
+    );
+}
+
 fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
     Answers {
         lines: Vec::new(),
         labels: Vec::new(),
 
-        classified: BTreeMap::new(),
         path: path.to_owned(),
         bytes: 100,
         // Every window of one file carries that file's digest, which is what
@@ -744,18 +763,14 @@ fn an_oversized_file_is_windowed_and_every_window_fits() {
         ));
     }
     assert!(
-        within_budget(&catalog::file_request("big.ts", &source))
-            .unwrap()
-            .is_none(),
+        within_budget(&catalog::file_request("big.ts", &source)).is_none(),
         "the fixture must exceed the budget or this proves nothing"
     );
     let windows = catalog_windows("big.ts", &source, Instrument::Catalog).unwrap();
     assert!(windows.len() > 1, "an oversized file is split");
     for (window, text) in &windows {
         assert!(
-            within_budget(&catalog::file_request("big.ts", text))
-                .unwrap()
-                .is_some(),
+            within_budget(&catalog::file_request("big.ts", text)).is_some(),
             "window {} of {} is still over budget",
             window.index,
             window.of
@@ -787,18 +802,14 @@ fn a_template_with_no_parser_is_windowed_at_line_boundaries() {
     source.push_str("</body></html>\n");
     for instrument in [Instrument::Catalog, Instrument::Security] {
         assert!(
-            within_budget(&instrument.file_request("page.html", &source))
-                .unwrap()
-                .is_none(),
+            within_budget(&instrument.file_request("page.html", &source)).is_none(),
             "the fixture must exceed the budget or this proves nothing"
         );
         let windows = catalog_windows("page.html", &source, instrument).unwrap();
         assert!(windows.len() > 1);
         for (_, text) in &windows {
             assert!(
-                within_budget(&instrument.file_request("page.html", text))
-                    .unwrap()
-                    .is_some(),
+                within_budget(&instrument.file_request("page.html", text)).is_some(),
                 "a window planned for {instrument:?} is over its own budget"
             );
         }
@@ -2323,7 +2334,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
     let moved_hash = digest(&serde_json::to_vec(&moved).unwrap());
     assert_eq!(moved_hash, hash);
     assert!(
-        cached(&path, &hash, &moved).unwrap().is_some(),
+        cached(&path, "quality", &hash, &moved).unwrap().is_some(),
         "answered from cache"
     );
 
@@ -2335,6 +2346,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
     assert!(
         cached(
             &store::responses(&temp.0, "quality").join(format!("{edited_hash}.json")),
+            "quality",
             &edited_hash,
             &edited
         )
@@ -2474,7 +2486,7 @@ fn security_asks_its_own_twelve_of_a_file_and_nothing_from_the_complexity_catalo
         dry_run: true,
         ..Options::default()
     };
-    let (report, _) = run_health(&temp.0, &options, None, Instrument::Security).unwrap();
+    let (report, _) = run_health(&temp.0, &options, None, Instrument::Security, None).unwrap();
     assert_eq!(report["instrument"], "security");
     assert_eq!(report["catalog_version"], catalog::security::VERSION);
     let requests = report["requests"].as_array().unwrap();
@@ -2492,7 +2504,7 @@ fn security_asks_its_own_twelve_of_a_file_and_nothing_from_the_complexity_catalo
     assert_eq!(asked, security);
     assert!(!asked.contains("deep_nesting") && !asked.contains("weakens_tests"));
     // And the quality lane asks a file none of the security questions.
-    let (report, _) = run_health(&temp.0, &options, None, Instrument::Catalog).unwrap();
+    let (report, _) = run_health(&temp.0, &options, None, Instrument::Catalog, None).unwrap();
     let asked: BTreeSet<&str> = report["requests"][0]["questions"]
         .as_object()
         .unwrap()
@@ -2508,7 +2520,6 @@ fn a_security_answer_is_never_scored_and_sorts_by_what_fired() {
         lines: Vec::new(),
         labels: Vec::new(),
 
-        classified: BTreeMap::new(),
         path: "src/b.ts".into(),
         sha256: "test-source".into(),
         bytes: 10,
@@ -2555,7 +2566,7 @@ fn a_run_that_was_not_assessed_is_not_said_to_catch_nothing() {
     });
     let text = human_security(&report);
     assert!(
-        text.contains("0 flagged files have lines no test in run run_1 executed.\n  Run run_1 has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported. Assess it with `supercov runs run_1 assertions assess`.\n"),
+        text.contains("Every line of the flagged files was executed by a test in run run_1.\n  Run run_1 has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported. Assess it with `supercov runs run_1 assertions assess`.\n"),
         "{text}"
     );
     assert!(!text.contains("judged to catch"), "{text}");
@@ -2582,7 +2593,7 @@ fn the_security_report_names_what_fired_and_where_tests_never_went() {
     let text = human_security(&report);
     assert!(text.starts_with("Security: 1 of 3 files flagged, 2 clean.\n"));
     assert!(text.contains("injection_sink 1"));
-    assert!(text.contains("1 flagged files have lines no test in run run_1 executed; 1 are executed by tests that are not judged to catch any line of them."));
+    assert!(text.contains("1 flagged file has lines no test in run run_1 executed; 1 is executed by tests that are not judged to catch any line of it."));
     assert!(
         text.contains(
             "executed by tests, but no test is judged to catch a change to any line of it"
@@ -2672,6 +2683,25 @@ fn a_file_view_reports_what_the_summary_flagged() {
 }
 
 #[test]
+fn an_older_security_snapshot_judges_each_check_at_its_own_cut() {
+    // Snapshots from before the assessment recorded what fired keep no
+    // `present` list; each check is judged at the security cut it has.
+    let temp = Temp::new();
+    let (id, _) = store::identity().unwrap();
+    let manifest = json!({
+        "created_at": "2026-09-01T00-00-00-000000Z", "instrument": "security",
+        "catalog_version": "security-v3", "model": "jev-1.13.0",
+        "counts": {"assessed": 1, "flagged": 1}, "by_check": {"secret_in_source": 1},
+    });
+    let files = json!({"files": [{"path": "src/k.ts", "status": "completed",
+        "checks": {"secret_in_source": 0.99, "injection_sink": 0.01}}]});
+    store::write(&temp.0, "security", &id, &manifest, &files).unwrap();
+    let text = query::render(&query::file(&temp.0, "security", "src/k.ts", None).unwrap());
+    assert!(text.contains("  yes  0.99  secret_in_source\n"), "{text}");
+    assert!(text.contains("   no  0.01  injection_sink\n"), "{text}");
+}
+
+#[test]
 fn an_assessment_takes_a_run_to_cross_with() {
     let options = parse_scan(vec!["--run".into(), "latest".into(), "src".into()]).unwrap();
     assert_eq!(options.run.as_deref(), Some("latest"));
@@ -2708,11 +2738,14 @@ fn security_totals_include_a_check_only_the_line_pass_found() {
         bytes: 10,
         sha256: "source".into(),
         windows: 1,
-        lines: vec![
-            json!({"line": 5, "check": "sensitive_data_exposure", "value": 0.9, "text": "log(token)"}),
-        ],
+        lines: vec![ConfirmedLine {
+            line: 5,
+            check: "sensitive_data_exposure".into(),
+            value: 0.9,
+            text: "log(token)".into(),
+            enters_at: None,
+        }],
         labels: Vec::new(),
-        classified: BTreeMap::new(),
         note: None,
         values: Some(values(&[("sensitive_data_exposure", 0.1)])),
         cached: false,
@@ -2995,4 +3028,204 @@ fn an_answer_is_accepted_only_as_the_question_asked_for_it() {
         ),
         Err("invalid request questions".into())
     );
+}
+
+#[test]
+fn layout_targets_benchmarks_banners_and_build_scripts() {
+    let (_temp, map) = layout(&[
+        (
+            "package.json",
+            r#"{"name":"app","exports":{"./x":"./lib/x.js"},"bin":{"app":"./cli/app.js"},"browser":["./web/a.js"]}"#,
+        ),
+        ("lib/x.js", "export const x = 1;\n"),
+        ("cli/app.js", "console.log(1);\n"),
+        ("web/a.js", "export const a = 1;\n"),
+        ("src/index.js", "export const i = 1;\n"),
+        ("src/speed.bench.js", "bench();\n"),
+        ("src/a.benchmark.ts", "bench();\n"),
+        (
+            "public/licensed.js",
+            "/** @license Apache-2.0 */\nvar b=1;\n",
+        ),
+        (
+            "public/mit.js",
+            "// Licensed under the MIT license\nvar c=1;\n",
+        ),
+        (
+            "rust/Cargo.toml",
+            "[package]\nname = \"r\"\n[lib]\npath = \"lib/mylib.rs\"\n[[bin]]\npath= \"tools/run.rs\"\n",
+        ),
+        ("rust/lib/mylib.rs", "pub fn a() {}\n"),
+        ("rust/tools/run.rs", "fn main() {}\n"),
+        ("jvm/build.gradle.kts", "plugins {}\n"),
+        ("jvm/settings.gradle.kts", "rootProject.name = \"jvm\"\n"),
+        ("jvm/src/main/kotlin/A.kt", "class A\n"),
+    ]);
+    included(
+        &map,
+        &[
+            "lib/x.js",
+            "cli/app.js",
+            "web/a.js",
+            "src/index.js",
+            "rust/lib/mylib.rs",
+            "rust/tools/run.rs",
+            "jvm/src/main/kotlin/A.kt",
+        ],
+    );
+    excluded_as(
+        &map,
+        "benchmark",
+        &["src/speed.bench.js", "src/a.benchmark.ts"],
+    );
+    excluded_as(
+        &map,
+        "vendored third-party library",
+        &["public/licensed.js", "public/mit.js"],
+    );
+    excluded_as(
+        &map,
+        "build or tool configuration",
+        &["jvm/build.gradle.kts", "jvm/settings.gradle.kts"],
+    );
+}
+
+#[test]
+fn a_distribution_is_a_probability_for_every_choice_summing_to_one() {
+    let keys = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>();
+    let values = |pairs: &[(&str, f64)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert!(distribution(
+        &values(&[("a", 0.33), ("b", 0.33), ("c", 0.33)]),
+        keys(&["a", "b", "c"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", 0.5), ("b", 0.5)]),
+        keys(&["a", "c"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", f64::NAN), ("b", 1.0)]),
+        keys(&["a", "b"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", 1.5), ("b", -0.5)]),
+        keys(&["a", "b"])
+    ));
+    assert!(!distribution(
+        &values(&[("a", 0.4), ("b", 0.4)]),
+        keys(&["a", "b"])
+    ));
+    assert!(!probability(f64::INFINITY));
+    assert!(probability(0.0) && probability(1.0));
+    // A bracket only opens an IPv6 host at the start of the authority.
+    assert_eq!(host("http://a]b:1/x"), "a]b");
+    assert_eq!(host("example.com:443"), "example.com");
+    assert_eq!(host("https://h.example?q=1"), "h.example");
+}
+
+#[test]
+fn a_dense_run_counts_a_token_a_byte_and_an_oversized_declaration_splits_at_its_children() {
+    // 64 dense bytes, then 11 ordinary ones: 64 + ceil(11 / 3).
+    let text = format!("{} {}", "A".repeat(DENSE_RUN), "b".repeat(10));
+    assert_eq!(estimated_tokens(text.as_bytes()), DENSE_RUN + 4);
+    let filler = "x".repeat(SPLIT_INSIDE_BYTES + 10);
+    let source = format!(
+        "export class Big {{\n  one() {{\n    return \"{filler}\";\n  }}\n  two() {{\n    return 2;\n  }}\n}}\nexport function huge() {{\n  return \"{filler}\";\n}}\nexport function small() {{\n  return 1;\n}}\n"
+    );
+    let (outline, units) = split_units("src/a.js", &source).unwrap();
+    let names = units
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Big.one", "Big.two", "huge", "small"]);
+    assert_eq!(outline.as_array().unwrap().len(), 4);
+    assert!(split_units("notes.txt", "plain\n").is_none());
+}
+
+#[test]
+fn line_windows_cut_a_long_declaration_and_merge_what_fits() {
+    let ranges = |source: &str| {
+        line_windows("src/a.js", source)
+            .unwrap()
+            .into_iter()
+            .map(|(window, _)| (window.start_line, window.end_line))
+            .collect::<Vec<_>>()
+    };
+    // 450 lines of 120 bytes: cut at 200, the short tail joined to the second.
+    let line = format!("  x = '{}';\n", "y".repeat(110));
+    let long = format!("export function huge() {{\n{}}}\n", line.repeat(450));
+    assert_eq!(ranges(&long), [(1, 200), (201, 452)]);
+    // Over the budget in fewer than 200 lines: sent whole.
+    let wide_line = format!("  x = '{}';\n", "y".repeat(390));
+    let wide = format!("export function wide() {{\n{}}}\n", wide_line.repeat(150));
+    assert_eq!(ranges(&wide), [(1, 152)]);
+    // Small declarations share one window.
+    assert_eq!(
+        ranges("export function a() {\n  return 1;\n}\nexport function b() {\n  return 2;\n}\n"),
+        [(1, 6)]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn quality_targets_are_refused_by_what_they_are_and_where_they_lead() {
+    let temp = Temp::new();
+    temp.write("src/a.js", "export const a = 1;\n");
+    temp.write("src/node_modules/dep/index.js", "module.exports = 1;\n");
+    temp.write("notes.txt", "words\n");
+    temp.write("empty/README", "none\n");
+    std::os::unix::fs::symlink(temp.0.join("src/a.js"), temp.0.join("linked.js")).unwrap();
+    std::os::unix::fs::symlink(temp.0.join("src"), temp.0.join("via")).unwrap();
+    let found = discover(&temp.0, &[PathBuf::from("src")]).unwrap();
+    assert_eq!(found, [temp.0.join("src/a.js")], "node_modules is left out");
+    for (path, said) in [
+        ("missing.js", "missing.js:"),
+        ("linked.js", "symbolic link is not a quality target"),
+        ("via/a.js", "symbolic link in quality target path"),
+        ("notes.txt", "unsupported source extension"),
+        ("empty", "no supported source files found"),
+        ("..", "outside current directory"),
+    ] {
+        let error = discover(&temp.0, &[PathBuf::from(path)]).unwrap_err();
+        assert!(error.contains(said), "{path}: {error}");
+    }
+}
+
+/// One file read from the tree is one that was, and a few callers not
+/// asked are each named with no remainder to count.
+#[test]
+fn one_file_read_and_a_few_callers_not_asked_are_told_in_full() {
+    let quality = human_quality(&json!({
+        "counts": {"assessed": 0},
+        "files": [],
+        "scope_resolved": {"asked": 1, "ships": 1, "does_not": 0}
+    }));
+    assert!(
+        quality.contains(
+            "1 file under no source root was read by the model from the tree: 1 ships, 0 do not."
+        ),
+        "{quality}"
+    );
+    let path = json!({
+        "caller": {"file": "src/a.ts", "line": 3, "function": "a"},
+        "callee": {"file": "src/b.ts", "line": 9, "function": "b"}
+    });
+    let security = human_security(&json!({
+        "counts": {"assessed": 1, "flagged": 0},
+        "files": [],
+        "paths_not_asked": [path.clone(), path]
+    }));
+    assert!(
+        security.contains("2 more caller(s) ran with a flagged function"),
+        "{security}"
+    );
+    assert_eq!(
+        security.matches("  src/a.ts:3 a -> src/b.ts:9 b\n").count(),
+        2
+    );
+    assert!(!security.contains("... and"), "{security}");
 }

@@ -16,7 +16,7 @@ use supercov_engine::{
         CoverageFileDetailOptions, CoverageScopeQueryOptions, CoverageSummaryQueryOptions,
         FileDetailSource, coverage_file_detail_from, coverage_scope_query, coverage_summary_query,
     },
-    run_store::{StoredRun, compare_run_integrity, select_run},
+    run_store::{StoredRun, select_run},
 };
 
 use crate::{current_integrity_for_run, full_suite_hints, public_run_inventory};
@@ -275,9 +275,14 @@ fn selected_runs<'a>(
     if let Some(selector) = options.comparison.as_deref() {
         let comparison =
             select_run(inventory, Some(selector)).map_err(|error| error.to_string())?;
-        if ids.insert(comparison.id.as_str()) {
-            runs.push(comparison);
+        // `--compare latest` on the latest run compared it with itself.
+        if !ids.insert(comparison.id.as_str()) {
+            return Err(format!(
+                "--compare {selector} is {}, the run this report shows; compare it with another run",
+                comparison.id
+            ));
         }
+        runs.push(comparison);
     }
     let selected_position = inventory
         .runs
@@ -388,16 +393,12 @@ fn build_run(
     let source_exact = current_integrity.as_ref().is_some_and(|current| {
         current.fingerprint.source == run.metadata.integrity.fingerprint.source
     });
-    let comparison = current_integrity
-        .as_ref()
-        .map(|current| compare_run_integrity(Some(&run.metadata.integrity), current));
-    let stale = comparison.as_ref().is_some_and(|value| value.stale)
-        || run.metadata.integrity.stale.unwrap_or(false);
-    let stale_reasons = comparison
-        .as_ref()
-        .map(|value| value.reasons.clone())
-        .or_else(|| run.metadata.integrity.stale_reasons.clone())
-        .unwrap_or_default();
+    let comparison = supercov_engine::run_store::compare_with_checkout(
+        &run.metadata.integrity,
+        current_integrity.as_ref(),
+    );
+    let stale = comparison.stale;
+    let stale_reasons = comparison.reasons;
     let container = match crate::open_query_index_for(run, filter) {
         Ok(container) => container,
         Err(supercov_engine::run_store::RunIndexError::Report(
@@ -438,7 +439,9 @@ fn build_run(
         .map_err(|error| format!("could not read run {}: {error:?}", run.id))?;
     for file in files
         .iter()
-        .filter(|file| file.score > 0 || file.measurement_limitations > 0)
+        // The score counts measurement limitations too, and the index
+        // refuses a record whose score is not its counts' sum.
+        .filter(|file| file.score > 0)
     {
         let (detail, _) = coverage_file_detail_from(
             &read,
@@ -830,8 +833,8 @@ fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<Timeli
 }
 
 /// Exact assessed scope and source bytes. Missing digests cannot prove equality.
-fn assessment_source(assessment: &ReportQuality) -> Option<BTreeMap<String, String>> {
-    let files = assessment.files.as_array()?;
+fn assessment_source(files: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+    let files = files.as_array()?;
     if files.is_empty() {
         return None;
     }
@@ -857,7 +860,7 @@ fn attach_security(
     let mut seen_sources = BTreeSet::new();
     for security in securities {
         let superseded =
-            assessment_source(security).is_some_and(|source| !seen_sources.insert(source));
+            assessment_source(&security.files).is_some_and(|source| !seen_sources.insert(source));
         let mut paired = false;
         for item in timeline.iter_mut() {
             if item.security_id.is_none()
@@ -895,9 +898,7 @@ fn render_html(bundle: &ReportBundle) -> Result<Vec<u8>, String> {
         .map_err(|error| error.to_string())?;
     let compressed = gzip.finish().map_err(|error| error.to_string())?;
     let encoded = STANDARD.encode(compressed);
-    if REPORT_TEMPLATE.matches(PAYLOAD_MARKER).count() != 1 {
-        return Err("embedded report template has an invalid payload marker".into());
-    }
+    // The template holds one marker, which a unit test checks.
     Ok(REPORT_TEMPLATE
         .replacen(PAYLOAD_MARKER, &encoded, 1)
         .into_bytes())
@@ -956,21 +957,18 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn open_report(path: &Path) -> Result<(), String> {
-    let mut command = if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(path);
-        command
-    } else if cfg!(target_os = "windows") {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
         let mut command = Command::new("cmd");
         command.args(["/C", "start", ""]);
-        command.arg(path);
-        command
-    } else {
-        let mut command = Command::new("xdg-open");
-        command.arg(path);
         command
     };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = Command::new("xdg-open");
     command
+        .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1001,6 +999,9 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A line redrawn in place is for a terminal; in a log the carriage
+    // returns and the spaces that erase it are noise.
+    let progress = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let result = (|| -> Result<(PathBuf, usize), String> {
         let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
         // An assessment is worth reading on its own, so no run is only fatal
@@ -1020,13 +1021,15 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
             .or_else(|| selected.get(1).map(|run| run.id.clone()));
         let mut runs = Vec::with_capacity(selected.len());
         for (position, run) in selected.iter().enumerate() {
-            eprint!(
-                "\r[supercov] preparing report run {}/{}: {}",
-                position + 1,
-                selected.len(),
-                run.id
-            );
-            let _ = std::io::stderr().flush();
+            if progress {
+                eprint!(
+                    "\r[supercov] preparing report run {}/{}: {}",
+                    position + 1,
+                    selected.len(),
+                    run.id
+                );
+                let _ = std::io::stderr().flush();
+            }
             let filter = (!options.filter.is_empty()).then_some(&options.filter);
             match build_run(&root, run, filter)? {
                 Some(built) => runs.push(built),
@@ -1042,8 +1045,10 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
                 None => {}
             }
         }
-        eprint!("\r{}\r", " ".repeat(96));
-        let _ = std::io::stderr().flush();
+        if progress {
+            eprint!("\r{}\r", " ".repeat(96));
+            let _ = std::io::stderr().flush();
+        }
         let mut qualities = build_assessments(&root, "quality", DEFAULT_SNAPSHOTS);
         let mut securities = build_assessments(&root, "security", DEFAULT_SNAPSHOTS);
         let mut timeline = build_timeline(&runs, &qualities);
@@ -1097,7 +1102,9 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
     let (output, bytes) = match result {
         Ok(result) => result,
         Err(error) => {
-            eprint!("\r{}\r", " ".repeat(96));
+            if progress {
+                eprint!("\r{}\r", " ".repeat(96));
+            }
             eprintln!("[supercov] report failed: {error}");
             return ExitCode::from(2);
         }
@@ -1123,6 +1130,192 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The data replaces the template's one marker.
+    #[test]
+    fn the_report_template_holds_one_payload_marker() {
+        assert_eq!(REPORT_TEMPLATE.matches(PAYLOAD_MARKER).count(), 1);
+    }
+
+    /// Sixteen megabytes of source in all: a file that would take a report
+    /// past that is named as left out, however small it is itself. Through
+    /// the command this is a project of seventeen megabytes.
+    #[test]
+    fn sources_past_sixteen_megabytes_in_all_are_left_out() {
+        use supercov_engine::coverage_index::IndexedGapDimensions;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-total-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let contents = "x".repeat(1_000_000);
+        let sha256 = format!("{:x}", Sha256::digest(contents.as_bytes()));
+        let names = (0..17).map(|i| format!("f{i:02}.js")).collect::<Vec<_>>();
+        for name in &names {
+            fs::write(root.join(name), &contents).unwrap();
+        }
+        let none = IndexedGapDimensions {
+            lines: 0,
+            statements: 0,
+            functions: 0,
+            branches: 0,
+            mcdc_conditions: 0,
+        };
+        let gaps = names
+            .iter()
+            .map(|name| IndexedFileGap {
+                view: CoverageViewId::All,
+                file: name.clone(),
+                uncovered_lines: 0,
+                uncovered_statements: 0,
+                uncovered_functions: 0,
+                missing_branches: 0,
+                missing_mcdc_conditions: 0,
+                measurement_limitations: 0,
+                limitation_kinds: Vec::new(),
+                covered_by_other_tests: none.clone(),
+                uncovered_everywhere: none.clone(),
+                totals: none.clone(),
+                covered: none.clone(),
+                score: 0,
+            })
+            .collect::<Vec<_>>();
+        let (sources, omitted) = collect_sources(&root, &gaps, true);
+        assert_eq!(sources.len(), 16);
+        assert_eq!(omitted, ["f16.js"]);
+        let assessed = serde_json::json!(
+            names
+                .iter()
+                .map(|name| serde_json::json!({"path": name, "sha256": sha256}))
+                .collect::<Vec<_>>()
+        );
+        let (sources, omitted) = collect_quality_sources(&root, &assessed);
+        assert_eq!(sources.len(), 16);
+        assert_eq!(omitted, ["f16.js"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A temporary name another write of this process holds is passed over
+    /// for the next. Through the command the process's own id cannot be known
+    /// beforehand.
+    #[test]
+    fn a_temporary_name_in_use_is_passed_over() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-temporary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let held = root.join(format!(".r.html.{}.0.tmp", std::process::id()));
+        fs::write(&held, "held").unwrap();
+        write_atomic(&root.join("r.html"), b"report").unwrap();
+        assert_eq!(fs::read_to_string(root.join("r.html")).unwrap(), "report");
+        assert_eq!(fs::read_to_string(&held).unwrap(), "held");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A temporary file that cannot be made fails the write, and an
+    /// assessment that names no file names no source.
+    #[test]
+    fn a_report_whose_temporary_file_cannot_be_made_is_not_written() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-long-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        // The name fits; the temporary name beside it does not.
+        let path = root.join("r".repeat(250));
+        let error = write_atomic(&path, b"report").unwrap_err();
+        assert!(error.contains(".tmp: "), "{error}");
+        assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(assessment_source(&serde_json::json!([])), None);
+    }
+
+    /// A source that is a directory is named as left out.
+    #[test]
+    fn a_source_that_is_a_directory_is_left_out() {
+        use supercov_engine::coverage_index::IndexedGapDimensions;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-directory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src.js")).unwrap();
+        let none = IndexedGapDimensions {
+            lines: 0,
+            statements: 0,
+            functions: 0,
+            branches: 0,
+            mcdc_conditions: 0,
+        };
+        let gap = IndexedFileGap {
+            view: CoverageViewId::All,
+            file: "src.js".into(),
+            uncovered_lines: 0,
+            uncovered_statements: 0,
+            uncovered_functions: 0,
+            missing_branches: 0,
+            missing_mcdc_conditions: 0,
+            measurement_limitations: 0,
+            limitation_kinds: Vec::new(),
+            covered_by_other_tests: none.clone(),
+            uncovered_everywhere: none.clone(),
+            totals: none.clone(),
+            covered: none,
+            score: 0,
+        };
+        let (sources, omitted) = collect_sources(&root, &[gap], true);
+        assert!(sources.is_empty());
+        assert_eq!(omitted, ["src.js"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A report is titled by the package's name when it has a usable one,
+    /// and by its directory otherwise.
+    #[test]
+    fn a_report_is_titled_by_the_package_or_its_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-report-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let directory = root.file_name().unwrap().to_str().unwrap().to_owned();
+        assert_eq!(project_name(&root), directory);
+        for (package, name) in [
+            (r#"{"name":"shop"}"#.to_owned(), "shop".to_owned()),
+            (r#"{"name":"  "}"#.to_owned(), directory.clone()),
+            (
+                format!(r#"{{"name":"{}"}}"#, "n".repeat(201)),
+                directory.clone(),
+            ),
+            (r#"{"name":1}"#.to_owned(), directory.clone()),
+            ("not json".to_owned(), directory.clone()),
+        ] {
+            fs::write(root.join("package.json"), &package).unwrap();
+            assert_eq!(project_name(&root), name, "{package}");
+        }
+        assert_eq!(project_name(Path::new("/")), "project");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_portable_report_options() {

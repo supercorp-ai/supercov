@@ -205,16 +205,16 @@ fn project_path(
     {
         return Ok(relative);
     }
-    // The longest measured path the recorded one ends with, where only one
-    // is that long: `/app/src/lib.rs` is `src/lib.rs`, never a guess
-    // between `a/lib.rs` and `b/lib.rs`.
+    // The longest measured path the recorded one ends with:
+    // `/app/x/src/lib.rs` is `x/src/lib.rs` over `src/lib.rs`.
     let mut matches = measured
         .iter()
+        // A path equal to a measured file was returned above; only a tail
+        // after a whole segment is left to match.
         .filter(|file| {
-            normalized == **file
-                || normalized
-                    .strip_suffix(file.as_str())
-                    .is_some_and(|prefix| prefix.ends_with('/'))
+            normalized
+                .strip_suffix(file.as_str())
+                .is_some_and(|prefix| prefix.ends_with('/'))
         })
         .collect::<Vec<_>>();
     matches.sort_by_key(|file| std::cmp::Reverse(file.len()));
@@ -232,11 +232,11 @@ fn project_path(
             return Ok(tail);
         }
     }
-    match matches[..] {
-        [only] => Ok(only.clone()),
-        [first, second, ..] if first.len() > second.len() => Ok(first.clone()),
-        [_, _, ..] => Err("more than one measured file ends with this path".into()),
-        [] => Err(if absolute {
+    // Two tails of one path are never the same length, so the longest is
+    // the only one that long.
+    match matches.first() {
+        Some(longest) => Ok((*longest).clone()),
+        None => Err(if absolute {
             "outside the project".into()
         } else {
             "no such file in the project".into()
@@ -439,6 +439,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
         }
     }
 
+    let skipped_paths = skipped.len();
     let mut hits = BTreeSet::<String>::new();
     let mut lines_run = 0;
     let mut added_files = Vec::new();
@@ -551,6 +552,20 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                 .insert(file.clone(), FileFingerprint::read(file, &text));
         }
         added_files.push(file.clone());
+    }
+    // Every file the run leaves out, or that is gone: a run made of
+    // nothing would be a run all the same.
+    if !by_file.is_empty() && skipped.len() == by_file.len() + skipped_paths {
+        return Err(format!(
+            "Nothing in {} is a file the run measures: {}",
+            request.evidence.display(),
+            crate::run_merge::listed(
+                &skipped
+                    .iter()
+                    .map(|(file, reason)| format!("{file} ({reason})"))
+                    .collect::<Vec<_>>()
+            )
+        ));
     }
     if by_file.is_empty() {
         return Err(format!(
@@ -821,11 +836,269 @@ mod tests {
     }
 
     #[test]
+    fn lcov_edges_blank_lines_short_records_and_names_with_commas() {
+        let files = parse_lcov(
+            "SF:src/a.rs\n\nFN:4,(anonymous,1)\nFNDA:3,(anonymous,1)\nFN:8,b\nFNDA:1,x,b\nDA:4,1\nend_of_record\n",
+        )
+        .unwrap();
+        // A name with a comma, and a count whose name the record splits,
+        // are both found by the name's last field.
+        assert_eq!(
+            files["src/a.rs"].functions,
+            BTreeMap::from([(4, 3), (8, 1)])
+        );
+        assert!(
+            parse_lcov("SF:a\nFN:3\n")
+                .unwrap_err()
+                .contains("malformed FN")
+        );
+        assert!(
+            parse_lcov("SF:a\nFNDA:3\n")
+                .unwrap_err()
+                .contains("malformed FNDA")
+        );
+        assert!(parse_lcov("SF:a\nDA:3\n").unwrap_err().contains("DA needs"));
+        // A count for a function no FN named is no function's.
+        let files = parse_lcov("SF:a\nFNDA:2,ghost\nend_of_record\n").unwrap();
+        assert!(files["a"].functions.is_empty());
+    }
+
+    #[test]
+    fn a_longer_tail_wins_and_a_path_that_climbs_or_names_nothing_is_refused() {
+        let root = Path::new("/work/project");
+        let measured = BTreeSet::from(["src/util.rs".to_owned(), "x/src/util.rs".to_owned()]);
+        let path = |recorded| project_path(root, root, recorded, &measured);
+        // Both end the recorded path; the longer one is the file.
+        assert_eq!(path("/app/x/src/util.rs").unwrap(), "x/src/util.rs");
+        // A relative path naming no project file says so, not "outside".
+        assert!(
+            path("lib/none.rs")
+                .unwrap_err()
+                .contains("no such file in the project")
+        );
+        assert!(path("/app/../../etc/passwd").is_err());
+    }
+
+    #[test]
     fn llvm_profiles_are_known_by_their_magic() {
         let raw = [0x81, b'r', b'f', b'o', b'r', b'p', b'l', 0xff, 0];
         let indexed = [0x81, b'i', b'f', b'o', b'r', b'p', b'l', 0xff];
         assert!(is_llvm_profile(&raw));
         assert!(is_llvm_profile(&indexed));
         assert!(!is_llvm_profile(b"SF:a\nDA:1,1\n"));
+    }
+
+    /// A recorded path is the project file it names: under the root, the
+    /// longest measured file it ends with, or the longest tail that is a
+    /// file of the project; otherwise it says why not.
+    #[test]
+    fn a_recorded_path_is_read_as_the_project_file_it_names() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-project-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("src/deep")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(base);
+        std::fs::write(root.join("README.md"), "hi\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "\n").unwrap();
+        let measured = ["src/lib.rs", "src/deep/x.rs", "deep/x.rs"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let canonical = root.canonicalize().unwrap();
+        let read = |recorded: &str| project_path(&root, &canonical, recorded, &measured);
+        let inside = format!("{}/src/lib.rs", root.display());
+        for (recorded, expected) in [
+            ("/app/src/lib.rs", Ok("src/lib.rs")),
+            ("./src/lib.rs", Ok("src/lib.rs")),
+            (inside.as_str(), Ok("src/lib.rs")),
+            ("C:\\proj\\src\\lib.rs", Ok("src/lib.rs")),
+            // Both end it; the longer is the file.
+            ("/app/src/deep/x.rs", Ok("src/deep/x.rs")),
+            // Not measured, but a file of the project.
+            ("/elsewhere/README.md", Ok("README.md")),
+            ("/nowhere/zzz.rs", Err("outside the project")),
+            ("zzz.rs", Err("no such file in the project")),
+        ] {
+            assert_eq!(
+                read(recorded),
+                expected.map(str::to_owned).map_err(str::to_owned),
+                "{recorded}"
+            );
+        }
+        let magic = |kind: u8| vec![0x81, kind, b'f', b'o', b'r', b'p', b'l', 0xff, 0];
+        assert!(is_llvm_profile(&magic(b'r')));
+        assert!(is_llvm_profile(&magic(b'i')));
+        assert!(!is_llvm_profile(&magic(b'x')));
+        assert!(!is_llvm_profile(&magic(b'r')[..7]));
+    }
+
+    /// Line evidence goes into a run with no scope and no record of its
+    /// source, for a measured file the checkout no longer holds and for a
+    /// file it adds; a second import under the same kind of credit declares
+    /// its runner once. An LLVM profile is refused for what it is.
+    #[test]
+    fn line_evidence_is_imported_into_a_run_with_no_scope_or_source_record() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-import-lines-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(base);
+        crate::run_store::create_analyzable_test_run(&root, "run-a");
+        std::fs::write(root.join("src/new.js"), "one();\ntwo();\n").unwrap();
+        let evidence = root.join("lines.info");
+        std::fs::write(
+            &evidence,
+            "SF:src/app.js\nDA:1,1\nend_of_record\nSF:src/new.js\nDA:1,1\nDA:2,0\nend_of_record\n",
+        )
+        .unwrap();
+        let import = |parent: &str, credit: Credit, run_id: &str, evidence: &Path| {
+            import_line_evidence(&ImportRequest {
+                root: &root,
+                run: Some(parent),
+                evidence,
+                credit,
+                status: None,
+                run_id,
+                started_at: "2026-01-01T00:00:00.000Z",
+            })
+        };
+        let runners = |run: &str| {
+            let entries = crate::evidence_archive::read_archive(
+                &root
+                    .join(".supercov/runs")
+                    .join(run)
+                    .join("evidence.raw.gz"),
+            )
+            .unwrap();
+            let declaration: FrontendRunDeclaration = serde_json::from_slice(
+                &entries
+                    .iter()
+                    .find(|entry| entry.path == "frontend.json")
+                    .unwrap()
+                    .contents,
+            )
+            .unwrap();
+            declaration
+                .runners
+                .into_iter()
+                .map(|runner| runner.runner)
+                .collect::<Vec<_>>()
+        };
+        let first = import("run-a", Credit::Test("smoke".into()), "run-b", &evidence).unwrap();
+        assert_eq!(first.added_files, ["src/new.js"]);
+        assert_eq!(first.lines_run, 2);
+        import("run-b", Credit::Test("again".into()), "run-c", &evidence).unwrap();
+        let imported = runners("run-c");
+        assert_eq!(
+            imported
+                .iter()
+                .filter(|runner| *runner == IMPORTED_RUNNER)
+                .count(),
+            1,
+            "{imported:?}"
+        );
+        import("run-c", Credit::Background, "run-d", &evidence).unwrap();
+        import("run-d", Credit::Background, "run-e", &evidence).unwrap();
+        let background = runners("run-e");
+        assert_eq!(
+            background
+                .iter()
+                .filter(|runner| *runner == BACKGROUND_RUNNER)
+                .count(),
+            1,
+            "{background:?}"
+        );
+        let profile = root.join("default.profraw");
+        std::fs::write(
+            &profile,
+            [0x81, b'r', b'f', b'o', b'r', b'p', b'l', 0xff, 0],
+        )
+        .unwrap();
+        assert!(
+            import("run-a", Credit::Background, "run-f", &profile)
+                .unwrap_err()
+                .contains("is an LLVM profile")
+        );
+    }
+
+    /// A file the run's scope names is imported when the scope included it
+    /// and nothing in it was measured, and skipped, with the scope's reason,
+    /// when the scope left it out.
+    #[test]
+    fn a_file_the_scope_includes_is_imported_and_one_it_leaves_out_is_skipped() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-import-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(base);
+        let directory = crate::run_store::create_analyzable_test_run(&root, "run-a");
+        let evidence_path = directory.join("evidence.raw.gz");
+        let mut entries = read_archive(&evidence_path).unwrap();
+        let manifest = entries
+            .iter_mut()
+            .find(|entry| entry.path == "manifest.json")
+            .unwrap();
+        let mut value: Value = serde_json::from_slice(&manifest.contents).unwrap();
+        value["scope"] = json!({"entries": [
+            {"file": "src/app.js", "status": "included", "reason": "javascript source"},
+            {"file": "src/empty.js", "status": "included", "reason": "javascript source"},
+            {"file": "src/vendor.js", "status": "excluded", "reason": "vendored"},
+        ]});
+        manifest.contents = serde_json::to_vec(&value).unwrap();
+        let archive = write_archive(entries, &evidence_path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence = RawEvidenceMetadata {
+            schema_version: archive.schema_version,
+            format: archive.format.into(),
+            file: archive.file.into(),
+            files: archive.files,
+            uncompressed_bytes: archive.uncompressed_bytes,
+            compressed_bytes: archive.compressed_bytes,
+        };
+        std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        for file in ["src/empty.js", "src/vendor.js"] {
+            std::fs::write(root.join(file), "one();\n").unwrap();
+        }
+        let evidence = root.join("lines.info");
+        std::fs::write(
+            &evidence,
+            "SF:src/empty.js\nDA:1,1\nend_of_record\nSF:src/vendor.js\nDA:1,1\nend_of_record\n",
+        )
+        .unwrap();
+        let outcome = import_line_evidence(&ImportRequest {
+            root: &root,
+            run: Some("run-a"),
+            evidence: &evidence,
+            credit: Credit::Background,
+            status: None,
+            run_id: "run-b",
+            started_at: "2026-01-01T00:00:00.000Z",
+        })
+        .unwrap();
+        assert_eq!(outcome.added_files, ["src/empty.js"]);
+        assert_eq!(
+            outcome.skipped,
+            [(
+                "src/vendor.js".to_owned(),
+                "the run leaves it out: vendored".to_owned()
+            )]
+        );
     }
 }

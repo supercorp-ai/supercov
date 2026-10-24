@@ -61,8 +61,9 @@ pub fn parse(
     if tree.root_node().has_error() {
         if language == JvmLanguage::Kotlin
             && let Some(joined) = constructors_joined(source)
-            && let Some(retried) = parser.parse(&joined, None)
-            && !retried.root_node().has_error()
+            && let Some(retried) = parser
+                .parse(&joined, None)
+                .filter(|retried| !retried.root_node().has_error())
         {
             return Ok(retried);
         }
@@ -487,6 +488,13 @@ impl Collector<'_> {
         }
     }
 
+    /// Braces a loop's body, where it has one: a Kotlin `while` may not.
+    fn ensure_body(&mut self, node: Node) {
+        if let Some(body) = node.child_by_field_name("body") {
+            self.ensure_block(body);
+        }
+    }
+
     fn ensure_block(&mut self, node: Node) {
         if node.kind() == "block" {
             return;
@@ -516,10 +524,9 @@ fn body_block<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
     })?;
     match language {
         JvmLanguage::Java => (body.kind() == "block").then_some(body),
+        // A Kotlin function's body is always a `function_body`, holding its
+        // block or its expression.
         JvmLanguage::Kotlin => {
-            if body.kind() == "block" {
-                return Some(body);
-            }
             let mut cursor = body.walk();
             body.children(&mut cursor)
                 .find(|child| child.kind() == "block")
@@ -543,23 +550,21 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
                 .map(|op| &source[op.byte_range()])
                 .unwrap_or("");
             if operator == "&&" || operator == "||" {
-                if let Some(left) = node.child_by_field_name("left") {
-                    condition_nodes(left, source, out);
-                }
-                if let Some(right) = node.child_by_field_name("right") {
-                    condition_nodes(right, source, out);
+                // The grammar gives every binary expression both operands.
+                for operand in ["left", "right"]
+                    .into_iter()
+                    .filter_map(|field| node.child_by_field_name(field))
+                {
+                    condition_nodes(operand, source, out);
                 }
                 return;
             }
             out.push(node);
         }
-        "parenthesized_expression" => {
-            let mut cursor = node.walk();
-            match node.children(&mut cursor).find(|child| child.is_named()) {
-                Some(inner) => condition_nodes(inner, source, out),
-                None => out.push(node),
-            }
-        }
+        "parenthesized_expression" => match first_named_child(node) {
+            Some(inner) => condition_nodes(inner, source, out),
+            None => out.push(node),
+        },
         _ => out.push(node),
     }
 }
@@ -583,8 +588,7 @@ fn opening_contract<'tree>(
     if language != JvmLanguage::Kotlin {
         return None;
     }
-    let mut cursor = body.walk();
-    let first = body.children(&mut cursor).find(|child| child.is_named())?;
+    let first = first_named_child(body)?;
     if first.kind() != "call_expression" {
         return None;
     }
@@ -682,7 +686,9 @@ fn arms<'t>(node: Node<'t>, language: JvmLanguage) -> (Option<Node<'t>>, Option<
             let mut cursor = node.walk();
             let children = node.children(&mut cursor).collect::<Vec<_>>();
             let otherwise = children.iter().position(|child| child.kind() == "else");
-            let arm = |child: &&Node<'t>| child.is_named() && Some(child.byte_range()) != condition;
+            let arm = |child: &&Node<'t>| {
+                child.is_named() && !child.is_extra() && Some(child.byte_range()) != condition
+            };
             (
                 children
                     .iter()
@@ -695,17 +701,23 @@ fn arms<'t>(node: Node<'t>, language: JvmLanguage) -> (Option<Node<'t>>, Option<
     }
 }
 
-/// The expression inside `if (...)`. Java parenthesises its condition; Kotlin
-/// does not.
+/// The expression inside `if (...)`. Java's grammar makes its condition a
+/// parenthesized expression; Kotlin's holds the expression itself.
 fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
     let condition = node.child_by_field_name("condition")?;
-    if language == JvmLanguage::Java && condition.kind() == "parenthesized_expression" {
-        let mut cursor = condition.walk();
-        return condition
-            .children(&mut cursor)
-            .find(|child| child.is_named());
+    if language == JvmLanguage::Java {
+        return first_named_child(condition);
     }
     Some(condition)
+}
+
+/// The first named child that is not a comment: tree-sitter names comments
+/// too, wherever they stand, and wrapping one in place of the expression it
+/// precedes does not compile.
+fn first_named_child(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find(|child| child.is_named() && !child.is_extra())
 }
 
 pub fn build_jvm_obligations(
@@ -797,41 +809,7 @@ fn walk(collector: &mut Collector, node: Node) {
             }
         }
         "if_statement" | "if_expression" => {
-            if let Some(condition) = condition_of(node, language) {
-                let probes = collector.add_branch(node, "if", &["true", "false"]);
-                // An arm written without braces has nowhere to record itself.
-                let (consequence, alternative) = arms(node, language);
-                for arm in [consequence, alternative].into_iter().flatten() {
-                    collector.ensure_block(arm);
-                }
-                if narrows_a_type(condition, collector.source, language) {
-                    // The condition stays exactly as written, and the branch is
-                    // recorded from inside the arms instead. Which way it went
-                    // is still measured; only the vectors are lost, because
-                    // those need the operands wrapped.
-                    collector.record_arms(node, language, &probes);
-                    let limitation = collector.limitation_id(node, "condition-narrows-a-type");
-                    collector.limitations.push(serde_json::json!({
-                        "id": limitation,
-                        "kind": "condition-narrows-a-type",
-                        "file": collector.file,
-                        "source": collector.text(node),
-                        "line": collector.position(node).0,
-                        "column": collector.position(node).1,
-                        "reason": "the compiler reads this condition to narrow a type in the branch below it, so observing its operands would stop the code compiling; the branch is recorded from its arms and carries no condition vectors",
-                    }));
-                    return;
-                }
-                let decision = collector.add_decision(condition, "if");
-                let wrapper = match decision {
-                    Some(index) => {
-                        format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1])
-                    }
-                    None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-                };
-                collector.edit(condition.start_byte(), 5, wrapper);
-                collector.edit(condition.end_byte(), 5, ")".to_owned());
-            }
+            if_node(collector, node);
         }
         "while_statement" | "for_statement" | "do_statement" | "do_while_statement" => {
             match node.child_by_field_name("condition") {
@@ -839,11 +817,7 @@ fn walk(collector: &mut Collector, node: Node) {
                     let inner = if language == JvmLanguage::Java
                         && condition.kind() == "parenthesized_expression"
                     {
-                        let mut cursor = condition.walk();
-                        condition
-                            .children(&mut cursor)
-                            .find(|child| child.is_named())
-                            .unwrap_or(condition)
+                        first_named_child(condition).unwrap_or(condition)
                     } else {
                         condition
                     };
@@ -910,8 +884,9 @@ fn walk(collector: &mut Collector, node: Node) {
                         collector.edit(inner.end_byte(), 5, ")".to_owned());
                     }
                 }
+                // Kotlin's `while` and `do`/`while` always hold a condition,
+                // so this is its `for`.
                 None if language == JvmLanguage::Kotlin
-                    && node.kind() == "for_statement"
                     && record_loop_ran(collector, node, language) => {}
                 None => {
                     let (line, column) = collector.position(node);
@@ -927,14 +902,10 @@ fn walk(collector: &mut Collector, node: Node) {
                     }));
                 }
             }
-            if let Some(body) = node.child_by_field_name("body") {
-                collector.ensure_block(body);
-            }
+            collector.ensure_body(node);
         }
         "enhanced_for_statement" if record_loop_ran(collector, node, language) => {
-            if let Some(body) = node.child_by_field_name("body") {
-                collector.ensure_block(body);
-            }
+            collector.ensure_body(node);
         }
         "enhanced_for_statement" => {
             let (line, column) = collector.position(node);
@@ -948,9 +919,7 @@ fn walk(collector: &mut Collector, node: Node) {
                 "column": column,
                 "reason": "a for-each loop has no condition to observe, so no branch obligation is recorded for it",
             }));
-            if let Some(body) = node.child_by_field_name("body") {
-                collector.ensure_block(body);
-            }
+            collector.ensure_body(node);
         }
         _ if in_statement_position(node, language)
             && is_statement(node, collector.source, language)
@@ -966,6 +935,45 @@ fn walk(collector: &mut Collector, node: Node) {
             walk(collector, child);
         }
     }
+}
+
+/// An `if`'s branch, its condition's decision, and braces around its arms.
+/// The grammar gives every `if` a condition.
+fn if_node(collector: &mut Collector, node: Node) -> Option<()> {
+    let language = collector.language;
+    let condition = condition_of(node, language)?;
+    let probes = collector.add_branch(node, "if", &["true", "false"]);
+    // An arm written without braces has nowhere to record itself.
+    let (consequence, alternative) = arms(node, language);
+    for arm in [consequence, alternative].into_iter().flatten() {
+        collector.ensure_block(arm);
+    }
+    if narrows_a_type(condition, collector.source, language) {
+        // The condition stays exactly as written, and the branch is
+        // recorded from inside the arms instead. Which way it went
+        // is still measured; only the vectors are lost, because
+        // those need the operands wrapped.
+        collector.record_arms(node, language, &probes);
+        let limitation = collector.limitation_id(node, "condition-narrows-a-type");
+        collector.limitations.push(serde_json::json!({
+                "id": limitation,
+                "kind": "condition-narrows-a-type",
+                "file": collector.file,
+                "source": collector.text(node),
+                "line": collector.position(node).0,
+                "column": collector.position(node).1,
+                "reason": "the compiler reads this condition to narrow a type in the branch below it, so observing its operands would stop the code compiling; the branch is recorded from its arms and carries no condition vectors",
+            }));
+    } else {
+        let decision = collector.add_decision(condition, "if");
+        let wrapper = match decision {
+            Some(index) => format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]),
+            None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
+        };
+        collector.edit(condition.start_byte(), 5, wrapper);
+        collector.edit(condition.end_byte(), 5, ")".to_owned());
+    }
+    Some(())
 }
 
 fn is_statement(node: Node, source: &str, language: JvmLanguage) -> bool {
@@ -1102,25 +1110,21 @@ fn record_loop_ran(collector: &mut Collector, node: Node, language: JvmLanguage)
             None => return false,
         }
     } else {
-        if collector.source[..node.start_byte()]
-            .trim_end()
-            .ends_with('@')
-            || collector.text(node).contains('@')
-                && collector
-                    .text(node)
-                    .split('{')
-                    .next()
-                    .is_some_and(|head| head.contains('@'))
+        // A label (`outer@ for`) and an annotated variable are both inside
+        // the loop, before its body.
+        let text = collector.text(node);
+        if text
+            .split_once('{')
+            .map_or(text.as_str(), |(head, _)| head)
+            .contains('@')
         {
             return false;
         }
+        // The grammar puts a braced body straight under the loop; an
+        // unbraced one is a statement there instead.
         let block = node
             .children(&mut node.walk())
-            .find(|child| child.kind() == "control_structure_body")
-            .and_then(|body| {
-                body.children(&mut body.walk())
-                    .find(|child| child.kind() == "block")
-            });
+            .find(|child| child.kind() == "block");
         match block {
             Some(block) => (block.start_byte() + 1, 100),
             None => return false,
@@ -1338,6 +1342,7 @@ class Outer {
     while (true) {
         break
     }
+    for (item in items) sum += 1
     return sum
 }
 "#;
@@ -1426,6 +1431,40 @@ class Outer {
             opened < probe,
             "the probe must be inside the braces:\n{out}"
         );
+    }
+
+    /// Shapes probes go around in Java and Kotlin: each instruments, and
+    /// what comes out still parses.
+    #[test]
+    fn every_jvm_shape_still_parses_once_probed() {
+        for source in [
+            "class A { int f(int a, boolean b) { while (a > 0) a--; do a++; while (a < 3 && b); for (int i = 0; i < a; i++) { if (i == 2) continue; if (i > 5) break; } if ((a > 1)) { return a; } return b ? 1 : 2; } }",
+            "class B { @SuppressWarnings(value = \"x\") int g(Object o) { switch (o.hashCode()) { case 1: return 1; default: break; } label: for (;;) { break label; } return o instanceof String s && !s.isEmpty() ? 1 : 0; } }",
+            "class C { boolean h(int a, int b) { boolean c = (a & b) == 0 | a > b; return c || (a > 0 && b > 0); } }",
+            // For-each loops: labelled, without braces, and as an arm.
+            "class D { void f(int[] xs, boolean a) { outer: for (int x : xs) { if (x > 1) break outer; } for (int x : xs) g(x); if (a) for (int x : xs) { g(x); } } void g(int x) {} }",
+        ] {
+            java(source);
+        }
+        for source in [
+            "package k\n\nclass Box @Inject internal constructor(val n: Int) {\n    fun f(x: Any?): Int {\n        if (x is String && x.isNotEmpty()) return 1\n        if (x == null || (x as? String).isNullOrEmpty()) return 2\n        for (i in 0 until n) {\n            if (i == 3) continue\n            if (i > 5) break\n        }\n        while (n > 9) return 3\n        do { } while (n < 0)\n        return when {\n            n > 1 && n < 5 -> 4\n            else -> 5\n        }\n    }\n}\n",
+            "package k\n\nclass Loops {\n    fun f(xs: List<Int>, s: String?, a: Boolean) {\n        outer@ for (x in xs) {\n            for (y in xs) {\n                if (y > x) continue@outer\n            }\n        }\n        for (x in xs) println(x)\n        if (a) for (x in xs) { println(x) }\n        for (@Suppress(\"UNUSED\") x in xs) { }\n        if (s.isNullOrBlank() || !s.isNullOrEmpty()) println(s)\n    }\n}\n",
+            "package k\n\nannotation class Marker(val on: Boolean)\n\nclass Gated {\n    @Marker(on = 1 > 0)\n    fun g(a: Boolean, b: Boolean): Boolean {\n        val c = if (a) b else !b\n        return c && (a || b)\n    }\n}\n",
+        ] {
+            let mut next = 0;
+            let mut decisions = 0;
+            let obligations = build_jvm_obligations(
+                "K.kt",
+                source,
+                JvmLanguage::Kotlin,
+                &mut next,
+                &mut decisions,
+            )
+            .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+            let out = rewrite(source, &obligations.edits);
+            parse(&out, JvmLanguage::Kotlin)
+                .unwrap_or_else(|error| panic!("rewritten Kotlin does not parse: {error}\n{out}"));
+        }
     }
 
     #[test]
@@ -1673,5 +1712,198 @@ class Outer {
             "{:?}",
             obligations.manifest.limitations
         );
+    }
+
+    fn kotlin(source: &str) -> (JvmFileObligations, String) {
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_jvm_obligations(
+            "K.kt",
+            source,
+            JvmLanguage::Kotlin,
+            &mut next,
+            &mut decisions,
+        )
+        .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+        let out = rewrite(source, &obligations.edits);
+        parse(&out, JvmLanguage::Kotlin)
+            .unwrap_or_else(|error| panic!("rewritten Kotlin does not parse: {error}\n{out}"));
+        (obligations, out)
+    }
+
+    #[test]
+    fn a_kotlin_for_loop_records_whether_it_ran() {
+        // The grammar puts a braced body straight under the loop. Looked for
+        // one level further down, it was never found, and every Kotlin `for`
+        // was a limitation instead of its two outcomes.
+        let source = "fun f(xs: List<Int>): Int {\n    var n = 0\n    for (x in xs) {\n        n += x\n    }\n    outer@ for (x in xs) {\n        n += x\n    }\n    for (x in xs) n += x\n    return n\n}\n";
+        let (obligations, out) = kotlin(source);
+        let loops = obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "for")
+            .map(|branch| branch.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(loops, ["for (x in xs) {"]);
+        assert!(
+            out.contains("var _scvRan46 = false; /*line :3:5*/for (x in xs) { if (!_scvRan46)"),
+            "{out}"
+        );
+        // A labelled loop and one without braces have nowhere for the flag.
+        assert_eq!(obligations.manifest.limitations.len(), 2);
+    }
+
+    #[test]
+    fn a_constructor_line_is_joined_only_to_a_class_header_through_plain_modifiers() {
+        // An annotation counts among the modifiers before `constructor`.
+        assert_eq!(
+            constructor_prefix("@Inject constructor(val n: Int)"),
+            Some("@Inject constructor".len())
+        );
+        // A modifier has to be followed by a space.
+        assert_eq!(constructor_prefix("private\tconstructor(x)"), None);
+        assert_eq!(constructor_prefix("private(x)"), None);
+        assert!(ends_class_header("class My_Box"));
+        assert!(ends_class_header("  data class Box<T>"));
+        for line in ["fun f(", "subclass Box", "my_class Box", "class"] {
+            assert!(!ends_class_header(line), "{line}");
+        }
+        // A file that still fails once its constructor is joined is refused.
+        let source = "class Outer {\n  class Inner\n  private constructor(val n: Int) {\n    fun f(): Int {\n      return n )\n    }\n  }\n}\n";
+        assert!(constructors_joined(source).is_some());
+        assert!(parse(source, JvmLanguage::Kotlin).is_err());
+    }
+
+    #[test]
+    fn a_logical_value_is_one_decision_wherever_it_stands() {
+        // In a static initializer, and in an `if`'s body; the `&&` inside a
+        // measured condition's `||` is a condition of that one.
+        let (obligations, _) = java(
+            "class X { static boolean S; static { S = a() && b() || a(); } boolean f(boolean a, boolean b, boolean c) { if (a && b || c) { boolean d = a && c; return d; } return false; } static boolean a() { return true; } static boolean b() { return false; } }",
+        );
+        let decisions = obligations
+            .manifest
+            .decisions
+            .iter()
+            .map(|d| (d.kind.as_str(), d.source.as_str(), d.conditions.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decisions,
+            [
+                ("value", "a() && b() || a()", 3),
+                ("if", "a && b || c", 3),
+                ("value", "a && c", 2),
+            ]
+        );
+        // A Kotlin call that implies no smart cast is a condition like any.
+        let (obligations, _) = kotlin(
+            "fun f(xs: List<Int>, a: Boolean) {\n    if (xs.isEmpty() && a) {\n        println(1)\n    }\n}\n",
+        );
+        assert_eq!(
+            obligations.manifest.decisions[0].conditions,
+            ["xs.isEmpty()", "a"]
+        );
+        assert!(obligations.manifest.limitations.is_empty());
+    }
+
+    /// Stands in for the runtime: every probe passes its value through.
+    const STUB_RUNTIME: &str = "package com.supercorp.supercov;\npublic final class Supercov {\n  public static int[] HITS = new int[256];\n  public static boolean c(int id, int index, boolean value) { return value; }\n  public static boolean b(int whenTrue, int whenFalse, boolean value) { return value; }\n  public static boolean bd(int whenTrue, int whenFalse, int id, boolean value) { return value; }\n}\n";
+
+    /// What class `X`, compiled with the stub runtime, prints.
+    fn java_prints(root: &std::path::Path, source: &str) -> String {
+        let sources = root.join("src");
+        let classes = root.join("classes");
+        std::fs::create_dir_all(sources.join("com/supercorp/supercov")).unwrap();
+        std::fs::write(
+            sources.join("com/supercorp/supercov/Supercov.java"),
+            STUB_RUNTIME,
+        )
+        .unwrap();
+        std::fs::write(sources.join("X.java"), source).unwrap();
+        let compiled = std::process::Command::new("javac")
+            .arg("-d")
+            .arg(&classes)
+            .arg(sources.join("X.java"))
+            .arg(sources.join("com/supercorp/supercov/Supercov.java"))
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}\n{source}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let ran = std::process::Command::new("java")
+            .arg("-cp")
+            .arg(&classes)
+            .arg("X")
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{source}");
+        String::from_utf8(ran.stdout).unwrap()
+    }
+
+    /// The probed class prints what the original printed.
+    fn java_runs_alike(source: &str) -> (JvmFileObligations, String) {
+        let (obligations, probed) = java(source);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-jvm-instrumenter-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let original = java_prints(&root.join("original"), source);
+        let printed = java_prints(&root.join("probed"), &probed);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(printed, original, "{probed}");
+        (obligations, probed)
+    }
+
+    /// A comment opening a condition is no operand: wrapped in its place,
+    /// the probe closed before the condition began and the class no longer
+    /// compiled.
+    #[test]
+    fn a_comment_opening_a_condition_stays_where_it_was_written() {
+        let (obligations, probed) = java_runs_alike(
+            "class X {\n  static int f(boolean a, boolean b, int n) {\n    int total = 0;\n    if (/* both */ a && b) total += 1;\n    if ((/* either */ a) || b) total += 10;\n    while (/* count */ n > 0) { total += 100; n--; }\n    return total;\n  }\n  public static void main(String[] args) {\n    System.out.println(f(true, true, 2) + \" \" + f(false, true, 0) + \" \" + f(false, false, 1));\n  }\n}\n",
+        );
+        assert!(probed.contains("(/* both */ com.supercorp"), "{probed}");
+        let conditions = obligations
+            .manifest
+            .decisions
+            .iter()
+            .map(|decision| decision.conditions.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(conditions, [["a", "b"], ["a", "b"]]);
+        // A Kotlin arm may follow a comment, and so may a contract.
+        let (_, probed) = kotlin(
+            "fun f(a: Boolean) { if (a) /* yes */ g() else h() }\nfun g() {}\nfun h() {}\nfun k(a: Any?): Int {\n  // first\n  contract { returns() implies (a != null) }\n  return 1\n}\n",
+        );
+        assert!(probed.contains("/* yes */ { com.supercorp"), "{probed}");
+        assert!(probed.contains("// first\n  contract {"), "{probed}");
+    }
+
+    /// The arms were left unwalked when the condition narrowed a type: the
+    /// statements and decisions inside them were not measured at all.
+    #[test]
+    fn the_arms_of_a_condition_that_narrows_a_type_are_measured() {
+        let (obligations, probed) = java_runs_alike(
+            "class X {\n  static int f(Object o) {\n    if (o instanceof String s) {\n      if (s.isEmpty() || s.length() > 3) return 1;\n      return 2;\n    }\n    return 3;\n  }\n  public static void main(String[] args) {\n    System.out.println(f(\"\") + \" \" + f(\"ab\") + \" \" + f(1));\n  }\n}\n",
+        );
+        let manifest = &obligations.manifest;
+        assert_eq!(manifest.decisions.len(), 1, "{probed}");
+        assert_eq!(
+            manifest.decisions[0].conditions,
+            ["s.isEmpty()", "s.length() > 3"]
+        );
+        let statements = manifest
+            .points
+            .iter()
+            .filter(|point| point.kind == PointKind::Statement)
+            .map(|point| point.source.as_str())
+            .collect::<Vec<_>>();
+        assert!(statements.contains(&"return 2;"), "{statements:?}");
     }
 }

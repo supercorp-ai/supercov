@@ -46,9 +46,8 @@ fn rate(covered: usize, total: usize) -> f64 {
 }
 
 fn counts(view: &RunView, metric: Metric) -> (usize, usize) {
-    view.metric(metric)
-        .map(|m| (m.covered, m.eligible))
-        .unwrap_or((0, 0))
+    let metric = view.metric(metric);
+    (metric.covered, metric.eligible)
 }
 
 /// The export formats, named once so the rest of the product never has to
@@ -498,6 +497,30 @@ mod tests {
             xml("a\u{0}b"),
             "ab",
             "unencodable control bytes are dropped"
+        );
+    }
+
+    #[test]
+    fn xml_keeps_the_whitespace_controls_xml_allows() {
+        // Tab, line feed and carriage return are legal XML characters; only
+        // the other control characters are unencodable.
+        assert_eq!(xml("a\tb\nc\rd\u{1}e"), "a\tb\nc\rde");
+    }
+
+    #[test]
+    fn a_condition_without_source_is_named_by_its_place_in_the_group() {
+        let conditions = [ConditionRecord {
+            line: 7,
+            column: 1,
+            index: 0,
+            covered: false,
+            source: " \n ".into(),
+        }];
+        let mut out = String::new();
+        assert_eq!(mcdc_records(&conditions, &mut out), (2, 0));
+        assert_eq!(
+            out,
+            "MCDC:7,1,t,0,0,condition 0\nMCDC:7,1,f,0,0,condition 0\n"
         );
     }
 

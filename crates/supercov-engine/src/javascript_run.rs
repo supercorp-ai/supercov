@@ -91,7 +91,7 @@ impl std::fmt::Display for DirectJavascriptRunError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Interrupted { signal, .. } => {
-                write!(formatter, "interrupted by {}", signal_name(*signal))
+                write!(formatter, "interrupted by {}", signal.name())
             }
             Self::Failed(message) => formatter.write_str(message),
         }
@@ -103,14 +103,6 @@ impl std::error::Error for DirectJavascriptRunError {}
 impl From<String> for DirectJavascriptRunError {
     fn from(value: String) -> Self {
         Self::Failed(value)
-    }
-}
-
-fn signal_name(signal: ForwardedSignal) -> &'static str {
-    match signal {
-        ForwardedSignal::Sighup => "SIGHUP",
-        ForwardedSignal::Sigint => "SIGINT",
-        ForwardedSignal::Sigterm => "SIGTERM",
     }
 }
 
@@ -325,9 +317,6 @@ struct RunCleanup {
     workspace: Option<PathBuf>,
     state_written: bool,
     terminal_recorded: bool,
-    /// Leave the instrumented copy in place: its build failed, and what the
-    /// build read is the only evidence of why.
-    keep_workspace: bool,
 }
 
 impl RunCleanup {
@@ -356,7 +345,7 @@ impl Drop for RunCleanup {
                 &self.run_id,
                 RunStateStatus::Failed,
                 &self.started_at,
-                Some("Rust run exited before reaching a terminal lifecycle state".into()),
+                Some("the run stopped before it finished".into()),
             );
         }
         if let Some(workspace) = &self.workspace {
@@ -370,8 +359,8 @@ impl Drop for RunCleanup {
                     .join(".supercov/server-evidence")
                     .join(&self.run_id),
             );
-            let keep_workspace = self.keep_workspace
-                || std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
+            let keep_workspace =
+                std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
             if !keep_workspace {
                 let _ = prune_cached_workspace_sources(&self.root, &self.lock);
             }
@@ -545,7 +534,6 @@ pub fn run_direct_javascript(
         workspace: None,
         state_written: false,
         terminal_recorded: false,
-        keep_workspace: false,
     };
     let recovered_runs =
         recover_abandoned_runs(&root, &started_at).map_err(|error| error.to_string())?;
@@ -601,7 +589,7 @@ pub fn run_direct_javascript(
         && !serves_rust_wasm
     {
         return Err(
-            crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
+            crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()
                 .into(),
         );
@@ -770,7 +758,7 @@ pub fn run_direct_javascript(
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
-            crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
+            crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()
                 .into(),
         );
@@ -923,19 +911,17 @@ pub fn run_direct_javascript(
     #[cfg(unix)]
     let docker_state = root.join(".supercov/work").join(&run_id).join("docker");
     #[cfg(unix)]
-    let mut docker_proxy = if !project.source_files.is_empty() || !servers.is_empty() {
-        start_docker_relay(
-            &root,
-            &workspace,
-            &docker_state,
-            &servers,
-            &environment,
-            &mut overrides,
-            diagnostics,
-        )?
-    } else {
-        None
-    };
+    // There is JavaScript source or a server here: a run with neither ended
+    // above.
+    let mut docker_proxy = start_docker_relay(
+        &root,
+        &workspace,
+        &docker_state,
+        &servers,
+        &environment,
+        &mut overrides,
+        diagnostics,
+    )?;
     // What bootstrap.cjs installs in a process that runs the workspace without
     // these settings: one started in a container or VM the workspace is
     // mounted into. It moves `root` to where it sees the workspace from.
@@ -1058,7 +1044,7 @@ pub fn run_direct_javascript(
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
     if let Some(signal) = execution.interrupted_signal {
-        interrupt_run_state(&root, &run_id, &started_at, signal_name(signal))
+        interrupt_run_state(&root, &run_id, &started_at, signal.name())
             .map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
         return Err(DirectJavascriptRunError::Interrupted {
@@ -1615,6 +1601,86 @@ mod environment_tests {
         assert_eq!(companion_run_id("rust-1", 1), "rust-1-server-1");
     }
 
+    fn result(runner: &str, runtime: serde_json::Value) -> RawTestResult {
+        serde_json::from_value(serde_json::json!({
+            "testId": "t1",
+            "test": "adds",
+            "retry": 0,
+            "provenance": { "runner": runner, "kind": "unit", "source": "runner" },
+            "runtime": runtime,
+        }))
+        .unwrap()
+    }
+
+    fn manifest() -> crate::javascript_frontend::JavascriptManifest {
+        serde_json::from_value(serde_json::json!({
+            "decisions": [], "points": [], "branches": [], "limitations": [],
+            "scope": { "version": 1, "mode": "automatic", "roots": [], "entries": [] }
+        }))
+        .unwrap()
+    }
+
+    // A worker matters only to a result that observed something in it.
+    #[test]
+    fn a_result_that_observed_nothing_needs_no_worker() {
+        let quiet = result("vitest", serde_json::json!([{}]));
+        let declaration = javascript_runner_declaration("vitest".into(), &[&quiet]);
+        assert_eq!(
+            declaration.execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        let event = result(
+            "vitest",
+            serde_json::json!([{ "events": [{
+                "type": "hit", "id": "p1", "timestampMs": 1, "environment": "node"
+            }] }]),
+        );
+        let declaration = javascript_runner_declaration("vitest".into(), &[&event]);
+        assert_eq!(
+            declaration.execution_model,
+            ExecutionModel::ParallelUnattributed
+        );
+    }
+
+    #[test]
+    fn results_are_read_from_every_place_a_runner_writes_them() {
+        let encoded = |runner| serde_json::to_vec(&result(runner, serde_json::json!([]))).unwrap();
+        let mut lines = encoded("jest");
+        lines.push(b'\n');
+        let entries = vec![
+            EvidenceArchiveEntry {
+                path: "mcdc.json".into(),
+                contents: encoded("node:test"),
+            },
+            EvidenceArchiveEntry {
+                path: "mcdc.jsonl".into(),
+                contents: lines,
+            },
+            // Not a record of server work.
+            EvidenceArchiveEntry {
+                path: "server/background/notes.txt".into(),
+                contents: b"x".to_vec(),
+            },
+        ];
+        let entries = javascript_archive_entries(entries, &manifest(), "run_1", 0).unwrap();
+        let declaration: supercov_contracts::FrontendRunDeclaration = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|entry| entry.path == "frontend.json")
+                .unwrap()
+                .contents,
+        )
+        .unwrap();
+        assert_eq!(
+            declaration
+                .runners
+                .iter()
+                .map(|runner| runner.runner.as_str())
+                .collect::<Vec<_>>(),
+            ["jest", "node:test"]
+        );
+    }
+
     #[test]
     fn nested_npm_drops_only_pnpm_derived_environment_aliases() {
         let mut environment = BTreeMap::from([
@@ -1637,5 +1703,267 @@ mod environment_tests {
                 ),
             ])
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
+
+    /// A run that stops between writing its state and finishing is marked
+    /// failed, in words about the run it was, and releases its lock.
+    #[test]
+    fn a_run_that_stops_early_is_marked_failed_as_itself() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-js-cleanup-{}-{}",
+            std::process::id(),
+            now_nonce()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let started_at = "2026-01-01T00:00:00.000Z".to_owned();
+        let lock = ProjectLock::acquire(&root, "run-early", &started_at).unwrap();
+        write_run_state(
+            &root,
+            &RunState {
+                id: "run-early".into(),
+                pid: std::process::id(),
+                root: root.display().to_string(),
+                workspace: String::new(),
+                started_at: started_at.clone(),
+                updated_at: started_at.clone(),
+                status: RunStateStatus::Preparing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let mut cleanup = RunCleanup {
+            root: root.to_path_buf(),
+            run_id: "run-early".into(),
+            started_at,
+            lock,
+            workspace: None,
+            state_written: false,
+            terminal_recorded: false,
+        };
+        cleanup.mark_state_written();
+        drop(cleanup);
+        let state: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(".supercov/work/run-early/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["error"], "the run stopped before it finished");
+        assert_ne!(state["status"], serde_json::json!("preparing"));
+        // The lock went with it: another run can take the store.
+        ProjectLock::acquire(&root, "run-next", "2026-01-01T00:00:01.000Z")
+            .unwrap()
+            .release()
+            .unwrap();
+    }
+
+    fn result(
+        test_id: Option<&str>,
+        retry: Option<usize>,
+        scope: Option<(&str, &str, usize)>,
+        observed: bool,
+    ) -> RawTestResult {
+        RawTestResult {
+            span: None,
+            test_id: test_id.map(str::to_owned),
+            scope: scope.map(|(worker, test, retry)| ExecutionScope {
+                version: 1,
+                run_id: "run".into(),
+                worker_id: worker.into(),
+                test_id: test.into(),
+                test_key: test.into(),
+                retry,
+                attempt_id: format!("{test}:{retry}"),
+            }),
+            test: "t".into(),
+            test_file: None,
+            title: None,
+            retry,
+            status: Some("passed".into()),
+            expected_status: None,
+            flaky: false,
+            provenance: TestProvenance {
+                runner: "vitest".into(),
+                kind: "unit".into(),
+                project: None,
+                source: "runner-default".into(),
+                tags: Vec::new(),
+            },
+            role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
+            phases: vec![],
+            runtime: if observed {
+                vec![RuntimeSnapshot {
+                    decisions: vec![],
+                    hits: vec!["h".into()],
+                    events: vec![],
+                    logicals: vec![],
+                    phase_id: None,
+                }]
+            } else {
+                vec![]
+            },
+            browser: vec![],
+            server: vec![],
+        }
+    }
+
+    /// A runner is exact only where every result names its test, worker
+    /// and retry the way its scope does; any one missing or disagreeing
+    /// makes it unattributed, with a limitation for each kind.
+    #[test]
+    fn a_runner_is_exact_only_when_every_result_says_who_ran_it() {
+        let exact = result(Some("a"), Some(0), Some(("w1", "a", 0)), true);
+        let declared = |results: &[RawTestResult]| {
+            javascript_runner_declaration("vitest".into(), &results.iter().collect::<Vec<_>>())
+        };
+        let good = declared(std::slice::from_ref(&exact));
+        assert_eq!(
+            good.execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        assert!(good.limitations.is_empty());
+        // Nothing observed needs no worker.
+        assert_eq!(
+            declared(&[result(Some("a"), Some(0), None, false)]).execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        for (case, bad) in [
+            (
+                "no test id",
+                result(None, Some(0), Some(("w1", "a", 0)), true),
+            ),
+            (
+                "empty test id",
+                result(Some(""), Some(0), Some(("w1", "a", 0)), true),
+            ),
+            (
+                "test id disagrees",
+                result(Some("a"), Some(0), Some(("w1", "b", 0)), true),
+            ),
+            (
+                "no worker",
+                result(Some("a"), Some(0), Some(("", "a", 0)), true),
+            ),
+            ("observed, no scope", result(Some("a"), Some(0), None, true)),
+            (
+                "no retry",
+                result(Some("a"), None, Some(("w1", "a", 0)), true),
+            ),
+            (
+                "retry disagrees",
+                result(Some("a"), Some(1), Some(("w1", "a", 0)), true),
+            ),
+        ] {
+            let declaration = declared(&[exact.clone(), bad]);
+            assert_eq!(
+                declaration.execution_model,
+                ExecutionModel::ParallelUnattributed,
+                "{case}"
+            );
+            assert_eq!(declaration.limitations.len(), 6, "{case}");
+            assert_eq!(declaration.limitations[0].id, "vitest-no-worker");
+        }
+        assert_eq!(
+            declared(&[]).execution_model,
+            ExecutionModel::ParallelUnattributed
+        );
+    }
+
+    /// A JavaScript run's archive is read result by result: malformed files
+    /// are named, a run that recorded nothing gets the command's own result,
+    /// background server records get a runner of their own, and the
+    /// declaration and model are added.
+    #[test]
+    fn javascript_archive_entries_are_read_or_refused_by_name() {
+        let manifest: crate::javascript_frontend::JavascriptManifest =
+            serde_json::from_value(serde_json::json!({
+                "decisions": [], "points": [], "branches": [], "limitations": [],
+                "scope": {"version": 1, "mode": "automatic", "roots": [], "entries": []}
+            }))
+            .unwrap();
+        let entry = |path: &str, contents: &[u8]| EvidenceArchiveEntry {
+            path: path.into(),
+            contents: contents.to_vec(),
+        };
+        let read = |entries: Vec<EvidenceArchiveEntry>, exit: i32| {
+            javascript_archive_entries(entries, &manifest, "run", exit)
+        };
+        let good =
+            serde_json::to_vec(&result(Some("a"), Some(0), Some(("w1", "a", 0)), true)).unwrap();
+        for (entries, said) in [
+            (
+                vec![entry("results/a/mcdc.json", b"{")],
+                "invalid results/a/mcdc.json",
+            ),
+            (
+                vec![entry("w.mcdc.jsonl", &good)],
+                "does not end with a newline",
+            ),
+            (
+                vec![entry(
+                    "w.mcdc.jsonl",
+                    &[good.as_slice(), b"\n\n", good.as_slice(), b"\n"].concat(),
+                )],
+                "blank record at line 2",
+            ),
+            (
+                vec![entry("w.mcdc.jsonl", b"{}\n")],
+                "invalid w.mcdc.jsonl record at line 1",
+            ),
+        ] {
+            let error = read(entries, 0).unwrap_err();
+            assert!(error.contains(said), "{said}: {error}");
+        }
+        let declaration = |entries: &[EvidenceArchiveEntry]| -> serde_json::Value {
+            serde_json::from_slice(
+                &entries
+                    .iter()
+                    .find(|e| e.path == "frontend.json")
+                    .unwrap()
+                    .contents,
+            )
+            .unwrap()
+        };
+        // Nothing recorded: the command's own result, failed with its exit.
+        let empty = read(vec![], 3).unwrap();
+        let command = empty
+            .iter()
+            .find(|e| e.path == "results/command/mcdc.json")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&command.contents).contains("\"status\":\"failed\""));
+        assert!(empty.iter().any(|e| e.path == "coverage-model.json"));
+        let timed_out = read(vec![], supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE).unwrap();
+        assert!(
+            String::from_utf8_lossy(
+                &timed_out
+                    .iter()
+                    .find(|e| e.path == "results/command/mcdc.json")
+                    .unwrap()
+                    .contents
+            )
+            .contains("timedOut")
+        );
+        let with_server = read(
+            vec![
+                entry("w.mcdc.jsonl", &[good.as_slice(), b"\n"].concat()),
+                entry("server/background/p1.jsonl", b"{}\n"),
+            ],
+            0,
+        )
+        .unwrap();
+        let runners = declaration(&with_server)["runners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|runner| runner["runner"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(runners, ["background", "vitest"]);
     }
 }

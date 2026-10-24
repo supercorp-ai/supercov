@@ -199,12 +199,12 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
 
   | Project | Checked | Right | Flagged (truly not asserted) | Share reported / true |
   | --- | --- | --- | --- | --- |
-  | google/uuid (Go) | 339 | 298 | 34 (28) | 90.0% / 81.4% |
-  | hashicorp/go-version (Go) | 257 | 253 | 21 (19) | 91.8% / 91.8% |
+  | google/uuid (Go) | 291 of 326 | 254 | 16 (12) | 94.5% / 84.5% |
+  | hashicorp/go-version (Go) | 232 of 237 | 230 | 0 (0) | 100.0% / 99.1% |
   | dtolnay/semver (Rust) | 200 of a sample of 200 | 190 | 7 (2) | 96.5% / 96.5% |
   | apache/commons-cli (Java) | 196 of a sample of 200 | 167 | 49 (33) | 75.0% / 76.5% |
-  | dry-rb/dry-inflector (Ruby 3.4) | 157 | 148 | 13 (8) | 91.7% / 92.4% |
-  | sporkmonger/addressable (Ruby) | 198 of a sample of 200 | 182 | 25 (14) | 87.4% / 90.4% |
+  | dry-rb/dry-inflector (Ruby 3.3) | 157 of 157 | 151 | 12 (9) | 92.4% / 92.4% |
+  | sporkmonger/addressable (Ruby 3.3) | 199 of a sample of 200 | 183 | 17 (11) | 91.5% / 89.4% |
   | square/moshi (Kotlin) | 60 of a sample of 60 | 52 | 9 (6) | 85.0% / 81.7% |
 
 - **Held out:** five projects nothing was tuned on, each assessed once by the
@@ -217,14 +217,23 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   | pallets/itsdangerous (Python) | 60 of 60 | 56 | 3 (2) | 95.0% / 91.7% |
   | — every statement | 238 of 238 | 224 | 13 (9) | 94.5% / 92.0% |
   | Masterminds/semver (Go) | 60 of 60 | 55 | 7 (7) | 88.3% / 80.0% |
-  | — every statement | 497 of 498 | 472 | 46 (44) | 90.7% / 86.5% |
+  | — every statement | 443 of 461 | 422 | 9 (9) | 98.0% / 93.2% |
   | hashie/hashie (Ruby 3.4) | 60 of 60 | 57 | 3 (1) | 95.0% / 96.7% |
-  | — every statement | 700 of 701 | 655 | 26 (10) | 96.3% / 94.4% |
+  | — every statement | 771 of 772 | 720 | 22 (7) | 97.1% / 94.4% |
   | FasterXML/java-classmate (Java) | 60 of 60 | 58 | 9 (7) | 85.0% / 88.3% |
   | bluss/arrayvec (Rust) | 54 of 60 | 48 | 1 (1) | 98.1% / 87.0% |
 
   Assessing all five (2,582 statements) cost $0.15, about 0.006 cents per
-  statement. Go reads high: Jev takes a dropped error (`return false,
+  statement.
+
+  The Go and Ruby rows of both tables, the held-out ones' every-statement rows
+  among them, were measured again on 19 October 2026 by the current release,
+  at each project's latest commit and on Ruby 3.3; the projects have changed
+  since, so the counts differ from the first study's. The 60-statement samples
+  and the Rust, Java, Kotlin and Python rows are from that first study.
+  `node scripts/assertions-truth.mjs <project> -- <test command>` makes each
+  change, runs the tests and prints a row (Go and Ruby; a statement no
+  version of which builds is left out, so not every statement is checked). Go reads high: Jev takes a dropped error (`return false,
   fmt.Errorf(..)` becoming `return false, nil`) as caught where the tests check
   only the boolean. Rust reads high too on arrayvec, whose code is generic over
   its element type; six of its sampled changes cannot be made, because no value

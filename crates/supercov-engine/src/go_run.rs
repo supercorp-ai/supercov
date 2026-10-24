@@ -229,9 +229,9 @@ fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
 const LINE_DIRECTIVE: &str = "/*line ";
 
 fn write(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
-    }
+    // Every path written is a name joined onto a directory.
+    let parent = path.parent().unwrap_or(path);
+    fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     fs::write(path, contents).map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -265,14 +265,11 @@ impl InstrumentedSources {
 }
 
 /// The runtime a file imports, of the modules' runtimes longest first.
+/// `relative` names a file, never a module's directory itself.
 fn runtime_for<'a>(runtimes: &'a [(String, String)], relative: &str) -> &'a str {
     runtimes
         .iter()
-        .find(|(directory, _)| {
-            directory == "."
-                || relative == directory
-                || relative.starts_with(&format!("{directory}/"))
-        })
+        .find(|(directory, _)| directory == "." || relative.starts_with(&format!("{directory}/")))
         .map(|(_, import)| import.as_str())
         .unwrap_or_default()
 }
@@ -534,45 +531,54 @@ fn declares_test_main_textually(source: &str) -> bool {
     })
 }
 
-/// `go test` caches a package that passed, and a cached package does not run.
-/// The command with Go's test parallelism turned down to one.
-///
-/// `-parallel` bounds how many tests calling `t.Parallel()` run at once. At 1
-/// they resume one at a time, so each is the only test running when its probes
-/// fire and the harness can announce it like any serial test.
-fn command_run_in_order(command: &[String]) -> (Vec<String>, bool) {
-    if command
-        .iter()
-        .any(|argument| argument == "-parallel" || argument.starts_with("-parallel="))
-    {
-        // The author already said what they wanted; saying it louder is not
-        // Supercov's call.
-        return (command.to_vec(), false);
-    }
-    let mut updated = command.to_vec();
-    let position = updated
-        .iter()
-        .position(|argument| argument == "test")
-        .map_or(updated.len(), |index| index + 1);
-    updated.insert(position, "-parallel=1".into());
-    (updated, true)
-}
-
-fn command_with_fresh_results(command: &[String]) -> (Vec<String>, bool) {
-    if command
-        .iter()
-        .any(|argument| argument == "-count" || argument.starts_with("-count="))
-    {
-        return (command.to_vec(), false);
-    }
-    let mut updated = command.to_vec();
-    // After the subcommand, so `go -count=1 test` is never produced.
-    let position = updated
-        .iter()
-        .position(|argument| argument == "test")
-        .map_or(updated.len(), |index| index + 1);
-    updated.insert(position, "-count=1".into());
-    (updated, true)
+/// What the run adds to Go's flags, given the command and the `GOFLAGS` it
+/// would have run with: `-count=1`, since `go test` caches a package that
+/// passed and a cached package does not run, so it records nothing; and, for
+/// `--exact-attribution`, `-parallel=1`, so tests calling `t.Parallel()`
+/// resume one at a time and each is the only test running when its probes
+/// fire. A flag the author already set, on the command line or in
+/// `GOFLAGS`, stays theirs. Through `GOFLAGS` they reach every `go test` the
+/// command starts -- from a Makefile or a script as much as directly -- Go
+/// leaves them out of commands that do not take them, and a flag the
+/// command names itself still wins. Returns the new `GOFLAGS`, if any, and
+/// which of the two it added.
+fn go_flags(
+    command: &[String],
+    ambient: Option<&str>,
+    exact_attribution: bool,
+) -> (Option<String>, bool, bool) {
+    let named = |flag: &str| {
+        command
+            .iter()
+            .map(String::as_str)
+            .chain(ambient.unwrap_or_default().split_whitespace())
+            .any(|argument| {
+                argument
+                    .strip_prefix('-')
+                    .map(|rest| rest.strip_prefix('-').unwrap_or(rest))
+                    .is_some_and(|rest| {
+                        rest == flag
+                            || rest
+                                .strip_prefix(flag)
+                                .is_some_and(|value| value.starts_with('='))
+                    })
+            })
+    };
+    let fresh = !named("count");
+    let serial = exact_attribution && !named("parallel");
+    let added = [fresh.then_some("-count=1"), serial.then_some("-parallel=1")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let flags = (!added.is_empty()).then(|| {
+        ambient
+            .into_iter()
+            .filter(|flags| !flags.trim().is_empty())
+            .chain(added)
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    (flags, fresh, serial)
 }
 
 /// The fingerprint a later query compares against the stored run.
@@ -650,11 +656,12 @@ pub fn run_direct_go(
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
         // Decided before instrumenting, because whether a parallel test can be
         // announced depends on whether anything will be running beside it.
-        let (command, serialised) = if request.exact_attribution {
-            command_run_in_order(&request.command)
-        } else {
-            (request.command.clone(), false)
-        };
+        let command = request.command.clone();
+        let (go_flags, forced_fresh, serialised) = go_flags(
+            &command,
+            std::env::var("GOFLAGS").ok().as_deref(),
+            request.exact_attribution,
+        );
         let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
         let roots = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
             &root, &workspace, &ambient,
@@ -726,7 +733,6 @@ pub fn run_direct_go(
             )
             .map_err(|error| error.to_string())?;
         }
-        let (command, forced_fresh) = command_with_fresh_results(&command);
         if forced_fresh {
             writeln!(
                 diagnostics,
@@ -744,7 +750,12 @@ pub fn run_direct_go(
                     program: command[0].clone().into(),
                     arguments: command[1..].iter().map(OsString::from).collect(),
                     cwd: workspace.clone(),
-                    environment: None,
+                    environment: go_flags.map(|flags| {
+                        std::env::vars_os()
+                            .filter(|(name, _)| name != "GOFLAGS")
+                            .chain([(OsString::from("GOFLAGS"), OsString::from(flags))])
+                            .collect()
+                    }),
                     captured_output: None,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
@@ -783,7 +794,8 @@ pub fn run_direct_go(
         }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
-                "the test command was interrupted by {signal:?}; no run was published"
+                "the test command was interrupted by {}; no run was published",
+                signal.name()
             ));
         }
         let exit_code = execution.exit_code;
@@ -1032,7 +1044,8 @@ impl GoServer {
                 ),
             )?;
         }
-        if mains == 0 || sources.project.instrumented.is_empty() {
+        // A directory has a package only for a file instrumented in it.
+        if mains == 0 {
             return Ok(None);
         }
         let directory = root.join(".supercov/work").join(run_id).join("go");
@@ -1129,21 +1142,69 @@ mod tests {
         assert_eq!(package_name("import \"fmt\"\n"), None);
     }
 
+    /// `go test` skips a package whose result it has cached, and a package
+    /// that does not run records nothing; `--exact-attribution` needs tests
+    /// to run one at a time. Both go in through GOFLAGS, after whatever
+    /// GOFLAGS held, unless the author already set them anywhere.
     #[test]
-    fn caching_is_disabled_unless_the_author_already_chose() {
-        // `go test` skips a package whose result it has cached, and a package
-        // that does not run records nothing. A run that measured half a suite
-        // without saying so would be worse than a slow one.
-        let (command, forced) =
-            command_with_fresh_results(&["go".into(), "test".into(), "./...".into()]);
-        assert!(forced);
-        assert_eq!(command, ["go", "test", "-count=1", "./..."]);
-
-        // An author who already said how many times to run means it.
-        let (command, forced) =
-            command_with_fresh_results(&["go".into(), "test".into(), "-count=3".into()]);
-        assert!(!forced);
-        assert_eq!(command, ["go", "test", "-count=3"]);
+    fn go_flags_add_only_what_the_author_did_not_set() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        for (command, ambient, exact, expected) in [
+            (
+                "go test ./...",
+                None,
+                false,
+                (Some("-count=1"), true, false),
+            ),
+            ("make test", None, false, (Some("-count=1"), true, false)),
+            (
+                "go test ./...",
+                None,
+                true,
+                (Some("-count=1 -parallel=1"), true, true),
+            ),
+            (
+                "go test ./...",
+                Some("-mod=vendor"),
+                false,
+                (Some("-mod=vendor -count=1"), true, false),
+            ),
+            (
+                "go test ./...",
+                Some("  "),
+                false,
+                (Some("-count=1"), true, false),
+            ),
+            ("go test -count=3", None, false, (None, false, false)),
+            ("go test -count 3", None, false, (None, false, false)),
+            ("go test --count=2", None, false, (None, false, false)),
+            ("make test", Some("-count=2"), false, (None, false, false)),
+            (
+                "go test -parallel 4 ./...",
+                None,
+                true,
+                (Some("-count=1"), true, false),
+            ),
+            (
+                "make test",
+                Some("-parallel=2 -count=1"),
+                true,
+                (None, false, false),
+            ),
+            (
+                "go test -countx",
+                None,
+                false,
+                (Some("-count=1"), true, false),
+            ),
+        ] {
+            let (flags, fresh, serial) = go_flags(&words(command), ambient, exact);
+            assert_eq!(
+                (flags.as_deref(), fresh, serial),
+                expected,
+                "{command} {ambient:?} {exact}"
+            );
+        }
     }
 
     #[test]
@@ -1185,5 +1246,300 @@ mod tests {
             "package p\n\n// func TestMain\n"
         ));
         assert!(!declares_test_main_textually("package p\n"));
+    }
+
+    /// The package clause past comments, the runtime of the module a file
+    /// is in, and the flags Supercov adds only where the command has none.
+    #[test]
+    fn go_package_runtime_and_command_flags_read_the_way_go_does() {
+        assert_eq!(
+            package_name("// c\n/* b */ package main\n").as_deref(),
+            Some("main")
+        );
+        assert_eq!(package_name("/* never closed").as_deref(), None);
+        assert_eq!(package_name("").as_deref(), None);
+        let runtimes = vec![
+            ("svc/api".to_owned(), "example.com/api/rt".to_owned()),
+            (".".to_owned(), "example.com/rt".to_owned()),
+        ];
+        assert_eq!(runtime_for(&runtimes, "svc/api/h.go"), "example.com/api/rt");
+        assert_eq!(runtime_for(&runtimes, "svc/apix/h.go"), "example.com/rt");
+        assert_eq!(
+            runtime_for(&[("svc".to_owned(), "r".to_owned())], "other/x.go"),
+            ""
+        );
+    }
+
+    fn temporary_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write(&root.join("go.mod"), "module example.com/m\n\ngo 1.22\n").unwrap();
+        root
+    }
+
+    fn go_request(root: &Path, command: &[&str]) -> DirectGoRunRequest {
+        DirectGoRunRequest {
+            root: root.to_owned(),
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            run_id: "2026-01-02T00-00-00-000Z".into(),
+            started_at: "2026-01-02T00:00:00Z".into(),
+            exact_attribution: false,
+        }
+    }
+
+    const SOURCE: &str = "package m\n\nfunc One() int {\n\treturn 1\n}\n";
+
+    #[test]
+    fn a_file_already_named_by_a_line_directive_is_left_as_it_is() {
+        let text = "/*line elsewhere.go:1:1*/package m\n";
+        assert_eq!(named_for_the_project(Path::new("/p"), "m.go", text), text);
+    }
+
+    #[test]
+    fn a_package_s_files_vote_its_probe_file_s_package_and_its_tests_its_harness() {
+        let root = temporary_root("go-votes");
+        // A test behind a constraint names another package; two sources
+        // outvote it.
+        write(
+            &root.join("lib/a.go"),
+            "package lib\n\nfunc A() int {\n\treturn 1\n}\n",
+        )
+        .unwrap();
+        write(
+            &root.join("lib/b.go"),
+            "package lib\n\nfunc B() int {\n\treturn 2\n}\n",
+        )
+        .unwrap();
+        write(
+            &root.join("lib/tool_test.go"),
+            "//go:build tools\n\npackage main\n",
+        )
+        .unwrap();
+        // A file the grammar reads without a package clause votes for none.
+        write(&root.join("lib/c.go"), "func C() int {\n\treturn 3\n}\n").unwrap();
+        // Only external tests: the harness joins the first.
+        write(&root.join("ext.go"), SOURCE).unwrap();
+        for name in ["a_test.go", "b_test.go"] {
+            write(
+                &root.join(name),
+                "package m_test\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n",
+            )
+            .unwrap();
+        }
+        // A test file with no package clause votes for nothing and joins no
+        // harness.
+        write(&root.join("none/n.go"), "package none\n\nfunc N() {}\n").unwrap();
+        write(&root.join("none/n_test.go"), "// nothing here\n").unwrap();
+        let instrumented =
+            instrument_workspace(&root, &root, &root.join("evidence"), false, None).unwrap();
+        let probes = fs::read_to_string(root.join("lib").join(PROBE_FILE)).unwrap();
+        assert!(probes.contains("package lib\n"), "{probes}");
+        let harness = fs::read_to_string(root.join(HARNESS_FILE)).unwrap();
+        assert!(harness.contains("package m_test\n"), "{harness}");
+        assert!(!root.join("none").join(HARNESS_FILE).exists());
+        let packages = instrumented
+            .packages
+            .iter()
+            .map(|package| package.directory.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(packages, [".", "lib"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_go_run_refuses_an_empty_command() {
+        let root = std::env::temp_dir().join("supercov-go-empty-command-never-created");
+        let error = run_direct_go(&go_request(&root, &[]), &mut Vec::new()).unwrap_err();
+        assert_eq!(error, "test command must not be empty");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_project_without_test_packages_is_refused_before_its_command_runs() {
+        let root = temporary_root("go-no-tests");
+        write(&root.join("m.go"), SOURCE).unwrap();
+        // A run whose process died before it cleaned up.
+        let abandoned = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/work").join(abandoned)).unwrap();
+        crate::lifecycle::write_run_state(
+            &root,
+            &crate::lifecycle::RunState {
+                id: abandoned.into(),
+                pid: u32::MAX,
+                root: root.display().to_string(),
+                workspace: root.display().to_string(),
+                started_at: "start".into(),
+                updated_at: "update".into(),
+                status: crate::lifecycle::RunStateStatus::Testing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let marker = root.join("ran");
+        let command = format!("touch {}", marker.display());
+        let mut diagnostics = Vec::new();
+        let error = run_direct_go(
+            &go_request(&root, &["sh", "-c", &command]),
+            &mut diagnostics,
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("no Go test packages were found"),
+            "{error}"
+        );
+        assert!(!marker.exists());
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains(&format!("recovered abandoned run(s): {abandoned}")),
+            "{diagnostics}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn parallel_tests_that_reached_nothing_are_named_in_the_refusal() {
+        let root = temporary_root("go-parallel");
+        write(&root.join("m.go"), SOURCE).unwrap();
+        write(
+            &root.join("m_test.go"),
+            "package m\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tt.Parallel()\n\tOne()\n}\n",
+        )
+        .unwrap();
+        // Told not to cache, the run adds no -count=1 of its own.
+        let mut diagnostics = Vec::new();
+        let error =
+            run_direct_go(&go_request(&root, &["true", "-count=1"]), &mut diagnostics).unwrap_err();
+        assert!(
+            error.contains("1 test(s) ran without being able to announce themselves"),
+            "{error}"
+        );
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(!diagnostics.contains("added -count=1"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("1 test package(s) wrote no evidence"),
+            "{diagnostics}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_project_of_tests_alone_runs_its_command() {
+        let root = temporary_root("go-tests-only");
+        write(
+            &root.join("m_test.go"),
+            "package m\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {}\n",
+        )
+        .unwrap();
+        let error = run_direct_go(&go_request(&root, &["true"]), &mut Vec::new()).unwrap_err();
+        assert!(error.starts_with("no Go test recorded evidence"), "{error}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Evidence of `probes` probes, the first reached, and no test.
+    fn evidence_reaching_the_first_of(probes: usize) -> Vec<u8> {
+        let mut bytes = (probes as u64).to_le_bytes().to_vec();
+        for index in 0..probes {
+            bytes.extend(u64::from(index == 0).to_le_bytes());
+        }
+        bytes.extend(0_u64.to_le_bytes());
+        bytes.extend(0_u64.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn code_reached_with_no_test_to_name_is_still_a_run() {
+        // Every test called t.Parallel(): nothing could be credited, and what
+        // they reached is the run's.
+        let root = temporary_root("go-unnamed");
+        write(&root.join("m.go"), SOURCE).unwrap();
+        write(
+            &root.join("m_test.go"),
+            "package m\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tt.Parallel()\n}\n",
+        )
+        .unwrap();
+        let probes = crate::go_project::prepare_go_project(&root, None)
+            .unwrap()
+            .probes
+            .len();
+        let prepared = root.with_extension("bin");
+        fs::write(&prepared, evidence_reaching_the_first_of(probes)).unwrap();
+        let request = go_request(&root, &["cp", "", ""]);
+        let evidence = root
+            .join(".supercov/work")
+            .join(&request.run_id)
+            .join("go/evidence/_.bin");
+        let command = [
+            "cp".to_owned(),
+            prepared.display().to_string(),
+            evidence.display().to_string(),
+        ];
+        let request = DirectGoRunRequest {
+            command: command.to_vec(),
+            ..request
+        };
+        let result = run_direct_go(&request, &mut Vec::new()).unwrap();
+        assert_eq!(result.tests, 0);
+        assert_eq!(result.unattributed, 1);
+        assert!(result.run_directory.exists());
+
+        // Measured and then not published: what was measured is kept.
+        let run_id = "2026-01-03T00-00-00-000Z";
+        let evidence = root
+            .join(".supercov/work")
+            .join(run_id)
+            .join("go/evidence/_.bin");
+        let runs = root.join(".supercov/runs");
+        let command = format!(
+            "cp {} {} && rm -rf {runs} && touch {runs}",
+            prepared.display(),
+            evidence.display(),
+            runs = runs.display()
+        );
+        let request = DirectGoRunRequest {
+            command: vec!["sh".into(), "-c".into(), command],
+            run_id: run_id.into(),
+            ..request
+        };
+        let error = run_direct_go(&request, &mut Vec::new()).unwrap_err();
+        assert!(
+            error.contains("the tests were measured and the run could not be published"),
+            "{error}"
+        );
+        fs::remove_file(&prepared).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_server_needs_a_module_sources_and_a_main_package() {
+        let root = temporary_root("go-server");
+        let command = ["npm".to_owned(), "test".to_owned()];
+        let prepare = |root: &Path| {
+            GoServer::prepare(root, root, "2026-01-02T00-00-00-000Z", &command)
+                .unwrap()
+                .is_none()
+        };
+        // A module with nothing in it.
+        assert!(prepare(&root));
+        // A library is no server.
+        write(&root.join("m.go"), SOURCE).unwrap();
+        assert!(prepare(&root));
+        // No module at all, then only a workspace's.
+        fs::remove_file(root.join("go.mod")).unwrap();
+        assert!(prepare(&root));
+        write(&root.join("go.work"), "go 1.22\n\nuse ./svc\n").unwrap();
+        write(
+            &root.join("svc/go.mod"),
+            "module example.com/svc\n\ngo 1.22\n",
+        )
+        .unwrap();
+        assert!(prepare(&root));
+        fs::remove_dir_all(&root).ok();
     }
 }

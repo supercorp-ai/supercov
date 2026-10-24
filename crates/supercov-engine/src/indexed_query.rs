@@ -266,7 +266,7 @@ impl IndexedQueryError {
                 ),
                 QueryError::UnattributedEvidence => (
                     ErrorCode::UnattributedEvidence,
-                    "Cannot minimize exactly: this coverage view contains background/unattributed evidence. Use a runner with exact test attribution or select a fully attributed coverage view.".into(),
+                    "Cannot minimize exactly: this coverage view contains background/unattributed evidence, code that ran when no test was running. Narrow it to the tests' own evidence with --kind <kind> or --runner <runner>, which leave the background out; `runs <run> kinds` lists them.".into(),
                     None,
                 ),
                 QueryError::TargetUnreachable {
@@ -321,6 +321,13 @@ impl IndexedQueryError {
                     format!("Test not found: {selector}"),
                     Some(json!({ "selector": selector })),
                 ),
+                QueryError::TestNotInView(selector) => (
+                    ErrorCode::TestNotFound,
+                    format!(
+                        "No test matching {selector} is in this view: the run has one, and --filter, --kind or --runner leaves it out"
+                    ),
+                    Some(json!({ "selector": selector, "inRun": true })),
+                ),
                 QueryError::DecisionNotFound(selector) => (
                     ErrorCode::DecisionNotFound,
                     format!("Decision not found: {selector}"),
@@ -328,8 +335,34 @@ impl IndexedQueryError {
                 ),
                 QueryError::SourceNotFound(selector) => (
                     ErrorCode::SourceNotFound,
-                    format!("Source file not found: {selector}"),
+                    // `file src/a.js:3` is most often a line asked as a file.
+                    match selector.rsplit_once(':') {
+                        Some((file, line))
+                            if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) =>
+                        {
+                            format!(
+                                "Source file not found: {selector}; one line is read with `line {file}:{line}`"
+                            )
+                        }
+                        _ => format!("Source file not found: {selector}"),
+                    },
                     Some(json!({ "selector": selector })),
+                ),
+                QueryError::NothingMeasured(file) => (
+                    ErrorCode::SourceNotFound,
+                    format!(
+                        "{file} holds nothing the run measures: no statement, branch or function starts in it"
+                    ),
+                    Some(json!({ "selector": file, "status": "included" })),
+                ),
+                QueryError::OutOfScope {
+                    file,
+                    status,
+                    reason,
+                } => (
+                    ErrorCode::SourceNotFound,
+                    format!("{file} is outside the run's scope: {reason}"),
+                    Some(json!({ "selector": file, "status": status, "reason": reason })),
                 ),
                 QueryError::AmbiguousSelector { selector, matches } => (
                     ErrorCode::AmbiguousSelector,
@@ -377,7 +410,6 @@ fn compact_line(mut data: CoverageCoversData) -> CoverageCoversData {
     if let CoverageCoversData::Line(line) = &mut data {
         line.phases.clear();
         line.confidence.tests.clear();
-        line.confidence.asserted_tests.clear();
     }
     data
 }
@@ -387,8 +419,39 @@ fn compact_line(mut data: CoverageCoversData) -> CoverageCoversData {
 fn location_failure(error: &QueryError) -> bool {
     matches!(
         error,
-        QueryError::SourceNotFound(_) | QueryError::AmbiguousSelector { .. }
+        QueryError::SourceNotFound(_)
+            | QueryError::NothingMeasured(_)
+            | QueryError::OutOfScope { .. }
+            | QueryError::AmbiguousSelector { .. }
     )
+}
+
+/// A file the query did not find that the run's scope names says why: left
+/// out, with the scope's reason, or included with nothing in it to measure.
+fn with_scope_reason(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+    error: QueryError,
+) -> QueryError {
+    let QueryError::SourceNotFound(selector) = &error else {
+        return error;
+    };
+    let Some(entry) = index
+        .scope_entries(view)
+        .ok()
+        .and_then(|entries| entries.into_iter().find(|entry| entry.file == *selector))
+    else {
+        return error;
+    };
+    if entry.status.eq_ignore_ascii_case("included") {
+        QueryError::NothingMeasured(entry.file)
+    } else {
+        QueryError::OutOfScope {
+            file: entry.file,
+            status: entry.status,
+            reason: entry.reason,
+        }
+    }
 }
 
 /// A location of a several-line query that could not be answered.
@@ -556,7 +619,7 @@ pub fn query_indexed(
                 view_id: view,
                 kind: request.kind.as_deref(),
                 runner: request.runner.as_deref(),
-                target: request.target.unwrap_or(100.0),
+                target: request.target,
                 metric: request.metric,
                 max_states: request.max_states.unwrap_or(5_000),
                 offset: request.offset,
@@ -648,7 +711,8 @@ pub fn query_indexed(
                     limit: request.limit.min(BATCH_LINE_TESTS),
                 },
                 &mut cache,
-            );
+            )
+            .map_err(|error| with_scope_reason(index, view, error));
             match answer {
                 Ok((data, page)) => {
                     lines.push(compact_line(data));
@@ -715,7 +779,8 @@ pub fn query_indexed(
                 offset: request.offset,
                 limit: request.limit,
             },
-        )?;
+        )
+        .map_err(|error| with_scope_reason(index, view, error))?;
         return Ok(IndexedQueryOutput {
             command: "coverage.line",
             data: IndexedQueryData::Line(Box::new(data)),
@@ -788,7 +853,8 @@ pub fn query_indexed(
                 offset: request.offset,
                 limit: request.limit,
             },
-        )?;
+        )
+        .map_err(|error| with_scope_reason(index, view, error))?;
         return Ok(IndexedQueryOutput {
             command: "coverage.file",
             data: IndexedQueryData::FileDetail(Box::new(data)),
@@ -1001,13 +1067,83 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_file_with_an_empty_line_number_gets_no_line_hint() {
+        let error =
+            IndexedQueryError::Query(QueryError::SourceNotFound("src/a.js:".into())).agent_error();
+        assert_eq!(error.message, "Source file not found: src/a.js:");
+        let error =
+            IndexedQueryError::Query(QueryError::SourceNotFound("src/a.js:3".into())).agent_error();
+        assert!(
+            error.message.contains("`line src/a.js:3`"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Several lines asked of one run: each location that is not in it is a
+    /// failure of its own, all of them failing is the call failing, and a
+    /// failure of the whole query is never put down to one location.
+    #[test]
+    fn several_lines_fail_one_by_one_and_together() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-indexed-lines-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        crate::run_store::create_analyzable_test_run(&root, "run-a");
+        let run = crate::run_store::discover_runs(&root)
+            .unwrap()
+            .runs
+            .remove(0);
+        let container = crate::run_store::open_or_rebuild_query_index(&run).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let ask = |extra: Value| {
+            let mut request = json!({
+                "runId": "run-a",
+                "filter": "all",
+                "command": "line",
+                "file": "src/gone.js",
+                "line": 1,
+                "moreLines": [["src/also-gone.js", 2]],
+            });
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let request: IndexedQueryRequest = serde_json::from_value(request).unwrap();
+            query_indexed(&index, None, &request, None)
+        };
+        let Err(IndexedQueryError::Query(QueryError::SourceNotFound(file))) = ask(json!({})) else {
+            panic!("every location failing did not fail the call");
+        };
+        assert_eq!(file, "src/gone.js");
+        let output = ask(json!({ "moreLines": [["src/app.js", 1]] })).unwrap();
+        let IndexedQueryData::Lines(lines) = output.data else {
+            panic!("not a several-line answer");
+        };
+        assert_eq!(lines.lines.len(), 1);
+        assert_eq!(lines.failed.len(), 1);
+        assert_eq!(lines.failed[0].location, "src/gone.js:1");
+        let Err(IndexedQueryError::Query(QueryError::TestFilterEmpty { .. })) =
+            ask(json!({ "kind": "e2e" }))
+        else {
+            panic!("a filter that matches no test was put down to a location");
+        };
+    }
+
+    #[test]
     fn maps_solver_limits_without_losing_machine_readable_details() {
         let error = IndexedQueryError::Query(QueryError::ComplexityLimit {
             candidate_tests: 200,
             obligations: 900,
             explored_states: 5_001,
             max_states: 5_000,
-            target: 100.0,
+            target: Some(100.0),
             metric: MinimizeMetric::All,
         })
         .agent_error();

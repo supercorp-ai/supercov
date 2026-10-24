@@ -14,7 +14,8 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, Expression, Function,
+    Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class,
+    ExportDefaultDeclaration, ExportDefaultDeclarationKind, Expression, Function,
     ImportDeclaration, ImportDeclarationSpecifier, JSXAttribute, MethodDefinition, NewExpression,
     ObjectProperty, PropertyKey, SpreadElement, StringLiteral, TemplateLiteral, VariableDeclarator,
 };
@@ -67,6 +68,9 @@ pub struct Import {
 pub struct Structure {
     pub functions: Vec<FunctionSpan>,
     pub imports: Vec<Import>,
+    /// The function `export default` names, where it names one: what an
+    /// import of `default` refers to, whatever the importer calls it.
+    pub default_export: Option<String>,
 }
 
 struct Collector<'s> {
@@ -274,6 +278,19 @@ impl<'a> Visit<'a> for Collector<'_> {
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
         walk::walk_arrow_function_expression(self, arrow);
     }
+    fn visit_export_default_declaration(&mut self, export: &ExportDefaultDeclaration<'a>) {
+        let named = match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                function.id.as_ref().map(|id| id.name.to_string())
+            }
+            ExportDefaultDeclarationKind::Identifier(id) => Some(id.name.to_string()),
+            _ => None,
+        };
+        if named.is_some() {
+            self.structure.default_export = named;
+        }
+        walk::walk_export_default_declaration(self, export);
+    }
     fn visit_import_declaration(&mut self, import: &ImportDeclaration<'a>) {
         let specifier = import.source.value.to_string();
         if let Some(specifiers) = &import.specifiers {
@@ -348,6 +365,22 @@ fn parse(file: &Path, source: &str) -> Result<(Vec<Node>, Structure), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_default_export_is_named_where_the_module_names_it() {
+        let named = |source: &str| structure(Path::new("m.js"), source).unwrap().default_export;
+        assert_eq!(
+            named("export default function run() {}\n").as_deref(),
+            Some("run")
+        );
+        assert_eq!(
+            named("function go() {}\nexport default go;\n").as_deref(),
+            Some("go")
+        );
+        assert_eq!(named("export default () => 1;\n"), None);
+        assert_eq!(named("export function only() {}\n"), None);
+    }
+
     use super::*;
 
     /// A fake key in a live-key shape, assembled so no source line holds the
@@ -416,6 +449,43 @@ router.get('/x/:id', async (req, res) => {{
         );
     }
 
+    /// A route is a handler only when its first argument is a path or `*`;
+    /// a template literal with no substitution can be a secret; only a
+    /// spread of request data is a spread; a decorated method is a handler;
+    /// only `require` of a string is an import, and a bare import names
+    /// nothing; a function assigned to a property is a named span; and a file
+    /// that does not parse is refused.
+    #[test]
+    fn each_javascript_shape_is_read_for_what_it_can_be() {
+        let source = format!(
+            "import './side-effect'\napp.get('*', (req, res) => res.send(1))\napp.get('name', (req, res) => res.send(2))\nconst k = `{FAKE_KEY}`\nconst t = `${{k}}{FAKE_KEY}`\nconst a = {{ ...defaults }}\nconst b = {{ ...req.params }}\nexport default class {{\n  @Get() find() {{ return 1 }}\n}}\nconst c = require(name)\nconst d = load('./x')\nexports.f = function () {{ return 2 }}\nthis.handle = (req, res) => 3\nwindow.flag = 1\nconst e = {{ ...req.query }}\n"
+        );
+        let found = nodes(Path::new("a.ts"), &source).unwrap();
+        let at =
+            |line: usize, kind: NodeKind| found.iter().any(|n| n.line == line && n.kind == kind);
+        assert!(at(2, NodeKind::Handler), "{found:?}");
+        assert!(!at(3, NodeKind::Handler), "{found:?}");
+        assert!(at(4, NodeKind::Literal), "{found:?}");
+        assert!(!at(5, NodeKind::Literal), "{found:?}");
+        assert!(!at(6, NodeKind::Spread), "{found:?}");
+        assert!(at(7, NodeKind::Spread), "{found:?}");
+        assert!(at(16, NodeKind::Spread), "{found:?}");
+        assert!(at(9, NodeKind::Handler), "{found:?}");
+        let s = structure(Path::new("a.ts"), &source).unwrap();
+        assert!(s.imports.is_empty(), "{:?}", s.imports);
+        let names = s
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&"f") && names.contains(&"handle"),
+            "{names:?}"
+        );
+        assert!(!names.contains(&"flag"), "{names:?}");
+        assert!(nodes(Path::new("b.js"), "function (").is_err());
+    }
+
     #[test]
     fn a_secret_is_a_prefix_a_long_run_or_a_password_word() {
         assert!(secretish(FAKE_KEY));
@@ -423,5 +493,38 @@ router.get('/x/:id', async (req, res) => {{
         assert!(secretish("hunter2password"));
         assert!(!secretish("/api/users"));
         assert!(!secretish("select * from users"));
+    }
+
+    #[test]
+    fn each_shape_of_a_secret_is_read_on_its_own() {
+        for (value, secret) in [
+            ("short", false),
+            ("0123456789abcdef0123", true),
+            ("0123456789abcdef012", false),
+            ("Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8==", true),
+            ("Aa1+Bb2/Cc3_Dd4-Ee5Ff6Gg7Hh8", true),
+            ("aa1bb2cc3dd4ee5ff6gg7hh8ii", false),
+            ("AA1BB2CC3DD4EE5FF6GG7HH8II", false),
+            ("AaBbCcDdEeFfGgHhIiJjKkLlMm", false),
+            ("Aa1Bb2Cc3 Dd4Ee5Ff6Gg7Hh8Ii", false),
+            ("my-secret-thing", true),
+            ("old passwd here", true),
+            ("plain words here", false),
+        ] {
+            assert_eq!(secretish(value), secret, "{value}");
+        }
+        // A template literal with no expressions is read as its text; one with
+        // an expression is not one literal.
+        let found = nodes(
+            Path::new("a.js"),
+            "const a = `my-secret-thing`;\nconst b = `x ${y} my-secret-thing`;\nconst c = `plain words`;\n",
+        )
+        .unwrap();
+        let literal_lines = found
+            .iter()
+            .filter(|node| node.kind == NodeKind::Literal)
+            .map(|node| node.line)
+            .collect::<Vec<_>>();
+        assert_eq!(literal_lines, [1]);
     }
 }

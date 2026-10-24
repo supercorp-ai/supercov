@@ -13,6 +13,7 @@
       "assessment-input.json.gz",
       "evidence.raw.gz",
       "query-index.v1.bin",
+      "query-index.v1.bin.verified",
       "run.json",
       "source-manifest.cache.json",
       "statement-spans.json",

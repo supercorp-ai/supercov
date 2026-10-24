@@ -75,7 +75,6 @@ pub const CHILD_BINARY_ENV: &str = "SUPERCOV_DOCTEST_CHILD_BINARY";
 /// rustdoc's own protocol for merged doctest harnesses.
 pub const RUSTDOC_BIN_PATH_ENV: &str = "RUSTDOC_DOCTEST_BIN_PATH";
 pub const RUSTDOC_RUN_NB_TEST_ENV: &str = "RUSTDOC_DOCTEST_RUN_NB_TEST";
-const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
 /// The argument that puts this program in runtool mode.
 pub const RUNTOOL_MODE_ARGUMENT: &str = "__doctest-runner";
 
@@ -258,7 +257,7 @@ pub(crate) fn run_doctests(
     let program = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(io_error)?;
-    let real_rustdoc = real_rustdoc()?;
+    let real_rustdoc = real_rustdoc(std::env::var_os("RUSTDOC"), project, invocation)?;
     let output = crate::child_signal_guard::output(
         Command::new(&invocation.program)
             .args(&selection.doctest_arguments)
@@ -267,7 +266,8 @@ pub(crate) fn run_doctests(
             .env("RUSTFLAGS", capped_rustflags(project, invocation))
             .env("RUSTDOC", &program)
             .env(WRAPPER_ROOT_ENV, root)
-            .env(REAL_RUSTDOC_ENV, &real_rustdoc),
+            .env(REAL_RUSTDOC_ENV, &real_rustdoc)
+            .env(crate::rust_runtime::PROBE_TOKEN_ENV, &project.probes.token),
     )
     .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
@@ -410,13 +410,21 @@ pub(crate) fn run_doctests(
     Ok(results)
 }
 
-/// The rustdoc Cargo would have run: whatever `RUSTDOC` already named, else
-/// the one beside the selected toolchain's rustc.
-fn real_rustdoc() -> Result<PathBuf, RustTestRunnerError> {
-    if let Some(configured) = std::env::var_os("RUSTDOC") {
+/// The rustdoc Cargo would have run: whatever `RUSTDOC` (`configured`)
+/// already named, else the one beside the selected toolchain's rustc.
+fn real_rustdoc(
+    configured: Option<std::ffi::OsString>,
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+) -> Result<PathBuf, RustTestRunnerError> {
+    if let Some(configured) = configured {
         return Ok(PathBuf::from(configured));
     }
-    let sysroot = rustc_sysroot()?;
+    rustdoc_in(&rustc_sysroot(project, invocation)?)
+}
+
+/// The rustdoc of the toolchain at `sysroot`.
+fn rustdoc_in(sysroot: &Path) -> Result<PathBuf, RustTestRunnerError> {
     let rustdoc = sysroot
         .join("bin")
         .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX));
@@ -1238,7 +1246,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             fs::create_dir_all(&evidence).map_err(io_error)?;
             let output = Command::new(&binary)
                 .envs(instrumented_stack_environment())
-                .env(EVIDENCE_DIR_ENV, &evidence)
+                .envs(evidence_environment(&evidence)?)
                 .output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -1273,6 +1281,15 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
 /// This program as the child a merged harness spawns for one case: run the
 /// harness binary in rustdoc's single-case mode under this case's own
 /// evidence directory, record how it went, and exit as it exited.
+/// A doctest's evidence directory, for the instrumentation the run that
+/// started rustdoc named (see `rust_runtime::evidence_environment`).
+fn evidence_environment(evidence: &Path) -> Result<[(String, PathBuf); 2], RustTestRunnerError> {
+    let token = std::env::var(crate::rust_runtime::PROBE_TOKEN_ENV).map_err(|_| {
+        RustTestRunnerError::Context("the doctest runner has no instrumentation token".into())
+    })?;
+    Ok(crate::rust_runtime::evidence_environment(&token, evidence))
+}
+
 pub fn doctest_child() -> i32 {
     match doctest_child_inner() {
         Ok(code) => code,
@@ -1305,7 +1322,7 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
         .env_remove(CHILD_DIR_ENV)
         .env_remove(CHILD_BINARY_ENV)
         .envs(instrumented_stack_environment())
-        .env(EVIDENCE_DIR_ENV, &evidence)
+        .envs(evidence_environment(&evidence)?)
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
@@ -1479,9 +1496,65 @@ mod tests {
             .map(|(name, status)| (name.to_owned(), status.to_owned()))
         );
         // Counts that do not add up to what the harness printed name nothing.
-        let wrong = text.replace("2 passed", "3 passed");
-        assert!(quiet_cases(&wrong, &order, &selected, &ran, &root).is_none());
+        for wrong in [
+            text.replace("2 passed", "3 passed"),
+            text.replace("1 failed", "2 failed"),
+            text.replace("1 ignored", "0 ignored"),
+            text.replace("test result: ", "result: "),
+        ] {
+            assert!(
+                quiet_cases(&wrong, &order, &selected, &ran, &root).is_none(),
+                "{wrong}"
+            );
+        }
         fs::remove_dir_all(root).ok();
+    }
+
+    /// rustdoc's reports go under the package Cargo announced them for; a
+    /// package nothing was asked of says so; and where a heading or a report
+    /// cannot be placed, the reports are passed on as they came.
+    #[test]
+    fn doctest_reports_go_under_the_package_cargo_announced() {
+        let package = PackageDoctests {
+            package: "my-crate".into(),
+            manifest_dir: PathBuf::from("/nowhere"),
+            cases: vec![DoctestCase {
+                name: "src/lib.rs - a (line 1)".into(),
+                status: "passed".into(),
+                evidence: None,
+            }],
+            listed: 3,
+            exit_code: 0,
+        };
+        let report = "running 1 test\ntest src/lib.rs - a (line 1) ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s\n\n";
+        let reports = |stdout: &str, stderr: &str, packages: &[PackageDoctests]| {
+            doctest_reports(stdout, stderr, packages, false)
+                .into_iter()
+                .map(|announced| (announced.heading, announced.report))
+                .collect::<Vec<_>>()
+        };
+        assert!(reports("", "", &[]).is_empty());
+        let heading = "   Doc-tests my_crate";
+        assert_eq!(
+            reports(report, heading, std::slice::from_ref(&package)),
+            [(Some(heading.to_owned()), report.to_owned())]
+        );
+        let unasked = reports("", "", std::slice::from_ref(&package));
+        assert_eq!(unasked.len(), 1);
+        assert!(unasked[0].1.contains("3 filtered out"), "{unasked:?}");
+        assert_eq!(
+            reports(report, "   Doc-tests other", std::slice::from_ref(&package)),
+            [(None, report.to_owned())]
+        );
+        let stray = "running 1 test\ntest src/lib.rs - z (line 9) ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n";
+        assert_eq!(
+            reports(
+                &format!("{report}{stray}"),
+                heading,
+                std::slice::from_ref(&package)
+            ),
+            [(None, format!("{report}{stray}"))]
+        );
     }
 
     #[test]
@@ -1514,6 +1587,274 @@ mod tests {
                 "src/lib.rs - a (line 1): test\nsrc/lib.rs - b (line 5): test\n\n3 tests, 0 benchmarks\n"
             ),
             ["src/lib.rs - a (line 1)", "src/lib.rs - b (line 5)"]
+        );
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// rustdoc's own arguments and the harness's, taken apart the way each
+    /// reads them; a flag left without its value at the end is dropped.
+    #[test]
+    fn rustdoc_and_harness_arguments_are_taken_apart_as_each_reads_them() {
+        let parsed = parse_rustdoc_arguments(&strings(&[
+            "--test",
+            "--test-args",
+            "a b",
+            "--test-runtool",
+            "x",
+            "--test-runtool-arg",
+            "y",
+            "--test-args=c",
+            "--test-runtool=z",
+            "--crate-name",
+            "k",
+            "--test-args",
+        ]));
+        assert!(parsed.test);
+        assert_eq!(parsed.crate_arguments, ["--test", "--crate-name", "k"]);
+        assert_eq!(parsed.harness_arguments, ["a b", "c"]);
+        assert!(!parse_rustdoc_arguments(&strings(&["--crate-name", "k"])).test);
+        let harness = parse_harness_arguments(&strings(&[
+            "--skip=s1",
+            "--skip",
+            "s2",
+            "-q",
+            "--format=terse",
+            "--format",
+            "json",
+            "--exact",
+            "--list",
+            "--test-threads",
+            "2",
+            "-Z",
+            "x",
+            "--nocapture",
+            "filter",
+            "--logfile",
+        ]));
+        assert_eq!(harness.filters, ["filter"]);
+        assert_eq!(harness.skips, ["s1", "s2"]);
+        assert!(harness.exact && harness.list);
+        assert_eq!(
+            harness.passthrough,
+            ["--test-threads", "2", "-Z", "x", "--nocapture", "--logfile"]
+        );
+        assert!(
+            parse_harness_arguments(&strings(&["--skip"]))
+                .skips
+                .is_empty()
+        );
+    }
+
+    /// libtest's result lines, read by name and outcome, the mode it
+    /// appends taken off; a fence marks a doctest ignored by its attributes.
+    #[test]
+    fn harness_lines_and_fence_attributes_are_read_as_libtest_prints_them() {
+        let lines = harness_lines(
+            "running 5 tests\ntest a ... ok\ntest b ... FAILED\ntest c ... ignored\ntest d ... bench\nnoise\ntest src/lib.rs - f (line 3) - compile fail ... ok\n",
+        );
+        assert_eq!(
+            lines,
+            [
+                ("a".to_owned(), "passed".to_owned()),
+                ("b".to_owned(), "failed".to_owned()),
+                ("c".to_owned(), "skipped".to_owned()),
+                ("src/lib.rs - f (line 3)".to_owned(), "passed".to_owned()),
+            ]
+        );
+        let root = std::env::temp_dir().join(format!(
+            "supercov-fence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        fs::write(
+            root.join("src/lib.rs"),
+            "/// ```ignore\n/// ```rust,ignore-wasm32\n/// ```rust no_run\n/// ```\n",
+        )
+        .unwrap();
+        for (name, ignored) in [
+            ("src/lib.rs - f (line 1)", true),
+            ("src/lib.rs - f (line 2)", true),
+            ("src/lib.rs - f (line 3)", false),
+            ("src/lib.rs - f (line 4)", false),
+            ("src/lib.rs - f (line 9)", false),
+            ("src/missing.rs - f (line 1)", false),
+            ("src/lib.rs - f", false),
+            ("plain", false),
+        ] {
+            assert_eq!(fence_says_ignore(name, &root), ignored, "{name}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sequence_that_cannot_be_claimed_is_an_error_not_a_retry() {
+        // Nothing can create a file in procfs, so the first claim fails with
+        // an error other than an existing claim.
+        let error = next_sequence(Path::new("/proc/self"), "").unwrap_err();
+        assert!(matches!(error, RustTestRunnerError::Io(_)), "{error}");
+    }
+
+    #[test]
+    fn a_rustdoc_the_user_configured_is_the_one_run() {
+        let project = PreparedRustProject::empty(std::env::temp_dir());
+        let invocation = crate::rust_test_runner::cargo_invocation(
+            &project.workspace_root,
+            &["cargo".into(), "test".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            real_rustdoc(Some("/opt/rustdoc-wrapper".into()), &project, &invocation).unwrap(),
+            PathBuf::from("/opt/rustdoc-wrapper")
+        );
+        // A toolchain without rustdoc is named, not run.
+        let error = rustdoc_in(Path::new("/nonexistent-toolchain")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the selected toolchain has no rustdoc at /nonexistent-toolchain"),
+            "{error}"
+        );
+    }
+
+    /// `run_doctests` against a script standing in for Cargo, which leaves
+    /// in the wrapper's results root what `setup` writes there, prints
+    /// `stdout` and `stderr`, and exits with `status`.
+    #[cfg(unix)]
+    fn doctests_through(
+        command: &[&str],
+        setup: &str,
+        stdout: &str,
+        stderr: &str,
+        status: i32,
+    ) -> (Result<Vec<RawTestResult>, RustTestRunnerError>, String, i32) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-fake-doctests-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        fs::write(root.join("stdout"), stdout).unwrap();
+        fs::write(root.join("stderr"), stderr).unwrap();
+        fs::write(
+            root.join("cargo.draft"),
+            format!(
+                "#!/bin/sh\ncd \"$SUPERCOV_DOCTEST_WRAPPER_ROOT/packages\"\n{setup}\ncat '{0}/stdout'\ncat '{0}/stderr' >&2\nexit {status}\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        // Copied by another process, so no descriptor to it is held open
+        // here while a test thread forks.
+        assert!(
+            Command::new("cp")
+                .arg(root.join("cargo.draft"))
+                .arg(root.join("cargo"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::set_permissions(root.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+        let project = PreparedRustProject::empty(root.join("workspace"));
+        let mut words = vec![root.join("cargo").display().to_string()];
+        words.extend(command.iter().map(|word| (*word).to_owned()));
+        let invocation =
+            crate::rust_test_runner::cargo_invocation(&project.workspace_root, &words).unwrap();
+        let selection =
+            crate::rust_test_runner::rust_cargo_execution_selection(&invocation).unwrap();
+        let mut diagnostics = Vec::new();
+        let mut exit = 0;
+        let results = run_doctests(
+            &project,
+            &invocation,
+            &selection,
+            &root.join("results"),
+            "run",
+            &mut diagnostics,
+            &mut exit,
+        );
+        fs::remove_dir_all(&root).ok();
+        (results, String::from_utf8(diagnostics).unwrap(), exit)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_package_whose_doctests_could_not_be_attributed_fails_the_run() {
+        let (results, _, _) = doctests_through(
+            &["test", "--doc"],
+            "printf 'doctest x ran more than once' > 00000000.error",
+            "",
+            "",
+            101,
+        );
+        let error = results.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "doctest attribution could not be established: doctest x ran more than once"
+            ),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_library_to_document_is_no_doctests_unless_they_were_asked_for() {
+        let stderr = "error: no library targets found in package `worker`";
+        let (results, _, exit) = doctests_through(&["test"], "", "", stderr, 101);
+        assert!(results.unwrap().is_empty());
+        assert_eq!(exit, 0);
+        let (results, _, _) = doctests_through(&["test", "--doc"], "", "", stderr, 101);
+        assert!(
+            matches!(results, Err(RustTestRunnerError::CargoFailed(output)) if output == stderr)
+        );
+        // Any other failure with no doctest run is the build's.
+        let stderr = "error: could not compile `fixture`";
+        let (results, _, _) = doctests_through(&["test"], "", "", stderr, 101);
+        assert!(
+            matches!(results, Err(RustTestRunnerError::CargoFailed(output)) if output == stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_doctest_the_report_does_not_name_is_named() {
+        let record = serde_json::json!({
+            "package": "fixture",
+            "manifest_dir": "/nowhere",
+            "cases": [
+                {"name": "src/lib.rs - unseen (line 1)", "status": "failed", "evidence": null},
+                {"name": "src/lib.rs - seen (line 5)", "status": "failed", "evidence": null},
+            ],
+            "listed": 2,
+            "exit_code": 101,
+        });
+        let (results, diagnostics, exit) = doctests_through(
+            &["test", "--doc"],
+            &format!("printf '%s' '{record}' > 00000000.json"),
+            "\nrunning 1 test\ntest src/lib.rs - seen (line 5) ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            "",
+            101,
+        );
+        assert_eq!(results.unwrap().len(), 2);
+        assert_eq!(exit, 101);
+        assert!(
+            diagnostics.contains("[supercov] Rust doctest failed: src/lib.rs - unseen (line 1)"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("[supercov] Rust doctest failed: src/lib.rs - seen"),
+            "{diagnostics}"
         );
     }
 }

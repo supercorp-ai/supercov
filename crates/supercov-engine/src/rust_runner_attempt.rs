@@ -418,6 +418,67 @@ mod tests {
         assert_eq!(attempt.test_name, "tests::flaky");
     }
 
+    /// Each malformed identity is refused with its own reason: a nextest
+    /// key without `NEXTEST`, a `NEXTEST` other than 1, a value that is
+    /// empty, oversized or multi-line, a run id that is not a canonical
+    /// lowercase UUID, a version of four parts, an attempt past the total,
+    /// and a stress total on its own.
+    #[test]
+    fn each_malformed_identity_is_refused_for_its_reason() {
+        let attempt = [
+            ("NEXTEST_TEST_NAME", "tests::flaky"),
+            ("NEXTEST_ATTEMPT", "1"),
+            ("NEXTEST_TOTAL_ATTEMPTS", "1"),
+            (
+                "NEXTEST_ATTEMPT_ID",
+                "2ae19189-240a-433a-a31d-acc411fe8e1f:fixture$tests::flaky",
+            ),
+            ("NEXTEST_STRESS_CURRENT", "none"),
+            ("NEXTEST_STRESS_TOTAL", "none"),
+        ];
+        let refused = |changes: &[(&'static str, &'static str)], with_attempt: bool| {
+            let mut values = nextest_base();
+            if with_attempt {
+                values.extend(attempt);
+            }
+            for (key, value) in changes {
+                values.retain(|(k, _)| k != key);
+                values.push((key, value));
+            }
+            classify_rust_runner_environment_from(environment(&values))
+                .unwrap_err()
+                .to_string()
+        };
+        let lone = classify_rust_runner_environment_from(environment(&[(
+            "NEXTEST_RUN_ID",
+            "2ae19189-240a-433a-a31d-acc411fe8e1f",
+        )]))
+        .unwrap_err()
+        .to_string();
+        assert!(lone.contains("without NEXTEST=1"), "{lone}");
+        assert!(refused(&[("NEXTEST", "0")], false).contains("must equal 1"));
+        let long = "a".repeat(4_097).leak() as &'static str;
+        for value in ["", long, "2ae19189\n"] {
+            let error = refused(&[("NEXTEST_RUN_ID", value)], false);
+            assert!(error.contains("not a single-line identity"), "{error}");
+        }
+        for value in [
+            "2ae19189-240a-433a-a31d-acc411fe8e1",
+            "2AE19189-240a-433a-a31d-acc411fe8e1f",
+            "2ae19189-240a-433a-a31d-acc411fe8e1g",
+            "2ae19189x240a-433a-a31d-acc411fe8e1f",
+        ] {
+            let error = refused(&[("NEXTEST_RUN_ID", value)], false);
+            assert!(
+                error.contains("canonical lowercase UUID"),
+                "{value}: {error}"
+            );
+        }
+        assert!(refused(&[("NEXTEST_VERSION", "0.9.140.1")], false).contains("exactly three"),);
+        assert!(refused(&[("NEXTEST_ATTEMPT", "2")], true).contains("exceeds"));
+        assert!(refused(&[("NEXTEST_STRESS_TOTAL", "2")], true).contains("stress"));
+    }
+
     #[test]
     fn partial_or_cross_run_nextest_identity_is_fatal() {
         let mut partial = nextest_base();
@@ -549,6 +610,109 @@ mod tests {
                 b"cargo-nextest 0.9.140\nrelease: 0.9.140\nextra: value\nhost: aarch64-apple-darwin\n"
             )
             .is_err()
+        );
+    }
+
+    /// Each part of `nextest --version` is checked on its own: a variant that
+    /// breaks exactly one is refused for that one.
+    #[test]
+    fn every_part_of_the_version_output_is_checked() {
+        let full = |first: &str, hash: &str, date: &str, host: &str| {
+            format!(
+                "cargo-nextest 0.9.148{first}\nrelease: 0.9.148\ncommit-hash: {hash}\ncommit-date: {date}\nhost: {host}\n"
+            )
+        };
+        let hash = "cd1d6d5467322dbc0d39a80cb671d000ac302798";
+        let ok = full(
+            " (cd1d6d546 2026-10-07)",
+            hash,
+            "2026-10-07",
+            "aarch64-apple-darwin",
+        );
+        assert_eq!(
+            parse_nextest_version_output(ok.as_bytes()).unwrap(),
+            "0.9.148"
+        );
+        let refused = |output: &[u8], said: &str| {
+            let error = parse_nextest_version_output(output)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(said), "{error} (wanted {said})");
+        };
+        refused(b"cargo-nextest \xff\n", "not UTF-8");
+        refused(ok.replace('\n', "\r\n").as_bytes(), "carriage return");
+        refused(b"cargo-nextest\n", "lacks a version");
+        refused(b"cargo-nextest 0.9.148\n", "lacks release metadata");
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.147\nhost: x\n",
+            "disagrees with its product version",
+        );
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.148\nhost: \n",
+            "lacks a build host",
+        );
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.148\nplatform: x\n",
+            "lacks a build host",
+        );
+        refused(
+            format!(
+                "cargo-nextest 0.9.148\nrelease: 0.9.148\nhost: {}\n",
+                "x".repeat(256)
+            )
+            .as_bytes(),
+            "oversized or non-ASCII",
+        );
+        refused(
+            "cargo-nextest 0.9.148\nrelease: 0.9.148\nhost: hôte\n".as_bytes(),
+            "oversized or non-ASCII",
+        );
+        let first = " (cd1d6d546 2026-10-07)";
+        for bad in [
+            "cd1d6d54",
+            &"a".repeat(65),
+            "CD1D6D5467",
+            "cd1d6d546z",
+            "nothex!!!!",
+        ] {
+            refused(
+                full(first, bad, "2026-10-07", "x").as_bytes(),
+                "invalid commit hash",
+            );
+        }
+        refused(
+            ok.replace("commit-hash: ", "hash: ").as_bytes(),
+            "invalid commit hash",
+        );
+        for bad in ["2026-10-7", "2026/10/07", "2026-1a-07", "20261-0-07"] {
+            refused(
+                full(first, hash, bad, "x").as_bytes(),
+                "invalid commit date",
+            );
+        }
+        refused(
+            ok.replace("commit-date: ", "date: ").as_bytes(),
+            "invalid commit date",
+        );
+        for bad_first in [
+            "",
+            " (cd1d6d546)",
+            " (cd1d6d547 2026-10-07)",
+            " (cd1d6d546 2026-10-08)",
+            " cd1d6d546 2026-10-07)",
+        ] {
+            refused(
+                full(bad_first, hash, "2026-10-07", "x").as_bytes(),
+                "short build identity disagrees",
+            );
+        }
+        refused(
+            b"cargo-nextest 0.9.148 (cd1d6d546 2026-10-07)\nrelease: 0.9.148\nhost: x\n",
+            "only partially present",
+        );
+        refused(
+            b"cargo-nextest 0.9.148\nrelease: 0.9.148\na\nb\nc\nd\n",
+            "unknown metadata layout",
         );
     }
 }

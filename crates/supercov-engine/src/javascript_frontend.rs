@@ -394,11 +394,10 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
         } else {
             Path::new(root)
         };
+        // A root is text, and so is every path made from it.
         for name in ["package.json", "runtime.mjs", "runtime.d.mts"] {
             let path = host.join(".supercov/node_modules").join(name);
-            if let Some(path) = path.to_str() {
-                artifacts.push(path.replace('\\', "/"));
-            }
+            artifacts.push(path.to_string_lossy().replace('\\', "/"));
         }
     }
     let rewritten = project
@@ -448,9 +447,10 @@ fn keep_authored(
 ) -> Result<(), JavascriptFrontendError> {
     if authored.insert(file.to_owned()) {
         let path = checked_source_path(&workspace.join(AUTHORED_DIRECTORY), file)?;
-        if let Some(parent) = path.parent() {
-            create_directory_all(parent)?;
-        }
+        create_directory_all(
+            path.parent()
+                .expect("a path under the authored directory has a parent"),
+        )?;
         atomic_write(&path, source.as_bytes())?;
     }
     Ok(())
@@ -1049,17 +1049,26 @@ fn bootstrap_loader(
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
     let line = output.code[..offset].matches('\n').count();
-    if let Some(serde_json::Value::String(mappings)) =
-        output.map.as_mut().and_then(|map| map.get_mut("mappings"))
-    {
-        let mut lines: Vec<&str> = mappings.split(';').collect();
-        if line <= lines.len() {
-            lines.insert(line, "");
-            *mappings = lines.join(";");
-        }
+    let mappings = mappings(&mut output.map);
+    let mut lines: Vec<&str> = mappings.split(';').collect();
+    if line <= lines.len() {
+        lines.insert(line, "");
+        *mappings = lines.join(";");
     }
     output.code.insert_str(offset, &loader);
     Ok(())
+}
+
+/// The `mappings` of an instrumented file's map. The instrumenter maps every
+/// file it writes, and nothing before these steps takes the map away.
+fn mappings(map: &mut Option<serde_json::Value>) -> &mut String {
+    map.as_mut()
+        .and_then(|map| map.get_mut("mappings"))
+        .and_then(|mappings| match mappings {
+            serde_json::Value::String(mappings) => Some(mappings),
+            _ => None,
+        })
+        .expect("the instrumenter maps every file it writes")
 }
 
 /// Sprockets reads a file's `//= require` and `//= link` directives only from
@@ -1116,19 +1125,12 @@ fn keep_directives_first(source: &str, output: &mut crate::js_instrumenter::Cand
     // Segments are encoded relative to the one before, so a line that carries
     // any cannot move without re-encoding the map. A directive is a comment
     // and carries none; a map where one does is dropped, not left wrong.
-    let mut keep_map = true;
-    if let Some(serde_json::Value::String(mappings)) =
-        output.map.as_mut().and_then(|map| map.get_mut("mappings"))
-    {
-        let mut segments = mappings.split(';').collect::<Vec<_>>();
-        segments.resize(segments.len().max(lines.len()), "");
-        if moved.iter().all(|index| segments[*index].is_empty()) {
-            *mappings = reorder(segments).join(";");
-        } else {
-            keep_map = false;
-        }
-    }
-    if !keep_map {
+    let mappings = mappings(&mut output.map);
+    let mut segments = mappings.split(';').collect::<Vec<_>>();
+    segments.resize(segments.len().max(lines.len()), "");
+    if moved.iter().all(|index| segments[*index].is_empty()) {
+        *mappings = reorder(segments).join(";");
+    } else {
         output.map = None;
     }
     output.code = reorder(lines).join("\n");
@@ -1262,14 +1264,11 @@ fn bootstrap_runtime(
     );
     let line = output.code[..offset].matches('\n').count();
     let added = prelude.matches('\n').count();
-    if let Some(serde_json::Value::String(mappings)) =
-        output.map.as_mut().and_then(|map| map.get_mut("mappings"))
-    {
-        let mut lines: Vec<&str> = mappings.split(';').collect();
-        if line <= lines.len() {
-            lines.splice(line..line, std::iter::repeat_n("", added));
-            *mappings = lines.join(";");
-        }
+    let mappings = mappings(&mut output.map);
+    let mut lines: Vec<&str> = mappings.split(';').collect();
+    if line <= lines.len() {
+        lines.splice(line..line, std::iter::repeat_n("", added));
+        *mappings = lines.join(";");
     }
     output.code.insert_str(offset, &prelude);
 }
@@ -1926,6 +1925,126 @@ pub fn prepare_javascript_frontend(
 #[cfg(test)]
 mod tests {
 
+    /// A cached frontend is reused only when its schema, key and every
+    /// artifact check out: a safe path, a cache file named by its digest, a
+    /// well-formed digest, and contents that still have it. Restoring over a
+    /// directory is refused.
+    #[test]
+    fn a_frontend_cache_is_reused_only_when_every_artifact_checks_out() {
+        use super::*;
+        let workspace = std::env::temp_dir().join(format!(
+            "supercov-frontend-cache-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        fs::create_dir_all(workspace.join(FRONTEND_CACHE_DIRECTORY)).unwrap();
+        let workspace = crate::test_directory::TestDirectory::adopt(workspace);
+        let contents = b"export const a = 1;\n";
+        let sha = format!("{:x}", Sha256::digest(contents));
+        fs::write(
+            workspace.join(FRONTEND_CACHE_DIRECTORY).join(&sha),
+            contents,
+        )
+        .unwrap();
+        let artifact = |path: &str, cache_file: String, sha256: String| serde_json::json!({ "path": path, "cacheFile": cache_file, "sha256": sha256 });
+        let good = artifact(
+            "src/a.js",
+            format!("{FRONTEND_CACHE_DIRECTORY}/{sha}"),
+            sha.clone(),
+        );
+        let write = |schema: u32, key: &str, artifacts: Vec<serde_json::Value>| {
+            fs::write(
+                workspace.join(FRONTEND_CACHE_FILE),
+                serde_json::json!({
+                    "schemaVersion": schema,
+                    "key": key,
+                    "assertionCalls": 0,
+                    "artifacts": artifacts,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            read_javascript_frontend_cache(&workspace, "k").is_some()
+        };
+        assert!(write(
+            FRONTEND_CACHE_SCHEMA_VERSION,
+            "k",
+            vec![good.clone()]
+        ));
+        assert!(!write(
+            FRONTEND_CACHE_SCHEMA_VERSION + 1,
+            "k",
+            vec![good.clone()]
+        ));
+        assert!(!write(
+            FRONTEND_CACHE_SCHEMA_VERSION,
+            "other",
+            vec![good.clone()]
+        ));
+        assert!(!write(FRONTEND_CACHE_SCHEMA_VERSION, "k", vec![]));
+        let wrong = "0".repeat(64);
+        for bad in [
+            artifact(
+                "../a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{sha}"),
+                sha.clone(),
+            ),
+            artifact("src/a.js", format!("../{sha}"), sha.clone()),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/other"),
+                sha.clone(),
+            ),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/abc"),
+                "abc".into(),
+            ),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{}", sha.to_uppercase()),
+                sha.to_uppercase(),
+            ),
+            artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{wrong}"),
+                wrong.clone(),
+            ),
+        ] {
+            assert!(
+                !write(
+                    FRONTEND_CACHE_SCHEMA_VERSION,
+                    "k",
+                    vec![good.clone(), bad.clone()]
+                ),
+                "{bad}"
+            );
+        }
+        fs::write(
+            workspace.join(FRONTEND_CACHE_DIRECTORY).join(&wrong),
+            b"other",
+        )
+        .unwrap();
+        assert!(!write(
+            FRONTEND_CACHE_SCHEMA_VERSION,
+            "k",
+            vec![artifact(
+                "src/a.js",
+                format!("{FRONTEND_CACHE_DIRECTORY}/{wrong}"),
+                wrong
+            )]
+        ));
+        assert!(read_javascript_frontend_cache(&workspace.join("absent"), "k").is_none());
+        fs::create_dir_all(workspace.join("src/dir")).unwrap();
+        assert!(matches!(
+            restore_cached_file(&workspace.join("src/dir"), contents),
+            Err(JavascriptFrontendError::UnsafeSourcePath(_))
+        ));
+        restore_cached_file(&workspace.join("src/new.js"), contents).unwrap();
+        restore_cached_file(&workspace.join("src/new.js"), b"again").unwrap();
+        assert_eq!(fs::read(workspace.join("src/new.js")).unwrap(), b"again");
+    }
+
     // Sprockets reads directives only from the comments a file opens with.
     #[test]
     fn sprockets_directives_stay_where_sprockets_reads_them() {
@@ -2216,6 +2335,236 @@ mod tests {
         fs::remove_dir_all(workspace).unwrap();
     }
 
+    /// A file name longer than any filesystem takes.
+    fn too_long() -> String {
+        "n".repeat(300)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restored_file_replaces_a_link_and_never_writes_through_it() {
+        let root = temporary("restore-link");
+        fs::write(root.join("target.txt"), "the project's own\n").unwrap();
+        std::os::unix::fs::symlink(root.join("target.txt"), root.join("a.js")).unwrap();
+        restore_cached_file(&root.join("a.js"), b"cached\n").unwrap();
+        assert!(fs::symlink_metadata(root.join("a.js")).unwrap().is_file());
+        assert_eq!(fs::read_to_string(root.join("a.js")).unwrap(), "cached\n");
+        assert_eq!(
+            fs::read_to_string(root.join("target.txt")).unwrap(),
+            "the project's own\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_restored_or_written_leaves_no_temporary_behind() {
+        let root = temporary("unwritable");
+        assert!(restore_cached_file(&root.join(too_long()), b"cached\n").is_err());
+        assert!(atomic_write(&root.join(too_long()).join("a.js"), b"x").is_err());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        // A directory that is not there yet is made.
+        atomic_write(&root.join("new/a.js"), b"x").unwrap();
+        assert_eq!(fs::read_to_string(root.join("new/a.js")).unwrap(), "x");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_description_names_a_link_and_an_error() {
+        let root = temporary("ancestors-link");
+        std::os::unix::fs::symlink(&root, root.join("link")).unwrap();
+        let described = describe_ancestors(&root.join("link/child"));
+        assert!(described.contains("link=link"), "{described}");
+        let described = describe_ancestors(&root.join(too_long()));
+        assert!(described.contains(" -> "), "{described}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_source_path_that_leaves_the_workspace_is_refused() {
+        let workspace = Path::new("/w");
+        for file in [
+            "/etc/passwd",
+            "../outside.js",
+            "src/../../outside.js",
+            "./a.js",
+        ] {
+            assert!(
+                matches!(
+                    checked_source_path(workspace, file),
+                    Err(JavascriptFrontendError::UnsafeSourcePath(_))
+                ),
+                "{file}"
+            );
+            assert!(
+                matches!(
+                    runtime_specifier(file, "runtime.mjs"),
+                    Err(JavascriptFrontendError::UnsafeSourcePath(_))
+                ),
+                "{file}"
+            );
+        }
+        assert_eq!(
+            checked_source_path(workspace, "src/a.js").unwrap(),
+            workspace.join("src/a.js")
+        );
+        assert_eq!(
+            runtime_specifier("src/a.js", "runtime.mjs").unwrap(),
+            "../.supercov/node_modules/runtime.mjs"
+        );
+    }
+
+    #[test]
+    fn a_file_is_kept_as_its_author_wrote_it_the_first_time_only() {
+        let workspace = temporary("authored-once");
+        let mut authored = BTreeSet::new();
+        keep_authored(&workspace, &mut authored, "src/a.js", "as written\n").unwrap();
+        // Its assertions are tracked in the text already instrumented.
+        keep_authored(&workspace, &mut authored, "src/a.js", "instrumented\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(authored_path(&workspace, Path::new("src/a.js"))).unwrap(),
+            "as written\n"
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_cache_artifact_is_not_restored() {
+        let workspace = temporary("corrupt-cache");
+        fs::write(workspace.join("artifact"), "corrupt").unwrap();
+        let cache = JavascriptFrontendCache {
+            schema_version: FRONTEND_CACHE_SCHEMA_VERSION,
+            key: "key".into(),
+            assertion_calls: 0,
+            artifacts: vec![JavascriptFrontendCacheArtifact {
+                path: "src/a.js".into(),
+                cache_file: "artifact".into(),
+                sha256: format!("{:x}", Sha256::digest(b"whole")),
+            }],
+        };
+        assert!(matches!(
+            load_cached_javascript_frontend(&workspace, &cache),
+            Err(JavascriptFrontendError::UnsafeSourcePath(message))
+                if message == "corrupt frontend cache artifact artifact"
+        ));
+        assert!(!workspace.join("src/a.js").exists());
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn a_map_whose_first_segment_is_a_far_column_still_maps_the_directive_line() {
+        for mappings in ["+BAAA", "/BAAA"] {
+            let inlined = inline_instrumentation_map(
+                "a();\nb();\n",
+                Some(&serde_json::json!({ "version": 3, "mappings": mappings })),
+                Path::new("/p/a.js"),
+                "a();\nb();\n",
+            )
+            .unwrap();
+            let encoded = inlined.rsplit("base64,").next().unwrap().trim_end();
+            use base64::Engine as _;
+            let map: serde_json::Value = serde_json::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(map["mappings"], format!("{mappings};;;AAAA"));
+        }
+    }
+
+    #[test]
+    fn a_source_map_directive_that_runs_on_is_kept() {
+        let bytes = b"code();\n//# sourceMappingURL=a.map\rcode();\n".to_vec();
+        assert_eq!(strip_source_map_reference(bytes.clone()), bytes);
+        assert_eq!(
+            strip_source_map_reference(b"code();\n//# sourceMappingURL=a.map\r\n".to_vec()),
+            b"code();\n"
+        );
+    }
+
+    #[test]
+    fn a_runtime_that_does_not_parse_is_carried_as_written() {
+        // One the parser gives up on, and one it reads with an error.
+        for body in ["const a = {;", "const a;"] {
+            let source = format!("{body}\nexport {{ a }};\n");
+            assert_eq!(compact_runtime(&source), source);
+        }
+        assert_eq!(compact_runtime("const a = 1;\n"), "const a = 1;\n");
+    }
+
+    #[test]
+    fn a_typed_name_of_another_value_is_not_a_helper() {
+        let global = "globalThis.__SUPERCOV_DIRECT_RUNTIME__";
+        assert_eq!(
+            helper_declaration(
+                "var h_1: typeof import(\"./r.mjs\").mcdcBegin = other.mcdcBegin;",
+                "h_1",
+                global,
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_map_shorter_than_the_code_is_left_as_it_is() {
+        let source = "export function f(a: boolean, b: boolean) {\n  return a && b;\n}\n";
+        let mut output =
+            instrument_with_import_policy(source, "src/a.ts", "./capability.mjs", false).unwrap();
+        assert!(output.runtime.is_some());
+        let mut runtime_only = output.clone();
+        // Past the last line the map has, the map has nothing to move.
+        output.map.as_mut().unwrap()["mappings"] = serde_json::Value::from("");
+        output.code = format!("\n\n\n{}", output.code);
+        bootstrap_loader(&mut output, "src/a.ts").unwrap();
+        assert_eq!(output.map.as_ref().unwrap()["mappings"], "");
+        assert!(
+            output
+                .code
+                .contains(crate::js_instrumenter::RUNTIME_LOADER_START)
+        );
+        runtime_only.map.as_mut().unwrap()["mappings"] = serde_json::Value::from("");
+        runtime_only.code = format!("\n\n\n{}", runtime_only.code);
+        bootstrap_runtime(
+            &mut runtime_only,
+            "const runtime = 1;\nexport { runtime };\n",
+            true,
+            true,
+        );
+        assert_eq!(runtime_only.map.as_ref().unwrap()["mappings"], "");
+        assert!(runtime_only.code.contains("const runtime = 1;"));
+    }
+
+    #[test]
+    fn playwright_is_linked_from_the_directory_of_a_nested_config() {
+        // The project's own Playwright sits beside a config in a directory
+        // of its own, where the runtime cannot find it from the workspace.
+        let workspace = std::env::temp_dir().join(format!("supercov-playwright-link-{}", unique()));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("package.json"), "{\"type\":\"module\"}\n").unwrap();
+        fs::write(workspace.join("src/a.mjs"), "export const a = 1;\n").unwrap();
+        fs::create_dir_all(workspace.join("e2e/node_modules/@playwright/test")).unwrap();
+        let mut project = discover_coverage_project(
+            &workspace,
+            &BTreeMap::new(),
+            &["node".into(), "--test".into()],
+        )
+        .unwrap();
+        project.playwright_module = "@playwright/test".into();
+        project.playwright_config = Some(project.root.join("e2e/playwright.config.ts"));
+        let runtime = workspace.join(".supercov/node_modules");
+        fs::create_dir_all(&runtime).unwrap();
+        link_playwright_package(&workspace, &project, &runtime);
+        assert!(runtime.join("@playwright/test").is_dir());
+        // A runtime directory that cannot hold the link gets none.
+        let blocked = workspace.join("blocked");
+        fs::write(&blocked, "").unwrap();
+        link_playwright_package(&workspace, &project, &blocked);
+        assert!(blocked.is_file());
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
     #[test]
     fn embedded_runtime_contains_every_declared_shim() {
         for name in RUNTIME_FILES {
@@ -2226,6 +2575,242 @@ mod tests {
             std::str::from_utf8(embedded_runtime("runtime.mjs").unwrap())
                 .unwrap()
                 .contains(RUNTIME_INSTANCE_MARKER)
+        );
+    }
+
+    /// The collector's id replaces the runtime's marker in either quote;
+    /// a runtime with no marker is refused.
+    #[test]
+    fn a_runtime_is_isolated_by_its_marker_in_either_quote() {
+        let double = format!("let runtimeInstanceToken = \"{RUNTIME_INSTANCE_MARKER}\";\n");
+        let single = format!("let runtimeInstanceToken = '{RUNTIME_INSTANCE_MARKER}';\n");
+        assert_eq!(
+            isolate_runtime(&double, "c1").unwrap(),
+            "/* eslint-disable */\nlet runtimeInstanceToken = \"c1\";\n"
+        );
+        assert_eq!(
+            isolate_runtime(&single, "c2").unwrap(),
+            "/* eslint-disable */\nlet runtimeInstanceToken = 'c2';\n"
+        );
+        assert!(matches!(
+            isolate_runtime("let x = 1;\n", "c3"),
+            Err(JavascriptFrontendError::MissingRuntimeMarker)
+        ));
+    }
+
+    /// Only a last line that is a source-map directive is taken off.
+    #[test]
+    fn only_a_trailing_source_map_directive_is_stripped() {
+        let strip = |text: &str| {
+            String::from_utf8(strip_source_map_reference(text.as_bytes().to_vec())).unwrap()
+        };
+        assert_eq!(strip("a();\n//# sourceMappingURL=a.js.map\n"), "a();\n");
+        assert_eq!(strip("a();\n//# sourceMappingURL=a.js.map\r\n"), "a();\n");
+        assert_eq!(strip("a();\n//# sourceMappingURL=a.js.map"), "a();\n");
+        assert_eq!(
+            strip("a();\n//# sourceMappingURL=a.js.map\nb();\n"),
+            "a();\n//# sourceMappingURL=a.js.map\nb();\n"
+        );
+        assert_eq!(strip("a();\n"), "a();\n");
+    }
+
+    /// The inlined map is shifted past banner lines, its first column mapped
+    /// where there is no shebang, and its directive line mapped.
+    #[test]
+    fn an_inlined_map_is_shifted_past_banners_and_maps_its_last_line() {
+        use base64::Engine as _;
+        let mappings = |code: &str, map: &str| {
+            let inlined = inline_instrumentation_map(
+                code,
+                Some(&serde_json::json!({"version": 3, "mappings": map})),
+                Path::new("src/a.js"),
+                "original\n",
+            )
+            .unwrap();
+            let encoded = inlined.rsplit_once("base64,").unwrap().1.trim_end();
+            let map: serde_json::Value = serde_json::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(map["sources"], serde_json::json!(["src/a.js"]));
+            assert_eq!(map["sourcesContent"], serde_json::json!(["original\n"]));
+            map["mappings"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(mappings("a;\nb;\n", "AAAA;AACA"), "AAAA;AACA;;AAAA");
+        assert_eq!(
+            mappings("/* eslint-disable */\na;\n", "AAAA"),
+            "AAAA,C;AAAA;;AAAA"
+        );
+        assert_eq!(
+            mappings(
+                "#!/usr/bin/env node\n/* eslint-disable */\nx\n",
+                "AAAA;AACA"
+            ),
+            ";AAAA;AACA;;AAAA"
+        );
+        // Nothing mapped: no position to add.
+        assert_eq!(mappings("x\n", ""), "");
+        // Already past the directive line.
+        assert_eq!(mappings("x", ";;;;;;"), "AAAA,C;;;;;;");
+        assert!(inline_instrumentation_map("x", None, Path::new("a.js"), "x").is_none());
+        assert!(
+            inline_instrumentation_map("x", Some(&serde_json::json!({})), Path::new("a.js"), "x")
+                .is_none()
+        );
+    }
+
+    /// Sprockets directives go back to the top with the map moved under
+    /// them, unless a moved line carries a mapping, which drops the map.
+    #[test]
+    fn sprockets_directives_go_back_to_the_top_with_their_map() {
+        let source = "//= require a\n//= link b\nexport const x = 1;\n";
+        let fresh = || {
+            crate::js_instrumenter::instrument_candidate(source, "app/assets/config/manifest.js")
+                .unwrap()
+        };
+        let lines_of = |code: &str| code.split('\n').map(str::to_owned).collect::<Vec<_>>();
+        // Already first: left as it is.
+        let mut first = fresh();
+        let before = first.clone();
+        first.code = format!(
+            "//= require a\n//= link b\n{}",
+            first.code.replace("//= require a\n//= link b\n", "")
+        );
+        let as_first = first.code.clone();
+        keep_directives_first(source, &mut first);
+        assert_eq!(first.code, as_first);
+        // Below a runtime line: moved up, and the map with them.
+        let mut below = before.clone();
+        below.code = format!("RUNTIME;\n{as_first}");
+        below.map = Some(serde_json::json!({"version": 3, "mappings": "AAAA;;;CACA"}));
+        keep_directives_first(source, &mut below);
+        let lines = lines_of(&below.code);
+        assert_eq!(&lines[..3], ["//= require a", "//= link b", "RUNTIME;"]);
+        // One segment per line of the code, the empty ones past the end too.
+        assert_eq!(
+            below.map.as_ref().unwrap()["mappings"]
+                .as_str()
+                .unwrap()
+                .trim_end_matches(';'),
+            ";;AAAA;CACA"
+        );
+        // A moved line that carries a mapping: the map goes.
+        let mut mapped = before.clone();
+        mapped.code = format!("RUNTIME;\n{as_first}");
+        mapped.map = Some(serde_json::json!({"version": 3, "mappings": "AAAA;CACA"}));
+        keep_directives_first(source, &mut mapped);
+        assert!(mapped.map.is_none());
+        assert_eq!(
+            &lines_of(&mapped.code)[..2],
+            ["//= require a", "//= link b"]
+        );
+        // Directives the output lost, or a source with none: nothing moves.
+        let mut lost = before.clone();
+        lost.code = "RUNTIME;\nexport const x = 1;\n".into();
+        keep_directives_first(source, &mut lost);
+        assert_eq!(lost.code, "RUNTIME;\nexport const x = 1;\n");
+        let mut plain = before;
+        plain.code = "RUNTIME;\n//= require a\n".into();
+        keep_directives_first("export const x = 1;\n", &mut plain);
+        assert_eq!(plain.code, "RUNTIME;\n//= require a\n");
+    }
+
+    /// A helper's declaration is found by its value, typed or not.
+    #[test]
+    fn a_helper_declaration_is_found_by_its_value() {
+        assert_eq!(
+            helper_declaration("const a = g.mcdcBegin, b = 1;", "a", "g", false),
+            Some(6)
+        );
+        assert_eq!(
+            helper_declaration("ab = 1;\nconst a = g.mcdcBegin;\n", "a", "g", false),
+            Some(14)
+        );
+        let typed = "const a: typeof import(\"x\").mcdcBegin = g.mcdcBegin;";
+        assert_eq!(helper_declaration(typed, "a", "g", true), Some(6));
+        assert_eq!(helper_declaration(typed, "a", "g", false), None);
+        assert_eq!(
+            helper_declaration("const a = h.mcdcBegin;", "a", "g", true),
+            None
+        );
+    }
+
+    /// A cached artifact is used only where its paths stay inside, its
+    /// cache file is named by its digest, and its bytes still match it.
+    #[test]
+    fn a_cached_artifact_is_used_only_when_every_check_holds() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-frontend-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(FRONTEND_CACHE_DIRECTORY)).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let contents = b"export {};\n";
+        let sha = format!("{:x}", Sha256::digest(contents));
+        std::fs::write(root.join(FRONTEND_CACHE_DIRECTORY).join(&sha), contents).unwrap();
+        let artifact =
+            |path: &str, cache_file: String, sha256: String| JavascriptFrontendCacheArtifact {
+                path: path.into(),
+                cache_file,
+                sha256,
+            };
+        let cached = format!("{FRONTEND_CACHE_DIRECTORY}/{sha}");
+        assert!(valid_cached_artifact(
+            &root,
+            &artifact("src/a.js", cached.clone(), sha.clone())
+        ));
+        let other = "0".repeat(64);
+        for (case, bad) in [
+            (
+                "parent path",
+                artifact("../a.js", cached.clone(), sha.clone()),
+            ),
+            ("empty path", artifact("", cached.clone(), sha.clone())),
+            (
+                "misnamed cache file",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/x"),
+                    sha.clone(),
+                ),
+            ),
+            (
+                "short digest",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/{}", &sha[1..]),
+                    sha[1..].to_owned(),
+                ),
+            ),
+            (
+                "upper-case digest",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/{}", sha.to_uppercase()),
+                    sha.to_uppercase(),
+                ),
+            ),
+            (
+                "no cache file",
+                artifact(
+                    "src/a.js",
+                    format!("{FRONTEND_CACHE_DIRECTORY}/{other}"),
+                    other.clone(),
+                ),
+            ),
+        ] {
+            assert!(!valid_cached_artifact(&root, &bad), "{case}");
+        }
+        std::fs::write(root.join(FRONTEND_CACHE_DIRECTORY).join(&sha), b"changed").unwrap();
+        assert!(
+            !valid_cached_artifact(&root, &artifact("src/a.js", cached, sha)),
+            "changed bytes"
         );
     }
 }

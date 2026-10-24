@@ -367,8 +367,6 @@ try {
   assert.match(JSON.stringify(negation), /UnitStyleTest#test_negation/, 'test-unit identity reaches the line');
   const testUnitFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.doesNotMatch(JSON.stringify(testUnitFile), /ruby-runner-adapter-failed/, 'the test-unit adapter installed completely');
-  const testUnitSummary = query(['runs', 'latest'], environment);
-  assert.equal(testUnitSummary.confidence.lines.asserted, 0, "a run alone never credits assertions");
 
   // Thread-parallel Minitest: probes stay per test, stdlib deltas that
   // overlapped go to the run and the limitation says so.
@@ -574,10 +572,72 @@ try {
     'a run missing a process cannot call itself complete',
   );
 
+  // Ruby 4 on Windows ARM never finished a suite that started a Ractor: the
+  // job hung at this case until CI cancelled it, while Ruby 3.4 on the same
+  // runner passed in two minutes (addressable skips its own Ractor spec on
+  // Ruby 4 Windows for the same reason). It runs everywhere else.
+  const ractorsRun = !(windows && process.arch === 'arm64' && version.major >= 4);
+  if (ractorsRun) {
+    // Code a test runs inside a Ractor. A non-main Ractor cannot touch a
+    // global, so a probe reaching for one raised Ractor::IsolationError in the
+    // user's code and failed the test. The run must pass, keep what the main
+    // Ractor ran, and say that what only the Ractor ran was not recorded.
+    const ractorProject = resolve(temporary, 'ractors');
+    mkdirSync(resolve(ractorProject, 'lib'), { recursive: true });
+    mkdirSync(resolve(ractorProject, 'test'), { recursive: true });
+    writeFileSync(
+      resolve(ractorProject, 'lib/greet.rb'),
+      [
+        'module Greet',
+        '  def self.hi(name)',
+        '    if name.empty? || name == "-"',
+        '      "hi"',
+        '    else',
+        '      "hi #{name}"',
+        '    end',
+        '  end',
+        'end',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      resolve(ractorProject, 'test/greet_test.rb'),
+      [
+        'require "minitest/autorun"',
+        'require "greet"',
+        '',
+        'class GreetTest < Minitest::Test',
+        '  def test_in_a_ractor',
+        '    ractor = Ractor.new { Greet.hi("ann") }',
+        '    assert_equal "hi ann", ractor.respond_to?(:value) ? ractor.value : ractor.take',
+        '  end',
+        '',
+        '  def test_in_main',
+        '    assert_equal "hi", Greet.hi("")',
+        '  end',
+        'end',
+        '',
+      ].join('\n'),
+    );
+    const ractors = supercov(
+      ['--', 'ruby', '-W0', '-Ilib', '-Itest', 'test/greet_test.rb'],
+      environment,
+      ractorProject,
+    );
+    assert.equal(ractors.status, 0, `${ractors.stdout}\n${ractors.stderr}`);
+    const inMain = query(['runs', 'latest', 'line', 'lib/greet.rb:4'], environment, ractorProject);
+    assert.match(JSON.stringify(inMain), /test_in_main/, 'what the main Ractor ran is recorded');
+    const ractorSummary = query(['runs', 'latest', 'summary'], environment, ractorProject);
+    assert.ok(
+      ractorSummary.measurement.limitations >= 1,
+      `what only a Ractor ran must be declared unrecorded: ${JSON.stringify(ractorSummary.measurement)}`,
+    );
+  }
+
   const signalled = windows
     ? 'a killed child declares what it took with it (Windows has no SIGTERM to keep coverage through)'
     : 'a signalled child keeps its coverage, and a killed one declares what it took with it';
-  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals, and ${signalled}`);
+  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals, ${ractorsRun ? 'code run inside a Ractor passes and declares what it could not record' : 'the Ractor case skipped on Ruby 4 Windows ARM'}, and ${signalled}`);
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 }

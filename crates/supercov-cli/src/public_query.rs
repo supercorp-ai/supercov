@@ -152,7 +152,7 @@ struct QueryOptions {
     limit: usize,
     offset: usize,
     json: bool,
-    target: f64,
+    target: Option<f64>,
     metric: MinimizeMetric,
     group_decision: bool,
     /// `scope --files`: the scope file by file.
@@ -180,7 +180,7 @@ impl Default for QueryOptions {
             limit: DEFAULT_LIMIT,
             offset: 0,
             json: false,
-            target: 100.0,
+            target: None,
             metric: MinimizeMetric::All,
             group_decision: false,
             scope_files: false,
@@ -304,7 +304,7 @@ fn parse_options(
                         "--target must be between 0 and 100",
                     ));
                 }
-                options.target = target.expect("validated minimization target");
+                options.target = target;
             }
             "--metric" => {
                 index += 1;
@@ -424,7 +424,11 @@ fn parse_options(
                     }
                 };
             }
-            option if option.starts_with("--") => {
+            // A single dash is an option too (`-q`), except in a test name.
+            option
+                if option.starts_with("--")
+                    || (option.starts_with('-') && option.len() > 1 && command != "test") =>
+            {
                 let mut error = PublicQueryError::invalid(
                     Some(&agent_command),
                     json_output,
@@ -463,6 +467,7 @@ fn parse_options(
     Ok(options)
 }
 
+/// `file:line` or `file:line:column`; lines count from 1.
 fn parse_location(selector: &str) -> Option<(String, usize)> {
     let without_column = selector.rsplit_once(':')?;
     let (file_and_maybe_line, final_number) = without_column;
@@ -470,9 +475,9 @@ fn parse_location(selector: &str) -> Option<(String, usize)> {
     if let Some((file, line)) = file_and_maybe_line.rsplit_once(':')
         && let Ok(line) = line.parse::<usize>()
     {
-        return Some((file.to_owned(), line));
+        return (line > 0).then(|| (file.to_owned(), line));
     }
-    Some((file_and_maybe_line.to_owned(), final_number))
+    (final_number > 0).then(|| (file_and_maybe_line.to_owned(), final_number))
 }
 
 fn coverage_invocation(
@@ -510,6 +515,21 @@ fn coverage_invocation(
         titles: options.titles.clone(),
         test_files: options.test_files.clone(),
     };
+    // A word a query does not take would be read as a filter it is not.
+    let takes = match command {
+        "file" | "decision" => 1,
+        "line" | "test" => usize::MAX,
+        _ => 0,
+    };
+    if let Some(extra) = options.positional.get(takes) {
+        let mut error = PublicQueryError::invalid(
+            Some(&agent_command),
+            json_output,
+            format!("Unexpected argument: {extra}"),
+        );
+        error.error.details = Some(json!({ "argument": extra }));
+        return Err(error);
+    }
     match command {
         "summary" | "kinds" | "runners" | "gaps" | "tests-without-evidence" => {}
         "files" => {
@@ -582,7 +602,7 @@ fn coverage_invocation(
                     let mut error = PublicQueryError::invalid(
                         Some(&agent_command),
                         json_output,
-                        "Expected <source-file>:<line>",
+                        "Expected <source-file>:<line>, with lines counted from 1",
                     );
                     error.error.details = Some(json!({ "selector": selector }));
                     return Err(error);
@@ -605,7 +625,7 @@ fn coverage_invocation(
             request.selector = Some(options.positional.join(" ").to_lowercase());
         }
         "minimize" => {
-            request.target = Some(options.target);
+            request.target = options.target;
             request.max_states = Some(DEFAULT_MAX_STATES);
         }
         _ => unreachable!("coverage hierarchy validates child commands"),
@@ -639,6 +659,15 @@ pub fn parse_public_query(
                 "Usage: supercov diff <older-run> <newer-run>",
             ));
         };
+        if let Some(extra) = options.positional.get(2) {
+            return Err(PublicQueryError::invalid(
+                Some("diff"),
+                json_output,
+                format!(
+                    "unexpected argument {extra}\n\nUsage: supercov diff <older-run> <newer-run>"
+                ),
+            ));
+        }
         return Ok(PublicQueryInvocation::Coverage {
             request: Box::new(IndexedQueryRequest {
                 run_id: older.clone(),

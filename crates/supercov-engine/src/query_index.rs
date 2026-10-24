@@ -9,7 +9,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{self, File, OpenOptions},
-    io::{self, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -309,6 +309,20 @@ pub fn write_query_index(
     result
 }
 
+/// The evidence an index says it was built from, its digest and length, read
+/// from its header alone. Opening the index checks them against what is
+/// expected, as always; this is what to expect when nothing has changed since
+/// the index was verified (`run_store`).
+pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError> {
+    let mut header = [0_u8; QUERY_INDEX_HEADER_SIZE];
+    File::open(path)?.read_exact(&mut header)?;
+    if Sha256::digest(&header[..HEADER_CHECKSUM_OFFSET])[..] != header[HEADER_CHECKSUM_OFFSET..] {
+        return Err(QueryIndexError::InvalidHeader("checksum"));
+    }
+    let sha256 = header[48..80].try_into().expect("a 32-byte slice");
+    Ok((sha256, get_u64(&header, 24)?))
+}
+
 pub struct QueryIndex {
     mmap: Mmap,
     descriptors: Vec<SectionDescriptor>,
@@ -539,15 +553,18 @@ mod tests {
     use super::*;
 
     fn root(label: &str) -> PathBuf {
+        // The counter keeps two tests that read the same clock tick apart.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "supercov-query-index-{label}-{}-{nonce}",
-            std::process::id()
+            "supercov-query-index-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir(&path).unwrap();
         path
     }
 
@@ -686,6 +703,98 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn rejects_too_many_sections_and_the_reserved_kind() {
+        let root = root("refused-sections");
+        let path = root.join("query-index.v1.bin");
+        let many = (1..=QUERY_INDEX_MAX_SECTIONS as u32 + 1)
+            .map(|kind| QueryIndexSection {
+                kind,
+                record_size: 0,
+                count: 0,
+                bytes: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            write_query_index(&many, &identity(1), &path),
+            Err(QueryIndexError::TooManySections(49))
+        ));
+        assert!(matches!(
+            write_query_index(&many[..0], &identity(1), &path),
+            Ok(())
+        ));
+        assert!(matches!(
+            write_query_index(
+                &[QueryIndexSection {
+                    kind: 0,
+                    record_size: 0,
+                    count: 0,
+                    bytes: Vec::new(),
+                }],
+                &identity(1),
+                &path
+            ),
+            Err(QueryIndexError::InvalidSection { kind: 0, .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_section_without_records_has_no_record_to_read() {
+        let root = root("no-records");
+        let path = root.join("query-index.v1.bin");
+        write_query_index(&sections(9), &identity(1), &path).unwrap();
+        let index = QueryIndex::open(&path, &identity(1)).unwrap();
+        assert!(matches!(
+            index.record(1, 0),
+            Err(QueryIndexError::OutOfBounds { kind: 1, .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_temporary_name_already_taken_is_passed_over() {
+        let root = root("taken");
+        let path = root.join("query-index.v1.bin");
+        let next = TEMPORARY_SEQUENCE.load(Ordering::Relaxed);
+        let taken = (next..next + 256)
+            .map(|sequence| temporary_path(&path, sequence).unwrap())
+            .collect::<Vec<_>>();
+        for temporary in &taken {
+            fs::write(temporary, b"another writer's").unwrap();
+        }
+        write_query_index(&sections(9), &identity(1), &path).unwrap();
+        QueryIndex::open(&path, &identity(1)).unwrap();
+        for temporary in &taken {
+            assert_eq!(fs::read(temporary).unwrap(), b"another writer's");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file_behind() {
+        let root = root("failed-write");
+        // A temporary name too long to create fails before anything is written.
+        let long = root.join("q".repeat(250));
+        assert!(matches!(
+            write_query_index(&sections(9), &identity(1), &long),
+            Err(QueryIndexError::Io(_))
+        ));
+        // A destination that is a directory cannot be renamed over.
+        let path = root.join("query-index.v1.bin");
+        fs::create_dir_all(path.join("occupied")).unwrap();
+        assert!(matches!(
+            write_query_index(&sections(9), &identity(1), &path),
+            Err(QueryIndexError::Io(_))
+        ));
+        let names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["query-index.v1.bin"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlinked_indexes() {
@@ -700,6 +809,144 @@ mod tests {
             QueryIndex::open(&link, &identity(1)),
             Err(QueryIndexError::NotRegularFile(_))
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every field of the header and of each section descriptor is checked:
+    /// an index whose header is re-signed after one field changed is refused
+    /// for that field.
+    #[test]
+    fn each_header_and_descriptor_field_is_checked() {
+        let root = root("fields");
+        let path = root.join("query-index.v1.bin");
+        write_query_index(&sections(9), &identity(1), &path).unwrap();
+        let valid = fs::read(&path).unwrap();
+        let open_with = |bytes: &[u8], expected: &QueryIndexIdentity| {
+            fs::write(&path, bytes).unwrap();
+            match QueryIndex::open(&path, expected) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        let open = |bytes: &[u8]| open_with(bytes, &identity(1));
+        let signed = |edit: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = valid.clone();
+            edit(&mut bytes);
+            let checksum = Sha256::digest(&bytes[..HEADER_CHECKSUM_OFFSET]);
+            bytes[HEADER_CHECKSUM_OFFSET..QUERY_INDEX_HEADER_SIZE].copy_from_slice(&checksum);
+            bytes
+        };
+        let put32 = |bytes: &mut Vec<u8>, at: usize, value: u32| {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        let put64 = |bytes: &mut Vec<u8>, at: usize, value: u64| {
+            bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        let field =
+            |section: usize, offset: usize| DESCRIPTOR_OFFSET + section * DESCRIPTOR_SIZE + offset;
+        let read64 = |at: usize| u64::from_le_bytes(valid[at..at + 8].try_into().unwrap());
+        assert_eq!(open(&valid), "accepted");
+        // The descriptor whose records have a fixed size.
+        let sized = (0..2)
+            .find(|&section| valid[field(section, 4)..field(section, 4) + 4] != [0; 4])
+            .unwrap();
+        let mut longer = valid.clone();
+        longer.extend_from_slice(&[0; 8]);
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (valid[..100].to_vec(), "InvalidHeader(\"truncated\")"),
+            (signed(&|b| b[0] = b'X'), "InvalidHeader(\"magic\")"),
+            (
+                signed(&|b| put32(b, 8, 99)),
+                "InvalidHeader(\"schema version\")",
+            ),
+            (
+                signed(&|b| put32(b, 12, 1)),
+                "InvalidHeader(\"header size\")",
+            ),
+            (
+                {
+                    let mut b = valid.clone();
+                    b[200] ^= 1;
+                    b
+                },
+                "InvalidHeader(\"checksum\")",
+            ),
+            (longer, "InvalidHeader(\"total length\")"),
+            (signed(&|b| put32(b, 40, 1)), "InvalidHeader(\"page size\")"),
+            (
+                signed(&|b| put32(b, 36, QUERY_INDEX_MAX_SECTIONS as u32 + 1)),
+                "TooManySections",
+            ),
+            (signed(&|b| put32(b, field(0, 0), 0)), "DuplicateSection(0)"),
+            (
+                signed(&|b| {
+                    let kind =
+                        u32::from_le_bytes(b[field(0, 0)..field(0, 0) + 4].try_into().unwrap());
+                    put32(b, field(1, 0), kind)
+                }),
+                "DuplicateSection",
+            ),
+            (signed(&|b| put64(b, field(sized, 24), 3)), "record shape"),
+            (signed(&|b| put32(b, field(0, 40), 7)), "digest count"),
+            (signed(&|b| put64(b, field(0, 8), 8)), "bounds"),
+            (
+                signed(&|b| put64(b, field(0, 8), valid.len() as u64)),
+                "bounds",
+            ),
+            (signed(&|b| put64(b, field(0, 32), 8)), "bounds"),
+            (
+                signed(&|b| put64(b, field(0, 32), valid.len() as u64)),
+                "bounds",
+            ),
+            (
+                signed(&|b| put64(b, field(1, 8), read64(field(0, 8)))),
+                "overlapping sections",
+            ),
+        ];
+        for (bytes, expected) in &cases {
+            let said = open(bytes);
+            assert!(said.contains(expected), "{expected}: {said}");
+        }
+        for (identity, reason) in [
+            (
+                QueryIndexIdentity {
+                    evidence_bytes: 1,
+                    ..identity(1)
+                },
+                "evidence length",
+            ),
+            (
+                QueryIndexIdentity {
+                    archive_schema_version: 9,
+                    ..identity(1)
+                },
+                "archive schema",
+            ),
+            (
+                QueryIndexIdentity {
+                    evidence_sha256: [0; 32],
+                    ..identity(1)
+                },
+                "evidence hash",
+            ),
+            (
+                QueryIndexIdentity {
+                    analysis_sha256: [0; 32],
+                    ..identity(1)
+                },
+                "analysis hash",
+            ),
+            (
+                QueryIndexIdentity {
+                    producer_sha256: [0; 32],
+                    ..identity(1)
+                },
+                "producer hash",
+            ),
+        ] {
+            let said = open_with(&valid, &identity);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

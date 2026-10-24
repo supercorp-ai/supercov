@@ -272,14 +272,12 @@ pub fn remove_stored_tree_deferred(
     }
     let store = root.join(".supercov");
     let trash = root.join(TRASH);
-    let in_store = lexical_descendant(&store, &target) && !lexical_descendant(&trash, &target);
-    let container = crate::workspace::workspace_container(&root);
-    let in_workspace = owned_workspace_container(&root)
-        && (target == container || lexical_descendant(&container, &target));
-    if !in_store && !in_workspace {
+    // The workspace container is a directory of the store, so its copies are
+    // stored trees like any other.
+    if !lexical_descendant(&store, &target) || lexical_descendant(&trash, &target) {
         return Err(LifecycleError::UnsafePath(target));
     }
-    reject_linked_ancestors(if in_store { &store } else { &container }, &target, false)?;
+    reject_linked_ancestors(&store, &target, false)?;
     reject_linked_ancestors(&root, &trash, true)?;
     fs::create_dir_all(&trash).map_err(|source| io_error(&trash, source))?;
     let destination = trash.join(unique_name());
@@ -307,9 +305,10 @@ pub fn sweep_trash_in_background(project_root: &Path) {
     let sweep = std::thread::spawn(move || {
         let _ = sweep_trash(&root);
     });
-    if let Ok(mut running) = BACKGROUND_SWEEP.lock() {
-        *running = Some(sweep);
-    }
+    // Never poisoned: nothing that holds it can panic.
+    *BACKGROUND_SWEEP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sweep);
 }
 
 /// Wait for the sweep the run started, for as long as `patience`. True when
@@ -890,8 +889,10 @@ pub fn publish_archived_run(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunPublicationFault {
     FinalRename,
-    /// The query index cannot be written at publication.
-    QueryIndexWrite,
+    /// The files publication derives from the evidence -- the query index,
+    /// the statement spans and the assessment input -- cannot be written:
+    /// they are written below the staged evidence file, where nothing can be.
+    DerivedWrites,
 }
 
 pub(crate) fn publish_run_with_fault(
@@ -977,6 +978,16 @@ pub(crate) fn publish_run_with_fault(
             )));
         }
     };
+    let derived = if fault == Some(RunPublicationFault::DerivedWrites) {
+        let directory = staged.evidence_path.join("derived");
+        crate::run_store::StoredRun {
+            query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+            directory,
+            ..staged.clone()
+        }
+    } else {
+        staged.clone()
+    };
     // The execution record and the query index both read the analysis and
     // write their own files, so they are written side by side.
     let prepared = std::thread::scope(|scope| {
@@ -984,23 +995,21 @@ pub(crate) fn publish_run_with_fault(
             scope.spawn(|| {
                 // Disposable, like every query index: one that failed to
                 // write is rebuilt by the first query.
-                if fault == Some(RunPublicationFault::QueryIndexWrite)
-                    || crate::run_store::write_query_index_from(&staged, report).is_err()
-                {
-                    let _ = fs::remove_file(&staged.query_index_path);
+                if crate::run_store::write_query_index_from(&derived, report).is_err() {
+                    let _ = fs::remove_file(&derived.query_index_path);
                 }
                 // Also disposable: the report analyses the evidence when the
                 // file is missing.
-                if crate::run_store::write_statement_spans(&staged, report).is_err() {
+                if crate::run_store::write_statement_spans(&derived, report).is_err() {
                     let _ = fs::remove_file(
-                        staged
+                        derived
                             .directory
                             .join(crate::run_store::STATEMENT_SPANS_FILE),
                     );
                 }
-                if crate::run_store::write_assessment_input(&staged, report).is_err() {
+                if crate::run_store::write_assessment_input(&derived, report).is_err() {
                     let _ = fs::remove_file(
-                        staged
+                        derived
                             .directory
                             .join(crate::run_store::ASSESSMENT_INPUT_FILE),
                     );
@@ -1348,8 +1357,8 @@ pub fn cleanup_storage_locked(
         }
         let has_run = published.contains(&id);
         let remove_history = has_run && !retained.contains(&id);
-        if work.contains(&id) && read_state(root, &id)?.is_none_or(|state| state.status.terminal())
-        {
+        // A run whose state is not terminal is active, and passed over above.
+        if work.contains(&id) {
             result.removed_workspaces.push(id.clone());
             if !options.dry_run {
                 remove_stored_tree_deferred(root, &work_root.join(&id))?;
@@ -1382,17 +1391,16 @@ pub fn cleanup_storage_locked(
         }
     }
     let container = crate::workspace::workspace_container(root);
-    let legacy = [root.join(".supercov/.cache"), root.join(".supercov/cache")];
+    // What runs keep between them: the Docker image registry, among others.
+    let shared = root.join(".supercov/cache");
     let mut caches = Vec::new();
     if remove_build_cache && active.is_empty() {
         if owned_workspace_container(root) {
             caches.push(container);
         }
-        caches.extend(
-            legacy
-                .into_iter()
-                .filter(|path| fs::symlink_metadata(path).is_ok()),
-        );
+        if fs::symlink_metadata(&shared).is_ok() {
+            caches.push(shared);
+        }
     }
     result.removed_build_cache = !caches.is_empty();
     if !options.dry_run {
@@ -1403,37 +1411,73 @@ pub fn cleanup_storage_locked(
     Ok(result)
 }
 
-fn cleanup_storage(
-    root: &Path,
-    options: CleanupOptions,
-    remove_build_cache: bool,
-    updated_at: &str,
-) -> Result<CleanupResult, LifecycleError> {
-    let operation = if remove_build_cache {
-        "clean"
-    } else {
-        "retention"
-    };
-    let lock_id = format!("{operation}-{}-{}", std::process::id(), unique_name());
-    let mut lock = ProjectLock::acquire_alone(root, &lock_id, updated_at)?;
-    recover_abandoned_runs(root, updated_at)?;
-    let result = cleanup_storage_locked(root, options, remove_build_cache);
-    lock.release()?;
-    result
-}
-
 pub fn clean_storage(
     root: &Path,
     options: CleanupOptions,
     updated_at: &str,
 ) -> Result<CleanupResult, LifecycleError> {
-    cleanup_storage(root, options, true, updated_at)
+    let lock_id = format!("clean-{}-{}", std::process::id(), unique_name());
+    let mut lock = ProjectLock::acquire_alone(root, &lock_id, updated_at)?;
+    recover_abandoned_runs(root, updated_at)?;
+    let result = cleanup_storage_locked(root, options, true);
+    lock.release()?;
+    result
+}
+
+/// The metadata of a run `id` whose evidence is `bytes` long, for tests.
+#[cfg(test)]
+pub(crate) fn test_run_metadata(id: &str, bytes: u64) -> RunMetadata {
+    use crate::run_store::{RawEvidenceMetadata, RunFingerprint, RunIntegrity};
+
+    RunMetadata {
+        id: id.into(),
+        started_at: "2026-01-01T00:00:00Z".into(),
+        duration_ms: 1.0,
+        command: vec!["test".into()],
+        test_exit_code: Some(0),
+        integrity: RunIntegrity {
+            schema_version: 2,
+            instrumenter_version: "rust".into(),
+            git: None,
+            fingerprint: RunFingerprint {
+                algorithm: "sha256".into(),
+                source: "0".repeat(64),
+                tests: "0".repeat(64),
+                dependencies: "0".repeat(64),
+                configuration: "0".repeat(64),
+                instrumenter: "0".repeat(64),
+                execution: "0".repeat(64),
+                combined: "0".repeat(64),
+                source_files: 1,
+                test_files: 1,
+            },
+            stale: None,
+            stale_reasons: None,
+        },
+        raw_evidence: RawEvidenceMetadata {
+            schema_version: 2,
+            format: "supercov-evidence-archive".into(),
+            file: "evidence.raw.gz".into(),
+            files: 1,
+            uncompressed_bytes: bytes,
+            compressed_bytes: bytes,
+        },
+        isolated_build: None,
+        instrumented_build_cache: None,
+        timings: None,
+        merged: None,
+        parents: None,
+        source_roots: None,
+        copy: None,
+        merged_across: None,
+        recorded_by: None,
+        companions: None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run_store::{RawEvidenceMetadata, RunFingerprint, RunIntegrity};
 
     fn project() -> PathBuf {
         let root = std::env::temp_dir().join(format!("supercov-lifecycle-{}", unique_name()));
@@ -1497,50 +1541,7 @@ mod tests {
     }
 
     fn metadata(id: &str, bytes: u64) -> RunMetadata {
-        RunMetadata {
-            id: id.into(),
-            started_at: "2026-01-01T00:00:00Z".into(),
-            duration_ms: 1.0,
-            command: vec!["test".into()],
-            test_exit_code: Some(0),
-            integrity: RunIntegrity {
-                schema_version: 2,
-                instrumenter_version: "rust".into(),
-                git: None,
-                fingerprint: RunFingerprint {
-                    algorithm: "sha256".into(),
-                    source: "0".repeat(64),
-                    tests: "0".repeat(64),
-                    dependencies: "0".repeat(64),
-                    configuration: "0".repeat(64),
-                    instrumenter: "0".repeat(64),
-                    execution: "0".repeat(64),
-                    combined: "0".repeat(64),
-                    source_files: 1,
-                    test_files: 1,
-                },
-                stale: None,
-                stale_reasons: None,
-            },
-            raw_evidence: RawEvidenceMetadata {
-                schema_version: 2,
-                format: "supercov-evidence-archive".into(),
-                file: "evidence.raw.gz".into(),
-                files: 1,
-                uncompressed_bytes: bytes,
-                compressed_bytes: bytes,
-            },
-            isolated_build: None,
-            instrumented_build_cache: None,
-            timings: None,
-            merged: None,
-            parents: None,
-            source_roots: None,
-            copy: None,
-            merged_across: None,
-            recorded_by: None,
-            companions: None,
-        }
+        test_run_metadata(id, bytes)
     }
 
     fn evidence(root: &Path) -> (PathBuf, u64) {
@@ -1724,6 +1725,7 @@ mod tests {
     fn an_index_that_could_not_be_written_is_built_by_the_first_query() {
         // A failed index write loses nothing: publication succeeds without a
         // partial file, and the first query builds the index as it used to.
+        // The other files derived from the evidence are as disposable.
         let root = project();
         let id = "2026-01-01T00-00-00-400Z";
         let (evidence, metadata) = analysable_evidence(&root, id);
@@ -1732,11 +1734,21 @@ mod tests {
             &metadata,
             &evidence,
             Archived::default(),
-            Some(RunPublicationFault::QueryIndexWrite),
+            Some(RunPublicationFault::DerivedWrites),
         )
         .unwrap();
         let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
         assert!(!index.exists(), "no partial index is left");
+        assert!(
+            !published
+                .join(crate::run_store::STATEMENT_SPANS_FILE)
+                .exists()
+        );
+        assert!(
+            !published
+                .join(crate::run_store::ASSESSMENT_INPUT_FILE)
+                .exists()
+        );
         assert!(published.join("run.json").is_file());
         crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
         assert!(index.is_file());
@@ -1759,6 +1771,113 @@ mod tests {
             publish_run(&root, &metadata(id, bytes), &evidence),
             Err(LifecycleError::PublicationExists(_))
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Evidence whose length is not the one the run recorded is refused and
+    /// leaves nothing published; a staging directory left by an interrupted
+    /// attempt is cleared before the next.
+    #[test]
+    fn publication_refuses_evidence_of_another_length_and_clears_old_staging() {
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        let (evidence, bytes) = evidence(&root);
+        let staging = root.join(".supercov/work").join(id).join("run-publication");
+        assert!(matches!(
+            publish_run(&root, &metadata(id, bytes + 1), &evidence),
+            Err(LifecycleError::EvidenceLength { expected, actual }) if expected == bytes + 1 && actual == bytes
+        ));
+        assert!(!root.join(".supercov/runs").join(id).exists());
+        assert!(!staging.join("evidence.raw.gz").exists());
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("leftover"), b"from an interrupted attempt").unwrap();
+        let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
+        assert!(!published.join("leftover").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Only Supercov's own stored trees are removed: a path in the project,
+    /// in the trash, or the store itself is refused; a missing one is done.
+    /// What is copied or hashed is a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn only_stored_trees_are_removed_and_only_files_copied() {
+        let root = project();
+        fs::create_dir_all(root.join(".supercov/runs/r1")).unwrap();
+        let moved = remove_stored_tree_deferred(&root, Path::new(".supercov/runs/r1")).unwrap();
+        assert!(moved.is_some_and(|path| path.starts_with(root.join(TRASH))));
+        assert_eq!(
+            remove_stored_tree_deferred(&root, Path::new(".supercov/runs/gone")).unwrap(),
+            None
+        );
+        fs::create_dir_all(root.join(TRASH).join("old")).unwrap();
+        for target in [
+            root.join("src"),
+            root.join(TRASH).join("old"),
+            root.join(".supercov"),
+        ] {
+            assert!(
+                matches!(
+                    remove_stored_tree_deferred(&root, &target),
+                    Err(LifecycleError::UnsafePath(_))
+                ),
+                "{}",
+                target.display()
+            );
+        }
+        assert!(!lexical_descendant(&root, &root));
+        assert!(!lexical_descendant(&root, &root.join("a/../b")));
+        assert!(lexical_descendant(&root, &root.join("a/b")));
+        assert_eq!(
+            absolute_root(Path::new("relative")).unwrap(),
+            std::env::current_dir().unwrap().join("relative")
+        );
+        assert!(process_exists(std::process::id()));
+        assert!(!process_exists(0));
+        assert!(!process_exists(u32::MAX));
+        let directory = root.join("src");
+        assert!(matches!(
+            copy_regular_file(&directory, &root.join("copy")),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            file_sha256(&directory),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A copy whose owner file names a live process that holds no lock -- a
+    /// release that locked nothing -- still counts: cleaning is refused
+    /// naming it, and a run takes the next copy.
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_without_a_lock_still_holds_its_copy() {
+        let root = project();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let foreign = LockOwner {
+            run_id: "run_foreign".into(),
+            pid: 1,
+            started_at: "earlier".into(),
+        };
+        fs::write(
+            locks.join(format!("{}.json", copy_lock_name(1))),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            ProjectLock::acquire_alone(&root, "clean-1", "now"),
+            Err(LifecycleError::ActiveRun { pid: 1, .. })
+        ));
+        let mut lock = ProjectLock::acquire(&root, "run_mine", "now").unwrap();
+        assert_eq!(lock.copy(), 2);
+        assert!(lock.protects(&root));
+        assert!(!lock.protects(&root.join("other")));
+        lock.release().unwrap();
+        lock.release().unwrap();
+        assert!(!lock.protects(&root));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1847,6 +1966,106 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A run whose process still lives is left to finish; a run directory
+    /// with no state is passed over; and a link where a run's directory
+    /// belongs is refused, while a file there is not a run.
+    #[test]
+    fn a_live_run_is_left_alone_and_a_link_among_runs_is_refused() {
+        let root = project();
+        let live = "2026-01-03T00-00-00-000Z";
+        let stateless = "2026-01-04T00-00-00-000Z";
+        for id in [live, stateless] {
+            fs::create_dir_all(root.join(".supercov/work").join(id)).unwrap();
+        }
+        write_run_state(
+            &root,
+            &state(&root, live, RunStateStatus::Testing, std::process::id()),
+        )
+        .unwrap();
+        fs::write(root.join(".supercov/work/notes.txt"), "not a run").unwrap();
+        assert!(
+            recover_abandoned_runs(&root, "recovered")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(root.join(".supercov/work").join(live).exists());
+        assert!(root.join(".supercov/work").join(stateless).exists());
+        let mut names = child_directories(&root.join(".supercov/work")).unwrap();
+        names.sort();
+        assert_eq!(names, [live, stateless]);
+        assert!(
+            child_directories(&root.join(".supercov/absent"))
+                .unwrap()
+                .is_empty()
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("src"), root.join(".supercov/work/linked"))
+                .unwrap();
+            assert!(matches!(
+                child_directories(&root.join(".supercov/work")),
+                Err(LifecycleError::UnsafePath(path)) if path.ends_with("linked")
+            ));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Evidence goes with its run: an orphan's always, a kept run's never.
+    /// A full clean takes kept evidence and the build cache only once no
+    /// run is active.
+    #[test]
+    fn evidence_goes_with_its_run_and_a_clean_waits_for_active_runs() {
+        let root = project();
+        let (old, new, orphan, active) = (
+            "2026-01-01T00-00-00-000Z",
+            "2026-01-02T00-00-00-000Z",
+            "2026-01-03T00-00-00-000Z",
+            "2026-01-04T00-00-00-000Z",
+        );
+        for id in [old, new] {
+            fs::create_dir_all(root.join(".supercov/runs").join(id)).unwrap();
+        }
+        for id in [old, new, orphan] {
+            fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+        }
+        write_run_state(
+            &root,
+            &state(&root, active, RunStateStatus::Testing, std::process::id()),
+        )
+        .unwrap();
+        kept_evidence(&root, "2025-12-31T00-00-00-000Z");
+        fs::create_dir_all(root.join(".supercov/cache")).unwrap();
+        let clean = |keep: usize| {
+            cleanup_storage_locked(
+                &root,
+                CleanupOptions {
+                    keep,
+                    dry_run: true,
+                },
+                true,
+            )
+            .unwrap()
+        };
+        let trim = clean(1);
+        assert_eq!(trim.removed_runs, [old]);
+        assert_eq!(trim.removed_evidence, [orphan, old]);
+        assert!(trim.removed_failed_evidence.is_empty());
+        assert!(!trim.removed_build_cache, "a run is active");
+        let full = clean(0);
+        assert!(full.removed_failed_evidence.is_empty(), "a run is active");
+        assert!(!full.removed_build_cache);
+        write_run_state(
+            &root,
+            &state(&root, active, RunStateStatus::Complete, std::process::id()),
+        )
+        .unwrap();
+        let idle = clean(0);
+        assert_eq!(idle.removed_failed_evidence, ["2025-12-31T00-00-00-000Z"]);
+        assert!(idle.removed_build_cache);
+        assert!(idle.removed_workspaces.contains(&active.to_owned()));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn retention_is_deterministic_dry_run_safe_and_preserves_active_work() {
         let root = project();
@@ -1920,7 +2139,7 @@ mod tests {
         let stored = [
             root.join(".supercov/evidence/run_orphaned"),
             root.join(FAILED_EVIDENCE).join("run_failed"),
-            root.join(".supercov/.cache/build"),
+            root.join(".supercov/cache/docker-images"),
         ];
         for directory in &stored {
             fs::create_dir_all(directory).unwrap();
@@ -2386,6 +2605,152 @@ mod tests {
             vec!["run_cleaned".to_string()]
         );
         assert!(!kept.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_or_a_name_too_long_on_the_way_to_a_write_refuses_it() {
+        let root = project();
+        fs::create_dir_all(root.join(".supercov")).unwrap();
+        fs::write(root.join(".supercov/file"), "").unwrap();
+        assert!(matches!(
+            atomic_write(&root, &root.join(".supercov/file/x/state.json"), b"{}"),
+            Err(LifecycleError::UnsafePath(path)) if path == root.join(".supercov/file")
+        ));
+        let long = "x".repeat(300);
+        assert!(matches!(
+            atomic_write(&root, &root.join(".supercov").join(&long).join("state.json"), b"{}"),
+            Err(LifecycleError::Io { path, .. }) if path == root.join(".supercov").join(&long)
+        ));
+        // A name that fits, but not with the temporary's suffix.
+        let near = "x".repeat(250);
+        assert!(matches!(
+            atomic_write(&root, &root.join(".supercov").join(&near), b"{}"),
+            Err(LifecycleError::Io { path, .. }) if path.extension().is_some_and(|extension| extension == "tmp")
+        ));
+        assert!(!root.join(".supercov").join(&near).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_write_onto_a_directory_fails_and_leaves_no_temporary() {
+        let root = project();
+        let directory = root.join(".supercov/work/run_dir/state.json");
+        fs::create_dir_all(directory.join("inside")).unwrap();
+        assert!(matches!(
+            atomic_write(&root, &directory, b"{}"),
+            Err(LifecycleError::Io { path, .. }) if path == directory
+        ));
+        let left = fs::read_dir(directory.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(left, ["state.json"]);
+        // The same directory is no state to read.
+        assert!(matches!(
+            update_run_state(&root, "run_dir", RunStateStatus::Failed, "now", None),
+            Err(LifecycleError::Io { .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_stored_tree_under_a_file_is_an_error_not_already_gone() {
+        let root = project();
+        fs::create_dir_all(root.join(".supercov/runs")).unwrap();
+        fs::write(root.join(".supercov/runs/file"), "").unwrap();
+        assert!(matches!(
+            remove_stored_tree_deferred(&root, &root.join(".supercov/runs/file/run_x")),
+            Err(LifecycleError::Io { .. })
+        ));
+        assert!(root.join(".supercov/runs/file").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn waiting_for_the_trash_sweep_gives_up_only_past_its_patience() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        *BACKGROUND_SWEEP.lock().unwrap() = Some(std::thread::spawn(move || {
+            let _ = wait.recv();
+        }));
+        assert!(!finish_background_sweep(Duration::ZERO));
+        drop(release);
+        *BACKGROUND_SWEEP.lock().unwrap() = Some(std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+        }));
+        assert!(finish_background_sweep(Duration::from_secs(30)));
+        assert!(finish_background_sweep(Duration::ZERO));
+    }
+
+    /// An owner file naming this process is not another run's: a run takes
+    /// the copy, and cleaning is not refused for it.
+    #[test]
+    fn a_copy_this_process_is_named_beside_is_not_held_by_another_run() {
+        let root = project();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let mine = LockOwner {
+            run_id: "run_earlier".into(),
+            pid: std::process::id(),
+            started_at: "earlier".into(),
+        };
+        fs::write(
+            locks.join(format!("{}.json", copy_lock_name(1))),
+            serde_json::to_vec(&mine).unwrap(),
+        )
+        .unwrap();
+        let mut alone = ProjectLock::acquire_alone(&root, "clean-1", "now").unwrap();
+        alone.release().unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run_mine", "now").unwrap();
+        assert_eq!(lock.copy(), 1);
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_run_named_but_without_its_evidence_is_not_published() {
+        let root = project();
+        let run = root.join(".supercov/runs/run_bare");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(run.join("run.json"), r#"{"id":"run_bare"}"#).unwrap();
+        fs::create_dir_all(root.join(".supercov/work/run_bare")).unwrap();
+        assert!(!finalize_published_run(&root, "run_bare").unwrap());
+        assert!(root.join(".supercov/work/run_bare").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn evidence_that_cannot_all_be_copied_is_not_kept_in_part() {
+        let root = project();
+        let evidence = root.join(".supercov/work/run_link/python/evidence");
+        fs::create_dir_all(&evidence).unwrap();
+        fs::write(evidence.join("main.jsonl"), "what the run saw").unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), evidence.join("zz.jsonl")).unwrap();
+        assert!(keep_failed_evidence(&root, &evidence, "run_link").is_none());
+        assert!(!root.join(FAILED_EVIDENCE).join("run_link").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_idle_copy_with_part_of_it_gone_is_removed_as_far_as_it_is_there() {
+        let root = project();
+        let container = root.join(".supercov/workspaces");
+        fs::create_dir_all(container.join("workspace-2/project")).unwrap();
+        fs::write(
+            container.join(".supercov-workspace-store"),
+            b"Supercov instrumented workspace. Safe to delete.\n",
+        )
+        .unwrap();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        File::create(locks.join("active-2.lock"))
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60))
+            .unwrap();
+        recover_abandoned_runs(&root, "now").unwrap();
+        assert!(!container.join("workspace-2").exists());
+        sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }

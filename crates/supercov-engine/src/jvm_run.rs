@@ -304,9 +304,9 @@ fn elapsed_ms(started: Instant) -> f64 {
 }
 
 fn write(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
-    }
+    // Every path written is a name joined onto a directory.
+    let parent = path.parent().unwrap_or(path);
+    fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     fs::write(path, contents).map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -348,10 +348,6 @@ fn java_literal(value: &str) -> String {
 /// passing suite into a failing one.
 fn runtime_source(probe_count: usize) -> String {
     let marker = "static final int PROBE_COUNT = 0; // supercov:probe-count";
-    debug_assert!(
-        RUNTIME_SOURCE.contains(marker),
-        "the runtime no longer declares the probe count Supercov substitutes"
-    );
     RUNTIME_SOURCE.replace(
         marker,
         &format!("static final int PROBE_COUNT = {probe_count}; // supercov:probe-count"),
@@ -452,9 +448,9 @@ fn maven_launcher_version(directory: &Path, pom: &str) -> Option<String> {
     }
     // A Jupiter the pom names without a version, under a parent that could
     // not be read (not yet downloaded): the parent manages it, and a pinned
-    // guess is what broke commons-cli.
-    let versionless = pom.contains("<artifactId>junit-jupiter") && jupiter_version(pom).is_none();
-    if pom.contains("<parent>") && versionless {
+    // guess is what broke commons-cli. The effective text starts with the
+    // pom's own, so a version the pom names was found above.
+    if pom.contains("<parent>") && pom.contains("<artifactId>junit-jupiter") {
         return None;
     }
     Some(DEFAULT_LAUNCHER_VERSION.to_owned())
@@ -1003,6 +999,18 @@ fn command_with_fresh_results(
             {
                 return (updated, None);
             }
+            // A flag on the end of `make test` is make's, and make refuses
+            // it; Gradle has no setting in the environment that says the
+            // same.
+            if !starts_gradle(command) {
+                return (
+                    updated,
+                    Some(
+                        "did not add --rerun-tasks: the command does not start Gradle itself, so a test task Gradle considers up to date may not run and would record no coverage; add --rerun-tasks where your command starts Gradle"
+                            .into(),
+                    ),
+                );
+            }
             updated.push("--rerun-tasks".into());
             (
                 updated,
@@ -1016,6 +1024,21 @@ fn command_with_fresh_results(
         // build cache has no Maven equivalent worth defeating here.
         JvmBuild::Maven | JvmBuild::Plain => (updated, None),
     }
+}
+
+/// Whether the command starts Gradle itself, rather than through a wrapper
+/// of its own (`make test`, a script) that Gradle's flags would not reach.
+fn starts_gradle(command: &[String]) -> bool {
+    command
+        .iter()
+        .any(|token| token == "gradle" || token.ends_with("gradlew"))
+}
+
+/// Whether the command starts Maven itself.
+fn starts_maven(command: &[String]) -> bool {
+    command
+        .iter()
+        .any(|token| matches!(token.as_str(), "mvn" | "mvnw" | "maven") || token.ends_with("/mvnw"))
 }
 
 /// One module of the build, and where its evidence lands.
@@ -1165,13 +1188,12 @@ fn instrument_workspace(
     // `files.tests`, so the source sets are asked directly: a module judged to
     // have no tests gets no listener, and a run with no listener records
     // nothing at all.
+    // `prepare_jvm_project` refuses a project with neither, so there is at
+    // least one module.
     for module in modules.keys().cloned().collect::<Vec<_>>() {
         if workspace.join(&module).join("src/test").is_dir() {
             modules.insert(module, true);
         }
-    }
-    if modules.is_empty() {
-        modules.insert(".".to_owned(), true);
     }
 
     let modules = modules
@@ -1280,13 +1302,10 @@ fn instrument_workspace(
         // JUnit version is in scope, and a module that runs JUnit 4 must not
         // get the launcher at all.
         JvmBuild::Maven => {
+            // Only a plain tree leaves a module unmeasurable.
             for module in modules
                 .iter()
-                .filter(|module| {
-                    module.has_tests
-                        && !unmeasurable.contains(&module.directory)
-                        && !modular.contains(&module.directory)
-                })
+                .filter(|module| module.has_tests && !modular.contains(&module.directory))
                 // A TestNG module needs none of this: it already depends on
                 // the framework its own listener implements, and the launcher
                 // would only change which provider the build chooses.
@@ -1335,25 +1354,28 @@ fn instrument_workspace(
                 })
                 .map(|module| module.directory.clone())
                 .collect::<Vec<_>>();
-            for name in ["build.gradle.kts", "build.gradle"] {
-                let path = workspace.join(name);
-                let Ok(existing) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                let catalog = fs::read_to_string(workspace.join("gradle/libs.versions.toml"))
-                    .unwrap_or_default();
-                if let Some(updated) =
-                    gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog, &junit4)
-                {
-                    added_vintage |= !junit4.is_empty();
-                    write(&path, &updated)?;
-                    added_launcher = Some(if name.ends_with(".kts") {
-                        "build.gradle.kts"
-                    } else {
-                        "build.gradle"
-                    });
-                }
-                break;
+            // A build whose root holds only its settings, each project with
+            // a build file of its own, gets a root build file in the copy:
+            // Gradle reads one there as well, and the `allprojects` block
+            // reaches every project from it.
+            let name = ["build.gradle.kts", "build.gradle"]
+                .into_iter()
+                .find(|name| workspace.join(name).is_file())
+                .unwrap_or(if workspace.join("settings.gradle.kts").is_file() {
+                    "build.gradle.kts"
+                } else {
+                    "build.gradle"
+                });
+            let path = workspace.join(name);
+            let existing = fs::read_to_string(&path).unwrap_or_default();
+            let catalog =
+                fs::read_to_string(workspace.join("gradle/libs.versions.toml")).unwrap_or_default();
+            if let Some(updated) =
+                gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog, &junit4)
+            {
+                added_vintage |= !junit4.is_empty();
+                write(&path, &updated)?;
+                added_launcher = Some(name);
             }
         }
         // Nothing resolves dependencies for a plain tree; whoever compiles it
@@ -1375,27 +1397,26 @@ fn instrument_workspace(
             )?;
             let properties = resources.join("junit-platform.properties");
             let existing = fs::read_to_string(&properties).ok();
-            if !exact_attribution {
+            if exact_attribution {
+                // Said out loud, because it changes how the suite runs rather
+                // than how it is measured. Every other thing Supercov does to
+                // the workspace is announced -- the isolated copy, the added
+                // launcher, `-count=1` over in Go -- and this is the one with a
+                // chance of changing an outcome: a test that waits on another
+                // test's thread passes under the project's own command and
+                // hangs under this one.
+                if asks_for_parallel_execution(existing.as_deref()) {
+                    serialised.insert(module.directory.clone());
+                }
+                write(&properties, &sequential_properties(existing.as_deref()))?;
+            } else if asks_for_parallel_execution(existing.as_deref()) {
                 // The suite runs the way its author wrote it. Where that means
                 // tests run at once the runtime notices, says what it could
                 // not credit, and the run records it -- which is a smaller
                 // price than several times the suite's wall time, and not one
                 // Supercov gets to spend on somebody's behalf.
-                if asks_for_parallel_execution(existing.as_deref()) {
-                    concurrent.insert(module.directory.clone());
-                }
-                continue;
+                concurrent.insert(module.directory.clone());
             }
-            // Said out loud, because it changes how the suite runs rather than
-            // how it is measured. Every other thing Supercov does to the
-            // workspace is announced -- the isolated copy, the added launcher,
-            // `-count=1` over in Go -- and this is the one with a chance of
-            // changing an outcome: a test that waits on another test's thread
-            // passes under the project's own command and hangs under this one.
-            if asks_for_parallel_execution(existing.as_deref()) {
-                serialised.insert(module.directory.clone());
-            }
-            write(&properties, &sequential_properties(existing.as_deref()))?;
         }
         if frameworks.testng {
             write(
@@ -1410,13 +1431,11 @@ fn instrument_workspace(
     // a test is its own and need not be a method at all.
     let mut declared_in = BTreeMap::new();
     for (relative, _) in &project.files.tests {
-        if let Some(stem) = relative
-            .rsplit('/')
-            .next()
-            .and_then(|name| name.split('.').next())
-        {
-            declared_in.insert(stem.to_owned(), relative.clone());
-        }
+        let name = relative
+            .rsplit_once('/')
+            .map_or(relative.as_str(), |(_, name)| name);
+        let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+        declared_in.insert(stem.to_owned(), relative.clone());
     }
 
     Ok(InstrumentedWorkspace {
@@ -1433,6 +1452,38 @@ fn instrument_workspace(
         unmeasurable,
         modular,
     })
+}
+
+/// How the copy's build skips Apache RAT's license check.
+#[derive(Debug, PartialEq)]
+enum RatSkip {
+    /// A property on the command, which starts Maven itself.
+    Argument,
+    /// The `MAVEN_OPTS` a wrapper passes on to Maven.
+    MavenOpts(String),
+}
+
+/// How to skip the license check, given the user's own `MAVEN_OPTS`;
+/// nothing when the command or those options already skip it.
+fn rat_skip(command: &[String], maven_opts: Option<String>) -> Option<RatSkip> {
+    if command.iter().any(|a| a.contains("rat.skip"))
+        || maven_opts
+            .as_deref()
+            .is_some_and(|opts| opts.contains("rat.skip"))
+    {
+        return None;
+    }
+    if starts_maven(command) {
+        return Some(RatSkip::Argument);
+    }
+    Some(RatSkip::MavenOpts(
+        maven_opts
+            .filter(|opts| !opts.trim().is_empty())
+            .into_iter()
+            .chain(["-Drat.skip=true".to_owned()])
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
 }
 
 /// The fingerprint a later query compares against the stored run.
@@ -1544,10 +1595,12 @@ pub fn run_direct_jvm(
             writeln!(
                 diagnostics,
                 "[supercov] turned JUnit's parallel execution off in the workspace copy ({}): attribution is a sweep of one shared probe array at each test boundary, so two tests running at once cannot both be credited with what they reached. Your suite runs in order here and your own configuration is untouched.",
+                // A module is the directory `module_of` names: `.` for the
+                // root, never empty.
                 instrumented
                     .serialised
                     .iter()
-                    .map(|module| if module.is_empty() { "." } else { module.as_str() })
+                    .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -1560,7 +1613,7 @@ pub fn run_direct_jvm(
                 instrumented
                     .concurrent
                     .iter()
-                    .map(|module| if module.is_empty() { "." } else { module.as_str() })
+                    .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -1611,8 +1664,16 @@ pub fn run_direct_jvm(
         // Apache RAT fails the build on a file without a license header, and
         // Supercov's runtime and listeners in the copy are such files: every
         // Apache Commons project stopped before its first test.
-        if instrumented.license_check && !command.iter().any(|a| a.contains("rat.skip")) {
-            command.push("-Drat.skip=true".into());
+        // Through a wrapper, the property reaches Maven in MAVEN_OPTS, which
+        // it reads as system properties.
+        let mut maven_opts = None;
+        if instrumented.license_check
+            && let Some(skip) = rat_skip(&command, std::env::var("MAVEN_OPTS").ok())
+        {
+            match skip {
+                RatSkip::Argument => command.push("-Drat.skip=true".into()),
+                RatSkip::MavenOpts(opts) => maven_opts = Some(opts),
+            }
             writeln!(
                 diagnostics,
                 "[supercov] added -Drat.skip=true: Apache RAT checks every file in the build for a license header, and the workspace copy holds Supercov's own runtime and listeners, which carry none. Your own build still runs the check."
@@ -1632,7 +1693,12 @@ pub fn run_direct_jvm(
                     program: command[0].clone().into(),
                     arguments: command[1..].iter().map(OsString::from).collect(),
                     cwd: workspace.clone(),
-                    environment: None,
+                    environment: maven_opts.map(|opts| {
+                        std::env::vars_os()
+                            .filter(|(name, _)| name != "MAVEN_OPTS")
+                            .chain([(OsString::from("MAVEN_OPTS"), OsString::from(opts))])
+                            .collect()
+                    }),
                     captured_output: None,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
@@ -1676,7 +1742,8 @@ pub fn run_direct_jvm(
         }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
-                "the test command was interrupted by {signal:?}; no run was published"
+                "the test command was interrupted by {}; no run was published",
+                signal.name()
             ));
         }
         let exit_code = execution.exit_code;
@@ -1862,10 +1929,6 @@ pub fn run_direct_jvm(
 /// with, since a server has none.
 fn server_runtime_source(probe_count: usize, widths: &[u8]) -> String {
     let marker = "static final int[] SERVER_WIDTHS = new int[0]; // supercov:server-widths";
-    debug_assert!(
-        RUNTIME_SOURCE.contains(marker),
-        "the runtime no longer declares the server widths Supercov substitutes"
-    );
     let widths = widths
         .iter()
         .map(u8::to_string)
@@ -2021,6 +2084,51 @@ impl JvmServer {
 mod tests {
     use super::*;
 
+    /// A catalog accessor counts only as itself, not as the start of a
+    /// longer one; a class's file is found by its path from the source root
+    /// or at the root itself; and only plain `<name>value</name>` children
+    /// are read.
+    #[test]
+    fn catalog_accessors_class_files_and_xml_children_are_read_exactly() {
+        let catalog = BTreeMap::from([("kotlin".to_owned(), "org.jetbrains:kotlin".to_owned())]);
+        for (text, named) in [
+            ("implementation(libs.kotlin)", true),
+            ("implementation libs.kotlin", true),
+            ("libs.kotlin.reflect", false),
+            ("libs.kotlinx", false),
+            ("libs.kotlin-x", false),
+            ("libs.kotlin_x", false),
+        ] {
+            assert_eq!(
+                with_catalog(text, &catalog).ends_with("\norg.jetbrains:kotlin"),
+                named,
+                "{text}"
+            );
+        }
+        let declared_in = BTreeMap::from([
+            ("Foo".to_owned(), "Foo.java".to_owned()),
+            ("Bar".to_owned(), "src/MyBar.java".to_owned()),
+        ]);
+        assert_eq!(
+            declaring_file(&declared_in, "Foo").as_deref(),
+            Some("Foo.java")
+        );
+        assert_eq!(
+            declaring_file(&declared_in, "pkg.Bar").as_deref(),
+            Some("src/MyBar.java")
+        );
+        let only = BTreeMap::from([("Baz".to_owned(), "src/MyBar.java".to_owned())]);
+        assert_eq!(declaring_file(&only, "pkg.Bar"), None);
+        assert_eq!(
+            xml_children("<a>1</a><!-- c --><b x=\"y\">2</b><?pi?></c><d> 4 </d><e>open"),
+            [
+                ("a".to_owned(), "1".to_owned()),
+                ("d".to_owned(), "4".to_owned())
+            ]
+        );
+        assert!(xml_children("<unclosed").is_empty());
+    }
+
     #[test]
     fn only_a_project_that_asked_for_parallel_execution_is_told_it_lost_it() {
         // The line is worth printing when something was taken away and noise
@@ -2090,6 +2198,17 @@ mod tests {
         );
         assert_eq!(command, ["./gradlew", "test", "--rerun"]);
         assert!(note.is_none());
+
+        // Behind a wrapper the flag would be the wrapper's; it is left out
+        // and the run says so.
+        let (command, note) =
+            command_with_fresh_results(JvmBuild::Gradle, &["make".to_owned(), "test".to_owned()]);
+        assert_eq!(command, ["make", "test"]);
+        assert!(note.is_some_and(|note| note.starts_with("did not add --rerun-tasks")));
+        assert!(starts_gradle(&["gradle".to_owned(), "test".to_owned()]));
+        assert!(starts_maven(&["./mvnw".to_owned(), "verify".to_owned()]));
+        assert!(starts_maven(&["mvn".to_owned()]));
+        assert!(!starts_maven(&["make".to_owned(), "test".to_owned()]));
 
         // Maven's lifecycle re-runs surefire every time; nothing to defeat.
         let (command, note) =
@@ -2440,7 +2559,25 @@ mod tests {
         assert_eq!(maven, ["stopped the build failing on warnings"]);
         let mut unchanged = Vec::new();
         note_relaxations("-Xlint:all", "-Xlint:all", &mut unchanged);
+        note_relaxations(
+            "-Werror -Xplugin:ErrorProne",
+            "-Werror -Xplugin:ErrorProne",
+            &mut unchanged,
+        );
         assert!(unchanged.is_empty());
+    }
+
+    /// A catalog's JUnit entries: the BOM by name, and Jupiter with its
+    /// version however it is written; other JUnit modules and a Jupiter
+    /// entry with no version add nothing.
+    #[test]
+    fn a_version_catalog_names_its_junit_bom_and_jupiter_versions() {
+        let catalog = "[versions]\njunit = \"5.10.0\"\n\n[libraries]\nbom = { module = \"org.junit:junit-bom\", version.ref = \"junit\" }\njupiter = { module = \"org.junit.jupiter:junit-jupiter\", version.ref = \"junit\" }\napi = { module = \"org.junit.jupiter:junit-jupiter-api\", version = \"5.9.0\" }\nparams = { module = \"org.junit.jupiter:junit-jupiter-params\", version=\"5.8.0\" }\nengine = { module = \"org.junit.jupiter:junit-jupiter-engine\" }\nlauncher = { module = \"org.junit.platform:junit-platform-launcher\" }\nother = { module = \"com.example:x\" }\n";
+        assert_eq!(
+            catalog_versions(catalog),
+            "junit-bom\norg.junit.jupiter:junit-jupiter:5.10.0\norg.junit.jupiter:junit-jupiter:5.9.0\norg.junit.jupiter:junit-jupiter:5.8.0\n"
+        );
+        assert_eq!(catalog_versions("[libraries]\n"), "");
     }
 
     #[test]
@@ -2458,6 +2595,7 @@ mod tests {
             "5.x.1",
             "4.13.2",
             "five.1.0",
+            "5.1.",
         ] {
             assert_eq!(platform_of_jupiter(unknown), None, "{unknown}");
         }
@@ -2767,6 +2905,539 @@ mod tests {
         assert_eq!(
             maven_with_vintage(&updated, launcher_version(&updated)),
             None
+        );
+    }
+
+    fn temporary_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "supercov-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// A module directory with one product class and, when asked, one test.
+    fn java_module(root: &Path, module: &str, tests: bool) {
+        write(
+            &root.join(module).join("src/main/java/app/Api.java"),
+            "package app;\npublic class Api { public int one(boolean b) { return b ? 1 : 2; } }\n",
+        )
+        .unwrap();
+        if tests {
+            write(
+                &root.join(module).join("src/test/java/app/ApiTest.java"),
+                "package app;\nclass ApiTest { void t() {} }\n",
+            )
+            .unwrap();
+        }
+    }
+
+    fn jvm_request(root: &Path, command: &[&str]) -> DirectJvmRunRequest {
+        DirectJvmRunRequest {
+            root: root.to_owned(),
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            run_id: "2026-01-02T00-00-00-000Z".into(),
+            started_at: "2026-01-02T00:00:00Z".into(),
+            exact_attribution: true,
+        }
+    }
+
+    #[test]
+    fn the_runtime_carries_the_sizes_supercov_substitutes() {
+        assert!(runtime_source(7).contains("static final int PROBE_COUNT = 7;"));
+        let server = server_runtime_source(7, &[2, 1]);
+        assert!(server.contains("static final int PROBE_COUNT = 7;"));
+        assert!(server.contains("static final int[] SERVER_WIDTHS = new int[] {2, 1};"));
+    }
+
+    #[test]
+    fn rarer_build_file_shapes_are_read_as_maven_and_gradle_mean_them() {
+        // A catalog with no libraries resolves nothing.
+        let root = temporary_root("catalog-versions-only");
+        write(
+            &root.join("gradle/libs.versions.toml"),
+            "[versions]\njunit = \"5.10.0\"\n",
+        )
+        .unwrap();
+        assert!(version_catalog(&root).is_empty());
+        fs::remove_dir_all(&root).ok();
+        // A self-closing section holds no `<dependencies>` of its own.
+        let pom = "<project><build/><dependencies></dependencies></project>";
+        assert_eq!(project_dependencies_end(pom), pom.find("</dependencies>"));
+        // A file whose name merely ends in the class's does not declare it.
+        let only = BTreeMap::from([("Baz".to_owned(), "src/MyBar.java".to_owned())]);
+        assert_eq!(declaring_file(&only, "Bar"), None);
+        // An author who asked for every task to rerun is left as written.
+        let command = ["./gradlew".to_owned(), "--rerun-tasks".to_owned()];
+        assert_eq!(
+            command_with_fresh_results(JvmBuild::Gradle, &command),
+            (command.to_vec(), None)
+        );
+    }
+
+    #[test]
+    fn a_parent_named_by_its_directory_is_read_and_one_that_names_no_jupiter_is_not_trusted() {
+        let root = temporary_root("parent-directory");
+        let module = root.join("module");
+        fs::create_dir_all(&module).unwrap();
+        write(
+            &root.join("parent/pom.xml"),
+            "<project><artifactId>p</artifactId><dependencyManagement><dependencies><dependency><artifactId>junit-jupiter</artifactId><version>5.12.0</version></dependency></dependencies></dependencyManagement></project>",
+        )
+        .unwrap();
+        let child = "<project><parent><groupId>g</groupId><artifactId>p</artifactId><version>1</version><relativePath>../parent</relativePath></parent></project>";
+        assert_eq!(
+            maven_launcher_version(&module, child).as_deref(),
+            Some("1.12.0")
+        );
+        // A parent that cannot be read, for a pom naming no Jupiter: nothing
+        // manages a version, so the launcher pins its own.
+        fs::remove_dir_all(root.join("parent")).unwrap();
+        assert_eq!(
+            maven_launcher_version(&module, child).as_deref(),
+            Some(DEFAULT_LAUNCHER_VERSION)
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_plain_tree_s_listeners_skip_untested_junit_4_and_java_modules() {
+        // No build at the root makes a plain tree, whatever a module holds.
+        let root = temporary_root("plain-modules");
+        java_module(&root, "app", true);
+        java_module(&root, "docs", false);
+        java_module(&root, "legacy", true);
+        write(
+            &root.join("legacy/pom.xml"),
+            "<project><dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId></dependency></dependencies></project>",
+        )
+        .unwrap();
+        java_module(&root, "boundaries", true);
+        write(
+            &root.join("boundaries/src/test/java/module-info.java"),
+            "module app.boundaries {}\n",
+        )
+        .unwrap();
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        assert_eq!(instrumented.build, JvmBuild::Plain);
+        assert_eq!(instrumented.unmeasurable, ["legacy"]);
+        assert_eq!(instrumented.modular, ["boundaries"]);
+        let tested = instrumented
+            .modules
+            .iter()
+            .map(|module| (module.directory.as_str(), module.has_tests))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tested,
+            [
+                ("app", true),
+                ("boundaries", true),
+                ("docs", false),
+                ("legacy", true)
+            ]
+        );
+        let listener = |module: &str| {
+            root.join(module)
+                .join("src/test/resources")
+                .join(SERVICES_FILE)
+                .exists()
+        };
+        assert!(listener("app"));
+        for module in ["boundaries", "docs", "legacy"] {
+            assert!(!listener(module), "{module}");
+        }
+        // Run in order, a suite that never asked for parallelism is not told
+        // it lost it.
+        assert!(instrumented.serialised.is_empty());
+        assert!(
+            fs::read_to_string(root.join("app/src/test/resources/junit-platform.properties"))
+                .unwrap()
+                .contains("parallel.enabled=false")
+        );
+        // Every module's product code still stores into a runtime of its own.
+        assert!(
+            root.join("docs/src/main/java")
+                .join(PACKAGE_DIRECTORY)
+                .join("Supercov.java")
+                .exists()
+        );
+        // A test class is known by its file's stem.
+        assert_eq!(
+            instrumented.declared_in.keys().collect::<Vec<_>>(),
+            ["ApiTest", "module-info"]
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn gradle_moves_only_its_plain_junit_4_modules_onto_the_platform() {
+        let root = temporary_root("gradle-junit4");
+        write(&root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let junit4 = "dependencies { testImplementation 'junit:junit:4.13.2' }\n";
+        // TestNG attributes a module that runs it beside JUnit 4.
+        java_module(&root, "both", true);
+        write(
+            &root.join("both/build.gradle"),
+            &format!("{junit4}dependencies {{ testImplementation 'org.testng:testng:7.10.2' }}\n"),
+        )
+        .unwrap();
+        java_module(&root, "named", true);
+        write(&root.join("named/build.gradle"), junit4).unwrap();
+        write(
+            &root.join("named/src/test/java/module-info.java"),
+            "module app.named {}\n",
+        )
+        .unwrap();
+        java_module(&root, "only", false);
+        java_module(&root, "plain", true);
+        write(&root.join("plain/build.gradle"), junit4).unwrap();
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert!(instrumented.added_vintage);
+        assert_eq!(instrumented.added_launcher, Some("build.gradle"));
+        let build = fs::read_to_string(root.join("build.gradle")).unwrap();
+        assert!(build.contains("in [\"plain\"]"), "{build}");
+        let resources = |module: &str, file: &str| {
+            root.join(module)
+                .join("src/test/resources")
+                .join(file)
+                .exists()
+        };
+        // A JUnit 4 module runs on Vintage now, so the platform listener
+        // reports it.
+        assert!(resources("plain", SERVICES_FILE));
+        assert!(resources("both", SERVICES_FILE));
+        assert!(resources("both", TESTNG_SERVICES_FILE));
+        assert!(!resources("named", SERVICES_FILE));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A Gradle build whose root holds only its settings still gets the
+    /// launcher its listeners compile against: in a root build file made in
+    /// the copy, for each settings language.
+    #[test]
+    fn a_gradle_root_with_only_its_settings_gets_the_launcher_in_a_root_build_file() {
+        for (settings, build) in [
+            ("settings.gradle", "build.gradle"),
+            ("settings.gradle.kts", "build.gradle.kts"),
+        ] {
+            let root = temporary_root("gradle-settings-only");
+            write(&root.join(settings), "include 'app'\n").unwrap();
+            write(&root.join("app/build.gradle"), "plugins { id 'java' }\n").unwrap();
+            java_module(&root, "app", true);
+            let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None)
+                .expect("instrument");
+            assert_eq!(instrumented.added_launcher, Some(build));
+            let made = fs::read_to_string(root.join(build)).unwrap();
+            assert!(made.contains(LAUNCHER_ARTIFACT), "{made}");
+            assert!(made.contains("allprojects"), "{made}");
+            assert!(
+                root.join("app/src/test/resources")
+                    .join(SERVICES_FILE)
+                    .exists()
+            );
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    #[test]
+    fn gradle_adds_nothing_where_no_module_needs_the_launcher_or_it_is_there() {
+        let root = temporary_root("gradle-testng");
+        write(&root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        java_module(&root, "core", false);
+        java_module(&root, "suite", true);
+        write(
+            &root.join("suite/build.gradle"),
+            "dependencies { testImplementation 'org.testng:testng:7.10.2' }\n",
+        )
+        .unwrap();
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert_eq!(instrumented.added_launcher, None);
+        assert_eq!(
+            fs::read_to_string(root.join("build.gradle")).unwrap(),
+            "plugins { id 'java' }\n"
+        );
+        assert!(
+            root.join("suite/src/test/resources")
+                .join(TESTNG_SERVICES_FILE)
+                .exists()
+        );
+        fs::remove_dir_all(&root).ok();
+
+        let root = temporary_root("gradle-launcher");
+        let declared = "dependencies { testImplementation 'org.junit.platform:junit-platform-launcher:1.10.2' }\n";
+        write(&root.join("build.gradle"), declared).unwrap();
+        java_module(&root, ".", true);
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert_eq!(instrumented.added_launcher, None);
+        assert_eq!(
+            fs::read_to_string(root.join("build.gradle")).unwrap(),
+            declared
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn maven_adds_the_launcher_only_to_modules_with_tests() {
+        let root = temporary_root("maven-untested");
+        let pom = "<project>\n  <dependencies>\n    <dependency>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n    </dependency>\n  </dependencies>\n</project>\n";
+        write(&root.join("pom.xml"), pom).unwrap();
+        for module in ["core", "app"] {
+            write(&root.join(module).join("pom.xml"), pom).unwrap();
+        }
+        java_module(&root, "core", false);
+        java_module(&root, "app", true);
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert_eq!(instrumented.added_launcher, Some("pom.xml"));
+        assert!(
+            fs::read_to_string(root.join("app/pom.xml"))
+                .unwrap()
+                .contains("junit-platform-launcher")
+        );
+        assert_eq!(fs::read_to_string(root.join("core/pom.xml")).unwrap(), pom);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_run_refuses_an_empty_command() {
+        let root = temporary_root("jvm-empty-command");
+        let error = run_direct_jvm(&jvm_request(&root, &[]), &mut Vec::new()).unwrap_err();
+        assert_eq!(error, "test command must not be empty");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_command_that_records_nothing_names_the_silent_modules_and_publishes_no_run() {
+        let root = temporary_root("jvm-silent");
+        java_module(&root, "app", true);
+        java_module(&root, "legacy", true);
+        write(
+            &root.join("legacy/pom.xml"),
+            "<project><dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId></dependency></dependencies></project>",
+        )
+        .unwrap();
+        java_module(&root, "boundaries", true);
+        write(
+            &root.join("boundaries/src/test/java/module-info.java"),
+            "module app.boundaries {}\n",
+        )
+        .unwrap();
+        // A run whose process died before it cleaned up.
+        let abandoned = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/work").join(abandoned)).unwrap();
+        crate::lifecycle::write_run_state(
+            &root,
+            &crate::lifecycle::RunState {
+                id: abandoned.into(),
+                pid: u32::MAX,
+                root: root.display().to_string(),
+                workspace: root.display().to_string(),
+                started_at: "start".into(),
+                updated_at: "update".into(),
+                status: crate::lifecycle::RunStateStatus::Testing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let request = jvm_request(&root, &["true"]);
+        let mut diagnostics = Vec::new();
+        let error = run_direct_jvm(&request, &mut diagnostics).unwrap_err();
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(error.contains("wrote no coverage evidence"), "{error}");
+        for said in [
+            format!("recovered abandoned run(s): {abandoned}"),
+            "1 module(s) declare their tests as a Java module and are not attributed: boundaries"
+                .to_owned(),
+            "1 module(s) run JUnit 4, which is not a JUnit Platform engine, so they are not attributed: legacy".to_owned(),
+            "3 module(s) wrote no evidence and are absent from this run: app, boundaries, legacy"
+                .to_owned(),
+        ] {
+            assert!(diagnostics.contains(&said), "{said}\n{diagnostics}");
+        }
+        assert!(!root.join(".supercov/runs").join(&request.run_id).exists());
+        assert!(!root.join(".supercov/work").join(&request.run_id).exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_module_the_command_does_not_name_is_not_called_silent() {
+        let root = temporary_root("jvm-named");
+        write(&root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        java_module(&root, ".", true);
+        let mut diagnostics = Vec::new();
+        let error = run_direct_jvm(
+            &jvm_request(&root, &["true", ":other:test"]),
+            &mut diagnostics,
+        )
+        .unwrap_err();
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(error.contains("wrote no coverage evidence"), "{error}");
+        assert!(!diagnostics.contains("wrote no evidence"), "{diagnostics}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Evidence of `probes` probes, none reached, and one passing test.
+    fn evidence_of_one_test(probes: usize) -> Vec<u8> {
+        let mut bytes = (probes as u64).to_le_bytes().to_vec();
+        bytes.extend(std::iter::repeat_n(0_u8, probes * 8));
+        bytes.extend(1_u64.to_le_bytes());
+        for text in ["ApiTest#t()", "passed"] {
+            bytes.extend((text.len() as u64).to_le_bytes());
+            bytes.extend(text.as_bytes());
+        }
+        // Attributed, under the declared runner, untagged, reaching nothing.
+        bytes.extend(0_u64.to_le_bytes());
+        bytes.extend(0_u64.to_le_bytes());
+        for _ in 0..4 {
+            bytes.extend(0_u64.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn evidence_measured_and_then_not_published_is_kept() {
+        let root = temporary_root("jvm-kept");
+        java_module(&root, ".", true);
+        let probes = crate::jvm_project::prepare_jvm_project(&root, None)
+            .unwrap()
+            .probes
+            .len();
+        let prepared = root.with_extension("bin");
+        fs::write(&prepared, evidence_of_one_test(probes)).unwrap();
+        let request = jvm_request(&root, &[]);
+        let module = root
+            .join(".supercov/work")
+            .join(&request.run_id)
+            .join("jvm/_");
+        let runs = root.join(".supercov/runs");
+        let command = format!(
+            "mkdir -p {module} && cp {} {module}/1.bin && rm -rf {runs} && touch {runs}",
+            prepared.display(),
+            module = module.display(),
+            runs = runs.display()
+        );
+        let request = DirectJvmRunRequest {
+            command: vec!["sh".into(), "-c".into(), command],
+            ..request
+        };
+        let error = run_direct_jvm(&request, &mut Vec::new()).unwrap_err();
+        assert!(
+            error.contains("the tests were measured and the run could not be published"),
+            "{error}"
+        );
+        assert!(
+            root.join(".supercov/failed-evidence")
+                .join(&request.run_id)
+                .join("_/1.bin")
+                .exists()
+        );
+        fs::remove_file(&prepared).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_license_check_is_skipped_unless_the_command_already_skips_it() {
+        let rat = "<project><dependencies><dependency><artifactId>junit-jupiter</artifactId><version>5.10.2</version></dependency></dependencies><build><plugins><plugin><artifactId>apache-rat-plugin</artifactId></plugin></plugins></build></project>";
+        for (command, added) in [
+            (&["true", "-Drat.skip=true"][..], false),
+            // Not Maven itself: the property goes through MAVEN_OPTS.
+            (&["true"][..], true),
+        ] {
+            let root = temporary_root("jvm-rat");
+            write(&root.join("pom.xml"), rat).unwrap();
+            java_module(&root, ".", true);
+            let mut diagnostics = Vec::new();
+            run_direct_jvm(&jvm_request(&root, command), &mut diagnostics).unwrap_err();
+            let diagnostics = String::from_utf8(diagnostics).unwrap();
+            assert_eq!(
+                diagnostics.contains("added -Drat.skip=true"),
+                added,
+                "{command:?}\n{diagnostics}"
+            );
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    #[test]
+    fn a_server_is_prepared_only_from_java_that_parses() {
+        let root = temporary_root("jvm-server");
+        let workspace = root.join("copy");
+        fs::create_dir_all(&workspace).unwrap();
+        let command = ["npm".to_owned(), "test".to_owned()];
+        assert!(
+            JvmServer::prepare(&root, &workspace, "2026-01-02T00-00-00-000Z", &command)
+                .unwrap()
+                .is_none()
+        );
+        for tree in [&root, &workspace] {
+            write(&tree.join("src/main/java/Bad.java"), "class {\n").unwrap();
+        }
+        assert!(
+            JvmServer::prepare(&root, &workspace, "2026-01-02T00-00-00-000Z", &command)
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_module_on_testng_and_the_platform_registers_both_listeners_however_it_runs() {
+        // A migration in progress runs both in one JVM. Left to run as
+        // written, the TestNG listener was compiled but never registered, so
+        // the module's TestNG tests recorded nothing.
+        for exact_attribution in [false, true] {
+            let root = temporary_root("jvm-testng-platform");
+            write(
+                &root.join("pom.xml"),
+                "<project><dependencies><dependency><artifactId>testng</artifactId></dependency><dependency><artifactId>junit-jupiter</artifactId><version>5.10.2</version></dependency></dependencies></project>",
+            )
+            .unwrap();
+            java_module(&root, ".", true);
+            instrument_workspace(&root, &root.join("evidence"), exact_attribution, None)
+                .expect("instrument");
+            let resources = root.join("src/test/resources");
+            assert!(resources.join(SERVICES_FILE).exists());
+            assert!(
+                resources.join(TESTNG_SERVICES_FILE).exists(),
+                "exact attribution {exact_attribution}"
+            );
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// The user's own `MAVEN_OPTS` are kept, and one that already skips the
+    /// license check needs nothing more.
+    #[test]
+    fn the_license_check_is_skipped_once_and_after_the_user_s_own_options() {
+        let command = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        let wrapper = command(&["./build.sh", "test"]);
+        assert_eq!(
+            rat_skip(&command(&["mvn", "test"]), None),
+            Some(RatSkip::Argument)
+        );
+        assert_eq!(
+            rat_skip(&command(&["mvn", "-Drat.skip=true", "test"]), None),
+            None
+        );
+        assert_eq!(
+            rat_skip(&wrapper, Some("-Drat.skip=true -Xmx1g".into())),
+            None
+        );
+        assert_eq!(
+            rat_skip(&wrapper, Some("-Xmx1g".into())),
+            Some(RatSkip::MavenOpts("-Xmx1g -Drat.skip=true".into()))
+        );
+        assert_eq!(
+            rat_skip(&wrapper, Some(" ".into())),
+            Some(RatSkip::MavenOpts("-Drat.skip=true".into()))
         );
     }
 }

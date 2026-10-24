@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, process::ExitCode};
 use supercov_engine::{
     agent_json,
-    run_store::{StoredRun, compare_run_integrity, discover_runs, select_run},
+    run_store::{StoredRun, discover_runs, select_run},
     source_manifest as maps,
 };
 
@@ -61,28 +61,33 @@ Also: supercov runs <run> tests without-evidence
 
 /// Working-tree differences the per-test record cannot see: every test is
 /// affected by them.
-const RUN_WIDE: [&str; 6] = [
+const RUN_WIDE: [&str; 7] = [
     "coverage schema changed",
     "instrumenter contract changed",
     "dependencies or lockfile changed",
     "test/build configuration changed",
     "execution environment changed",
     "run predates integrity fingerprints",
+    supercov_engine::run_store::SOURCE_UNMEASURABLE,
 ];
 
 pub fn command(args: &[String]) -> ExitCode {
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h"))
         || args.get(2).map(String::as_str) != Some("affected")
     {
-        print!("{HELP}");
-        return if args
-            .get(2)
-            .is_some_and(|a| a != "affected" && !a.starts_with('-'))
-        {
-            eprintln!("[supercov] unknown tests action: {}", args[2]);
-            ExitCode::from(2)
-        } else {
-            ExitCode::SUCCESS
+        let asked_for_help = args.iter().any(|a| matches!(a.as_str(), "--help" | "-h"));
+        return match args.get(2) {
+            // Without --help, only another action comes here.
+            Some(action) if !asked_for_help => crate::refuse(
+                "runs.tests",
+                args.iter().any(|a| a == "--json"),
+                format!("unknown tests action: {action}"),
+                HELP,
+            ),
+            _ => {
+                print!("{HELP}");
+                ExitCode::SUCCESS
+            }
         };
     }
     let mut json_output = false;
@@ -93,6 +98,14 @@ pub fn command(args: &[String]) -> ExitCode {
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut seen = BTreeSet::new();
     let rest = &args[3..];
+    let usage = |message: String| {
+        crate::refuse(
+            "runs.tests.affected",
+            rest.iter().any(|a| a == "--json"),
+            message,
+            HELP,
+        )
+    };
     let mut index = 0;
     while let Some(flag) = rest.get(index) {
         index += 1;
@@ -214,25 +227,7 @@ pub fn command(args: &[String]) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(message) => {
-            if json_output {
-                print!(
-                    "{}",
-                    agent_json::failure(
-                        Some("runs.tests.affected"),
-                        &agent_json::AgentError {
-                            code: agent_json::ErrorCode::InvalidArgument,
-                            message,
-                            retryable: false,
-                            details: None,
-                        }
-                    )
-                );
-            } else {
-                eprintln!("[supercov] {message}");
-            }
-            ExitCode::from(2)
-        }
+        Err(message) => crate::refuse("runs.tests.affected", json_output, message, ""),
     }
 }
 
@@ -552,8 +547,9 @@ pub(crate) fn in_changed_code(
 
 /// The JSON envelope for `data`, made to fit one response: on a large suite
 /// the unaffected tests become a count, then each test keeps its first three
-/// reasons, then the lists keep their ranked head -- each step saying so, and
-/// `--names` always lists every test.
+/// reasons, then the lists keep their ranked head, and last the changed files
+/// and the changed statements not asserted keep theirs -- each step saying
+/// so, and `--names` always lists every test.
 fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
     let mut step = 0;
     loop {
@@ -571,32 +567,52 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
                     1 => {
                         for bucket in ["affected", "undetermined"] {
                             for test in data[bucket].as_array_mut().into_iter().flatten() {
-                                if let Some(reasons) = test["reasons"].as_array_mut() {
-                                    reasons.truncate(3);
-                                }
+                                test["reasons"]
+                                    .as_array_mut()
+                                    .expect("each test lists its reasons")
+                                    .truncate(3);
                             }
                         }
                         notes.push("each test keeps its first three reasons");
                     }
                     _ => {
-                        let mut shortened = false;
-                        for bucket in ["undetermined", "affected"] {
-                            let listed = data[bucket].as_array().map_or(0, Vec::len);
+                        // A change to hundreds of files no test ran affects
+                        // no test and still lists every file.
+                        const TESTS: &str = "the lists keep their first, highest-ranked tests; `--names` lists every one";
+                        let lists: [(Option<&str>, &str, &'static str); 4] = [
+                            (None, "undetermined", TESTS),
+                            (None, "affected", TESTS),
+                            (
+                                None,
+                                "changedFiles",
+                                "the changed files keep their first entries; the text view lists every one",
+                            ),
+                            (
+                                Some("assertions"),
+                                "unasserted",
+                                "the changed statements not asserted keep their first entries",
+                            ),
+                        ];
+                        let mut shortened = None;
+                        for (within, key, note) in lists {
+                            let at = match within {
+                                Some(within) => &mut data[within],
+                                None => &mut data,
+                            };
+                            let listed = at[key].as_array().map_or(0, Vec::len);
                             if listed > 0 {
-                                let total = data[format!("{bucket}Count")]
-                                    .as_u64()
-                                    .unwrap_or(listed as u64);
-                                data[format!("{bucket}Count")] = json!(total);
-                                data[bucket] =
-                                    json!(data[bucket].as_array().unwrap()[..listed / 2]);
-                                shortened = true;
+                                let count = format!("{key}Count");
+                                let total = at[&count].as_u64().unwrap_or(listed as u64);
+                                at[&count] = json!(total);
+                                at[key] = json!(at[key].as_array().unwrap()[..listed / 2]);
+                                shortened = Some(note);
                                 break;
                             }
                         }
-                        if !shortened {
+                        let Some(note) = shortened else {
                             return Err(size);
-                        }
-                        notes.push("the lists keep their first, highest-ranked tests; `--names` lists every one");
+                        };
+                        notes.push(note);
                     }
                 }
                 step += 1;
@@ -618,9 +634,9 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
 fn strip_changed_code(data: &mut Value) {
     for bucket in ["affected", "undetermined", "unaffected"] {
         for test in data[bucket].as_array_mut().into_iter().flatten() {
-            if let Some(entry) = test.as_object_mut() {
-                entry.remove("changedCode");
-            }
+            test.as_object_mut()
+                .expect("each test is an object")
+                .remove("changedCode");
         }
     }
 }
@@ -640,15 +656,13 @@ fn runner_filter_name(file: &str, name: &str) -> String {
     }
 }
 
-fn usage(message: String) -> ExitCode {
-    eprintln!("[supercov] {message}");
-    print!("{HELP}");
-    ExitCode::from(2)
-}
-
-/// Whether every configuration file that changed since the run belongs to a
-/// test runner its tests did not run under: the Playwright configuration
-/// changing changes nothing a Vitest run did.
+/// A mistake and the guide to put it right, both on standard error: a
+/// script reading `--names` from standard output must not take the guide for
+/// test names.
+/// Whether every configuration file that changed since the run, or was added
+/// since, belongs to a test runner its tests did not run under: the
+/// Playwright configuration changing changes nothing a Vitest run did, and
+/// nor does one written where there was none.
 fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
     let Ok(files) = supercov_engine::source_manifest::load_manifest(run) else {
         return false;
@@ -656,9 +670,8 @@ fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
     let Some(runners) = supercov_engine::run_currency::Ran::of(run).runners else {
         return false;
     };
-    let changed = files
-        .manifest
-        .files
+    let recorded = &files.manifest.files;
+    let mut changed = recorded
         .iter()
         .filter(|(file, _)| supercov_engine::run_currency::configuration_file(file))
         .filter(|(file, was)| {
@@ -667,9 +680,15 @@ fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
                 .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
                 != Some(was.sha256.clone())
         })
-        .map(|(file, _)| file.as_str())
+        .map(|(file, _)| file.clone())
         .collect::<Vec<_>>();
-    // Nothing recorded changed, yet the configuration did: a file was added.
+    changed.extend(
+        supercov_engine::run_currency::configuration_files_in(root)
+            .into_iter()
+            .filter(|file| !recorded.contains_key(file)),
+    );
+    // Nothing recorded changed and nothing was added, yet the configuration
+    // did: what changed is one the fingerprint reads and the walk does not.
     !changed.is_empty()
         && changed.iter().all(|file| {
             supercov_engine::test_loads::configuration_runner(file)
@@ -681,10 +700,7 @@ fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
 /// run-wide difference makes every test affected; a source set that changed
 /// without any captured file changing means a file was added.
 fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
-    let Some(current) = super::current_integrity_for_run(root, run) else {
-        return json!({"stale": null, "reason": "current source integrity unavailable"});
-    };
-    let comparison = compare_run_integrity(Some(&run.metadata.integrity), &current);
+    let comparison = super::checkout_comparison(root, run);
     let run_wide = comparison
         .reasons
         .iter()
@@ -741,16 +757,19 @@ fn keep_picked(
     picked: &BTreeSet<(String, Option<String>)>,
     filter: &supercov_engine::coverage_report::TestFilter,
 ) {
+    // A test by its name and file: one with only the name the same is
+    // another test.
     let is_picked = |test: &Value| {
         let name = test["name"].as_str().unwrap_or_default().to_owned();
         let file = test["file"].as_str().map(str::to_owned);
-        picked.contains(&(name.clone(), file)) || picked.contains(&(name, None))
+        picked.contains(&(name, file))
     };
     for bucket in ["affected", "undetermined", "unaffected"] {
-        if let Some(tests) = data[bucket].as_array_mut() {
-            tests.retain(|test| is_picked(test));
-            data["summary"][bucket] = json!(tests.len());
-        }
+        let tests = data[bucket]
+            .as_array_mut()
+            .expect("each bucket is a list of tests");
+        tests.retain(|test| is_picked(test));
+        data["summary"][bucket] = json!(tests.len());
     }
     data["summary"]["tests"] = json!(
         ["affected", "undetermined", "unaffected"]
@@ -882,6 +901,28 @@ fn render(data: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Statements still standing are the longest run matching the current
+    /// lines in order, so a repeated line counts where it is; past the size
+    /// a table fits, each statement is looked for anywhere.
+    #[test]
+    fn standing_statements_are_matched_in_order() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let statements = ["a", "ret", "b", "ret", "c"];
+        assert_eq!(
+            aligned(&statements, &words("a ret c")),
+            [true, true, false, false, true]
+        );
+        assert_eq!(aligned(&statements, &[]), [false; 5]);
+        assert_eq!(aligned(&["x", "y"], &words("x")), [true, false]);
+        assert_eq!(aligned(&["y", "x"], &words("x y")), [false, true]);
+        let many = (0..2001).map(|i| format!("s{i}")).collect::<Vec<_>>();
+        let many = many.iter().map(String::as_str).collect::<Vec<_>>();
+        let lines = (0..2001).rev().map(|i| format!("s{i}")).collect::<Vec<_>>();
+        // In reverse order, the in-order match would keep one; the lookup
+        // finds each.
+        assert!(aligned(&many, &lines).iter().all(|kept| *kept));
+    }
 
     /// dry-rb/dry-inflector, 1,128 examples, a change every test reached:
     /// 364 KB of JSON and the command failed instead of answering.

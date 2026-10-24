@@ -1,7 +1,7 @@
 //! Java and Kotlin: statements by tree-sitter, tests by class and method name.
 use super::{Change, Located, Starts, line_of, line_starts};
 use crate::jvm_instrumenter::JvmLanguage;
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 fn kotlin(file: &str) -> bool {
     file.ends_with(".kt") || file.ends_with(".kts")
@@ -24,16 +24,7 @@ pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
     let tree = match crate::jvm_instrumenter::parse(source, language) {
         Ok(tree) => tree,
         Err(_) => {
-            let mut parser = Parser::new();
-            let grammar = if kotlin(file) {
-                tree_sitter_kotlin_ng::LANGUAGE.into()
-            } else {
-                tree_sitter_java::LANGUAGE.into()
-            };
-            if parser.set_language(&grammar).is_err() {
-                return out;
-            }
-            let Some(tree) = parser.parse(source, None) else {
+            let Some(tree) = recovered(source, language) else {
                 return out;
             };
             tree
@@ -42,6 +33,30 @@ pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
     let starts = line_starts(source);
     walk(tree.root_node(), source, &starts, kotlin(file), &mut out);
     out
+}
+
+/// Whatever tree the grammar recovers from a source that does not parse.
+fn recovered(source: &str, language: JvmLanguage) -> Option<Tree> {
+    let mut parser = Parser::new();
+    let grammar = match language {
+        JvmLanguage::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        JvmLanguage::Java => tree_sitter_java::LANGUAGE.into(),
+    };
+    parser.set_language(&grammar).ok()?;
+    parser.parse(source, None)
+}
+
+/// What an `if` tests, out of Java's parentheses.
+fn tested(node: Node) -> Option<Node> {
+    if !matches!(node.kind(), "if_statement" | "if_expression") {
+        return None;
+    }
+    let condition = node.child_by_field_name("condition")?;
+    Some(if condition.kind() == "parenthesized_expression" {
+        condition.named_child(0).unwrap_or(condition)
+    } else {
+        condition
+    })
 }
 
 fn walk(node: Node, source: &str, starts: &[usize], kotlin: bool, out: &mut Starts) {
@@ -59,14 +74,7 @@ fn walk(node: Node, source: &str, starts: &[usize], kotlin: bool, out: &mut Star
             .push((text(node), change));
         // An `else if`, and any Kotlin `if`, may be recorded by its
         // condition alone.
-        if matches!(node.kind(), "if_statement" | "if_expression")
-            && let Some(c) = node.child_by_field_name("condition")
-        {
-            let c = if c.kind() == "parenthesized_expression" {
-                c.named_child(0).unwrap_or(c)
-            } else {
-                c
-            };
+        if let Some(c) = tested(node) {
             out.entry(line_of(starts, c.start_byte()))
                 .or_default()
                 .push((text(c), Some(Change::Invert)));
@@ -119,7 +127,8 @@ fn change(node: Node, source: &str, kotlin: bool) -> Option<Option<Change>> {
         "property_declaration" => {
             (has_value() && !text.contains(" by ")).then_some(Change::ValueUndefined)
         }
-        "expression_statement" if !kotlin => {
+        // Kotlin's grammar has no expression statement.
+        "expression_statement" => {
             let assignment = node
                 .named_child(0)
                 .filter(|c| c.kind() == "assignment_expression");
@@ -172,9 +181,8 @@ fn change(node: Node, source: &str, kotlin: bool) -> Option<Option<Change>> {
         }
         // A Kotlin `throw` the function would otherwise end on: not
         // throwing leaves it nothing to return, so it returns the default.
-        "throw_expression" if kotlin && on_final_path(node, source) => {
-            Some(Change::ReturnUndefined)
-        }
+        // Java's grammar has no throw expression.
+        "throw_expression" if on_final_path(node, source) => Some(Change::ReturnUndefined),
         _ => Some(Change::Skip),
     })
 }
@@ -354,11 +362,16 @@ pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
         .or_else(|| (from..lines.len()).find(declares_method))
         .or_else(|| (0..lines.len()).find(declares_method))?;
     let indent = super::indent(lines[start]);
+    // The annotations above it, an argument list spread over lines included:
+    // walking up, a line is taken while an annotation's parentheses are open.
     let mut first = start;
-    while first > 0 && {
+    let mut open = 0i64;
+    while first > 0 {
         let t = lines[first - 1].trim_start();
-        t.starts_with('@') || t.starts_with(')')
-    } {
+        if !(t.starts_with('@') || t.starts_with(')') || open > 0) {
+            break;
+        }
+        open += t.matches(')').count() as i64 - t.matches('(').count() as i64;
         first -= 1;
     }
     let class = (0..first).rev().find(|&i| {
@@ -414,7 +427,80 @@ mod tests {
             Some(8)
         );
     }
+    #[test]
+    fn a_test_name_finds_its_method_by_whole_names_only() {
+        let text = "class T {\n  class MyInner {\n    void run() {}\n  }\n  class Inner_x {\n    void run() {}\n  }\n  class Inner {\n    @Tag(\n      \"slow\"\n    )\n    void run() {}\n  }\n  fun plain() {}\n}\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let at =
+            |name: &str| locate(&lines, name).map(|found| (found.start + 1, found.context.len()));
+        // `Inner` is a whole class name: not `MyInner`, not `Inner_x`.
+        assert_eq!(at("app.T$Inner#run()").map(|(line, _)| line), Some(12));
+        // An empty segment names no class, and the first method is taken.
+        assert_eq!(at("app.T$$Inner#run()").map(|(line, _)| line), Some(12));
+        assert_eq!(at("app.T#plain()").map(|(line, _)| line), Some(14));
+        // An annotation whose arguments close on their own line belongs to it.
+        assert!(at("app.T$Inner#run()").unwrap().1 >= 4);
+        assert_eq!(at("app.T#()"), None);
+        assert_eq!(at("app.T#missing()"), None);
+        // A method on the file's first line has nothing above it.
+        let first = ["void solo() {}", ""];
+        assert_eq!(
+            locate(&first, "app.S#solo()").map(|found| found.start),
+            Some(0)
+        );
+    }
     use crate::assertion_coverage::{Language, change_at};
+
+    /// A Kotlin file the instrumenter cannot parse is still read; a comment
+    /// is no statement; a bare `return` and a delegated property change
+    /// nothing; a statement before the last ends no function; and a `throw`
+    /// ends its function only on the path the function ends on.
+    #[test]
+    fn statements_off_the_final_path_and_in_broken_files_are_read() {
+        let j = Language::Jvm;
+        let broken = statement_starts(
+            "A.kt",
+            "fun f(): Int {\n    val x by lazy { 1 }\n    return\n    val y = (\n}\n",
+        );
+        assert_eq!(change_at(&broken, 2, "val x by lazy { 1 }", j), None);
+        assert_eq!(change_at(&broken, 3, "return", j), Some(Change::Skip));
+        let java = statement_starts(
+            "A.java",
+            "class A {\n    int f() {\n        // c\n        try { g(); } finally { h(); }\n        return;\n    }\n}\n",
+        );
+        assert!(!java.contains_key(&3), "{java:?}");
+        assert_eq!(
+            change_at(&java, 4, "try { g(); } finally { h(); }", j),
+            Some(Change::Skip)
+        );
+        assert_eq!(change_at(&java, 5, "return;", j), Some(Change::Skip));
+        let kotlin = statement_starts(
+            "A.kt",
+            "fun k(a: Boolean): Int {\n    if (a) {\n        throw E()\n    } else {\n        g()\n    }\n    return 1\n}\nfun m(a: Boolean): Int {\n    try {\n        g()\n        throw E()\n    } catch (e: E) {\n        throw E()\n    }\n}\nfun h() {\n    throw E()\n    g()\n}\n",
+        );
+        assert_eq!(change_at(&kotlin, 3, "throw E()", j), Some(Change::Skip));
+        assert_eq!(
+            change_at(&kotlin, 12, "throw E()", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&kotlin, 14, "throw E()", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(change_at(&kotlin, 18, "throw E()", j), Some(Change::Skip));
+    }
+
+    /// A class is found by its whole name at the start of a line, and not
+    /// inside a longer word or before more of a name.
+    #[test]
+    fn a_nested_class_is_named_by_its_whole_word_anywhere_on_its_line() {
+        let text = "class T {\nsubclass Inner {\n}\nclass Inner2 {\n    void run() {}\n}\nclass Inner {\n    void run() {}\n}\n}\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        assert_eq!(
+            locate(&lines, "app.T$Inner#run()").map(|found| found.start + 1),
+            Some(8)
+        );
+    }
 
     #[test]
     fn null_changed_to_null_is_not_asked() {
@@ -430,6 +516,39 @@ mod tests {
         assert_eq!(
             change_at(&starts, 8, "return y;", j),
             Some(Change::ReturnUndefined)
+        );
+    }
+
+    /// A comparison with null is a value, not null assigned; a Kotlin
+    /// property delegated with `by` has no value of its own to change.
+    #[test]
+    fn null_comparisons_and_delegated_properties_are_told_apart() {
+        let java = "class A {\n    boolean f(String x) {\n        boolean b = x != null;\n        boolean c = x == null;\n        return b;\n    }\n}\n";
+        let starts = statement_starts("A.java", java);
+        let j = Language::Jvm;
+        assert_eq!(
+            change_at(&starts, 3, "boolean b = x != null;", j),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 4, "boolean c = x == null;", j),
+            Some(Change::ValueUndefined)
+        );
+        let kotlin = "fun k() {\n    val lazyOne by lazy { 1 }\n    val plain: Int = 2\n    var none: String? = null\n    var seen by observable(0) { _, _, new -> last = new }\n}\n";
+        let starts = statement_starts("K.kt", kotlin);
+        assert_eq!(change_at(&starts, 2, "val lazyOne by lazy { 1 }", j), None);
+        // A delegate whose lambda assigns is still no value.
+        assert_eq!(
+            change_at(&starts, 5, "var seen by observable(0) {", j),
+            None
+        );
+        assert_eq!(
+            change_at(&starts, 3, "val plain: Int = 2", j),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 4, "var none: String? = null", j),
+            Some(Change::Skip)
         );
     }
 
@@ -571,5 +690,39 @@ mod tests {
             class_paths("app.Outer$Inner#m()"),
             vec!["app/Outer.java", "app/Outer.kt"]
         );
+    }
+    /// What each Kotlin and Java statement shape is asked as. A class-level
+    /// property and an expression-bodied function are not statements here, so
+    /// nothing is asked of them.
+    #[test]
+    fn each_jvm_statement_shape_is_asked_its_own_way() {
+        let kotlin = "class K {\n    val lazyOne by lazy { 1 }\n    val plain: Int = 2\n    fun f(a: Boolean): Int {\n        val x: Int\n        x = 3\n        val y = if (a) 1 else 2\n        val z = try { 4 } catch (e: Exception) { 5 }\n        var w: String? = null\n        w = \"v\"\n        if (a) return 6\n        return if (a) x else y\n    }\n    fun g(a: Boolean) = if (a) 7 else 8\n    fun h(a: Boolean): Int {\n        return try { 9 } finally { }\n    }\n}\n";
+        let starts = statement_starts("K.kt", kotlin);
+        let first = |line: usize| starts.get(&line).map(|entries| entries[0].1);
+        assert_eq!(first(2), None);
+        assert_eq!(first(5), Some(None), "a declaration with no value");
+        assert_eq!(first(6), Some(Some(Change::ValueUndefined)));
+        assert_eq!(first(7), Some(Some(Change::ValueUndefined)));
+        assert_eq!(starts[&8].len(), 3, "the try value and each branch's");
+        assert_eq!(
+            first(9),
+            Some(Some(Change::Skip)),
+            "null is already the other value"
+        );
+        assert_eq!(first(11), Some(Some(Change::Invert)));
+        assert_eq!(first(12), Some(Some(Change::ReturnUndefined)));
+        assert_eq!(first(14), None);
+        assert_eq!(first(16), Some(Some(Change::ReturnUndefined)));
+        assert!(statement_starts("build.gradle.kts", "val v = 1\nprintln(v)\n").is_empty());
+        let java = "class J {\n    int f(boolean a) {\n        int x;\n        x = 1;\n        if (a) x = 2;\n        String s = a ? \"t\" : null;\n        Object o = null;\n        if (o != null) { return 3; }\n        return x;\n    }\n}\n";
+        let starts = statement_starts("J.java", java);
+        let first = |line: usize| starts.get(&line).map(|entries| entries[0].1);
+        assert_eq!(first(3), Some(None));
+        assert_eq!(first(4), Some(Some(Change::ValueUndefined)));
+        assert_eq!(first(5), Some(Some(Change::Invert)));
+        assert_eq!(first(6), Some(Some(Change::ValueUndefined)));
+        assert_eq!(first(7), Some(Some(Change::Skip)));
+        assert_eq!(starts[&8].len(), 3);
+        assert_eq!(first(9), Some(Some(Change::ReturnUndefined)));
     }
 }

@@ -189,6 +189,17 @@ try {
     environment,
   );
   assertFixtureTotals(query(project, ['runs', 'latest'], environment), FIXTURE_TOTALS.core);
+  // A command that fails before any test runs keeps its own status:
+  // pytest's 5 when nothing is selected, 4 for a path that is not there.
+  for (const [extra, status] of [[['-k', 'no_such_test_name'], 5], [['tests/no_such_file.py'], 4]]) {
+    const ran = spawnSync(
+      binary,
+      ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests', '--ignore=tests/test_patterns.py', ...extra],
+      { cwd: project, env: environment, encoding: 'utf8' },
+    );
+    assert.equal(ran.status, status, `${extra.join(' ')}\n${ran.stdout}\n${ran.stderr}`);
+    assert.match(ran.stderr, /exited \d+ before any test reported an outcome/u, ran.stderr);
+  }
 
   const serial = successfulSupercov(
     project,

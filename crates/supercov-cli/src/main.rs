@@ -1,8 +1,8 @@
 use std::{
     ffi::OsStr,
     fs,
-    io::Read,
-    path::{Component, Path, PathBuf},
+    io::{Read, Write},
+    path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, Instant},
 };
@@ -109,17 +109,21 @@ const DOC_TOPICS: &[&str] = &[
 /// a decision's. Empty for a query about the whole run.
 fn queried_files(request: &supercov_engine::indexed_query::IndexedQueryRequest) -> Vec<String> {
     let mut files = Vec::new();
+    // `file` reaches here as the view it asked for.
     if matches!(
         request.command.as_str(),
-        "line" | "file" | "decision" | "source"
+        "line" | "file-detail" | "file-decisions" | "decision" | "source"
     ) {
         if let Some(file) = &request.file {
             files.push(file.clone());
         }
         files.extend(request.more_lines.iter().map(|(file, _)| file.clone()));
+        // `decision` always has its selector: an id, or a file and line.
         if request.command == "decision"
-            && let Some(selector) = &request.selector
-            && let Some((file, line)) = selector.rsplit_once(':')
+            && let Some((file, line)) = request
+                .selector
+                .as_deref()
+                .and_then(|selector| selector.rsplit_once(':'))
             && line.parse::<usize>().is_ok()
         {
             files.push(file.to_owned());
@@ -162,16 +166,9 @@ fn hydrate_line_source_from_working_tree(
     if source.is_some() {
         return;
     }
-    let relative = Path::new(&location.file);
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return;
-    }
-    let Ok(contents) = fs::read_to_string(root.join(relative)) else {
+    // The query answers only for a file the run recorded, which is always
+    // a path within the project.
+    let Ok(contents) = fs::read_to_string(root.join(&location.file)) else {
         return;
     };
     let Some(line) = contents.lines().nth(location.line.saturating_sub(1)) else {
@@ -243,9 +240,33 @@ fn main() -> ExitCode {
     }
     let mut arguments = arguments.into_iter();
     match arguments.next().as_deref() {
-        None | Some("help" | "--help" | "-h") => {
+        None | Some("--help" | "-h") => {
             print!("{HELP}");
             ExitCode::SUCCESS
+        }
+        // `help runs` is `runs --help`, as `git help` and `cargo help` read it.
+        Some("help") => {
+            let asked = vec!["--help".to_owned()];
+            match arguments.next().as_deref() {
+                None => {
+                    print!("{HELP}");
+                    ExitCode::SUCCESS
+                }
+                Some("quality") => quality::command(asked),
+                Some("security") => quality::security_command(asked),
+                Some("docs") => docs_command(asked),
+                Some("runs") => public_query_command("runs", asked),
+                Some("diff") => public_query_command("diff", asked),
+                Some("report") => html_report::report_command(asked),
+                Some("merge") => merge_command(asked),
+                Some("import") => import_command(asked),
+                Some(other) => {
+                    eprintln!(
+                        "[supercov] No help for {other}: it is no command. Try supercov help."
+                    );
+                    ExitCode::from(2)
+                }
+            }
         }
         Some("--version" | "-V") => {
             println!(
@@ -305,6 +326,31 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// A mistake in what was asked: under `--json` the failure envelope on
+/// standard output, as every answer to `--json` is; otherwise the message, and
+/// the usage `help` when there is one, on standard error.
+pub(crate) fn refuse(command: &str, json: bool, message: String, help: &str) -> ExitCode {
+    if json {
+        print!(
+            "{}",
+            agent_json::failure(
+                Some(command),
+                &agent_json::AgentError {
+                    code: agent_json::ErrorCode::InvalidArgument,
+                    message,
+                    retryable: false,
+                    details: None,
+                }
+            )
+        );
+    } else if help.is_empty() {
+        eprintln!("[supercov] {message}");
+    } else {
+        eprint!("[supercov] {message}\n\n{help}");
+    }
+    ExitCode::from(2)
 }
 
 /// The command the reader used to start Supercov. The npm package sets
@@ -440,6 +486,14 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
         .into_iter()
         .filter(|argument| argument != "--allow-changed")
         .collect::<Vec<_>>();
+    // An option merge does not take is no run id.
+    if let Some(option) = run_ids
+        .iter()
+        .find(|argument| argument.starts_with('-') && argument.len() > 1)
+    {
+        eprintln!("[supercov] Unknown option: {option}\n\n{MERGE_USAGE}");
+        return ExitCode::from(2);
+    }
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -541,7 +595,13 @@ fn import_command(arguments: Vec<String>) -> ExitCode {
     let credit = match (test, background) {
         (Some(name), false) => supercov_engine::outside_evidence::Credit::Test(name),
         (None, true) => supercov_engine::outside_evidence::Credit::Background,
-        _ => {
+        (Some(_), true) => {
+            eprintln!(
+                "[supercov] --test and --background each name who the lines are credited to; give one\n\n{IMPORT_USAGE}"
+            );
+            return ExitCode::from(2);
+        }
+        (None, false) => {
             eprintln!(
                 "[supercov] name who the lines are credited to: --test <name> or --background\n\n{IMPORT_USAGE}"
             );
@@ -1010,6 +1070,27 @@ fn public_run_identity() -> Result<(String, String), String> {
     Ok((run_id, started_at))
 }
 
+/// The warning for a run the checkout no longer matches, naming the first
+/// ten files that changed since it.
+fn stale_run_warning(run: &str, reasons: &[String], changed: &[String]) -> String {
+    let named = if changed.is_empty() {
+        String::new()
+    } else {
+        let shown = changed.iter().take(10).cloned().collect::<Vec<_>>();
+        let more = changed.len().saturating_sub(shown.len());
+        format!(
+            "; changed since the run: {}{}",
+            shown.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        )
+    };
+    format!("[supercov] stale run {run}: {}{named}", reasons.join(", "))
+}
+
 fn public_run_id(value: &str) -> bool {
     value.len() == 20
         && value.starts_with("run_")
@@ -1035,10 +1116,9 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     let mut index = 0;
     // `runs <id> check ...`; the id may be absent, meaning the latest run.
     let rest = &arguments[1..];
-    if let Some(first) = arguments.first()
-        && first != "check"
-    {
-        selector = Some(first.as_str());
+    // Dispatch put the word first or second, so there is a first argument.
+    if arguments[0] != "check" {
+        selector = Some(arguments[0].as_str());
     }
     while index < rest.len() {
         let argument = rest[index].as_str();
@@ -1133,16 +1213,15 @@ fn render_check(
     use supercov_engine::run_view::Outcome;
     let mut out = format!("Coverage check for {}\n", view.run);
     for floor in floors {
-        if let Some(metric) = view.metric(floor.metric) {
-            out.push_str(&format!(
-                "  {:<11} {:>8}  {}/{}  (floor {})\n",
-                metric.metric.name(),
-                render_percentage(metric.covered, metric.eligible),
-                metric.covered,
-                metric.eligible,
-                render_floor(floor.ppm),
-            ));
-        }
+        let metric = view.metric(floor.metric);
+        out.push_str(&format!(
+            "  {:<11} {:>8}  {}/{}  (floor {})\n",
+            metric.metric.name(),
+            render_percentage(metric.covered, metric.eligible),
+            metric.covered,
+            metric.eligible,
+            render_floor(floor.ppm),
+        ));
     }
     match outcome {
         Outcome::Pass => out.push_str("\nPASS: every floor is met.\n"),
@@ -1185,6 +1264,7 @@ fn render_check(
             }
         }
     }
+    out.push_str(&uncounted_note(view));
     out
 }
 
@@ -1292,9 +1372,13 @@ fn changed_lines_against(
         ))?
         .trim()
         .to_owned();
+    // Names as they are: git quotes one that is not ASCII, and the quoted
+    // name matched no file the run measured.
     let diff = git_output(
         root,
         &[
+            "-c",
+            "core.quotePath=false",
             "diff",
             "--unified=0",
             "--no-color",
@@ -1321,11 +1405,17 @@ fn changed_lines_against(
     // it stands, and the diff above from the top.
     for path in git_output(
         root,
-        &["ls-files", "--others", "--exclude-standard", "--full-name"],
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+        ],
     )?
-    .lines()
+    .split('\0')
     {
-        let Some(path) = relocate(path.trim().to_owned()) else {
+        let Some(path) = relocate(path.to_owned()) else {
             continue;
         };
         if let Some(file) = measured.file(&path) {
@@ -1347,10 +1437,9 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
     let mut json = false;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
-    if let Some(first) = arguments.first()
-        && first != "patch"
-    {
-        selector = Some(first.as_str());
+    // Dispatch put the word first or second, so there is a first argument.
+    if arguments[0] != "patch" {
+        selector = Some(arguments[0].as_str());
     }
     let rest = &arguments[1..];
     let mut index = 0;
@@ -1515,6 +1604,43 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
     }
 }
 
+/// The files no floor covered because discovery could not tell whether they
+/// are source and nothing loaded them. Said, never failed on: the suite
+/// passes without Supercov, so a gate must not fail for what it cannot tell.
+fn uncounted_note(view: &supercov_engine::run_view::RunView) -> String {
+    let files = view
+        .limitations
+        .iter()
+        .filter_map(|limitation| serde_json::from_str::<serde_json::Value>(limitation).ok())
+        .filter(|limitation| limitation["kind"] == "source-scope")
+        .filter_map(|limitation| limitation["file"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    if files.is_empty() {
+        return String::new();
+    }
+    let shown = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    let more = files.len().saturating_sub(5);
+    format!(
+        "{} {} outside the source roots that no source imports {} not counted: {shown}{}. \
+         If {} your code, name the roots with SUPERCOV_SOURCE_ROOTS; `{} runs {} scope` lists them.\n",
+        files.len(),
+        if files.len() == 1 { "file" } else { "files" },
+        if files.len() == 1 { "is" } else { "are" },
+        if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        },
+        if files.len() == 1 {
+            "it is"
+        } else {
+            "they are"
+        },
+        launcher_command(),
+        view.run
+    )
+}
+
 fn render_patch(
     patch: &supercov_engine::patch_view::PatchView,
     base: &str,
@@ -1577,7 +1703,9 @@ fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
         fs::read_to_string(root.join(file))
             .ok()
             .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
-    });
+    })
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
     // Added files are in no record: git names them, of the kinds of file the
     // run measured.
     let extensions = recorded
@@ -1595,6 +1723,7 @@ fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
             root,
             &[
                 "diff",
+                "-z",
                 "--name-only",
                 "--relative",
                 "--diff-filter=A",
@@ -1602,25 +1731,23 @@ fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
             ],
         )
     {
-        added.extend(listed.lines().map(str::to_owned));
+        added.extend(listed.split('\0').map(str::to_owned));
     }
-    if let Ok(listed) = git_output(root, &["ls-files", "--others", "--exclude-standard"]) {
-        added.extend(listed.lines().map(str::to_owned));
+    // NUL-separated, so a name is as it is: not quoted, not trimmed.
+    if let Ok(listed) = git_output(root, &["ls-files", "-z", "--others", "--exclude-standard"]) {
+        added.extend(listed.split('\0').map(str::to_owned));
     }
     for file in added {
-        let file = file.trim().to_owned();
         if !file.is_empty()
             && !recorded.contains_key(&file)
-            && !changed.contains(&file)
             && Path::new(&file)
                 .extension()
                 .is_some_and(|extension| extensions.contains(extension))
         {
-            changed.push(file);
+            changed.insert(file);
         }
     }
-    changed.sort();
-    changed
+    changed.into_iter().collect()
 }
 
 /// A run's query index, or, when a filter picks tests, the index of only
@@ -1656,8 +1783,7 @@ pub(crate) fn load_run_view_filtered(
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    let comparison = current_integrity_for_run(&root, run)
-        .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
+    let comparison = checkout_comparison(&root, run);
     let report = analyze_stored_run_filtered(run, filter)?;
     let passed = run.metadata.test_exit_code == Some(0);
     // A passing run is read whole, as its summary reads it: what passing
@@ -1675,8 +1801,8 @@ pub(crate) fn load_run_view_filtered(
         &run.metadata.started_at,
         view,
         passed,
-        comparison.as_ref().is_some_and(|c| c.stale),
-        comparison.map(|c| c.reasons).unwrap_or_default(),
+        comparison.stale,
+        comparison.reasons,
     )
     .map_err(|error| format!("{error:?}"))
 }
@@ -1709,7 +1835,8 @@ pub(crate) fn load_point_tests(
         .view
         .points
         .iter()
-        .filter(|point| point.covered && !point.tests.is_empty())
+        // A point is covered exactly when some test reached it.
+        .filter(|point| !point.tests.is_empty())
         .map(|point| {
             (
                 point.meta.file.clone(),
@@ -1770,10 +1897,9 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     let mut force = false;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
-    if let Some(first) = arguments.first()
-        && first != "report"
-    {
-        selector = Some(first.as_str());
+    // Dispatch put the word first or second, so there is a first argument.
+    if arguments[0] != "report" {
+        selector = Some(arguments[0].as_str());
     }
     let rest = &arguments[1..];
     let mut index = 0;
@@ -1910,6 +2036,19 @@ fn javascript_number(value: f64) -> String {
     }
 }
 
+/// A run this process published, timed: every published run records its
+/// timings.
+fn print_run_timings(metadata: &supercov_engine::run_store::RunMetadata, command_ms: f64) {
+    let timings = metadata
+        .timings
+        .as_ref()
+        .expect("a run this process published records its timings");
+    eprintln!(
+        "[supercov] timings {}",
+        format_run_timings(timings, metadata.duration_ms, Some(command_ms))
+    );
+}
+
 /// `run_ms` is the engine's own clock, which stops before the run is published;
 /// `command_ms`, when the run was published, is the whole command. What lies
 /// between is publication -- analysing the evidence once for the per-test
@@ -1960,9 +2099,34 @@ fn process_exit_code(code: i32) -> ExitCode {
 /// The status of a run that never measured anything. One that could not
 /// start because the project's storage was being cleaned is Supercov's not
 /// completing the request, which is 2: 1 reads as the tests failing.
+///
+/// A command that could not be started exits as a shell's would: 127 when
+/// there is no such program, 126 when it may not be run.
 fn could_not_measure(error: &str) -> ExitCode {
     if error.contains("storage is being cleaned") {
         ExitCode::from(2)
+    } else if let Some(code) = error
+        .strip_prefix("the test command exited ")
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(code, rest)| {
+            rest.starts_with("before any test reported an outcome")
+                .then(|| code.parse::<i32>().ok())
+                .flatten()
+        })
+    {
+        // No run, and the command's own status is the answer.
+        process_exit_code(code)
+    } else if let Some(signal) = supercov_engine::process_supervision::ForwardedSignal::ALL
+        .into_iter()
+        .find(|signal| error.contains(&format!("interrupted by {};", signal.name())))
+    {
+        // Interrupted, nothing published: exit as the command did, as a
+        // shell reports a signal.
+        process_exit_code(signal.exit_code())
+    } else if error.contains("could not spawn") && error.contains("(os error 2)") {
+        ExitCode::from(127)
+    } else if error.contains("could not spawn") && error.contains("(os error 13)") {
+        ExitCode::from(126)
     } else {
         ExitCode::from(1)
     }
@@ -2073,16 +2237,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     "[supercov] Rust coverage: {} test(s) across {} artifact(s)",
                     result.tests, result.artifacts
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2136,16 +2291,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                         result.unparseable_tests
                     );
                 }
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2172,16 +2318,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     "[supercov] JVM coverage: {} test(s) across {} source file(s) in {} module(s)",
                     result.tests, result.source_files, result.modules
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2210,16 +2347,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     result.interpreters,
                     result.python_versions.join(", ")
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2248,16 +2376,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     result.interpreters,
                     result.ruby_versions.join(", ")
                 );
-                if let Some(timings) = &result.metadata.timings {
-                    eprintln!(
-                        "[supercov] timings {}",
-                        format_run_timings(
-                            timings,
-                            result.metadata.duration_ms,
-                            Some(command_ms())
-                        )
-                    );
-                }
+                print_run_timings(&result.metadata, command_ms());
                 process_exit_code(result.exit_code)
             }
             Err(error) => {
@@ -2292,19 +2411,14 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     &command_text,
                 );
             }
+            // A server's run directory is named by its run id.
             for (language, server) in &result.server_runs {
-                if let Some(id) = server.file_name().and_then(|id| id.to_str()) {
-                    eprintln!(
-                        "[supercov] the {language} server's coverage is run {id}: `supercov runs {id}`"
-                    );
-                }
-            }
-            if let Some(timings) = &result.metadata.timings {
+                let id = server.file_name().unwrap_or_default().to_string_lossy();
                 eprintln!(
-                    "[supercov] timings {}",
-                    format_run_timings(timings, result.metadata.duration_ms, Some(command_ms()))
+                    "[supercov] the {language} server's coverage is run {id}: `supercov runs {id}`"
                 );
             }
+            print_run_timings(&result.metadata, command_ms());
             process_exit_code(result.exit_code)
         }
         Err(supercov_engine::javascript_run::DirectJavascriptRunError::Interrupted {
@@ -2530,6 +2644,17 @@ fn mark_tests_that_import_no_measured_source(
     }
 }
 
+/// A run against the checkout as it is now (`compare_with_checkout`).
+pub(crate) fn checkout_comparison(
+    root: &Path,
+    run: &StoredRun,
+) -> supercov_engine::run_store::IntegrityComparison {
+    supercov_engine::run_store::compare_with_checkout(
+        &run.metadata.integrity,
+        current_integrity_for_run(root, run).as_ref(),
+    )
+}
+
 fn current_integrity_for_run(
     root: &Path,
     run: &StoredRun,
@@ -2704,12 +2829,14 @@ impl PublicQueryOutput {
             // The standard page: a pager following `nextOffset` asks for the
             // rest as it asks for any page.
             let returned = data.lines.len();
-            if let Some(page) = output.pagination.as_mut() {
-                page.returned = returned;
-                page.limit = returned;
-                page.has_more = true;
-                page.next_offset = Some(page.offset + returned);
-            }
+            let page = output
+                .pagination
+                .as_mut()
+                .expect("a page of lines is paginated");
+            page.returned = returned;
+            page.limit = returned;
+            page.has_more = true;
+            page.next_offset = Some(page.offset + returned);
         }
     }
 
@@ -2730,12 +2857,14 @@ impl PublicQueryOutput {
                 next_offset: page.next_offset,
             });
         }
-        if let Some(next) = page.next_offset {
-            eprintln!(
-                "[supercov] this page holds {} of the {asked} entries asked for, as many as fit in one reply ({} in all); the rest start at --offset {next}",
-                page.returned, page.total
-            );
-        }
+        // A page cut to fit always has more after it: what fits is fewer
+        // than were asked for, and as many were there to return.
+        eprintln!(
+            "[supercov] this page holds {} of the {asked} entries asked for, as many as fit in one reply ({} in all); the rest start at --offset {}",
+            page.returned,
+            page.total,
+            page.offset + page.returned
+        );
     }
 
     /// How many entries of a page too large for one reply would fit, when
@@ -2851,11 +2980,10 @@ fn execute_public_query(
                 .valid
                 .get_or_insert(run.metadata.test_exit_code == Some(0));
             request.test_exit_code = run.metadata.test_exit_code;
-            let current = current_integrity_for_run(root, run);
             let mut warnings = Vec::new();
             let mut diff_inputs = None;
-            if let Some(current) = current.as_ref() {
-                let comparison = compare_run_integrity(Some(&run.metadata.integrity), current);
+            {
+                let comparison = checkout_comparison(root, run);
                 request.stale.get_or_insert(comparison.stale);
                 request
                     .stale_reasons
@@ -2896,29 +3024,32 @@ fn execute_public_query(
                         });
                     }
                 } else if comparison.stale {
-                    let named = if changed.is_empty() {
-                        String::new()
-                    } else {
-                        let shown = changed.iter().take(10).cloned().collect::<Vec<_>>();
-                        let more = changed.len().saturating_sub(shown.len());
-                        format!(
-                            "; changed since the run: {}{}",
-                            shown.join(", "),
-                            if more > 0 {
-                                format!(" and {more} more")
-                            } else {
-                                String::new()
-                            }
-                        )
-                    };
-                    warnings.push(format!(
-                        "[supercov] stale run {}: {}{named}",
-                        run.id,
-                        comparison.reasons.join(", ")
-                    ));
+                    warnings.push(stale_run_warning(&run.id, &comparison.reasons, &changed));
                 }
             }
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
+                // One line past the end of the file is no line: reading it as
+                // code the run did not measure would be an answer.
+                // A `line` request always names its file and line.
+                let (file, line) = (
+                    request.file.as_deref().unwrap_or_default(),
+                    request.line.unwrap_or_default(),
+                );
+                if request.command == "line"
+                    && request.more_lines.is_empty()
+                    && let Ok(contents) = fs::read_to_string(root.join(file))
+                    && line > contents.lines().count()
+                {
+                    return Err(agent_json::AgentError {
+                        code: agent_json::ErrorCode::InvalidArgument,
+                        message: format!(
+                            "{file} has {} lines; there is no line {line}",
+                            contents.lines().count()
+                        ),
+                        retryable: false,
+                        details: Some(serde_json::json!({ "file": file, "line": line })),
+                    });
+                }
                 let progress = ProgressLine::start("loading run evidence");
                 let test_filter = request.test_filter();
                 let container = open_query_index_for(run, test_filter.as_ref()).map_err(|error| {
@@ -2935,6 +3066,9 @@ fn execute_public_query(
                         RunIndexError::Report(ReportError::NoEvidence(_))
                     ) {
                         match run.metadata.test_exit_code {
+                            // A command that passed with nothing recorded ran
+                            // no test: a filter that matched none, most often.
+                            Some(0) => "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test.".into(),
                             Some(code) => format!(
                                 "The wrapped command exited {code} before publishing queryable coverage evidence. Inspect that command's original output and rerun after it passes."
                             ),
@@ -2967,14 +3101,14 @@ fn execute_public_query(
                     })?;
                     let newer_run =
                         select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
-                    if let Some(current) = current_integrity_for_run(root, newer_run).as_ref() {
-                        let comparison =
-                            compare_run_integrity(Some(&newer_run.metadata.integrity), current);
+                    // A run compared with itself was warned about above.
+                    if newer_run.id != run.id {
+                        let comparison = checkout_comparison(root, newer_run);
                         if comparison.stale {
-                            warnings.push(format!(
-                                "[supercov] stale run {}: {}",
-                                newer_run.id,
-                                comparison.reasons.join(", ")
+                            warnings.push(stale_run_warning(
+                                &newer_run.id,
+                                &comparison.reasons,
+                                &changed_since_run(root, newer_run),
                             ));
                         }
                     }
@@ -2982,17 +3116,14 @@ fn execute_public_query(
                         &run.metadata.integrity.fingerprint,
                         &newer_run.metadata.integrity.fingerprint,
                     );
-                    if older.algorithm == newer.algorithm
-                        && !older.source.is_empty()
-                        && !newer.source.is_empty()
-                    {
-                        diff_inputs = Some(supercov_engine::coverage_query::CoverageDiffInputs {
-                            source_changed: older.source != newer.source
-                                || older.dependencies != newer.dependencies
-                                || older.configuration != newer.configuration,
-                            tests_changed: older.tests != newer.tests,
-                        });
-                    }
+                    // A stored run's fingerprints are sha256 digests, or it
+                    // is not read at all.
+                    diff_inputs = Some(supercov_engine::coverage_query::CoverageDiffInputs {
+                        source_changed: older.source != newer.source
+                            || older.dependencies != newer.dependencies
+                            || older.configuration != newer.configuration,
+                        tests_changed: older.tests != newer.tests,
+                    });
                     let comparison_progress = ProgressLine::start("loading comparison run");
                     newer_container = open_query_index_for(newer_run, test_filter.as_ref())
                         .map_err(|error| {
@@ -3016,6 +3147,63 @@ fn execute_public_query(
                 query_indexed(&index, report.as_ref(), &request, newer_query)
                     .map_err(|error| error.agent_error())
             })();
+            // A line past the end of its file is no line, as it is when asked
+            // alone: it fails, the others stand; all failing fails the call.
+            let result = result.and_then(|mut output| {
+                if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) =
+                    &mut output.data
+                {
+                    let mut kept = Vec::new();
+                    let mut pages = Vec::new();
+                    for (line, page) in std::mem::take(&mut data.lines)
+                        .into_iter()
+                        .zip(std::mem::take(&mut data.pages))
+                    {
+                        let location = match &line {
+                            supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
+                                &data.location
+                            }
+                            supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                                &data.location
+                            }
+                        };
+                        let lines_in_file = fs::read_to_string(root.join(&location.file))
+                            .ok()
+                            .map(|contents| contents.lines().count());
+                        match lines_in_file {
+                            Some(count) if location.line > count => {
+                                data.failed.push(
+                                    supercov_engine::indexed_query::CoverageLineFailure {
+                                        location: format!("{}:{}", location.file, location.line),
+                                        code: agent_json::ErrorCode::InvalidArgument,
+                                        message: format!(
+                                            "{} has {count} lines; there is no line {}",
+                                            location.file, location.line
+                                        ),
+                                    },
+                                );
+                            }
+                            _ => {
+                                kept.push(line);
+                                pages.push(page);
+                            }
+                        }
+                    }
+                    data.lines = kept;
+                    data.pages = pages;
+                    if data.lines.is_empty()
+                        && let Some(first) = data.failed.first()
+                    {
+                        return Err(agent_json::AgentError {
+                            code: first.code,
+                            message: first.message.clone(),
+                            retryable: false,
+                            details: Some(serde_json::json!({ "location": first.location })),
+                        });
+                    }
+                }
+                Ok(output)
+            });
             result
                 .map(|mut output| {
                     let recorded = matches!(
@@ -3197,10 +3385,9 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                 let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
                     break;
                 };
-                if fits >= request.limit {
-                    break;
-                }
-                request.limit = fits;
+                // What fits is fewer than the page returned, which is at most
+                // its limit; the limit falls each time, so this ends.
+                request.limit = fits.min(request.limit - 1);
                 match execute_public_query(&root, &invocation) {
                     Ok(smaller) => output = smaller,
                     Err(failure) => {
@@ -3391,23 +3578,38 @@ const TRASH_PATIENCE_AT_START: Duration = Duration::from_millis(100);
 const TRASH_PATIENCE_AT_END: Duration = Duration::from_secs(10);
 
 fn spawn_trash_sweeper(root: &Path) {
-    sweep_trash_within(root, TRASH_PATIENCE_AT_START);
+    let still_sweeping = sweep_trash_within(root, TRASH_PATIENCE_AT_START);
+    *START_SWEEP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = still_sweeping;
 }
+
+/// The sweep started with the command, while it may still be running. It
+/// holds the trash's lock, so a sweep started at the end would find it held
+/// and leave at once: the end waits for this one instead.
+static START_SWEEP: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 
 /// Empty the trash before the command's own process ends.
 fn finish_trash_sweep(root: &Path) {
-    let started = std::time::Instant::now();
+    let deadline = Instant::now() + TRASH_PATIENCE_AT_END;
     supercov_engine::lifecycle::finish_background_sweep(TRASH_PATIENCE_AT_END);
-    sweep_trash_within(
-        root,
-        TRASH_PATIENCE_AT_END.saturating_sub(started.elapsed()),
-    );
+    let start = START_SWEEP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(child) = start
+        && wait_until(child, deadline).is_some()
+    {
+        // Still at it: it goes on by itself, as a sweep given up on does.
+        return;
+    }
+    sweep_trash_within(root, deadline.saturating_duration_since(Instant::now()));
 }
 
-fn sweep_trash_within(root: &Path, patience: Duration) {
-    let Ok(executable) = std::env::current_exe() else {
-        return;
-    };
+/// Starts a sweep and gives it until `patience` runs out; the sweep, if it
+/// is still running then.
+fn sweep_trash_within(root: &Path, patience: Duration) -> Option<std::process::Child> {
+    let executable = std::env::current_exe().ok()?;
     let mut command = Command::new(executable);
     command
         .arg("__sweep-trash")
@@ -3424,18 +3626,20 @@ fn sweep_trash_within(root: &Path, patience: Duration) {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let Ok(mut child) = command.spawn() else {
-        return;
-    };
+    let child = command.spawn().ok()?;
     // The sweep is given until `patience` runs out to finish, so that a
     // command launched right after Supercov does not find the trash on its
     // way out. Past that it goes on by itself: the independent process group
     // lets the child survive the parent CLI exiting on Unix.
-    let deadline = std::time::Instant::now() + patience;
+    wait_until(child, Instant::now() + patience)
+}
+
+/// The child, if it is still running at `deadline`.
+fn wait_until(mut child: std::process::Child, deadline: Instant) -> Option<std::process::Child> {
     loop {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) if std::time::Instant::now() >= deadline => return,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => return Some(child),
             Ok(None) => std::thread::sleep(Duration::from_millis(5)),
         }
     }
@@ -3600,11 +3804,18 @@ fn benchmark_js_transform() -> ExitCode {
         files,
         duration_ns: started.elapsed().as_nanos(),
     };
-    if let Err(error) = serde_json::to_writer(std::io::stdout(), &result) {
+    if let Err(error) = write_json_to_stdout(&result) {
         eprintln!("[supercov] failed to write Rust benchmark output: {error}");
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+/// Writes and flushes: an error the buffer would only meet at exit is lost.
+fn write_json_to_stdout(value: &impl Serialize) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, value)?;
+    stdout.flush()
 }
 
 fn stdin() -> Result<String, String> {
@@ -3660,7 +3871,7 @@ fn instrument_js() -> ExitCode {
             }
         }
     }
-    if let Err(error) = serde_json::to_writer(std::io::stdout(), &outputs) {
+    if let Err(error) = write_json_to_stdout(&outputs) {
         eprintln!("[supercov] failed to write Rust instrumenter output: {error}");
         return ExitCode::from(2);
     }
@@ -3671,7 +3882,7 @@ fn instrument_js() -> ExitCode {
 mod docs_command_tests {
     use super::localize_guide;
 
-    const GUIDE: &str = "Run `npx supercov security` or `supercov quality`.\nKeep `supercov-cli` and `supercov`.\n\n```sh\nnpx supercov -- npm test\nsupercov runs latest   # newest run\n$ supercov security patch\n```\n\n```text\nsupercov security: 3 files flagged\n```\n";
+    const GUIDE: &str = "Run `npx supercov security` or `supercov quality`.\nKeep `supercov-cli`, `npx supercov-cli` and `supercov`.\n\n```sh\nnpx supercov -- npm test\nsupercov runs latest   # newest run\n$ supercov security patch\n```\n\n```text\nsupercov security: 3 files flagged\n```\n";
 
     #[test]
     fn guides_print_commands_the_way_the_reader_started_supercov() {
@@ -3682,7 +3893,7 @@ mod docs_command_tests {
             "{go} -- npm test\n{go} runs latest   # newest run\n$ {go} security patch"
         )));
         // A package name, the bare binary name and recorded output stay put.
-        assert!(printed.contains("Keep `supercov-cli` and `supercov`."));
+        assert!(printed.contains("Keep `supercov-cli`, `npx supercov-cli` and `supercov`."));
         assert!(printed.contains("```text\nsupercov security: 3 files flagged\n```"));
 
         let npm = localize_guide(GUIDE, "npx supercov");
@@ -3720,6 +3931,38 @@ mod tests {
     }
 
     use super::*;
+
+    /// A run that measured nothing exits as what stopped it: 2 for a store
+    /// being cleaned, the command's own status when it ended before any test,
+    /// a shell's 127 and 126 for a program missing or not allowed to run,
+    /// and 1 otherwise.
+    #[test]
+    fn a_run_that_measured_nothing_exits_as_what_stopped_it() {
+        for (error, code) in [
+            ("the project's storage is being cleaned; try again", 2),
+            (
+                "the test command exited 3 before any test reported an outcome; its own output above says why",
+                3,
+            ),
+            (
+                "the test command exited x before any test reported an outcome",
+                1,
+            ),
+            ("the test command exited 3 after a while", 1),
+            (
+                "could not spawn nope: No such file or directory (os error 2)",
+                127,
+            ),
+            (
+                "could not spawn ./t.sh: Permission denied (os error 13)",
+                126,
+            ),
+            ("could not spawn x: other (os error 5)", 1),
+            ("something else", 1),
+        ] {
+            assert_eq!(could_not_measure(error), ExitCode::from(code), "{error}");
+        }
+    }
 
     #[test]
     fn the_timings_line_reports_publication_and_the_whole_command() {
@@ -3844,6 +4087,7 @@ mod tests {
         assert_ne!(first, second);
         assert!(!public_run_id("2026-08-25T23-33-12-211Z"));
         assert!(!public_run_id("run_35c35ceeaf4b843Z"));
+        assert!(!public_run_id("abc_35c35ceeaf4b8430"));
         assert!(first_started_at.contains('T'));
         assert!(second_started_at.contains('T'));
     }

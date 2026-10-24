@@ -252,6 +252,81 @@ mod tests {
     use super::*;
     use crate::{coverage_analysis::PointKind, coverage_report::PointMeta};
 
+    /// A cached build's files are named relative to their root, digested in
+    /// order, and its artifacts match only by path, order, size and digest;
+    /// one outside the target or not a file is refused when fingerprinted.
+    #[test]
+    fn cached_files_and_artifacts_match_exactly() {
+        for (value, safe) in [
+            ("src/lib.rs", true),
+            ("", false),
+            ("/abs/lib.rs", false),
+            ("../lib.rs", false),
+            ("./lib.rs", false),
+        ] {
+            assert_eq!(safe_relative(value), safe, "{value:?}");
+        }
+        let root = std::env::temp_dir().join(format!(
+            "supercov-build-cache-files-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        fs::write(root.join("a.rs"), "a").unwrap();
+        fs::create_dir(root.join("dir")).unwrap();
+        assert!(digest_files(&root, &["a.rs".into()]).is_some());
+        assert_eq!(digest_files(&root, &["../a.rs".into()]), None);
+        assert_eq!(digest_files(&root, &["dir".into()]), None);
+        assert_eq!(digest_files(&root, &["missing.rs".into()]), None);
+        let target = root.join("target");
+        fs::write(target.join("debug/bin"), "binary").unwrap();
+        fs::write(target.join("debug/other"), "other").unwrap();
+        fs::write(root.join("outside"), "x").unwrap();
+        let fingerprints = fingerprint_artifacts(
+            &target,
+            &[
+                target.join("debug/other"),
+                target.join("debug/bin"),
+                target.join("debug/bin"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            fingerprints
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["debug/bin", "debug/other"]
+        );
+        assert!(artifacts_match(&target, &fingerprints));
+        assert!(fingerprint_artifacts(&target, &[root.join("outside")]).is_err());
+        assert!(fingerprint_artifacts(&target, &[target.join("debug")]).is_err());
+        // The target directory itself names no artifact inside it.
+        assert_eq!(
+            fingerprint_artifacts(&target, std::slice::from_ref(&target)),
+            Err("unsafe cached Rust artifact: ".into())
+        );
+        assert!(!artifacts_match(&target, &[]));
+        let reversed = fingerprints.iter().rev().cloned().collect::<Vec<_>>();
+        assert!(!artifacts_match(&target, &reversed));
+        let mut wrong = fingerprints.clone();
+        wrong[0].bytes += 1;
+        assert!(!artifacts_match(&target, &wrong));
+        let mut changed = fingerprints.clone();
+        changed[0].sha256 = "0".repeat(64);
+        assert!(!artifacts_match(&target, &changed));
+        let mut unsafe_path = fingerprints.clone();
+        unsafe_path[0].path = "../outside".into();
+        assert!(!artifacts_match(&target, &unsafe_path));
+        let mut directory = fingerprints;
+        directory[0].path = "debug".into();
+        assert!(!artifacts_match(&target, &directory));
+    }
+
     #[test]
     fn cache_requires_exact_key_regular_workspace_target_and_sorted_sources() {
         let nonce = SystemTime::now()
@@ -302,13 +377,30 @@ mod tests {
         assert_eq!(written.source_files, ["src/lib.rs", "tests/test.rs"]);
         assert_eq!(
             read_rust_build_cache(&workspace, &target, "key"),
-            Some(written)
+            Some(written.clone())
         );
         assert!(read_rust_build_cache(&workspace, &target, "other").is_none());
         fs::write(workspace.join("src/lib.rs"), "fn changed() {}\n").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_none());
         fs::write(workspace.join("src/lib.rs"), "fn work() {}\n").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_some());
+        // A record of another schema, with no sources, no points or its
+        // sources out of order is no cache.
+        let tampered = |change: &dyn Fn(&mut RustBuildCacheMetadata)| {
+            let mut metadata = written.clone();
+            change(&mut metadata);
+            fs::write(
+                workspace.join(CACHE_FILE),
+                serde_json::to_vec(&metadata).unwrap(),
+            )
+            .unwrap();
+            read_rust_build_cache(&workspace, &target, "key")
+        };
+        assert!(tampered(&|metadata| metadata.schema_version += 1).is_none());
+        assert!(tampered(&|metadata| metadata.source_files.clear()).is_none());
+        assert!(tampered(&|metadata| metadata.manifest.points.clear()).is_none());
+        assert!(tampered(&|metadata| metadata.source_files.reverse()).is_none());
+        assert!(tampered(&|_| {}).is_some());
         fs::write(target.join("debug/test-bin"), b"tamper").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_none());
         fs::remove_dir_all(target).unwrap();

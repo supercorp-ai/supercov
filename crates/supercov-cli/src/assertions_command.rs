@@ -101,15 +101,18 @@ fn tokens(value: &Value) -> usize {
 /// its questions, and a test whose request is over even with one question is
 /// not asked about that statement. Supercov's own suite, whose tests hold
 /// long inline fixtures, had every request refused and the pass stopped.
+///
+/// `request` is the request asking test `t` about `asked`; a statement and
+/// test whose request is over even so go in `refused`.
 fn within_limits(
-    population: &Population,
-    pass: &mut Pass,
+    request: impl Fn(usize, &[usize]) -> Value,
+    refused: &mut BTreeSet<(usize, usize)>,
     batch: Vec<(usize, Vec<usize>)>,
 ) -> Vec<(usize, Vec<usize>)> {
     let mut out = Vec::new();
     let mut pending = batch;
     while let Some((t, asked)) = pending.pop() {
-        let request = population.request(t, &asked, pass.model);
+        let request = request(t, &asked);
         let state = tokens(&request["state"]);
         let longest = request["questions"]
             .as_object()
@@ -126,8 +129,10 @@ fn within_limits(
             let (left, right) = asked.split_at(asked.len() / 2);
             pending.push((t, left.to_vec()));
             pending.push((t, right.to_vec()));
-        } else if let Some(&s) = asked.first() {
-            pass.refused.insert((s, t));
+        } else {
+            // A plan asks a test about something, and a split leaves each
+            // half something: this is the one statement left.
+            refused.insert((asked[0], t));
         }
     }
     out
@@ -207,10 +212,14 @@ pub fn command(args: &[String]) -> ExitCode {
     }
     let options = match parse(&args[2..]) {
         Ok(o) => o,
+        // On standard error with the mistake: standard output is the answer.
         Err(message) => {
-            eprintln!("[supercov] {message}");
-            print!("{HELP}");
-            return ExitCode::from(2);
+            return crate::refuse(
+                "runs.assertions",
+                args.iter().any(|a| a == "--json"),
+                message,
+                HELP,
+            );
         }
     };
     let result = (|| -> Result<Value, String> {
@@ -252,25 +261,7 @@ pub fn command(args: &[String]) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(message) => {
-            if options.json {
-                print!(
-                    "{}",
-                    agent_json::failure(
-                        Some("runs.assertions"),
-                        &agent_json::AgentError {
-                            code: agent_json::ErrorCode::InvalidArgument,
-                            message,
-                            retryable: false,
-                            details: None,
-                        }
-                    )
-                );
-            } else {
-                eprintln!("[supercov] {message}");
-            }
-            ExitCode::from(2)
-        }
+        Err(message) => crate::refuse("runs.assertions", options.json, message, ""),
     }
 }
 
@@ -404,9 +395,11 @@ impl Cache {
         Cache { path, answers }
     }
     fn save(&self) -> Result<(), String> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
+        let dir = self
+            .path
+            .parent()
+            .expect("answers.json sits in .supercov/assertions");
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec(&json!({"version": CACHE_VERSION, "answers": self.answers}))
             .map_err(|e| e.to_string())?;
         let temp = self.path.with_extension("json.tmp");
@@ -608,7 +601,12 @@ fn run_pass(
             }
             continue;
         }
-        let batch = within_limits(population, pass, planned);
+        let model = pass.model;
+        let batch = within_limits(
+            |t, asked| population.request(t, asked, model),
+            &mut pass.refused,
+            planned,
+        );
         if batch.is_empty() {
             continue;
         }
@@ -620,9 +618,9 @@ fn run_pass(
                 Err(e) => {
                     failures += 1;
                     if failures > MAX_FAILURES {
-                        if asking.keep {
-                            cache.save()?;
-                        }
+                        // Only the pass that sends requests has one fail,
+                        // and it keeps its answers.
+                        cache.save()?;
                         return Err(format!("stopped after {failures} failed requests: {e}"));
                     }
                     continue;
@@ -717,7 +715,12 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     if options.dry_run {
         let undecided = (0..n).filter(|&s| pass.undecided(s)).count();
         let planned = pass.plan(usize::MAX);
-        let plan = within_limits(&population, &mut pass, planned);
+        let model = pass.model;
+        let plan = within_limits(
+            |t, asked| population.request(t, asked, model),
+            &mut pass.refused,
+            planned,
+        );
         let bytes: usize = plan
             .iter()
             .map(|(t, asked)| tokens(&population.request(*t, asked, pass.model)))
@@ -863,9 +866,10 @@ fn assess_changed(
                 .map(|(i, st)| json!({"index": i, "line": st.line, "text": st.text.lines().next().unwrap_or("").trim()}))
                 .collect::<Vec<_>>();
             for statement in crate::tests_query::in_changed_code(&mut current, code, statements) {
-                if let Some(i) = statement["index"].as_u64() {
-                    changed.insert(i as usize);
-                }
+                let i = statement["index"]
+                    .as_u64()
+                    .expect("each statement carries its index");
+                changed.insert(i as usize);
             }
         }
     }
@@ -936,9 +940,8 @@ fn assess_changed(
                     .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))));
                 let Some(p) = p else { continue };
                 answers.entry(s).or_default().push((*t, p));
-                if let Some(k) = keys.get(&(s, *t)) {
-                    cache.answers.insert(k.clone(), p);
-                }
+                // Every pair planned was keyed above.
+                cache.answers.insert(keys[&(s, *t)].clone(), p);
             }
         }
         cache.save()?;
@@ -1139,9 +1142,10 @@ fn narrowed(
     Ok(narrowed)
 }
 
+/// A test by its name and file: one with only the name the same is another
+/// test.
 fn picks(picked: &BTreeSet<(String, Option<String>)>, name: &str, file: Option<&str>) -> bool {
     picked.contains(&(name.to_owned(), file.map(str::to_owned)))
-        || picked.contains(&(name.to_owned(), None))
 }
 
 /// The options that give `filter` again, for the commands a reading names.
@@ -1314,7 +1318,11 @@ pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
 /// The lines of the statements judged asserted in a run, by file; `None`
 /// when the run has no saved assessment.
 pub(crate) fn asserted_lines(run: &StoredRun) -> Option<BTreeMap<String, BTreeSet<u64>>> {
-    let result = saved(run)?;
+    Some(asserted_in(&saved(run)?))
+}
+
+/// The lines of the statements an assessment judged asserted, by file.
+fn asserted_in(result: &Value) -> BTreeMap<String, BTreeSet<u64>> {
     let mut out = BTreeMap::<String, BTreeSet<u64>>::new();
     for s in result["statements"].as_array().into_iter().flatten() {
         if s["asserted"] == true
@@ -1323,7 +1331,7 @@ pub(crate) fn asserted_lines(run: &StoredRun) -> Option<BTreeMap<String, BTreeSe
             out.entry(file.to_owned()).or_default().insert(line);
         }
     }
-    Some(out)
+    out
 }
 
 /// What the run's saved assessment says about one file, for the coverage
@@ -1660,10 +1668,35 @@ fn view(
             }
             let (test_file, test_name) = match tests.len() {
                 0 => {
-                    return Err(format!(
-                        "no assessed test is named {query}; `{} runs {run} tests` lists the run's tests",
-                        crate::launcher_command()
-                    ));
+                    // The assessed tests are the only names this can take.
+                    let assessed = all
+                        .iter()
+                        .flat_map(|s| s["answers"].as_array().cloned().unwrap_or_default())
+                        .filter_map(|a| {
+                            Some((
+                                a["file"].as_str().unwrap_or("").to_owned(),
+                                a["name"].as_str()?.to_owned(),
+                            ))
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let listed = assessed
+                        .iter()
+                        .take(10)
+                        .map(|(file, name)| format!("  {name} ({file})"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let more = assessed.len().saturating_sub(10);
+                    return Err(if assessed.is_empty() {
+                        format!("no assessed test is named {query}; this assessment asked no test")
+                    } else if more > 0 {
+                        format!(
+                            "no assessed test is named {query}; a test that ran is asked nothing when other tests catch each statement it runs first. The assessed tests include:\n{listed}\n  and {more} more"
+                        )
+                    } else {
+                        format!(
+                            "no assessed test is named {query}; a test that ran is asked nothing when other tests catch each statement it runs first. The assessed tests are:\n{listed}"
+                        )
+                    });
                 }
                 1 => tests.into_iter().next().unwrap(),
                 n => {
@@ -1673,16 +1706,25 @@ fn view(
                         .map(|(file, name)| format!("  {name} ({file})"))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return Err(format!(
-                        "{n} assessed tests match {query}; give one's full name:\n{names}"
-                    ));
+                    // One name in several files is told apart by its file.
+                    let how = if tests
+                        .iter()
+                        .all(|(_, name)| name == &tests.first().unwrap().1)
+                    {
+                        "add --test-file with one's file"
+                    } else {
+                        "give one's full name"
+                    };
+                    return Err(format!("{n} assessed tests match {query}; {how}:\n{names}"));
                 }
             };
             let mut items = all
                 .iter()
                 .filter_map(|s| {
+                    // The test as `named` read it: its file, or none.
                     let answer = s["answers"].as_array()?.iter().find(|a| {
-                        a["name"] == test_name.as_str() && a["file"] == test_file.as_str()
+                        (a["file"].as_str().unwrap_or(""), a["name"].as_str())
+                            == (test_file.as_str(), Some(test_name.as_str()))
                     })?;
                     let p = answer["p"].as_f64().unwrap_or(0.0);
                     Some(json!({
@@ -1730,7 +1772,9 @@ fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> 
             Ok(output) => return Ok(output),
             Err(size) => {
                 // Only an --all listing can come to this: halve its page and
-                // say where the next one starts.
+                // say where the next one starts. A line's view lists one
+                // statement, the first on the line, which the assessment
+                // asks about alone.
                 let Some(key) = ["files", "notAsserted", "statements"]
                     .into_iter()
                     .find(|key| data[*key].as_array().is_some_and(|list| list.len() > 1))
@@ -1740,11 +1784,12 @@ fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> 
                 let listed = data[key].as_array().map_or(0, Vec::len);
                 let keep = listed / 2;
                 data[key] = json!(data[key].as_array().unwrap()[..keep]);
-                if let Some(page) = data["page"].as_object_mut() {
-                    let offset = page["offset"].as_u64().unwrap_or(0);
-                    page.insert("returned".into(), json!(keep));
-                    page.insert("nextOffset".into(), json!(offset + keep as u64));
-                }
+                let page = data["page"]
+                    .as_object_mut()
+                    .expect("every listing has a page");
+                let offset = page["offset"].as_u64().unwrap_or(0);
+                page.insert("returned".into(), json!(keep));
+                page.insert("nextOffset".into(), json!(offset + keep as u64));
                 data["truncated"] = json!(
                     "the listing was shortened to fit one response; page.nextOffset is where the rest starts"
                 );
@@ -1756,6 +1801,14 @@ fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> 
 fn render(data: &Value) -> String {
     if data["impact"] == true {
         let s = &data["summary"];
+        // Nothing the run measured changed: nothing to ask, and nothing for
+        // `tests affected` to say.
+        if s["changed"].as_u64() == Some(0) {
+            return format!(
+                "Run {}: no statement the run assessed has changed since it; nothing was asked.\n",
+                data["run"].as_str().unwrap_or("")
+            );
+        }
         let capped = s["capped"].as_u64().unwrap_or(0);
         let asked = if capped == 0 {
             "asked of every test that ran them".to_owned()
@@ -1839,6 +1892,13 @@ fn render(data: &Value) -> String {
             s["costUsd"].as_f64().unwrap_or(0.0),
             counted(&s["answersReused"], "answer", "answers")
         ));
+        // A test whose own code is over Jev's limit is never asked: what it
+        // would catch is unknown, not missing.
+        if let Some(n) = s["pairsOverLimit"].as_u64().filter(|n| *n > 0) {
+            out.push_str(&format!(
+                "Not asked: {n} statement(s) of a test whose request is over Jev's limit even with one question; that test was not judged on them.\n"
+            ));
+        }
     }
     out
 }
@@ -1862,6 +1922,9 @@ fn page_footer(data: &Value, command: &str) -> String {
     let offset = page["offset"].as_u64().unwrap_or(0);
     let returned = page["returned"].as_u64().unwrap_or(0);
     let total = page["total"].as_u64().unwrap_or(0);
+    if returned == 0 && total > 0 {
+        return format!("showing none of {total}: --offset {offset} is past the end\n");
+    }
     let start = if returned == 0 { 0 } else { offset + 1 };
     let mut out = format!("showing {start}-{} of {total}\n", offset + returned);
     if let Some(next) = page["nextOffset"].as_u64() {
@@ -1886,6 +1949,11 @@ fn render_files(run: &str, data: &Value) -> String {
         return format!(
             "Run {run}: not assessed for the tests {filter} picks: the {unasked} statement(s) they run were asked of other tests, which answered first. `{ask}` asks these tests.\n"
         );
+    }
+    if s["statements"].as_u64() == Some(0)
+        && let Some(filter) = data["filter"].as_str()
+    {
+        return format!("Run {run}: the tests {filter} picks ran no assessed statement.\n");
     }
     let mut out = format!(
         "Run {run}: {} asserted ({} of {} executed statements){}\n",
@@ -1916,6 +1984,9 @@ fn render_files(run: &str, data: &Value) -> String {
     ));
     let files = data["files"].as_array().cloned().unwrap_or_default();
     if files.is_empty() {
+        if data["page"]["total"].as_u64() > Some(0) {
+            out.push_str(&page_footer(data, ""));
+        }
         return out;
     }
     out.push_str(&format!(
@@ -1972,9 +2043,12 @@ fn render_weak(run: &str, data: &Value) -> String {
         WEAK_ANSWER * 100.0
     );
     let files = data["files"].as_array().cloned().unwrap_or_default();
-    if files.is_empty() {
+    let Some(first) = files.first() else {
+        if data["page"]["total"].as_u64() > Some(0) {
+            out.push_str(&page_footer(data, ""));
+        }
         return out;
-    }
+    };
     out.push_str("\nAn asserted statement is one some test was judged to catch; the judgment is the test's strongest answer. Checked by applying each change, a verdict on an answer under 75% was wrong about 1 time in 20, and one on a stronger answer about 1 in 50. Files, most such statements first:\n  WEAK  ASSERTED  FILE\n");
     for file in &files {
         out.push_str(&format!(
@@ -1993,15 +2067,13 @@ fn render_weak(run: &str, data: &Value) -> String {
             flags(data)
         ),
     ));
-    if let Some(first) = files.first() {
-        out.push_str(&format!(
-            "inspect a file: {} runs {} assertions{} {} --weak\n",
-            crate::launcher_command(),
-            quote(run),
-            flags(data),
-            quote(first["file"].as_str().unwrap_or(""))
-        ));
-    }
+    out.push_str(&format!(
+        "inspect a file: {} runs {} assertions{} {} --weak\n",
+        crate::launcher_command(),
+        quote(run),
+        flags(data),
+        quote(first["file"].as_str().unwrap_or(""))
+    ));
     out
 }
 
@@ -2016,9 +2088,12 @@ fn render_weak_file(run: &str, data: &Value) -> String {
         data["page"]["total"],
         WEAK_ANSWER * 100.0
     );
-    if weak.is_empty() {
+    let Some(first) = weak.first() else {
+        if data["page"]["total"].as_u64() > Some(0) {
+            out.push_str(&page_footer(data, ""));
+        }
         return out;
-    }
+    };
     out.push_str("\nThe least certain first. Each was settled by the test named, at the answer shown; the tests not asked were not judged.\n  LINE  STATEMENT  (change)  answer  tests asked  test\n");
     for st in &weak {
         out.push_str(&format!(
@@ -2042,15 +2117,13 @@ fn render_weak_file(run: &str, data: &Value) -> String {
             quote(file)
         ),
     ));
-    if let Some(first) = weak.first() {
-        out.push_str(&format!(
-            "inspect a statement: {} runs {} assertions{} {}\n",
-            crate::launcher_command(),
-            quote(run),
-            flags(data),
-            quote(&format!("{file}:{}", first["line"]))
-        ));
-    }
+    out.push_str(&format!(
+        "inspect a statement: {} runs {} assertions{} {}\n",
+        crate::launcher_command(),
+        quote(run),
+        flags(data),
+        quote(&format!("{file}:{}", first["line"]))
+    ));
     out
 }
 
@@ -2080,6 +2153,10 @@ fn render_file(run: &str, data: &Value) -> String {
         return out;
     }
     out.push_str(&weak);
+    let Some(first) = not.first() else {
+        out.push_str(&page_footer(data, ""));
+        return out;
+    };
     out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MAX_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
     for st in &not {
         let closest = st["test"]["name"]
@@ -2115,15 +2192,13 @@ fn render_file(run: &str, data: &Value) -> String {
             quote(file)
         ),
     ));
-    if let Some(first) = not.first() {
-        out.push_str(&format!(
-            "inspect a statement: {} runs {} assertions{} {}\n",
-            crate::launcher_command(),
-            quote(run),
-            flags(data),
-            quote(&format!("{file}:{}", first["line"]))
-        ));
-    }
+    out.push_str(&format!(
+        "inspect a statement: {} runs {} assertions{} {}\n",
+        crate::launcher_command(),
+        quote(run),
+        flags(data),
+        quote(&format!("{file}:{}", first["line"]))
+    ));
     out
 }
 
@@ -2249,6 +2324,25 @@ fn render_test(run: &str, data: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// A page past the end says so, an empty listing shows nothing of
+    /// nothing, and the next page names a limit other than the default.
+    #[test]
+    fn a_page_footer_reads_past_the_end_an_empty_listing_and_a_chosen_limit() {
+        let footer = |page: Value| page_footer(&json!({ "page": page }), "assertions");
+        assert_eq!(
+            footer(json!({"offset": 40, "returned": 0, "total": 3})),
+            "showing none of 3: --offset 40 is past the end\n"
+        );
+        assert_eq!(
+            footer(json!({"offset": 0, "returned": 0, "total": 0})),
+            "showing 0-0 of 0\n"
+        );
+        assert_eq!(
+            footer(json!({"offset": 0, "returned": 2, "total": 5, "nextOffset": 2, "limit": 2})),
+            "showing 1-2 of 5\nnext page: assertions --offset 2 --limit 2\n"
+        );
+    }
+
     /// square/moshi: 222 statements not asserted, each with up to 15 tests'
     /// answers, came to 94 KB and the listing failed outright. A file's page
     /// leaves the answers out, and even every statement at once fits.
@@ -2273,6 +2367,74 @@ mod tests {
         assert!(returned < 4000);
         assert_eq!(parsed["data"]["page"]["nextOffset"], returned);
         assert!(parsed["data"]["truncated"].is_string());
+    }
+
+    /// A request over the limit for all its questions is split by them, and
+    /// one over it with a single question is refused for that statement.
+    #[test]
+    fn a_request_over_the_limit_is_split_and_one_question_over_it_refused() {
+        // Just over 20,000 tokens: two fit beside the state, three do not.
+        let mut words = 1_000;
+        let question = loop {
+            let text = "a ".repeat(words);
+            if tokens(&json!(text)) > 20_000 {
+                break text;
+            }
+            words += 1_000;
+        };
+        // Statements 0 to 2 are each one such question; statement 9 is too
+        // long on its own.
+        let request = |_t: usize, asked: &[usize]| {
+            let questions = asked
+                .iter()
+                .map(|s| {
+                    let text = if *s == 9 {
+                        question.repeat(2)
+                    } else {
+                        question.clone()
+                    };
+                    (s.to_string(), json!(text))
+                })
+                .collect::<serde_json::Map<_, _>>();
+            json!({"state": "the test", "questions": questions})
+        };
+        let mut refused = BTreeSet::new();
+        let mut planned = within_limits(
+            request,
+            &mut refused,
+            vec![(7, vec![0, 1, 2]), (8, vec![9])],
+        );
+        planned.sort();
+        assert_eq!(planned, [(7, vec![0]), (7, vec![1, 2])]);
+        assert_eq!(refused, BTreeSet::from([(9, 8)]));
+    }
+
+    /// Only a statement judged asserted and saying where it is counts.
+    #[test]
+    fn asserted_lines_are_those_judged_asserted_that_say_where_they_are() {
+        let result = json!({"statements": [
+            {"file": "a.js", "line": 1, "asserted": true},
+            {"file": "a.js", "line": 2, "asserted": false},
+            {"file": "a.js", "asserted": true},
+            {"line": 4, "asserted": true},
+        ]});
+        assert_eq!(
+            asserted_in(&result),
+            BTreeMap::from([("a.js".to_owned(), BTreeSet::from([1]))])
+        );
+    }
+
+    /// A saved result from before the summary existed, or a statement that
+    /// is not an object, is shown as it is.
+    #[test]
+    fn a_result_without_a_summary_or_with_an_odd_statement_is_shown_as_it_is() {
+        assert_eq!(slim(&json!("x")), json!("x"));
+        let result = json!({"run": "run_x", "statements": [
+            {"file": "a.js", "line": 1, "text": "x;", "change": "skipped", "asserted": true, "answer": 0.6, "answers": []},
+        ]});
+        let files = view(result, &Target::Overview, 0, Some(PAGE)).unwrap();
+        assert!(files.get("summary").is_none(), "{files}");
+        assert_eq!(files["files"][0]["file"], "a.js");
     }
 
     #[test]
@@ -2398,5 +2560,63 @@ mod tests {
         let line = view(result, &Target::Line("request.js".into(), 75), 0, None).unwrap();
         let text = render(&line);
         assert!(text.contains("    Not asked: 130 test(s). No test was asked from 7 file(s) that run it: relay.test.js (40), safety.test.js (22), a.test.js (9), b.test.js (8), c.test.js (7), and 2 more\n"), "{text}");
+    }
+
+    /// Each option is refused where it does not belong, without its value,
+    /// or beside a second target; the rest set what they say.
+    #[test]
+    fn assertion_options_are_refused_where_they_do_not_belong() {
+        let parsed = |args: &[&str]| parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        for (args, said) in [
+            (
+                &["--dry-run"][..],
+                "--dry-run belongs to `assertions assess`",
+            ),
+            (
+                &["--workers", "2"][..],
+                "--workers belongs to `assertions assess`",
+            ),
+            (
+                &["--changed"][..],
+                "--changed belongs to `assertions assess`",
+            ),
+            (
+                &["assess", "--test", "x"][..],
+                "--test reads a saved result",
+            ),
+            (&["assess", "--all"][..], "--all reads a saved result"),
+            (&["--test"][..], "--test needs a test name"),
+            (&["--test", ""][..], "--test needs a test name"),
+            (&["a.js", "--test", "x"][..], "not more than one"),
+            (&["a.js", "b.js"][..], "not more than one"),
+            (&["--offset", "x"][..], "--offset needs a number"),
+            (&["--limit", "-1"][..], "--limit needs a number of rows"),
+            (
+                &["assess", "--workers", "0"][..],
+                "--workers needs a positive number",
+            ),
+            (&["assess", "a.js"][..], "Unknown option: a.js"),
+            (&["--bogus"][..], "Unknown option: --bogus"),
+            (&["a.js:3", "--weak"][..], "give a file or nothing"),
+        ] {
+            let error = parsed(args).err().unwrap_or_default();
+            assert!(error.contains(said), "{args:?}: {error}");
+        }
+        let assess = parsed(&[
+            "assess",
+            "--dry-run",
+            "--refresh",
+            "--changed",
+            "--workers",
+            "999",
+            "--json",
+        ])
+        .unwrap();
+        assert!(assess.assess && assess.dry_run && assess.refresh && assess.changed && assess.json);
+        assert_eq!(assess.workers, 64);
+        let read = parsed(&["--all", "--offset", "3"]).unwrap();
+        assert_eq!((read.limit, read.offset), (None, 3));
+        assert_eq!(parsed(&["--weak"]).unwrap().target, Target::Weak);
+        assert_eq!(parsed(&["--limit", "5"]).unwrap().limit, Some(5));
     }
 }

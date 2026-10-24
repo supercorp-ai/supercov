@@ -392,7 +392,7 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let set = |chosen: changes::Range, slot: &mut Option<changes::Range>| match slot {
         Some(existing) if *existing != chosen => {
-            Err("pick one change range: --unstaged, --staged or --since <ref>".to_string())
+            Err("pick one change range: --unstaged, --staged or --base <ref>".to_string())
         }
         slot => {
             *slot = Some(chosen);
@@ -507,11 +507,10 @@ fn clean(root: &Path, lane: &str, keep: usize, dry_run: bool) -> Result<Value, S
     let saved = store::list(root, lane)?;
     let removed: Vec<String> = saved.iter().skip(keep).map(|(id, _)| id.clone()).collect();
     if !dry_run {
+        // `list` names snapshot ids alone, so no path built here leaves the
+        // snapshot directory.
         for id in &removed {
             let directory = store::snapshots(root, lane).join(id);
-            if !store::is_snapshot_id(id) {
-                continue;
-            }
             fs::remove_dir_all(&directory).map_err(|e| format!("{}: {e}", directory.display()))?;
         }
         // The pointer may name something just removed. Dropping it is enough:
@@ -674,28 +673,18 @@ struct Window {
 /// gap between `MAX_REQUEST_TOKENS` and the model's limit absorbs.
 pub(crate) fn estimated_tokens(bytes: &[u8]) -> usize {
     let dense = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-');
-    let mut runs = 0;
-    let mut run = 0;
-    for byte in bytes {
-        if dense(byte) {
-            run += 1;
-        } else {
-            if run >= DENSE_RUN {
-                runs += run;
-            }
-            run = 0;
-        }
-    }
-    if run >= DENSE_RUN {
-        runs += run;
-    }
+    let runs: usize = bytes
+        .split(|b| !dense(b))
+        .map(<[u8]>::len)
+        .filter(|&run| run >= DENSE_RUN)
+        .sum();
     (bytes.len() - runs).div_ceil(BYTES_PER_TOKEN) + runs
 }
 
 /// The serialized request, when it fits the token budget.
-fn within_budget(request: &Value) -> Result<Option<Vec<u8>>, String> {
-    let bytes = serde_json::to_vec(request).map_err(|e| e.to_string())?;
-    Ok((estimated_tokens(&bytes) <= MAX_REQUEST_TOKENS).then_some(bytes))
+fn within_budget(request: &Value) -> Option<Vec<u8>> {
+    let bytes = serde_json::to_vec(request).expect("a JSON value always serializes");
+    (estimated_tokens(&bytes) <= MAX_REQUEST_TOKENS).then_some(bytes)
 }
 
 /// Byte offset of every line start, so a window can be sliced without
@@ -1094,9 +1083,9 @@ fn discover_for(
             builder
                 .follow_links(false)
                 .require_git(false)
+                // The walk never filters the directory it starts from.
                 .filter_entry(|entry| {
-                    entry.depth() == 0
-                        || !entry.file_type().is_some_and(|t| t.is_dir())
+                    !entry.file_type().is_some_and(|t| t.is_dir())
                         || !ignored_directory_at(entry.path())
                 });
             // A project inside one of Supercov's own copies has nothing above
@@ -1369,20 +1358,28 @@ struct CacheEntry {
     elapsed_ms: u64,
 }
 
-fn cached(path: &Path, hash: &str, request: &Value) -> Result<Option<CacheEntry>, String> {
+fn cached(
+    path: &Path,
+    lane: &str,
+    hash: &str,
+    request: &Value,
+) -> Result<Option<CacheEntry>, String> {
     match fs::read(path) {
         Ok(bytes) => {
             let entry: CacheEntry = serde_json::from_slice(&bytes)
-                .map_err(|_| "invalid quality cache; use --refresh")?;
+                .map_err(|_| format!("invalid {lane} cache; use --refresh"))?;
             if entry.request_hash != hash {
-                return Err("quality cache hash mismatch; use --refresh".into());
+                return Err(format!("{lane} cache hash mismatch; use --refresh"));
             }
             validate(&entry.response, request)
                 .map_err(|e| format!("{e} in cache; use --refresh"))?;
             Ok(Some(entry))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("cannot read quality cache: {e}")),
+        Err(e) => Err(format!(
+            "cannot read the {lane} cache {}: {e}; use --refresh",
+            path.display()
+        )),
     }
 }
 
@@ -1402,14 +1399,8 @@ fn resolve(
     hash: &str,
 ) -> Result<(CacheEntry, bool, Option<String>), String> {
     let cache_path = store::responses(project_root, lane).join(format!("{hash}.json"));
-    if !refresh {
-        // The flat directory is where responses were cached before snapshots
-        // existed. An answer saved there still answers this exact request.
-        for path in [&cache_path, &store::legacy_response(project_root, hash)] {
-            if let Some(entry) = cached(path, hash, request)? {
-                return Ok((entry, true, None));
-            }
-        }
+    if !refresh && let Some(entry) = cached(&cache_path, lane, hash, request)? {
+        return Ok((entry, true, None));
     }
     let key = key
         .filter(|s| !s.trim().is_empty())
@@ -1555,13 +1546,13 @@ fn catalog_windows(
     instrument: Instrument,
 ) -> Result<Vec<(Window, String)>, String> {
     let starts = line_starts(source);
-    let fits = |window: &Window| -> Result<bool, String> {
+    let fits = |window: &Window| -> bool {
         let text = window_source(source, &starts, window);
-        Ok(within_budget(&instrument.file_request(path, text))?.is_some())
+        within_budget(&instrument.file_request(path, text)).is_some()
     };
     let mut pieces: Vec<Window> = Vec::new();
     for candidate in window_candidates(path, source, &starts) {
-        if fits(&candidate)? {
+        if fits(&candidate) {
             pieces.push(candidate);
             continue;
         }
@@ -1573,7 +1564,7 @@ fn catalog_windows(
                 end_line: line,
                 declarations: candidate.declarations.clone(),
             };
-            if !fits(&piece)? {
+            if !fits(&piece) {
                 return Err(format!(
                     "file is over the request budget and line {line} alone is too; \
                      it is probably minified or embeds data"
@@ -1592,7 +1583,7 @@ fn catalog_windows(
             declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
         });
         match merged {
-            Some(merged) if fits(&merged)? => {
+            Some(merged) if fits(&merged) => {
                 *planned.last_mut().expect("a window to merge into") = merged;
             }
             _ => planned.push(candidate),
@@ -1626,16 +1617,26 @@ struct Subject {
     note: Option<String>,
 }
 
+/// A candidate line pass two confirmed for a check.
+#[derive(Debug, Clone, Serialize)]
+struct ConfirmedLine {
+    line: usize,
+    check: String,
+    value: f64,
+    text: String,
+    /// Where the outside value the line uses enters the function, when the
+    /// model named a line for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enters_at: Option<u64>,
+}
+
 /// Every answer for one subject, or why it has none.
 struct Answers {
-    /// Pass two: candidate lines the model confirmed, as `{line, check, value, text}`.
-    lines: Vec<Value>,
+    /// Pass two: candidate lines the model confirmed.
+    lines: Vec<ConfirmedLine>,
     /// The graph stage's labels for this file's functions, in declaration
     /// order: `{takes_outside, reaches_sink, sanitises, sink_kind}`.
     labels: Vec<FunctionLabel>,
-    /// Lines pass one already classified, when the first chunk of nodes rode
-    /// on its request: node index to check.
-    classified: BTreeMap<usize, String>,
     path: String,
     bytes: u64,
     sha256: String,
@@ -1782,21 +1783,23 @@ fn ask_smells(
     let mut out: Vec<Answers> = Vec::new();
     for (index, subject) in subjects.iter().enumerate() {
         let sendable = within_budget(&subject.request);
-        let error = match &sendable {
-            Ok(Some(_)) => None,
-            Ok(None) => Some(format!(
-                "over the {MAX_REQUEST_TOKENS} token request budget; a pair of versions \
-                 cannot be split into windows the way one file can"
-            )),
-            Err(e) => Some(e.clone()),
-        };
-        if let Ok(Some(bytes)) = sendable {
+        // Only a change can be over the budget here: an assessment windows
+        // a large file first. A new file has no pair of versions, and its
+        // diff is as large as it is.
+        let error = sendable.is_none().then(|| {
+            format!(
+                "over the {MAX_REQUEST_TOKENS} token request budget, and so is its diff; \
+                 a change cannot be split into windows, but `supercov {} {}` reads the file in them",
+                instrument.lane(),
+                subject.path
+            )
+        });
+        if let Some(bytes) = sendable {
             pending.push(((index, None), subject.request.clone(), bytes));
         }
         out.push(Answers {
             lines: Vec::new(),
             labels: Vec::new(),
-            classified: BTreeMap::new(),
             path: subject.path.clone(),
             bytes: subject.bytes,
             sha256: subject.sha256.clone(),
@@ -1807,7 +1810,7 @@ fn ask_smells(
             error,
         });
     }
-    if progress && key.is_some() {
+    if progress {
         let (tokens, _) = estimated_cost(&pending);
         eprintln!("{}", estimate_line(instrument, pending.len(), tokens));
     }
@@ -1850,7 +1853,6 @@ fn ask_smells(
                         .collect(),
                 );
                 out[index].labels = function_labels(&entry.response);
-                out[index].classified = classifications(&entry.response);
                 out[index].cached = hit;
                 out[index].error = warning;
             }
@@ -1914,14 +1916,6 @@ fn present_for(values: &BTreeMap<String, f64>, instrument: Instrument) -> Vec<(S
 /// nodes fit beside the file), then confirmation. On fifteen held-out
 /// repositories: F1 0.47 at $0.33, against 0.46 at $0.66 for a thirteen-way
 /// Choice on every node of every file.
-fn enumerate_lines() -> bool {
-    true
-}
-
-fn narrow_nodes() -> bool {
-    true
-}
-
 /// A file question at or above this sends the check into the narrowing
 /// tier. Lower than the 0.6 that flags a file, because the exhaustive tier
 /// found lines in files whose file question had not fired.
@@ -1942,10 +1936,7 @@ struct View {
 
 fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View> {
     let structure = candidates::structure(Path::new(path), source);
-    if matches!(
-        within_budget(&catalog::security::file_request(path, source)),
-        Ok(Some(_))
-    ) {
+    if within_budget(&catalog::security::file_request(path, source)).is_some() {
         return vec![View {
             text: source.to_string(),
             offset: 0,
@@ -1985,6 +1976,7 @@ fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View>
                         })
                         .collect(),
                     imports: structure.imports.clone(),
+                    default_export: structure.default_export.clone(),
                 },
             }
         })
@@ -2063,11 +2055,10 @@ fn ask_lines(
     };
     let (mut usage, mut reused) = (zero(), zero());
     let agent = client();
-    // Round one: the parser lists every node, the model says which check, if
-    // any, each shows. Whatever pass one already classified on its own
-    // request is kept; the rest is asked in chunks sized to the budget, per
-    // view. Files no parser knows keep their pattern candidates and skip to
-    // round two.
+    // Round one: the parser lists every node, the model says which of the
+    // checks the file question fired on, if any, each shows, in chunks sized
+    // to the budget, per view. Files no parser knows keep their pattern
+    // candidates and skip to round two.
     let mut views_by_index: BTreeMap<usize, Vec<View>> = BTreeMap::new();
     let mut pairs: BTreeMap<usize, Vec<candidates::Candidate>> = BTreeMap::new();
     // Each pending request names its job: which file and which view.
@@ -2092,26 +2083,14 @@ fn ask_lines(
                     })
                     .map(|(check, _)| check.clone())
                     .collect();
-                if narrow_nodes() && fired.is_empty() {
+                // Only the checks the file question fired on are asked
+                // line by line.
+                if fired.is_empty() {
                     continue;
                 }
-                let among = narrow_nodes().then_some(fired.as_slice());
-                for (i, check) in &answer.classified {
-                    if let Some(node) = nodes.get(*i) {
-                        pairs.entry(index).or_default().push(candidates::Candidate {
-                            line: node.line,
-                            check: check.clone(),
-                            text: node.text.clone(),
-                        });
-                    }
-                }
-                let asked = pass_one_asked(&answer.path, &nodes, answer);
                 let views = line_views(&answer.path, &source, &nodes);
                 for (v, view) in views.iter().enumerate() {
-                    // Pass one answers every node it was given, so the first
-                    // key it did not carry is where the remaining chunks
-                    // start. A windowed file was never given any.
-                    let mut offset = if views.len() == 1 { asked } else { 0 };
+                    let mut offset = 0;
                     while offset < view.nodes.len() {
                         let left = view.nodes.len() - offset;
                         let mut took = 0;
@@ -2127,9 +2106,9 @@ fn ask_lines(
                                 &view.text,
                                 &view.nodes[offset..offset + take],
                                 offset,
-                                among,
+                                &fired,
                             );
-                            if let Ok(Some(bytes)) = within_budget(&request) {
+                            if let Some(bytes) = within_budget(&request) {
                                 jobs.push((index, v));
                                 pending.push(((index, Some(jobs.len() - 1)), request, bytes));
                                 took = take;
@@ -2146,7 +2125,7 @@ fn ask_lines(
             }
             Some(_) => continue,
             None => {
-                let found = candidates::candidates(path, &source);
+                let found = candidates::candidates(&source);
                 if !found.is_empty() {
                     pairs.insert(index, found);
                     views_by_index.insert(index, line_views(&answer.path, &source, &[]));
@@ -2181,13 +2160,14 @@ fn ask_lines(
             };
             let classified = classifications(&entry.response);
             for (i, check) in classified {
-                if let Some(node) = view.nodes.get(i) {
-                    pairs.entry(index).or_default().push(candidates::Candidate {
-                        line: node.line + view.offset,
-                        check,
-                        text: node.text.clone(),
-                    });
-                }
+                // A validated answer has the request's ids alone, and the
+                // request asked `n{i}` of this view's nodes only.
+                let node = &view.nodes[i];
+                pairs.entry(index).or_default().push(candidates::Candidate {
+                    line: node.line + view.offset,
+                    check,
+                    text: node.text.clone(),
+                });
             }
         }
     }
@@ -2245,7 +2225,7 @@ fn ask_lines(
                         &local[offset..offset + take],
                         &view.structure,
                     );
-                    if let Ok(Some(bytes)) = within_budget(&request) {
+                    if let Some(bytes) = within_budget(&request) {
                         jobs.push((*index, v, mine[offset..offset + take].to_vec()));
                         pending.push(((*index, Some(jobs.len() - 1)), request, bytes));
                         took = take;
@@ -2272,7 +2252,7 @@ fn ask_lines(
         pending.len() > 4,
     );
     let mut confirmed = 0usize;
-    let mut lines_by_index: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
+    let mut lines_by_index: BTreeMap<usize, Vec<ConfirmedLine>> = BTreeMap::new();
     for ((index, slot), result) in answered {
         let entry = match result {
             Ok((_, entry, hit, _)) => {
@@ -2299,15 +2279,16 @@ fn ask_lines(
             if value >= catalog::security::cut_for(&candidate.check)
                 && dismissed < catalog::security::DISMISS_AT
             {
-                let mut line = json!({ "line": candidate.line, "check": candidate.check,
-                    "value": value, "text": candidate.text });
-                if let Some(chosen) = choice(&entry.response, &format!("s{i}"))
-                    && let Some(number) =
-                        chosen.strip_prefix('L').and_then(|n| n.parse::<u64>().ok())
-                {
-                    line["enters_at"] = json!(number + offset as u64);
-                }
-                lines.push(line);
+                let enters_at = choice(&entry.response, &format!("s{i}"))
+                    .and_then(|chosen| chosen.strip_prefix('L')?.parse::<u64>().ok())
+                    .map(|number| number + offset as u64);
+                lines.push(ConfirmedLine {
+                    line: candidate.line,
+                    check: candidate.check.clone(),
+                    value,
+                    text: candidate.text.clone(),
+                    enters_at,
+                });
             }
         }
     }
@@ -2315,30 +2296,19 @@ fn ask_lines(
     // one thing to fix, and are counted as one. The strongest line of the
     // window is the one shown, so a handler's `def` line at 0.62 does not
     // stand in for the `pickle.loads` at 0.96 eleven lines below it.
-    let mut kept_by_index: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
+    let mut kept_by_index: BTreeMap<usize, Vec<ConfirmedLine>> = BTreeMap::new();
     for (index, mut lines) in lines_by_index {
-        lines.sort_by(|a, b| {
-            b["value"]
-                .as_f64()
-                .partial_cmp(&a["value"].as_f64())
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a["line"].as_u64().cmp(&b["line"].as_u64()))
-        });
-        let mut kept: Vec<Value> = Vec::new();
+        lines.sort_by(|a, b| b.value.total_cmp(&a.value).then(a.line.cmp(&b.line)));
+        let mut kept: Vec<ConfirmedLine> = Vec::new();
         for line in lines {
-            let near = kept.iter().any(|k| {
-                k["check"] == line["check"]
-                    && k["line"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .abs_diff(line["line"].as_u64().unwrap_or(0))
-                        <= 10
-            });
+            let near = kept
+                .iter()
+                .any(|k| k.check == line.check && k.line.abs_diff(line.line) <= 10);
             if !near {
                 kept.push(line);
             }
         }
-        kept.sort_by(|a, b| a["line"].as_u64().cmp(&b["line"].as_u64()));
+        kept.sort_by_key(|line| line.line);
         if !kept.is_empty() {
             kept_by_index.insert(index, kept);
         }
@@ -2348,24 +2318,6 @@ fn ask_lines(
         answers[index].lines = kept;
     }
     (confirmed, usage, reused)
-}
-
-/// How many nodes pass one's request carried for this file: the largest
-/// classified index plus one when any were classified, otherwise what the
-/// same sizing would have chosen. Recomputed rather than stored, because the
-/// choice is deterministic on the same file.
-fn pass_one_asked(path: &str, nodes: &[candidates::Node], answer: &Answers) -> usize {
-    if let Some(max) = answer.classified.keys().max() {
-        // Every node asked was answered, so the keys reach at least this far;
-        // the chunk sizes are the same three, so the smallest that covers it.
-        return [nodes.len(), 60, 30]
-            .into_iter()
-            .filter(|take| *take > *max && *take <= nodes.len())
-            .min()
-            .unwrap_or(nodes.len());
-    }
-    let _ = path;
-    0
 }
 
 /// A Choice below this confidence is read as `none`.
@@ -2447,10 +2399,18 @@ fn confirm_paths(
                     .take(callee_answer.labels.len())
                 {
                     let label = &callee_answer.labels[j];
-                    let named = import.exported == "*"
-                        || import.exported == "default"
-                        || callee.name == import.exported
-                        || callee.name == import.local;
+                    // A default import names the function the module
+                    // exports as default, not every function in it.
+                    let named = match import.exported.as_str() {
+                        "*" => true,
+                        "default" => match &callee_structure.default_export {
+                            Some(exported) => callee.name == *exported,
+                            None => callee.name == import.local,
+                        },
+                        // An alias renames the function for the caller;
+                        // the callee is still the one exported.
+                        exported => callee.name == exported,
+                    };
                     if !named
                         || label.reaches_sink < cut
                         || label.sanitises >= cut
@@ -2482,7 +2442,7 @@ fn confirm_paths(
                         },
                         &label.sink_kind,
                     );
-                    if let Ok(Some(bytes)) = within_budget(&request) {
+                    if let Some(bytes) = within_budget(&request) {
                         let index = candidates_found.len();
                         candidates_found.push(json!({
                             "caller": { "file": file, "function": caller.name, "line": call_line },
@@ -2538,9 +2498,8 @@ fn confirm_pending(
         };
         let counted = if hit { &mut reused } else { &mut usage };
         counted.input_tokens += entry.response.usage.input_tokens;
-        if let Some(value) = noul(&entry.response, "path")
-            && value >= cut
-        {
+        let value = noul(&entry.response, "path").expect("validated: `path` is asked as a noul");
+        if value >= cut {
             let mut path = candidates_found[index].clone();
             path["value"] = json!(value);
             confirmed.push(path);
@@ -2563,7 +2522,7 @@ fn run_paths(
     structures: &BTreeMap<String, (candidates::Structure, String)>,
     points: &[(String, usize, Vec<String>)],
     already: &[Value],
-) -> (Vec<Value>, Usage, Usage) {
+) -> (Vec<Value>, Vec<Value>, Usage, Usage) {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
     // test -> file -> executed lines
@@ -2607,6 +2566,7 @@ fn run_paths(
         })
         .collect();
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut unasked = Vec::new();
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
     for (callee_file, (callee_structure, callee_source)) in structures {
@@ -2661,7 +2621,16 @@ fn run_paths(
                             format!("{caller_file}#{}", caller.name),
                             format!("{callee_file}#{}", callee.name),
                         );
-                        if known.contains(&pair) || !seen.insert(pair) || callers >= 3 {
+                        if known.contains(&pair) || !seen.insert(pair) {
+                            continue;
+                        }
+                        // Three callers a function are asked about; the rest
+                        // are named, not dropped.
+                        if callers >= 3 {
+                            unasked.push(json!({
+                                "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
+                                "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
+                            }));
                             continue;
                         }
                         callers += 1;
@@ -2680,7 +2649,7 @@ fn run_paths(
                             },
                             &label.sink_kind,
                         );
-                        if let Ok(Some(bytes)) = within_budget(&request) {
+                        if let Some(bytes) = within_budget(&request) {
                             let index = candidates_found.len();
                             candidates_found.push(json!({
                                 "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
@@ -2694,7 +2663,8 @@ fn run_paths(
             }
         }
     }
-    confirm_pending(root, key, refresh, pending, candidates_found)
+    let (paths, usage, reused) = confirm_pending(root, key, refresh, pending, candidates_found);
+    (paths, unasked, usage, reused)
 }
 
 /// Guards a run observed. For every function that takes outside data, the
@@ -2796,10 +2766,8 @@ fn scored(answers: &Answers, instrument: Instrument) -> Value {
             // A line the second round confirmed for a check pass one did not
             // fire on is still a finding; it carries the line's value.
             for line in &answers.lines {
-                if let (Some(check), Some(value)) = (line["check"].as_str(), line["value"].as_f64())
-                    && !fired.iter().any(|(id, _)| id == check)
-                {
-                    fired.push((check.to_owned(), value));
+                if !fired.iter().any(|(id, _)| *id == line.check) {
+                    fired.push((line.check.clone(), line.value));
                 }
             }
             fired
@@ -2807,8 +2775,8 @@ fn scored(answers: &Answers, instrument: Instrument) -> Value {
                 .map(|(id, value)| {
                     // The lines pass two confirmed for this check, if any:
                     // that is the tier a reader sees.
-                    let lines: Vec<&Value> =
-                        answers.lines.iter().filter(|l| l["check"] == id).collect();
+                    let lines: Vec<&ConfirmedLine> =
+                        answers.lines.iter().filter(|l| l.check == id).collect();
                     json!({ "check": id, "value": value,
                         "tier": if lines.is_empty() { "file" } else { "line" },
                         "lines": lines })
@@ -2856,10 +2824,12 @@ fn finding_counts(files: &[Value]) -> (usize, usize, BTreeMap<String, usize>) {
                 .as_array()
                 .is_some_and(|lines| !lines.is_empty())
         }));
-        for finding in findings {
-            if let Some(check) = finding["check"].as_str() {
-                *by_check.entry(check.to_owned()).or_default() += 1;
-            }
+        // `scored` names the check of every finding it writes.
+        for check in findings
+            .iter()
+            .filter_map(|finding| finding["check"].as_str())
+        {
+            *by_check.entry(check.to_owned()).or_default() += 1;
         }
     }
     (flagged, line_confirmed, by_check)
@@ -2918,12 +2888,7 @@ fn resolve_ambiguity(
     };
     let mut tree: Vec<String> = found.iter().map(|p| relative(p)).collect();
     tree.sort();
-    let manifests = tree
-        .iter()
-        .filter(|p| scope::declares_a_package(p))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let manifests = scope::manifests(root).join("\n");
     let asking: Vec<String> = scope
         .entries
         .iter()
@@ -2935,25 +2900,30 @@ fn resolve_ambiguity(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let request = catalog::scope_request(&name, &tree.join("\n"), &manifests, &asking);
-    let bytes = within_budget(&request).ok()??;
+    let bytes = within_budget(&request)?;
     let agent = client();
     let hash = digest(&bytes);
     // Scope is a property of the tree, not of an instrument, so both lanes
     // share one cached answer under the quality lane.
-    let (entry, _, _) =
-        resolve(root, "quality", &agent, Some(key), refresh, &request, &hash).ok()?;
+    let entry = match resolve(root, "quality", &agent, Some(key), refresh, &request, &hash) {
+        Ok((entry, _, _)) => entry,
+        // The files stay ambiguous, and the report says why.
+        Err(error) => return Some(json!({ "asked": asking.len(), "error": error })),
+    };
     let mut ships = 0usize;
-    for (index, path) in asking.iter().enumerate() {
-        let Some(value) = noul(&entry.response, &format!("f{index}")) else {
-            continue;
-        };
+    // `f{index}` is asked of the index-th ambiguous entry, in this order.
+    let ambiguous = scope
+        .entries
+        .iter_mut()
+        .filter(|e| e.status == scope::Status::Ambiguous);
+    for (index, found) in ambiguous.enumerate() {
+        let value = noul(&entry.response, &format!("f{index}"))
+            .expect("validated: each ambiguous path is asked as a noul");
         if value >= catalog::PRESENT_AT {
             ships += 1;
-            if let Some(found) = scope.entries.iter_mut().find(|e| &e.path == path) {
-                found.status = scope::Status::Included;
-                found.reason = "the model reads it as part of the product".into();
-            }
-        } else if let Some(found) = scope.entries.iter_mut().find(|e| &e.path == path) {
+            found.status = scope::Status::Included;
+            found.reason = "the model reads it as part of the product".into();
+        } else {
             found.status = scope::Status::Excluded;
             found.reason = "the model reads it as not part of the product".into();
         }
@@ -2969,6 +2939,7 @@ fn run_health(
     options: &Options,
     key: Option<&str>,
     instrument: Instrument,
+    run: Option<&RunCoverage>,
 ) -> Result<(Value, bool), String> {
     if !options.dry_run {
         require_key(key, instrument)?;
@@ -3046,49 +3017,25 @@ fn run_health(
                         let mut functions = structure.functions.clone();
                         functions.truncate(MAX_LABELLED_FUNCTIONS);
                         let mut labelled = whole.clone();
-                        if let Some(questions) = labelled["questions"].as_object_mut() {
-                            questions.extend(catalog::security::function_questions(&functions));
-                        }
-                        if matches!(within_budget(&labelled), Ok(Some(_))) {
+                        labelled["questions"]
+                            .as_object_mut()
+                            .expect("a file request asks its questions by id")
+                            .extend(catalog::security::function_questions(&functions));
+                        if within_budget(&labelled).is_some() {
                             whole = labelled;
                             structures.insert(relative.clone(), (structure, source.clone()));
                         }
                     }
-                    // The first chunk of line classifications rides here too,
-                    // as many as fit: the state is already being sent. Only
-                    // when the line tier enumerates; the narrowing tier asks
-                    // per function after the file questions have answered.
-                    if enumerate_lines()
-                        && !narrow_nodes()
-                        && let Some(nodes) = candidates::nodes(Path::new(&relative), &source)
-                    {
-                        for take in [nodes.len(), 60, 30] {
-                            if take == 0 || take > nodes.len() {
-                                continue;
-                            }
-                            let mut with = whole.clone();
-                            if let Some(questions) = with["questions"].as_object_mut() {
-                                questions.extend(catalog::security::classify_questions(
-                                    &nodes[..take],
-                                    0,
-                                ));
-                            }
-                            if matches!(within_budget(&with), Ok(Some(_))) {
-                                whole = with;
-                                break;
-                            }
-                        }
-                    }
                 }
                 match within_budget(&whole) {
-                    Ok(Some(_)) => subjects.push(Subject {
+                    Some(_) => subjects.push(Subject {
                         bytes: source.len() as u64,
                         request: whole,
                         path: relative,
                         sha256,
                         note: None,
                     }),
-                    Ok(None) => match catalog_windows(&relative, &source, instrument) {
+                    None => match catalog_windows(&relative, &source, instrument) {
                         Ok(windows) => {
                             let count = windows.len();
                             for (window, text) in windows {
@@ -3111,9 +3058,6 @@ fn run_health(
                             "path": relative, "status": "failed", "error": e
                         })),
                     },
-                    Err(e) => unreadable.push(json!({
-                        "path": relative, "status": "failed", "error": e
-                    })),
                 }
             }
             Err(e) => unreadable.push(json!({
@@ -3127,7 +3071,7 @@ fn run_health(
         // run, and it was printed only once the money was being spent.
         let sendable: Vec<usize> = subjects
             .iter()
-            .filter_map(|subject| within_budget(&subject.request).ok().flatten())
+            .filter_map(|subject| within_budget(&subject.request))
             .map(|bytes| estimated_tokens(&bytes))
             .collect();
         eprintln!(
@@ -3159,6 +3103,7 @@ fn run_health(
     // of unlabelled files against pass one's 23%, at 58% recall with a line.
     let (mut usage, mut reused) = (usage, reused);
     let mut paths_found: Vec<Value> = Vec::new();
+    let mut paths_not_asked: Vec<Value> = Vec::new();
     let mut handlers_by_file: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     if instrument == Instrument::Security {
         let (_, more, cached) = ask_lines(root, key, options.refresh, &mut answers);
@@ -3169,22 +3114,21 @@ fn run_health(
         usage.input_tokens += more.input_tokens;
         reused.input_tokens += cached.input_tokens;
         paths_found = paths;
-        if let Some(selector) = options.run.as_deref()
-            && let Ok(points) = crate::load_point_tests((selector != "latest").then_some(selector))
-        {
-            let (paths, more, cached) = run_paths(
+        if let Some(RunCoverage { points, .. }) = run {
+            let (paths, not_asked, more, cached) = run_paths(
                 root,
                 key,
                 options.refresh,
                 &answers,
                 &structures,
-                &points,
+                points,
                 &paths_found,
             );
             usage.input_tokens += more.input_tokens;
             reused.input_tokens += cached.input_tokens;
             paths_found.extend(paths);
-            handlers_by_file = run_guards(&answers, &structures, &points);
+            paths_not_asked = not_asked;
+            handlers_by_file = run_guards(&answers, &structures, points);
         }
     }
 
@@ -3194,8 +3138,9 @@ fn run_health(
     for answer in &answers {
         if instrument.scores()
             && let Some(values) = &answer.values
-            && let Some(health) = catalog::health(values)
         {
+            let health =
+                catalog::health(values).expect("a validated answer has every file question");
             weighted.push((answer.bytes, health));
             // Every ancestor directory, so a tree can be read at any depth.
             let mut directory = Path::new(&answer.path).parent();
@@ -3301,17 +3246,21 @@ fn run_health(
         "usage_this_run": usage,
         "usage_from_cache": reused,
     });
-    let recorded = json!({ "files": files, "directories": directories, "paths": paths_found });
+    let recorded = json!({
+        "files": files,
+        "directories": directories,
+        "paths": paths_found,
+        "paths_not_asked": paths_not_asked,
+    });
     let saved = store::write(root, instrument.lane(), &id, &manifest, &recorded);
     let mut report = manifest.take();
     if let Err(error) = &saved {
-        report["snapshot_warning"] = json!(format!(
-            "the assessment completed but no snapshot was saved: {error}"
-        ));
+        report["snapshot_warning"] = json!(format!("the assessment completed but {error}"));
     }
     report["directories"] = recorded["directories"].clone();
     report["files"] = recorded["files"].clone();
     report["paths"] = recorded["paths"].clone();
+    report["paths_not_asked"] = recorded["paths_not_asked"].clone();
     report["files_scored"] = json!(weighted.len());
     Ok((report, failed))
 }
@@ -3347,7 +3296,11 @@ fn run_patch(
         if !change.reviewable() {
             skipped.push(json!({
                 "path": change.path,
-                "reason": "a deletion cannot introduce anything",
+                "reason": if change.kind == changes::Kind::Deleted {
+                    "a deletion cannot introduce anything"
+                } else {
+                    "emptied; an empty file cannot introduce anything"
+                },
             }));
             continue;
         }
@@ -3357,11 +3310,9 @@ fn run_patch(
         }
         // The same scope as an assessment, so a reviewer reading `runs patch`
         // and `quality patch` together sees one set of files. A change outside
-        // it is reported rather than dropped.
-        if !all
-            && let Some(entry) = in_scope.get(&change.path)
-            && *entry != scope::Status::Included
-        {
+        // it is reported rather than dropped. The scope was decided for
+        // these very paths, so each has an entry.
+        if !all && in_scope[&change.path] != scope::Status::Included {
             skipped.push(json!({
                 "path": change.path,
                 "reason": scope_reasons.get(&change.path).cloned().unwrap_or_default(),
@@ -3376,7 +3327,7 @@ fn run_patch(
         // the patch alone is asked instead and the report says so.
         let whole = instrument.change_request(&change.before, &change.after);
         let (request, note) = match within_budget(&whole) {
-            Ok(Some(_)) => (whole, None),
+            Some(_) => (whole, None),
             _ if !change.patch.is_empty() => (
                 instrument.patch_request(&change.patch),
                 Some("unified diff only: both versions exceed the request budget".to_owned()),
@@ -3506,25 +3457,38 @@ fn human_quality(report: &Value) -> String {
             .filter(|f| band(f["health"].as_f64()) == name)
             .count()
     };
-    out.push_str(&format!(
-        "Quality {} ({:.1}/10) over {}.\n",
-        band(health),
-        health.unwrap_or(0.0),
-        self::files(scored.len() as u64)
-    ));
-    out.push_str(&format!(
-        "  {} good, {} fair, {} weak.\n",
-        count("good"),
-        count("fair"),
-        count("weak")
-    ));
-    if let Some(resolved) = report["scope_resolved"].as_object() {
+    // With no file scored there is no health, and a 0.0 would read as the
+    // worst one.
+    if let Some(health) = health {
         out.push_str(&format!(
-            "  {} files under no source root were read by the model from the tree: \
-             {} ship, {} do not.\n",
-            resolved["asked"].as_u64().unwrap_or(0),
-            resolved["ships"].as_u64().unwrap_or(0),
-            resolved["does_not"].as_u64().unwrap_or(0)
+            "Quality {} ({health:.1}/10) over {}.\n",
+            band(Some(health)),
+            self::files(scored.len() as u64)
+        ));
+        out.push_str(&format!(
+            "  {} good, {} fair, {} weak.\n",
+            count("good"),
+            count("fair"),
+            count("weak")
+        ));
+    } else {
+        out.push_str("Quality not scored: no file was assessed.\n");
+    }
+    if let Some(error) = report["scope_resolved"]["error"].as_str() {
+        out.push_str(&format!(
+            "  The model could not be asked which files under no source root ship: {error}\n"
+        ));
+    } else if let Some(resolved) = report["scope_resolved"].as_object() {
+        let asked = resolved["asked"].as_u64().unwrap_or(0);
+        let ships = resolved["ships"].as_u64().unwrap_or(0);
+        let does_not = resolved["does_not"].as_u64().unwrap_or(0);
+        out.push_str(&format!(
+            "  {} under no source root {} read by the model from the tree: \
+             {ships} {}, {does_not} {} not.\n",
+            self::files(asked),
+            if asked == 1 { "was" } else { "were" },
+            if ships == 1 { "ships" } else { "ship" },
+            if does_not == 1 { "does" } else { "do" },
         ));
     }
     if let Some(limitation) = report["limitation"].as_str() {
@@ -3618,13 +3582,23 @@ fn human_security(report: &Value) -> String {
         out.push_str(&format!("  {}\n", named.join(", ")));
     }
     if let Some(run) = report["run"].as_str() {
-        out.push_str(&format!(
-            "  {} flagged files have lines no test in run {run} executed",
-            report["flagged_in_untested_code"].as_u64().unwrap_or(0)
-        ));
+        out.push_str(
+            &match report["flagged_in_untested_code"].as_u64().unwrap_or(0) {
+                0 => {
+                    format!("  Every line of the flagged files was executed by a test in run {run}")
+                }
+                1 => format!("  1 flagged file has lines no test in run {run} executed"),
+                n => format!("  {n} flagged files have lines no test in run {run} executed"),
+            },
+        );
         match report["flagged_executed_unasserted"].as_u64() {
+            Some(0) => out.push_str(
+                "; every flagged file a test executes has a line some test is judged to catch.\n",
+            ),
             Some(n) => out.push_str(&format!(
-                "; {n} are executed by tests that are not judged to catch any line of them.\n"
+                "; {n} {} executed by tests that are not judged to catch any line of {}.\n",
+                if n == 1 { "is" } else { "are" },
+                if n == 1 { "it" } else { "them" }
             )),
             None => out.push_str(".\n"),
         }
@@ -3633,9 +3607,6 @@ fn human_security(report: &Value) -> String {
                 "  Run {run} has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported. Assess it with `{assess}`.\n"
             ));
         }
-    }
-    if let Some(limitation) = report["limitation"].as_str() {
-        out.push_str(&format!("\n{limitation}\n"));
     }
     out.push_str(&format!(
         "Catalog {}, model {}, snapshot {}.\nEach line is a judgment you can check against the file. \
@@ -3679,16 +3650,6 @@ fn human_security(report: &Value) -> String {
                     match line["enters_at"].as_u64() {
                         Some(n) => format!("  (enters at line {n})"),
                         None => String::new(),
-                    } + &if line["by"] == "agent" {
-                        match (
-                            line["registered_at"]["file"].as_str(),
-                            line["registered_at"]["line"].as_u64(),
-                        ) {
-                            (Some(f), Some(l)) => format!("  [agent; registered at {f}:{l}]"),
-                            _ => "  [agent]".to_owned(),
-                        }
-                    } else {
-                        String::new()
                     }
                 ));
             }
@@ -3765,6 +3726,30 @@ fn human_security(report: &Value) -> String {
                 path["callee"]["function"].as_str().unwrap_or("?"),
             ));
         }
+        if paths.len() > 10 {
+            out.push_str(&format!("  ... and {} more\n", paths.len() - 10));
+        }
+    }
+    let not_asked = report["paths_not_asked"].as_array().unwrap_or(&empty);
+    if !not_asked.is_empty() {
+        out.push_str(&format!(
+            "{} more caller(s) ran with a flagged function in a test and were not asked, three being asked per function:\n",
+            not_asked.len()
+        ));
+        for path in not_asked.iter().take(5) {
+            out.push_str(&format!(
+                "  {}:{} {} -> {}:{} {}\n",
+                path["caller"]["file"].as_str().unwrap_or("?"),
+                path["caller"]["line"].as_u64().unwrap_or(0),
+                path["caller"]["function"].as_str().unwrap_or("?"),
+                path["callee"]["file"].as_str().unwrap_or("?"),
+                path["callee"]["line"].as_u64().unwrap_or(0),
+                path["callee"]["function"].as_str().unwrap_or("?"),
+            ));
+        }
+        if not_asked.len() > 5 {
+            out.push_str(&format!("  ... and {} more\n", not_asked.len() - 5));
+        }
     }
     let failed: Vec<&Value> = files.iter().filter(|f| f["status"] == "failed").collect();
     for file in failed.iter().take(5) {
@@ -3790,21 +3775,27 @@ fn human_security(report: &Value) -> String {
 
 fn human_patch(report: &Value, limit: usize) -> String {
     let empty = Vec::new();
-    let mut out = String::new();
-    out.push_str(HOW_IT_IS_SCORED);
-    out.push_str(&format!(
-        "Reviewing {}.\n\n",
+    let mut out = format!(
+        "Reviewing {}.\n",
         report["range_description"].as_str().unwrap_or("a change")
-    ));
+    );
     let reviewed = report["reviewed_files"].as_u64().unwrap_or(0);
     let introduced = report["introduced"].as_u64().unwrap_or(0);
     if reviewed == 0 {
         out.push_str("No changed source files to review.\n");
         return out;
     }
+    let changed = format!("changed {}", if reviewed == 1 { "file" } else { "files" });
     if introduced == 0 {
         out.push_str(&format!(
-            "Nothing introduced across {reviewed} changed files.\n"
+            "Nothing introduced across {reviewed} {changed}.\n"
+        ));
+    } else {
+        // A review names which checks appeared; health is a file's, not a
+        // change's, so no number is given.
+        out.push_str(&format!(
+            "{introduced} check{} introduced across {reviewed} {changed}. Each is a judgment you can verify against the file.\n\n",
+            if introduced == 1 { "" } else { "s" }
         ));
     }
     let files = report["files"].as_array().unwrap_or(&empty);
@@ -3855,6 +3846,42 @@ fn human_patch(report: &Value, limit: usize) -> String {
     out
 }
 
+/// What a saved run says of the files a report names.
+struct RunCoverage {
+    view: supercov_engine::run_view::RunView,
+    /// The lines a test is judged to catch, when the run's assertions were
+    /// assessed.
+    asserted: Option<BTreeMap<String, BTreeSet<u64>>>,
+    /// Each covered point with the tests that ran it, for the paths and
+    /// guards a security assessment reads from a run.
+    points: Vec<(String, usize, Vec<String>)>,
+}
+
+/// Read the run `selector` picks before anything is asked, so that a
+/// selector that picks no run is named before a request is paid for.
+///
+/// Assertion credit is the third shelf, and only the security view asks for
+/// it: a change review already says what appeared and where tests do not go.
+/// A run whose assertions were not assessed has no third shelf: no test was
+/// asked, which is not a judgment that the tests catch nothing.
+fn load_run_coverage(selector: &str, security: bool) -> Result<RunCoverage, String> {
+    let selector = (selector != "latest").then_some(selector);
+    let view = crate::load_run_view(selector)?;
+    let (asserted, points) = if security {
+        (
+            crate::load_asserted_lines(selector)?,
+            crate::load_point_tests(selector)?,
+        )
+    } else {
+        (None, Vec::new())
+    };
+    Ok(RunCoverage {
+        view,
+        asserted,
+        points,
+    })
+}
+
 /// Cross what a change introduced with what a saved run covered.
 ///
 /// Neither half justifies stopping anyone on its own. A structural property is
@@ -3866,24 +3893,9 @@ fn human_patch(report: &Value, limit: usize) -> String {
 /// Coverage is read from a run that already happened. This never starts one,
 /// and nothing about quality is added to a run's own output, because an
 /// assessment costs money and needs a credential.
-fn cross_with_coverage(
-    report: &mut Value,
-    selector: &str,
-    file_flag: &str,
-    total_key: &str,
-) -> Result<(), String> {
-    let selector = (selector != "latest").then_some(selector);
-    let view = crate::load_run_view(selector)?;
-    // Assertion credit is the third shelf, and only the security view asks
-    // for it: a change review already says what appeared and where tests do
-    // not go. A run whose assertions were not assessed has no third shelf: no
-    // test was asked, which is not a judgment that the tests catch nothing.
+fn cross_with_coverage(report: &mut Value, run: &RunCoverage, file_flag: &str, total_key: &str) {
+    let RunCoverage { view, asserted, .. } = run;
     let security = file_flag == "flagged_and_untested";
-    let asserted = if security {
-        crate::load_asserted_lines(selector)?
-    } else {
-        None
-    };
     let mut both = 0usize;
     let mut unasserted = 0usize;
     let empty = Vec::new();
@@ -3920,16 +3932,13 @@ fn cross_with_coverage(
                             file["flagged_and_unasserted"] = json!(true);
                         }
                         // Per confirmed line: whether a test is judged to catch it.
-                        if let Some(present) = file["present"].as_array_mut() {
-                            for finding in present {
-                                if let Some(lines) = finding["lines"].as_array_mut() {
-                                    for line in lines {
-                                        let number = line["line"].as_u64().unwrap_or(0);
-                                        if asserted.get(&path).is_some_and(|l| l.contains(&number))
-                                        {
-                                            line["asserted"] = json!(true);
-                                        }
-                                    }
+                        let findings = file["present"].as_array_mut().into_iter().flatten();
+                        for finding in findings {
+                            let lines = finding["lines"].as_array_mut().into_iter().flatten();
+                            for line in lines {
+                                let number = line["line"].as_u64().unwrap_or(0);
+                                if asserted.get(&path).is_some_and(|l| l.contains(&number)) {
+                                    line["asserted"] = json!(true);
                                 }
                             }
                         }
@@ -3961,7 +3970,6 @@ fn cross_with_coverage(
             ),
         });
     }
-    Ok(())
 }
 
 /// GitHub workflow annotations for what a change introduced.
@@ -4109,14 +4117,22 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
             } => present(query::diff(&root, lane, &from, &to, limit)?, json),
             Command::Health(options) => {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
-                let (mut report, failed) = run_health(&root, &options, key.as_deref(), instrument)?;
-                if let Some(selector) = options.run.as_deref().filter(|_| !options.dry_run) {
+                let run = match options.run.as_deref().filter(|_| !options.dry_run) {
+                    Some(selector) => Some(load_run_coverage(
+                        selector,
+                        instrument == Instrument::Security,
+                    )?),
+                    None => None,
+                };
+                let (mut report, failed) =
+                    run_health(&root, &options, key.as_deref(), instrument, run.as_ref())?;
+                if let Some(run) = &run {
                     cross_with_coverage(
                         &mut report,
-                        selector,
+                        run,
                         "flagged_and_untested",
                         "flagged_in_untested_code",
-                    )?;
+                    );
                 }
                 if options.json || options.dry_run {
                     println!(
@@ -4135,6 +4151,11 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 }
                 if let Some(note) = unassessed_note(&report) {
                     eprintln!("{note}");
+                }
+                // Only the JSON report carried this, so a text report named a
+                // snapshot that `show` could not find.
+                if let Some(warning) = report["snapshot_warning"].as_str() {
+                    eprintln!("[supercov] {warning}");
                 }
                 Ok(failed)
             }
@@ -4155,6 +4176,10 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                     ));
                 }
                 let range = range.unwrap_or_else(|| changes::automatic(&root));
+                let run = match run.as_deref() {
+                    Some(selector) => Some(load_run_coverage(selector, false)?),
+                    None => None,
+                };
                 let (mut report, failed) = run_patch(
                     &root,
                     &range,
@@ -4164,13 +4189,13 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                     key.as_deref(),
                     instrument,
                 )?;
-                if let Some(selector) = run.as_deref() {
+                if let Some(run) = &run {
                     cross_with_coverage(
                         &mut report,
-                        selector,
+                        run,
                         "untested_and_changed",
                         "introduced_in_untested_code",
-                    )?;
+                    );
                 }
                 if json {
                     println!(

@@ -405,8 +405,8 @@ export function rests([first, ...[second = 2]] = [], { a, ...others } = {}) {
   return [first, second, a, Object.keys(others).length];
 }
 `,
-  'src/edges.ts': `export function defaults(a = (5), b = \`plain\`, c = -1, d = 'x' as const, e = 2 as number) {
-  return [a, b, c, d, e];
+  'src/edges.ts': `export function defaults(a = (5), b = \`plain\`, c = -1, d = 'x' as const, e = 2 as number, f = \`t\${1}\`, g = +2, h = -(1)) {
+  return [a, b, c, d, e, f, g, h];
 }
 
 export function inner(o?: { inner?: { v: number } }) {
@@ -443,8 +443,8 @@ test('rest patterns with defaults', () => {
 });
 
 test('typescript defaults', () => {
-  assert.deepEqual(defaults(), [5, 'plain', -1, 'x', 2]);
-  assert.deepEqual(defaults(1, 'b', 2, 'y', 3), [1, 'b', 2, 'y', 3]);
+  assert.deepEqual(defaults(), [5, 'plain', -1, 'x', 2, 't1', 2, -1]);
+  assert.deepEqual(defaults(1, 'b', 2, 'y', 3, 'u', 4, 5), [1, 'b', 2, 'y', 3, 'u', 4, 5]);
   assert.equal(inner(undefined), undefined);
   assert.equal(inner({ inner: { v: 4 } }), 4);
 });
@@ -473,6 +473,10 @@ export function chain(o) {
   return o?.inner?.['value'] ?? -1;
 }
 
+export function keyed(o, k) {
+  return o?.[k]?.name ?? 'none';
+}
+
 export function nested(a, b) {
   const result = ((a)) ? ((b || a)) : null;
   return result;
@@ -488,7 +492,7 @@ export function neither(a, b) {
 `,
   'test/grouped.test.mjs': `import assert from 'node:assert/strict';
 import test from 'node:test';
-import { both, call, chain, fallback, grouped, inIf, neither, nested } from '../src/grouped.js';
+import { both, call, chain, fallback, grouped, inIf, keyed, neither, nested } from '../src/grouped.js';
 
 test('parenthesized logic, computed optional calls and chains', () => {
   assert.equal(both(1, 2), 2);
@@ -508,6 +512,10 @@ test('parenthesized logic, computed optional calls and chains', () => {
   assert.equal(chain(null), -1);
   assert.equal(chain({}), -1);
   assert.equal(chain({ inner: {} }), -1);
+  assert.equal(keyed({ a: { name: 'n' } }, 'a'), 'n');
+  assert.equal(keyed(null, 'a'), 'none');
+  assert.equal(keyed({}, 'a'), 'none');
+  assert.equal(keyed({ a: {} }, 'a'), 'none');
   assert.equal(nested(1, 0), 1);
   assert.equal(nested(1, 2), 2);
   assert.equal(nested(0, 0), null);
@@ -517,6 +525,54 @@ test('parenthesized logic, computed optional calls and chains', () => {
   assert.equal(neither(1, 1), false);
   assert.equal(neither(0, 1), true);
   assert.equal(neither(1, 0), true);
+});
+`,
+  // Comments where the code generator drops them and they go back in: after
+  // a tab mid-expression, inside a condition, after \`return\`, on their own
+  // line before an expression.
+  'src/comments.js': `export function noted(a, b) {
+\tconst sum = a +\t/* tab before */ b;
+\tif (a && // why a
+\t\tb) {
+\t\treturn /* inline */ sum;
+\t}
+\treturn (
+\t\t// leading line comment
+\t\t-1
+\t);
+}
+
+export const pick = (o, k) => o?.[k]?.() ?? /* none */ 'none';
+
+export function deep(o) {
+  return o?.a.b?.c ?? (delete o?.a, 'gone');
+}
+`,
+  'test/comments.test.mjs': `import assert from 'node:assert/strict';
+import test from 'node:test';
+import { deep, noted, pick } from '../src/comments.js';
+
+test('comments that go back in', () => {
+  assert.equal(noted(1, 2), 3);
+  assert.equal(noted(0, 2), -1);
+  assert.equal(noted(1, 0), -1);
+  assert.equal(pick({ m: () => 'm' }, 'm'), 'm');
+  assert.equal(pick({}, 'm'), 'none');
+  assert.equal(pick(null, 'm'), 'none');
+  assert.equal(deep({ a: { b: { c: 1 } } }), 1);
+  assert.equal(deep({ a: { b: null } }), 'gone');
+  assert.equal(deep(null), 'gone');
+});
+`,
+  // Strict assertion modules reached through \`require\` in CommonJS tests.
+  'test/strict.test.cjs': `const assert = require('assert').strict;
+const strictly = require('node:assert').strict;
+const test = require('node:test');
+
+test('strict asserts through require', async () => {
+  const { noted } = await import('../src/comments.js');
+  assert.equal(noted(2, 3), 5);
+  strictly.equal(noted(0, 0), -1);
 });
 `,
   'test/routes.test.mjs': `import assert from 'node:assert/strict';
@@ -563,7 +619,7 @@ try {
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['src/flow.js', 'src/values.js', 'src/grouped.js', 'src/edges.js', 'src/edges.ts', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/routes/shared.ts', 'app/entry.server.ts']) {
+  for (const file of ['src/flow.js', 'src/values.js', 'src/grouped.js', 'src/edges.js', 'src/edges.ts', 'src/comments.js', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/routes/shared.ts', 'app/entry.server.ts']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {

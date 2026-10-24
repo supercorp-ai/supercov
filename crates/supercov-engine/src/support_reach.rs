@@ -156,7 +156,10 @@ fn url_path(rest: &str) -> String {
     while index < bytes.len() {
         if bytes[index] == b'%'
             && index + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&rest[index + 1..index + 3], 16)
+            // Bytes, not `rest[..]`: a `%` before a character of several
+            // bytes would cut that character.
+            && let Ok(digits) = std::str::from_utf8(&bytes[index + 1..index + 3])
+            && let Ok(byte) = u8::from_str_radix(digits, 16)
         {
             decoded.push(byte);
             index += 3;
@@ -246,6 +249,92 @@ mod tests {
             reach.names.get("t-refund").map(String::as_str),
             Some("t-refund")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A file URL decodes its escapes, leaves a malformed or cut-short one
+    /// as written, and drops the slash before a Windows drive.
+    #[test]
+    fn file_url_paths_decode_what_is_an_escape() {
+        for (rest, expected) in [
+            ("/a%20b", "/a b"),
+            ("localhost/a", "/a"),
+            ("/a%2", "/a%2"),
+            ("/a%", "/a%"),
+            ("/a%zz", "/a%zz"),
+            ("/a%aé", "/a%aé"),
+            ("/C:/x", "C:/x"),
+            ("/C", "/C"),
+            ("/Cx/y", "/Cx/y"),
+            ("C:/x", "C:/x"),
+            ("", ""),
+        ] {
+            assert_eq!(url_path(rest), expected, "{rest}");
+        }
+    }
+
+    /// Only a project file is noted: the workspace itself, Supercov's own
+    /// files and dependencies are not. Other files in the directory, lines
+    /// that are not JSON and a test that is not in the run are passed over,
+    /// and a request two running tests could have made is credited to none.
+    #[test]
+    fn only_project_files_and_known_tests_are_noted() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-support-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let workspace = root.join("copy");
+        let directory = root.join("support");
+        fs::create_dir_all(&directory).unwrap();
+        let at = |relative: &str| workspace.join(relative).display().to_string();
+        fs::write(
+            directory.join("1.jsonl"),
+            [
+                serde_json::json!({ "loaded": workspace.display().to_string() }),
+                serde_json::json!({ "loaded": at(".supercov/runtime.mjs") }),
+                serde_json::json!({ "loaded": at("node_modules/x/index.js") }),
+                serde_json::json!({ "loaded": "/elsewhere/a.js" }),
+                serde_json::json!({ "read": at("mock.json") }),
+                serde_json::json!({ "served": "t-gone" }),
+                serde_json::json!({ "unscoped": 60 }),
+                serde_json::json!({ "other": 1 }),
+            ]
+            .iter()
+            .map(|record| record.to_string())
+            .chain(["not json".to_owned()])
+            .collect::<Vec<_>>()
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(directory.join("notes.txt"), "{\"served\":\"t-a\"}").unwrap();
+        fs::write(directory.join("noext"), "{\"served\":\"t-a\"}").unwrap();
+        fs::create_dir(directory.join("dir.jsonl")).unwrap();
+        let reach = read(
+            &directory,
+            &workspace,
+            &[served("t-a", (0, 100)), served("t-b", (50, 150))],
+        )
+        .unwrap();
+        assert_eq!(
+            reach.files.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["mock.json"]
+        );
+        assert_eq!(
+            reach.files["mock.json"],
+            BTreeSet::from(["t-gone".to_owned()])
+        );
+        assert!(reach.names.is_empty());
+        // Nothing served: no reach at all; no directory: the same.
+        let quiet = root.join("quiet");
+        fs::create_dir(&quiet).unwrap();
+        fs::write(
+            quiet.join("1.jsonl"),
+            serde_json::json!({ "loaded": at("a.js") }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(read(&quiet, &workspace, &[]), None);
+        assert_eq!(read(&root.join("absent"), &workspace, &[]), None);
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt::Write, process::ExitCode};
 use supercov_engine::{
     agent_json,
-    run_store::{StoredRun, compare_run_integrity, discover_runs, select_run},
+    run_store::{StoredRun, discover_runs, select_run},
     source_manifest,
 };
 
@@ -23,10 +23,9 @@ pub fn command(args: &[String]) -> ExitCode {
         let runs = discover_runs(&root).map_err(|e| e.to_string())?;
         let run = select_run(&runs, Some(&args[0])).map_err(|e| e.to_string())?;
         let working_tree = working_tree(&root, run);
-        if working_tree["stale"] != false {
-            return Err("Current checkout differs from the run or cannot be verified; rerun tests to read current files".into());
-        }
-        let input = source_manifest::load_inputs(&root, run)?;
+        // Only this file has to match the run: another file changing does
+        // not make it any less the file the run measured.
+        let input = source_manifest::load_inputs_for(&root, run, |name| name == file)?;
         let text = input
             .inputs
             .files
@@ -78,25 +77,7 @@ pub fn command(args: &[String]) -> ExitCode {
             print!("{}", render(&data));
             ExitCode::SUCCESS
         }
-        Err(message) => {
-            if json_output {
-                print!(
-                    "{}",
-                    agent_json::failure(
-                        Some("coverage.source"),
-                        &agent_json::AgentError {
-                            code: agent_json::ErrorCode::InvalidArgument,
-                            message,
-                            retryable: false,
-                            details: None,
-                        }
-                    )
-                );
-            } else {
-                eprintln!("[supercov] {message}");
-            }
-            ExitCode::from(2)
-        }
+        Err(message) => crate::refuse("coverage.source", json_output, message, ""),
     }
 }
 
@@ -136,13 +117,8 @@ fn parse(args: &[String]) -> Result<(String, usize, usize), String> {
 }
 
 fn working_tree(root: &std::path::Path, run: &StoredRun) -> Value {
-    match super::current_integrity_for_run(root, run) {
-        Some(current) => {
-            let comparison = compare_run_integrity(Some(&run.metadata.integrity), &current);
-            json!({"stale": comparison.stale, "reasons": comparison.reasons})
-        }
-        None => json!({"stale": null, "reason": "current source integrity unavailable"}),
-    }
+    let comparison = super::checkout_comparison(root, run);
+    json!({"stale": comparison.stale, "reasons": comparison.reasons})
 }
 
 fn quote(value: &str) -> String {
@@ -164,12 +140,22 @@ fn render(data: &Value) -> String {
     let page = &data["pagination"];
     let offset = page["offset"].as_u64().unwrap_or(0);
     let returned = page["returned"].as_u64().unwrap_or(0);
-    let (start, end) = if returned == 0 {
-        (0, 0)
+    let total = page["total"].as_u64().unwrap_or(0);
+    if total == 0 {
+        let _ = writeln!(out, "\nThe file is empty.");
+    } else if returned == 0 {
+        let _ = writeln!(
+            out,
+            "\nShowing none of {total}: --offset {offset} is past the end"
+        );
     } else {
-        (offset + 1, offset + returned)
-    };
-    let _ = writeln!(out, "\nShowing {start}-{end} of {}", page["total"]);
+        let _ = writeln!(
+            out,
+            "\nShowing {}-{} of {total}",
+            offset + 1,
+            offset + returned
+        );
+    }
     if let Some(next) = page["nextOffset"].as_u64() {
         let _ = writeln!(
             out,
@@ -194,5 +180,12 @@ mod tests {
         assert!(rendered.contains(" 34 │   const x = '🧪';\n 35 │ \n 36 │ \tassert(x);\n"));
         assert!(rendered.contains("Showing 34-36 of 100"));
         assert!(rendered.contains("source 'tests/a b'\\''s.ts' --offset 36 --limit 3"));
+    }
+
+    #[test]
+    fn a_page_past_the_last_line_says_so() {
+        let data = json!({"view":"source","run":"run_one","file":"a.ts","items":[],
+            "pagination":{"offset":9999,"returned":0,"total":21}});
+        assert!(render(&data).contains("Showing none of 21: --offset 9999 is past the end"));
     }
 }

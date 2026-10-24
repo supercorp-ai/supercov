@@ -11,7 +11,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    path::{Component, Path},
+    path::Path,
 };
 
 use memmap2::MmapOptions;
@@ -349,15 +349,13 @@ fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, R
     };
     files.sort_by_key(|entry| entry.file_name());
     for entry in files {
+        // A listed name is one component, never `.` or `..`: it cannot
+        // reach outside the directory.
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| RubyEvidenceError::UnsafeEntry("<non-utf8>".into()))?;
-        if Path::new(&name)
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-            || !name.ends_with(".mmap")
-        {
+        if !name.ends_with(".mmap") {
             return Err(RubyEvidenceError::UnsafeEntry(name));
         }
         let metadata = fs::symlink_metadata(entry.path())
@@ -705,26 +703,14 @@ fn read_evidence_file(
                 .extend(ids);
             }
             Record::Dec { ctx, id, v, o } => {
-                if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
-                    return Err(invalid("decision vector digits must be 0, 1 or 2"));
-                }
-                if o > 1 {
-                    return Err(invalid("decision outcome must be 0 or 1"));
-                }
-                let values = v
-                    .bytes()
-                    .map(|digit| match digit {
-                        b'0' => None,
-                        b'1' => Some(false),
-                        _ => Some(true),
-                    })
-                    .collect::<Vec<_>>();
+                let (values, outcome) =
+                    crate::python_evidence::decision_vector(&v, o).map_err(invalid)?;
                 if let Some(before) = before_assertion.get_mut(&ctx) {
                     before
                         .vectors
                         .entry(id.clone())
                         .or_default()
-                        .insert((values.clone(), o == 1));
+                        .insert((values.clone(), outcome));
                 }
                 observations(
                     evidence,
@@ -737,7 +723,7 @@ fn read_evidence_file(
                 .vectors
                 .entry(id)
                 .or_default()
-                .insert((values, o == 1));
+                .insert((values, outcome));
             }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
@@ -946,7 +932,6 @@ fn snapshot(
             vector: None,
             timestamp_ms: clock,
             phase_id: Some(phase.into()),
-            statement_id: None,
             environment: "ruby".into(),
         });
         clock += 1;
@@ -974,7 +959,6 @@ fn snapshot(
                 vector: Some(vector.clone()),
                 timestamp_ms: clock,
                 phase_id: Some(phase.into()),
-                statement_id: None,
                 environment: "ruby".into(),
             });
             clock += 1;
@@ -1738,7 +1722,7 @@ fn build_from_evidence(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         coverage_analysis::PointKind, frontend_protocol::validate_frontend_report_request,
@@ -1757,7 +1741,7 @@ mod tests {
         bytes
     }
 
-    fn transport(records: &[serde_json::Value]) -> Vec<u8> {
+    pub(crate) fn transport(records: &[serde_json::Value]) -> Vec<u8> {
         let mut body = Vec::new();
         for record in records {
             body.extend(frame(record.to_string().as_bytes()));
@@ -1831,6 +1815,164 @@ mod tests {
             ),
             (other_owner, "does not match the transport owner"),
             (other_run, "run-2"),
+        ] {
+            let said = read(&bytes);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
+    }
+
+    /// Each record a Ruby process writes is checked field by field: a
+    /// transport whose process is sound but one record is not is refused for
+    /// that record.
+    #[test]
+    fn a_record_that_breaks_one_rule_is_refused_for_it() {
+        use serde_json::json;
+        let process = |ruby: &str, v: u32| json!({"t":"process","v":v,"run":"run-1","pid":7,"worker":"main","ruby":ruby,"executable":"ruby","argv":["x.rb"]});
+        let read = |records: &[serde_json::Value]| match read_evidence_file(
+            "main.7.a.mmap",
+            &transport(records),
+            "run-1",
+            &mut Evidence::default(),
+        ) {
+            Ok(()) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let ok = process("3.4.1", 1);
+        assert_eq!(read(std::slice::from_ref(&ok)), "accepted");
+        let phase = |ctx: u64, phase: &str, worker: &str, test: &str| json!({"t":"phase","ctx":ctx,"at":1,"worker":worker,"test":test,"retry":0,"phase":phase});
+        let outcome = |phase: &str, outcome: &str, runner: &str| json!({"t":"outcome","worker":"main","test":"T","retry":0,"phase":phase,"outcome":outcome,"xfail":false,"runner":runner});
+        for (records, said) in [
+            (
+                vec![process("3.4.1", 2)],
+                "unsupported Ruby evidence version 2",
+            ),
+            (vec![process("3.2.9", 1)], "the test command ran Ruby 3.2.9"),
+            (vec![process("3", 1)], "the test command ran Ruby 3"),
+            (vec![process("x.y", 1)], "the test command ran Ruby x.y"),
+            (
+                vec![ok.clone(), phase(0, "call", "main", "T")],
+                "phase context 0 is reserved",
+            ),
+            (
+                vec![ok.clone(), phase(1, "before", "main", "T")],
+                "unknown test phase",
+            ),
+            (
+                vec![ok.clone(), phase(1, "call", "main", " ")],
+                "must name a worker and test",
+            ),
+            (
+                vec![ok.clone(), phase(1, "call", " ", "T")],
+                "must name a worker and test",
+            ),
+            (
+                vec![ok.clone(), outcome("after", "passed", "rspec")],
+                "unknown test outcome phase",
+            ),
+            (
+                vec![ok.clone(), outcome("call", "pending", "rspec")],
+                "unknown test outcome",
+            ),
+            (
+                vec![ok.clone(), outcome("call", "passed", "bacon")],
+                "unknown Ruby test runner",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    outcome("call", "passed", "rspec"),
+                    outcome("call", "passed", "minitest"),
+                ],
+                "reported by two runners",
+            ),
+            (
+                vec![ok.clone(), json!({"t":"ids","first":3,"names":["a"]})],
+                "continue where the last ones ended",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"ids","first":0,"names":["a"]}),
+                    json!({"t":"hits","ctx":0,"n":[5]}),
+                ],
+                "hit number has no name",
+            ),
+            (
+                vec![ok.clone(), json!({"t":"dec","ctx":0,"id":"d","v":"","o":0})],
+                "digits must be 0, 1 or 2",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"dec","ctx":0,"id":"d","v":"13","o":0}),
+                ],
+                "digits must be 0, 1 or 2",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"dec","ctx":0,"id":"d","v":"12","o":2}),
+                ],
+                "outcome must be 0 or 1",
+            ),
+        ] {
+            let got = read(&records);
+            assert!(got.contains(said), "{said}: {got}");
+        }
+        // The same runner reporting an attempt twice is one attempt.
+        assert_eq!(
+            read(&[
+                ok.clone(),
+                outcome("setup", "passed", "rspec"),
+                outcome("call", "passed", "rspec")
+            ]),
+            "accepted"
+        );
+    }
+
+    #[test]
+    fn a_transport_too_short_or_with_bad_frame_bytes_is_refused() {
+        let valid = transport(&[
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+        ]);
+        let read = |bytes: &[u8]| match read_evidence_file(
+            "main.7.a.mmap",
+            bytes,
+            "run-1",
+            &mut Evidence::default(),
+        ) {
+            Ok(()) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let set = |at: usize, value: &[u8]| {
+            let mut bytes = valid.clone();
+            bytes[at..at + value.len()].copy_from_slice(value);
+            bytes
+        };
+        for (bytes, reason) in [
+            (valid[..10].to_vec(), "header or version does not match"),
+            (
+                set(8, &99_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(16, &(TRANSPORT_HEADER_SIZE as u64 - 1).to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (
+                set(12, &1_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(16, &u64::MAX.to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (set(65, &[1]), "commit marker or reserved bytes are invalid"),
+            (set(76, &[1]), "commit marker or reserved bytes are invalid"),
+            (
+                set(68, &((TRANSPORT_MAX_RECORD_SIZE + 1) as u32).to_le_bytes()),
+                "payload length is outside the transport bound",
+            ),
         ] {
             let said = read(&bytes);
             assert!(said.contains(reason), "{reason}: {said}");
@@ -2210,6 +2352,91 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// An expected failure is expected to fail; a phase the runtime entered
+    /// and the runner never reported is a failed phase that says so; a file
+    /// limitation takes the file's obligations out; and one naming an
+    /// obligation the run does not have is refused.
+    #[test]
+    fn expected_failures_unreported_phases_and_limitations_read_as_what_they_are() {
+        let source = "def f(a)\n  if a\n    1\n  else\n    0\n  end\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let run_with = |label: &str, extra: &[serde_json::Value]| {
+            let directory = temporary(label);
+            let mut records = vec![
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"]}),
+                serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"failed","xfail":true,"runner":"rspec"}),
+                serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":"spec/m_spec.rb[1:2]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"hit","ctx":2,"id":statement.id}),
+                // Reported as it ran, then the worker died in its teardown.
+                serde_json::json!({"t":"phase","ctx":3,"at":7,"worker":"main","test":"spec/m_spec.rb[1:3]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:3]","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"rspec"}),
+                serde_json::json!({"t":"phase","ctx":4,"at":8,"worker":"main","test":"spec/m_spec.rb[1:3]","retry":0,"phase":"teardown"}),
+                serde_json::json!({"t":"hit","ctx":4,"id":statement.id}),
+            ];
+            records.extend(extra.iter().cloned());
+            records.push(serde_json::json!({"t":"exit","at":9}));
+            fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+            let run = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            );
+            fs::remove_dir_all(directory).unwrap();
+            run
+        };
+        let run = run_with(
+            "outcomes",
+            &[serde_json::json!({"t":"limitation","id":"ruby-iseq-unmapped","reason":"no ranges","file":"lib/m.rb"})],
+        )
+        .unwrap();
+        let result = |test: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|raw| raw.test == test)
+                .unwrap()
+        };
+        let expected = result("spec/m_spec.rb[1:1]");
+        assert_eq!(expected.expected_status.as_deref(), Some("failed"));
+        let unreported = result("spec/m_spec.rb[1:2]");
+        assert_eq!(unreported.status.as_deref(), Some("failed"));
+        assert!(unreported.phases.iter().any(|phase| {
+            phase.error.as_deref() == Some("the phase started but the runner reported no outcome")
+        }));
+        let died = result("spec/m_spec.rb[1:3]");
+        assert_eq!(died.status.as_deref(), Some("failed"));
+        let phases = died
+            .phases
+            .iter()
+            .map(|phase| (phase.kind.as_str(), phase.status.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            [("test", Some("passed")), ("teardown", Some("failed"))]
+        );
+        assert_eq!(died.runtime.len(), 1);
+        assert!(run.request.manifest.unmeasured.contains(&statement.id));
+        assert!(matches!(
+            run_with(
+                "unknown-obligation",
+                &[serde_json::json!({"t":"limitation","id":"ruby-decision-folded","reason":"folded","obligation":"nope"})],
+            ),
+            Err(RubyEvidenceError::UnknownObligation(id)) if id == "nope"
+        ));
+    }
+
     #[test]
     fn an_rspec_example_carries_its_tags_and_description_and_a_level_tag_is_its_kind() {
         let source = "def f(a)\n  a ? 1 : 0\nend\n";
@@ -2265,5 +2492,277 @@ mod tests {
             Err(RubyEvidenceError::NoInterpreter)
         ));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A phase's snapshot names only obligations of the manifest, with
+    /// vectors as long as their decision's conditions; a branch outcome's
+    /// hit is one.
+    #[test]
+    fn a_snapshot_is_read_against_the_manifest() {
+        use crate::coverage_report::{BranchAlternativeMeta, BranchMeta};
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![DecisionMeta {
+                id: "d".into(),
+                file: "lib/a.rb".into(),
+                line: 1,
+                column: 0,
+                source: "a && b".into(),
+                conditions: vec!["a".into(), "b".into()],
+                kind: "if".into(),
+            }],
+            points: vec![],
+            branches: vec![BranchMeta {
+                id: "b".into(),
+                kind: "if".into(),
+                file: "lib/a.rb".into(),
+                line: 1,
+                column: 0,
+                source: "a && b".into(),
+                alternatives: vec![BranchAlternativeMeta {
+                    id: "alt".into(),
+                    label: "then".into(),
+                }],
+            }],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let index = ManifestIndex::new(&manifest);
+        let observed = |hits: &[&str], vectors: &[(&str, Vec<Option<bool>>)]| {
+            let mut observations = Observations::default();
+            observations
+                .hits
+                .extend(hits.iter().map(|hit| hit.to_string()));
+            for (id, values) in vectors {
+                observations
+                    .vectors
+                    .entry(id.to_string())
+                    .or_default()
+                    .insert((values.clone(), true));
+            }
+            snapshot(&index, &observations, "p")
+        };
+        assert!(
+            matches!(observed(&["zzz"], &[]), Err(RubyEvidenceError::UnknownObligation(id)) if id == "zzz")
+        );
+        assert!(
+            matches!(observed(&[], &[("zzz", vec![])]), Err(RubyEvidenceError::UnknownObligation(id)) if id == "zzz")
+        );
+        assert!(matches!(
+            observed(&[], &[("d", vec![Some(true)])]),
+            Err(RubyEvidenceError::InvalidVector {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        let good = observed(&["alt"], &[("d", vec![Some(true), Some(false)])])
+            .ok()
+            .unwrap();
+        assert_eq!(good.hits, ["alt".to_owned()]);
+        assert_eq!(good.decisions.len(), 1);
+    }
+
+    #[test]
+    fn an_evidence_directory_holds_only_transports_and_a_path_only_project_files() {
+        let root = Path::new("/project");
+        assert_eq!(relative(root, "/project"), None);
+        assert_eq!(relative(root, "../lib/m.rb"), None);
+        assert_eq!(relative(root, "./lib/m.rb").as_deref(), Some("lib/m.rb"));
+        let base = temporary("entries");
+        let read = |directory: &Path| match read_evidence_directory(directory, "run-1") {
+            Ok(evidence) => format!("ok {}", evidence.interpreters),
+            Err(error) => format!("{error:?}"),
+        };
+        assert_eq!(read(&base.join("missing")), "ok 0");
+        fs::write(base.join("file"), b"x").unwrap();
+        assert!(read(&base.join("file")).starts_with("Io"));
+        for (label, make) in [("notes", "notes.txt"), ("nested", "inner.mmap")] {
+            let directory = base.join(label);
+            fs::create_dir(&directory).unwrap();
+            if label == "nested" {
+                fs::create_dir(directory.join(make)).unwrap();
+            } else {
+                fs::write(directory.join(make), b"x").unwrap();
+            }
+            assert_eq!(read(&directory), format!("UnsafeEntry({make:?})"));
+        }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_transport_without_a_process_record_declares_no_lost_process() {
+        let mut evidence = Evidence::default();
+        read_evidence_file(
+            "main.7.a.mmap",
+            &transport(&[serde_json::json!({"t":"exit","at":9})]),
+            "run-1",
+            &mut evidence,
+        )
+        .unwrap();
+        assert_eq!(evidence.interpreters, 0);
+        assert!(evidence.limitations.is_empty());
+    }
+
+    #[test]
+    fn background_reads_only_what_it_observed_and_an_unexpected_pass_fails_its_assertions() {
+        let source = "def f(a, b)\n  return 1 if a && b\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let run = |label: &str, background: serde_json::Value| {
+            let directory = temporary(label);
+            let records = [
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"],"lines":"exact"}),
+                // Every file stays probed test by test.
+                serde_json::json!({"t":"lines","mode":"exact"}),
+                serde_json::json!({"t":"ids","first":0,"names":[statement.id]}),
+                background,
+                serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"assert","ctx":1}),
+                serde_json::json!({"t":"hit","ctx":1,"id":statement.id}),
+                // Pending, and it passed.
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"passed","xfail":true,"runner":"rspec"}),
+                serde_json::json!({"t":"exit","at":9}),
+            ];
+            fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+            let run = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            )
+            .unwrap();
+            fs::remove_dir_all(directory).unwrap();
+            validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+            run
+        };
+        let empty = run(
+            "empty-background",
+            serde_json::json!({"t":"hits","ctx":0,"n":[]}),
+        );
+        assert_eq!(empty.request.raw_results.len(), 1);
+        let test = &empty.request.raw_results[0];
+        assert_eq!(test.attribution, crate::coverage_report::ATTRIBUTION_EXACT);
+        let assertion = test
+            .phases
+            .iter()
+            .find(|phase| phase.kind == "assertion")
+            .unwrap();
+        assert_eq!(assertion.status.as_deref(), Some("failed"));
+        // A vector alone is something observed.
+        let vectors = run(
+            "vector-background",
+            serde_json::json!({"t":"dec","ctx":0,"id":obligations.manifest.decisions[0].id,"v":"11","o":1}),
+        );
+        let roles = vectors
+            .request
+            .raw_results
+            .iter()
+            .map(|raw| raw.role.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["test", "background"]);
+    }
+
+    #[test]
+    fn a_request_credited_by_time_keeps_the_partial_attribution_one_shot_lines_gave() {
+        let source = "def f(a)\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = &obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap()
+            .id;
+        let attribution = |run: &RubyFrontendRun| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|raw| raw.role == "test")
+                .unwrap()
+                .attribution
+                .clone()
+        };
+        // A suite's own process, answering a request while its test runs.
+        let directory = temporary("by-time-partial");
+        fs::write(
+            directory.join("main.7.a.mmap"),
+            transport(&[
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.3.6","executable":"ruby","argv":["rspec"]}),
+                serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":REQUEST_WORKER,"test":"1","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"hit","ctx":2,"id":statement}),
+                serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"rspec"}),
+                serde_json::json!({"t":"exit","at":9}),
+            ]),
+        )
+        .unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(
+            attribution(&run),
+            crate::coverage_report::ATTRIBUTION_PARTIAL
+        );
+
+        // A server's process, answering a browser test's request.
+        let directory = temporary("server-partial");
+        fs::write(
+            directory.join("main.7.a.mmap"),
+            transport(&[
+                serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.3.6","executable":"ruby","argv":["puma"]}),
+                serde_json::json!({"t":"phase","ctx":1,"at":150,"worker":REQUEST_WORKER,"test":"1","retry":0,"phase":"call"}),
+                serde_json::json!({"t":"hit","ctx":1,"id":statement}),
+                serde_json::json!({"t":"exit","at":300}),
+            ]),
+        )
+        .unwrap();
+        let served = ServedTest {
+            worker: "playwright:w0".into(),
+            test_id: "one".into(),
+            retry: 0,
+            name: "one".into(),
+            title: "one".into(),
+            file: "tests/a.spec.js".into(),
+            status: "passed".into(),
+            expected_status: "passed".into(),
+            provenance: TestProvenance::default(),
+            window: Some((100, 200)),
+            attempt_id: None,
+        };
+        let run = build_ruby_server_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+            &[served],
+        )
+        .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(
+            attribution(&run),
+            crate::coverage_report::ATTRIBUTION_PARTIAL
+        );
     }
 }

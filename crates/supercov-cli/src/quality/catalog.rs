@@ -372,25 +372,13 @@ pub mod security {
     pub fn line_questions(
         candidates: &[super::super::candidates::Candidate],
     ) -> Map<String, Value> {
-        const HANDLER: &str = "A request handler is declared at line {n}: `{text}`. Considering only \
-that handler and what it does, does it read, change or delete a record chosen by a caller-supplied \
-identifier, or perform an administrative or privileged action, without any visible check that the \
-caller is signed in and allowed to act on it? A check applied by a decorator, middleware, guard or \
-route group visible in this file counts as a check. A handler that only serves public, non-sensitive \
-data does not count.";
+        // A missing authorisation stays file-level and is never asked here.
         candidates
             .iter()
             .enumerate()
             .filter_map(|(i, candidate)| {
                 let check = checks().iter().find(|c| c.id == candidate.check);
                 let (task, present, absent) = match check {
-                    Some(c) if c.id == "missing_authorization" => (
-                        HANDLER
-                            .replace("{n}", &candidate.line.to_string())
-                            .replace("{text}", &candidate.text),
-                        "This handler acts on a caller-chosen record or a privileged operation with no visible authorisation.".to_owned(),
-                        "This handler is guarded, or acts on nothing sensitive.".to_owned(),
-                    ),
                     Some(c) => (
                         format!(
                             "Line {} of the file reads: `{}`. Considering only what reaches that line, and how the value got there: {}{}",
@@ -449,26 +437,18 @@ data does not count.";
         }
     }
 
-    /// One Choice per node: which check, if any, does this line show. Keys are
-    /// `n{offset+i}`, so chunks of one file can share a key space.
-    pub fn classify_questions(
-        nodes: &[super::super::candidates::Node],
-        offset: usize,
-    ) -> Map<String, Value> {
-        classify_among(nodes, offset, None)
-    }
-
-    /// The same Choice per node over only the checks the file question fired
-    /// on, when `among` names them: four options instead of thirteen, so a
-    /// hundred nodes fit beside the file where thirty did.
+    /// One Choice per node over only the checks the file question fired on:
+    /// four options instead of thirteen, so a hundred nodes fit beside the
+    /// file where thirty did. Keys are `n{offset+i}`, so chunks of one file
+    /// can share a key space.
     pub fn classify_among(
         nodes: &[super::super::candidates::Node],
         offset: usize,
-        among: Option<&[String]>,
+        among: &[String],
     ) -> Map<String, Value> {
         let mut criteria = Map::new();
         for c in checks() {
-            if among.is_none_or(|fired| fired.contains(&c.id)) {
+            if among.contains(&c.id) {
                 criteria.insert(c.id.clone(), Value::String(short(&c.id).to_owned()));
             }
         }
@@ -499,7 +479,7 @@ data does not count.";
         source: &str,
         nodes: &[super::super::candidates::Node],
         offset: usize,
-        among: Option<&[String]>,
+        among: &[String],
     ) -> Value {
         json!({
             "model": super::super::model(),
@@ -525,10 +505,21 @@ data does not count.";
         // over the lines of its function, "where does the outside value
         // enter".
         let lines: Vec<&str> = source.lines().collect();
+        // A JavaScript line starting `#` declares a private member.
+        let hash_comments = !matches!(
+            std::path::Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str()),
+            Some("js" | "ts" | "tsx" | "jsx" | "mjs" | "cjs" | "mts" | "cts")
+        );
         for (i, candidate) in candidates.iter().enumerate() {
-            if let Some(question) =
-                source_question(candidate.line, &candidate.check, &lines, structure)
-            {
+            if let Some(question) = source_question(
+                candidate.line,
+                &candidate.check,
+                &lines,
+                structure,
+                hash_comments,
+            ) {
                 questions.insert(format!("s{i}"), question);
             }
         }
@@ -551,12 +542,14 @@ data does not count.";
 
     /// One Choice for one line: over the lines of the function it sits in (or
     /// thirty lines above it), "on which line does the outside value enter".
-    /// Options `L{n}`, `same`, `none`.
+    /// Options `L{n}`, `same`, `none`; a comment is never an option, and a
+    /// line starting `#` is one when `hash_comments`.
     pub fn source_question(
         line: usize,
         check: &str,
         lines: &[&str],
         structure: &super::super::candidates::Structure,
+        hash_comments: bool,
     ) -> Option<Value> {
         let (start, end) = structure
             .functions
@@ -571,7 +564,8 @@ data does not count.";
         let mut options = Map::new();
         for n in start..=end.min(lines.len()) {
             let text = lines[n - 1].trim();
-            if !text.is_empty() && !text.starts_with('#') && !text.starts_with("//") {
+            let comment = text.starts_with("//") || (hash_comments && text.starts_with('#'));
+            if !text.is_empty() && !comment {
                 let shown: String = text.chars().take(100).collect();
                 options.insert(format!("L{n}"), Value::String(format!("line {n}: {shown}")));
             }
@@ -644,9 +638,11 @@ data does not count.";
             ));
             let mut criteria = Map::new();
             for kind in SINK_KINDS {
-                if let Some(c) = checks().iter().find(|c| c.id == *kind) {
-                    criteria.insert((*kind).to_owned(), Value::String(c.present.clone()));
-                }
+                let c = checks()
+                    .iter()
+                    .find(|c| c.id == *kind)
+                    .expect("every sink kind is a security check");
+                criteria.insert((*kind).to_owned(), Value::String(c.present.clone()));
             }
             criteria.insert(
                 "none".into(),
@@ -775,6 +771,29 @@ before it arrives, does not count.",
     mod tests {
         use super::*;
         use std::collections::BTreeSet;
+
+        /// A line with nothing above it in its window but comments and
+        /// blank lines has no line to say the value enters on, and is asked
+        /// only whether it is a weakness.
+        #[test]
+        fn a_line_with_only_comments_above_it_has_no_source_question() {
+            use super::super::super::candidates::{Candidate, Structure};
+            let candidate = |line: usize| Candidate {
+                line,
+                check: "injection_sink".into(),
+                text: "query(input)".into(),
+            };
+            let request = confirm_request(
+                "a.py",
+                "# where the input comes from\n\n\nquery(input)\n",
+                &[candidate(2), candidate(4)],
+                &Structure::default(),
+            );
+            let questions = request["questions"].as_object().unwrap();
+            assert!(!questions.contains_key("s0"), "{request}");
+            assert!(questions.contains_key("s1"), "{request}");
+            assert!(questions.contains_key("t0") && questions.contains_key("t1"));
+        }
 
         #[test]
         fn twelve_checks_with_ids_that_collide_with_no_other_catalog() {

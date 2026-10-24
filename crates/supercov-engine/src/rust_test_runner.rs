@@ -357,7 +357,8 @@ fn nextest_run_only_option(argument: &str) -> Option<bool> {
         | "--no-output-indent"
         | "--hide-progress-bar"
         | "--no-input-handler" => Some(false),
-        _ if argument.starts_with("-j") && argument.len() > 2 => Some(false),
+        // `-j` alone, or with `=`, is matched above: what reaches here is `-j4`.
+        _ if argument.starts_with("-j") => Some(false),
         _ => None,
     }
 }
@@ -442,18 +443,21 @@ fn nextest_shared_option(argument: &str) -> Option<bool> {
         | "--future-incompat-report"
         | "--ignore-default-filter"
         | "--override-version-check" => Some(false),
-        _ if argument.starts_with("-p") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-F") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-E") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-P") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-Z") && argument.len() > 2 => Some(false),
+        // The short options alone, or with `=`, are matched above: what
+        // reaches here carries its value attached (`-pfoo`).
+        _ if ["-p", "-F", "-E", "-P", "-Z"]
+            .iter()
+            .any(|short| argument.starts_with(short)) =>
+        {
+            Some(false)
+        }
+        // `-vv`, `-vvv`: a lone `-` is no verbosity.
         _ if argument.len() > 2
             && argument.starts_with('-')
             && argument[1..].bytes().all(|byte| byte == b'v') =>
         {
             Some(false)
         }
-        _ if argument.starts_with("--timings=") => Some(false),
         _ => None,
     }
 }
@@ -643,9 +647,13 @@ fn cargo_option_takes_value(argument: &str) -> Option<bool> {
         | "--offline"
         | "--frozen" => Some(false),
         _ if argument.starts_with("-vv") => Some(false),
-        _ if argument.starts_with("-p") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-F") && argument.len() > 2 => Some(false),
-        _ if argument.starts_with("-j") && argument.len() > 2 => Some(false),
+        // `-p`, `-F` and `-j` alone, or with `=`, are matched above.
+        _ if ["-p", "-F", "-j"]
+            .iter()
+            .any(|short| argument.starts_with(short)) =>
+        {
+            Some(false)
+        }
         _ => None,
     }
 }
@@ -728,7 +736,8 @@ pub(crate) fn rust_libtest_selection(
                 list_arguments.extend([argument.clone(), value.clone()]);
                 index += 1;
             }
-            _ if argument.starts_with("-Z") && argument.len() > 2 => {
+            // `-Z` alone is matched above.
+            _ if argument.starts_with("-Z") => {
                 list_arguments.push(argument.clone());
             }
             "--logfile" | "--color" | "--format" | "--shuffle-seed" => {
@@ -1028,6 +1037,21 @@ impl ArtifactLauncher {
         invocation: &CargoTestInvocation,
         hook_directory: &Path,
     ) -> Result<Self, RustTestRunnerError> {
+        Self::for_invocation_with(
+            project,
+            invocation,
+            hook_directory,
+            std::env::var_os("NODE_OPTIONS"),
+        )
+    }
+
+    /// `for_invocation`, with the user's own `NODE_OPTIONS`.
+    fn for_invocation_with(
+        project: &PreparedRustProject,
+        invocation: &CargoTestInvocation,
+        hook_directory: &Path,
+        user_node_options: Option<OsString>,
+    ) -> Result<Self, RustTestRunnerError> {
         let Ok(plan) = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
             &project.workspace_root,
             &project.workspace_root,
@@ -1054,7 +1078,7 @@ impl ArtifactLauncher {
             fs::create_dir_all(hook_directory).map_err(io_error)?;
             let hook = hook_directory.join("rust-wasm-node.mjs");
             fs::write(&hook, RUST_WASM_NODE_HOOK).map_err(io_error)?;
-            let mut options = std::env::var_os("NODE_OPTIONS").unwrap_or_default();
+            let mut options = user_node_options.unwrap_or_default();
             if !options.is_empty() {
                 options.push(" ");
             }
@@ -1080,16 +1104,25 @@ impl ArtifactLauncher {
 
     /// The runner's variables; and, for tests `wasm-bindgen-test-runner`
     /// runs in Chrome, the reader of their pages.
-    pub(crate) fn with_environment(mut self, environment: &[(String, String)]) -> Self {
+    pub(crate) fn with_environment(self, environment: &[(String, String)]) -> Self {
+        self.with_environment_from(environment, &|name| std::env::var_os(name))
+    }
+
+    /// `with_environment`, with `ambient` as the process's own variables.
+    fn with_environment_from(
+        mut self,
+        environment: &[(String, String)],
+        ambient: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Self {
         self.environment = environment.to_vec();
         let in_node = environment
             .iter()
             .any(|(name, _)| name == "WASM_BINDGEN_TEST_ONLY_NODE")
-            || std::env::var_os("WASM_BINDGEN_TEST_ONLY_NODE").is_some();
+            || ambient("WASM_BINDGEN_TEST_ONLY_NODE").is_some();
         if !self.wasm_bindgen_runner || in_node {
             return self;
         }
-        match crate::rust_wasm_browser::browser(environment) {
+        match crate::rust_wasm_browser::browser_from(environment, ambient) {
             Some(crate::rust_wasm_browser::Browser::Chrome(driver, arguments)) => {
                 match crate::rust_wasm_browser::BrowserReader::start(
                     &driver,
@@ -1103,13 +1136,21 @@ impl ArtifactLauncher {
             Some(crate::rust_wasm_browser::Browser::Other(name)) => {
                 // Said only where the driver was chosen by name: a driver
                 // found on PATH may never be used (the tests may run in Node).
-                let named =
-                    ["GECKODRIVER", "SAFARIDRIVER", "MSEDGEDRIVER"]
-                        .iter()
-                        .any(|variable| {
-                            environment.iter().any(|(key, _)| key == variable)
-                                || std::env::var_os(variable).is_some()
-                        });
+                // A remote driver, Chrome's included, is always named.
+                let named = [
+                    "GECKODRIVER",
+                    "SAFARIDRIVER",
+                    "MSEDGEDRIVER",
+                    "GECKODRIVER_REMOTE",
+                    "SAFARIDRIVER_REMOTE",
+                    "CHROMEDRIVER_REMOTE",
+                    "MSEDGEDRIVER_REMOTE",
+                ]
+                .iter()
+                .any(|variable| {
+                    environment.iter().any(|(key, _)| key == variable)
+                        || ambient(variable).is_some()
+                });
                 if named {
                     self.unmeasured_browser = Some(name);
                 }
@@ -1394,7 +1435,6 @@ pub(crate) fn snapshot_regions(
                             vector: record.vector,
                             timestamp_ms: record.sequence,
                             phase_id: Some(phase_id.clone()),
-                            statement_id: None,
                             environment: "server".into(),
                         });
                     }
@@ -1460,17 +1500,33 @@ pub(crate) fn rust_coverage_model() -> CoverageModelDeclaration {
 /// instrumented process gets 16 MiB unless the user chose a size. The
 /// reservation is virtual; only touched pages cost memory.
 pub(crate) fn instrumented_stack_environment() -> Vec<(&'static str, &'static str)> {
-    if std::env::var_os("RUST_MIN_STACK").is_some() {
+    stack_environment(std::env::var_os("RUST_MIN_STACK").is_some())
+}
+
+/// `instrumented_stack_environment`, knowing whether the user chose a size.
+fn stack_environment(chosen: bool) -> Vec<(&'static str, &'static str)> {
+    if chosen {
         Vec::new()
     } else {
         vec![("RUST_MIN_STACK", "16777216")]
     }
 }
 
-/// One path the selected toolchain reports through `rustc --print`.
-fn rustc_print_path(request: &str) -> Result<PathBuf, RustTestRunnerError> {
+/// One path the selected toolchain reports through `rustc --print`: the
+/// toolchain the command names with `+toolchain`, else the one rustup picks
+/// in the workspace, as it does for Cargo there.
+fn rustc_print_path(
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+    request: &str,
+) -> Result<PathBuf, RustTestRunnerError> {
+    let selector = invocation.arguments[..invocation.command_position()]
+        .iter()
+        .find(|argument| argument.starts_with('+'));
     let output = Command::new("rustc")
+        .args(selector)
         .args(["--print", request])
+        .current_dir(&project.workspace_root)
         .output()
         .map_err(|error| {
             RustTestRunnerError::Launch(format!("rustc --print {request}: {error}"))
@@ -1487,15 +1543,21 @@ fn rustc_print_path(request: &str) -> Result<PathBuf, RustTestRunnerError> {
 }
 
 /// The selected toolchain's sysroot, as `rustc --print sysroot` reports it.
-pub(crate) fn rustc_sysroot() -> Result<PathBuf, RustTestRunnerError> {
-    rustc_print_path("sysroot")
+pub(crate) fn rustc_sysroot(
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+) -> Result<PathBuf, RustTestRunnerError> {
+    rustc_print_path(project, invocation, "sysroot")
 }
 
 /// The directory holding the toolchain's own dynamic libraries
 /// (`<sysroot>/lib/rustlib/<host>/lib`), where libstd's dylib lives; the
 /// plain `<sysroot>/lib` no longer holds it.
-pub(crate) fn rustc_target_libdir() -> Result<PathBuf, RustTestRunnerError> {
-    rustc_print_path("target-libdir")
+pub(crate) fn rustc_target_libdir(
+    project: &PreparedRustProject,
+    invocation: &CargoTestInvocation,
+) -> Result<PathBuf, RustTestRunnerError> {
+    rustc_print_path(project, invocation, "target-libdir")
 }
 
 /// The dynamic library search path Cargo gives a test binary it runs: the
@@ -1507,13 +1569,28 @@ pub(crate) fn dynamic_library_environment(
     target_libdir: &Path,
     executable: &Path,
 ) -> Vec<(&'static str, OsString)> {
-    let variable = if cfg!(target_os = "macos") {
-        "DYLD_FALLBACK_LIBRARY_PATH"
-    } else if cfg!(windows) {
-        "PATH"
-    } else {
-        "LD_LIBRARY_PATH"
-    };
+    library_path_environment(
+        target_libdir,
+        executable,
+        std::env::var_os(LIBRARY_PATH_VARIABLE),
+    )
+}
+
+/// The variable a platform's loader searches for libraries.
+#[cfg(target_os = "macos")]
+const LIBRARY_PATH_VARIABLE: &str = "DYLD_FALLBACK_LIBRARY_PATH";
+#[cfg(windows)]
+const LIBRARY_PATH_VARIABLE: &str = "PATH";
+#[cfg(not(any(target_os = "macos", windows)))]
+const LIBRARY_PATH_VARIABLE: &str = "LD_LIBRARY_PATH";
+
+/// `dynamic_library_environment`, with the user's own path, `existing`.
+fn library_path_environment(
+    target_libdir: &Path,
+    executable: &Path,
+    existing: Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    let variable = LIBRARY_PATH_VARIABLE;
     let mut entries = Vec::new();
     if let Some(deps) = executable.parent() {
         entries.push(deps.to_path_buf());
@@ -1522,7 +1599,7 @@ pub(crate) fn dynamic_library_environment(
         }
     }
     entries.push(target_libdir.to_path_buf());
-    if let Some(existing) = std::env::var_os(variable) {
+    if let Some(existing) = existing {
         entries.extend(std::env::split_paths(&existing));
     }
     match std::env::join_paths(entries) {
@@ -1546,17 +1623,25 @@ pub(crate) fn capped_rustflags(
     project: &PreparedRustProject,
     invocation: &CargoTestInvocation,
 ) -> String {
-    let wasm = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
+    let plan = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
         &project.workspace_root,
         &project.workspace_root,
         invocation,
     )
-    .is_ok_and(|plan| {
+    .ok();
+    let wasm = plan.as_ref().is_some_and(|plan| {
         plan.targets
             .iter()
             .any(|target| target.target.starts_with("wasm"))
     });
-    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    // `RUSTFLAGS` replaces the flags Cargo's configuration gives rustc
+    // (`build.rustflags`, `target.<triple>.rustflags`), so where the user set
+    // none, the configuration's come first.
+    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_else(|_| {
+        plan.and_then(|plan| plan.rustflags)
+            .unwrap_or_default()
+            .join(" ")
+    });
     if !rustflags.is_empty() {
         rustflags.push(' ');
     }
@@ -1631,19 +1716,24 @@ fn running_line(
 /// none.
 fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
     use std::io::IsTerminal;
-    let arguments = &invocation.arguments;
-    let asked = arguments
-        .iter()
-        .enumerate()
-        .find_map(|(index, argument)| {
-            argument
-                .strip_prefix("--color=")
-                .map(str::to_owned)
-                .or_else(|| (argument == "--color").then(|| arguments.get(index + 1).cloned())?)
-        })
-        .or_else(|| std::env::var("CARGO_TERM_COLOR").ok());
-    let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    match asked.as_deref() {
+    let asked =
+        colour_flag(&invocation.arguments).or_else(|| std::env::var("CARGO_TERM_COLOR").ok());
+    cargo_colour_choice(
+        asked.as_deref(),
+        &|name| std::env::var(name).ok(),
+        std::io::stderr().is_terminal(),
+    )
+}
+
+/// What Cargo decides from what was asked, its environment, and whether its
+/// lines go to a terminal.
+fn cargo_colour_choice(
+    asked: Option<&str>,
+    variable: &dyn Fn(&str) -> Option<String>,
+    terminal: bool,
+) -> bool {
+    let set = |name: &str| variable(name).filter(|value| !value.is_empty());
+    match asked {
         Some("always") => true,
         Some("never") => false,
         // As Cargo decides it when left to: forced, refused, and otherwise
@@ -1652,10 +1742,7 @@ fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
         _ if set("NO_COLOR").is_some() || set("CLICOLOR").is_some_and(|value| value == "0") => {
             false
         }
-        _ => {
-            std::io::stderr().is_terminal()
-                && (cfg!(windows) || set("TERM").is_some_and(|term| term != "dumb"))
-        }
+        _ => shows_colours(terminal, set("TERM").as_deref()),
     }
 }
 
@@ -1664,21 +1751,37 @@ fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
 /// process writes to a pipe, so it is told.
 fn libtest_colours(invocation: &CargoTestInvocation) -> bool {
     use std::io::IsTerminal;
-    let arguments = &invocation.runner_arguments;
-    let asked = arguments.iter().enumerate().find_map(|(index, argument)| {
+    match colour_flag(&invocation.runner_arguments).as_deref() {
+        Some("always") => true,
+        Some("never") => false,
+        _ => shows_colours(
+            std::io::stdout().is_terminal(),
+            std::env::var("TERM").ok().as_deref(),
+        ),
+    }
+}
+
+/// `--color=<when>` or `--color <when>`, as Cargo and libtest both take it.
+fn colour_flag(arguments: &[String]) -> Option<String> {
+    arguments.iter().enumerate().find_map(|(index, argument)| {
         argument
             .strip_prefix("--color=")
             .map(str::to_owned)
             .or_else(|| (argument == "--color").then(|| arguments.get(index + 1).cloned())?)
-    });
-    match asked.as_deref() {
-        Some("always") => true,
-        Some("never") => false,
-        _ => {
-            std::io::stdout().is_terminal()
-                && (cfg!(windows)
-                    || std::env::var("TERM").is_ok_and(|term| !term.is_empty() && term != "dumb"))
-        }
+    })
+}
+
+/// Whether output to this stream can be coloured: a terminal whose `TERM`
+/// is not empty or `dumb` (Windows consoles need no `TERM`).
+fn shows_colours(terminal: bool, term: Option<&str>) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = term;
+        terminal
+    }
+    #[cfg(not(windows))]
+    {
+        terminal && term.is_some_and(|term| !term.is_empty() && term != "dumb")
     }
 }
 
@@ -1816,12 +1919,15 @@ fn decline_uncompiled_sources(
         .and_then(|scope| scope.get_mut("entries"))
         .and_then(serde_json::Value::as_array_mut)
     {
-        for entry in entries {
+        for entry in entries
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
             let named = entry
                 .get("file")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|file| declined.contains(file));
-            if named && let Some(entry) = entry.as_object_mut() {
+            if named {
                 entry.insert("status".into(), "excluded".into());
                 entry.insert(
                     "reason".into(),
@@ -2199,7 +2305,7 @@ pub fn run_prepared_rust_tests(
     let target_libdir = if artifacts.is_empty() {
         PathBuf::new()
     } else {
-        rustc_target_libdir()?
+        rustc_target_libdir(project, &invocation)?
     };
     // A binary none of whose tests were asked for, and how many it has.
     let mut unasked = Vec::new();
@@ -2270,7 +2376,10 @@ pub fn run_prepared_rust_tests(
                                 &target_libdir,
                                 &task.artifact.executable,
                             ))
-                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
+                            .envs(crate::rust_runtime::evidence_environment(
+                                &project.probes.token,
+                                &task.directory,
+                            ))
                             .envs(
                                 rust_workers
                                     .iter()
@@ -2460,20 +2569,20 @@ pub fn run_prepared_rust_tests(
             server: Vec::new(),
         });
     }
-    let doctest_results =
-        if selection.run_doctests && invocation.kind == RustCargoCommandKind::CargoTest {
-            crate::rust_owned_doctests::run_doctests(
-                project,
-                &invocation,
-                &selection,
-                &evidence_root.join("doctests"),
-                run_id,
-                diagnostics,
-                &mut overall_exit,
-            )?
-        } else {
-            Vec::new()
-        };
+    // A nextest run has returned above: this is `cargo test`.
+    let doctest_results = if selection.run_doctests {
+        crate::rust_owned_doctests::run_doctests(
+            project,
+            &invocation,
+            &selection,
+            &evidence_root.join("doctests"),
+            run_id,
+            diagnostics,
+            &mut overall_exit,
+        )?
+    } else {
+        Vec::new()
+    };
     // Only observed runners may be declared. A run with no tests at all keeps
     // the libtest declaration, as it always has.
     let project = &PreparedRustProject {
@@ -2524,6 +2633,75 @@ pub fn run_prepared_rust_tests(
 #[cfg(test)]
 mod tests {
 
+    /// `--color` decides when given, in either spelling; otherwise Cargo
+    /// follows CLICOLOR_FORCE, NO_COLOR and CLICOLOR, and both colour a
+    /// terminal whose TERM is set and not `dumb`.
+    #[test]
+    fn colours_follow_the_flag_the_environment_and_the_terminal() {
+        use super::{cargo_colour_choice, colour_flag, shows_colours};
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            colour_flag(&words("test --color=never")).as_deref(),
+            Some("never")
+        );
+        assert_eq!(
+            colour_flag(&words("test --color always")).as_deref(),
+            Some("always")
+        );
+        assert_eq!(colour_flag(&words("test --color")), None);
+        assert_eq!(colour_flag(&words("test")), None);
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        for (asked, pairs, terminal, coloured) in [
+            (Some("always"), &[][..], false, true),
+            (Some("never"), &[("CLICOLOR_FORCE", "1")][..], true, false),
+            (None, &[("CLICOLOR_FORCE", "1")][..], false, true),
+            (
+                None,
+                &[("CLICOLOR_FORCE", "0"), ("TERM", "xterm")][..],
+                true,
+                true,
+            ),
+            (
+                None,
+                &[("NO_COLOR", "1"), ("TERM", "xterm")][..],
+                true,
+                false,
+            ),
+            (None, &[("NO_COLOR", ""), ("TERM", "xterm")][..], true, true),
+            (
+                None,
+                &[("CLICOLOR", "0"), ("TERM", "xterm")][..],
+                true,
+                false,
+            ),
+            (
+                None,
+                &[("CLICOLOR", "1"), ("TERM", "xterm")][..],
+                true,
+                true,
+            ),
+            (None, &[("TERM", "xterm")][..], false, false),
+            (Some("auto"), &[("TERM", "dumb")][..], true, cfg!(windows)),
+            (None, &[][..], true, cfg!(windows)),
+        ] {
+            assert_eq!(
+                cargo_colour_choice(asked, &env(pairs), terminal),
+                coloured,
+                "{asked:?} {pairs:?} {terminal}"
+            );
+        }
+        assert!(!shows_colours(false, Some("xterm")));
+        assert_eq!(shows_colours(true, Some("")), cfg!(windows));
+        assert!(shows_colours(true, Some("xterm-256color")));
+    }
+
     #[test]
     fn node_takes_a_hook_by_a_file_url_with_its_bytes_encoded() {
         assert_eq!(
@@ -2551,6 +2729,613 @@ mod tests {
         frontend_protocol::validate_frontend_report_request,
         rust_project::prepare_rust_project,
     };
+
+    /// `cargo +toolchain test` builds with that toolchain, so the rustdoc
+    /// that compiles its doctests and the dynamic libraries its tests load
+    /// must come from it too.
+    #[cfg(unix)]
+    #[test]
+    fn the_toolchain_is_the_one_the_command_selects() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-toolchain-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // A custom toolchain whose rustc reports a sysroot of its own.
+        fs::create_dir_all(root.join("toolchain/bin")).unwrap();
+        fs::write(
+            root.join("toolchain/bin/rustc.draft"),
+            "#!/bin/sh\necho /custom-toolchain-sysroot\n",
+        )
+        .unwrap();
+        let copied = Command::new("cp")
+            .arg(root.join("toolchain/bin/rustc.draft"))
+            .arg(root.join("toolchain/bin/rustc"))
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        fs::set_permissions(
+            root.join("toolchain/bin/rustc"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        let project = PreparedRustProject::empty(root.join("workspace"));
+        let invocation = |command: &[&str]| {
+            cargo_invocation(
+                &project.workspace_root,
+                &command
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        // rustup takes a toolchain's directory after `+` as well as its name.
+        let selector = format!("+{}", root.join("toolchain").display());
+        assert_eq!(
+            rustc_sysroot(
+                &project,
+                &invocation(&["cargo", &selector, "test", "--doc"])
+            )
+            .unwrap(),
+            PathBuf::from("/custom-toolchain-sysroot")
+        );
+        let default = rustc_sysroot(&project, &invocation(&["cargo", "test", "--doc"])).unwrap();
+        assert!(
+            default.join("bin/rustdoc").is_file(),
+            "{}",
+            default.display()
+        );
+        // A toolchain whose rustc cannot answer stops the run.
+        script(&root.join("broken/bin/rustc"), "#!/bin/sh\nexit 3\n");
+        let selector = format!("+{}", root.join("broken").display());
+        let error = rustc_target_libdir(&project, &invocation(&["cargo", &selector, "test"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("rustc --print target-libdir exited with exit status: 3"),
+            "{error}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A directory of its own under the system temporary directory.
+    fn scratch(label: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-{label}-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// An executable script, copied into place by another process so that
+    /// no descriptor to it is open here while a test thread forks.
+    #[cfg(unix)]
+    fn script(path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let draft = path.with_extension("draft");
+        fs::write(&draft, text).unwrap();
+        assert!(
+            Command::new("cp")
+                .arg(&draft)
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_that_fails_says_how_with_whatever_the_binary_wrote() {
+        let root = scratch("failed-listing");
+        let launcher = ArtifactLauncher::default();
+        let listed = |name: &str, body: &str| {
+            let binary = root.join(name);
+            script(&binary, &format!("#!/bin/sh\n{body}\n"));
+            list_tests(&launcher, &binary, &[], &[])
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            listed("stderr", "echo 'cannot start' >&2; echo ignored; exit 2")
+                .ends_with("when asked to --list: cannot start"),
+        );
+        assert!(
+            listed("stdout", "echo 'half a listing'; exit 2")
+                .ends_with("when asked to --list: no stderr; stdout was half a listing"),
+        );
+        assert!(
+            listed("silent", "kill -9 $$")
+                .ends_with("when asked to --list: no output on either stream")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_wasm_runner_names_the_browser_it_cannot_read() {
+        let launcher = || ArtifactLauncher {
+            wasm_bindgen_runner: true,
+            ..ArtifactLauncher::default()
+        };
+        let unmeasured = |environment: &[(&str, &str)]| {
+            launcher()
+                .with_environment(
+                    &environment
+                        .iter()
+                        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                        .collect::<Vec<_>>(),
+                )
+                .unmeasured_browser()
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            unmeasured(&[("GECKODRIVER", "/opt/geckodriver")]),
+            Some("geckodriver".into())
+        );
+        // A remote driver runs its tests where Supercov cannot read them,
+        // Chrome's as much as any other's.
+        assert_eq!(
+            unmeasured(&[("CHROMEDRIVER_REMOTE", "http://grid:4444")]),
+            Some("a remote chromedriver".into())
+        );
+        // Tests that run in Node use no browser.
+        assert_eq!(
+            unmeasured(&[
+                ("GECKODRIVER", "/opt/geckodriver"),
+                ("WASM_BINDGEN_TEST_ONLY_NODE", "1")
+            ]),
+            None
+        );
+        // The same, said in Supercov's own environment rather than the
+        // runner's.
+        let ambient = |variables: &[(&str, &str)]| {
+            let variables = variables
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), OsString::from(value)))
+                .collect::<BTreeMap<_, _>>();
+            launcher()
+                .with_environment_from(&[], &|name| variables.get(name).cloned())
+                .unmeasured_browser()
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            ambient(&[("GECKODRIVER", "/opt/geckodriver")]),
+            Some("geckodriver".into())
+        );
+        assert_eq!(
+            ambient(&[
+                ("GECKODRIVER", "/opt/geckodriver"),
+                ("WASM_BINDGEN_TEST_ONLY_NODE", "1")
+            ]),
+            None
+        );
+    }
+
+    /// The user's own stack size and library path are kept: a size they
+    /// chose is not overridden, and their path follows Supercov's.
+    #[test]
+    fn the_user_s_stack_size_and_library_path_are_kept() {
+        assert_eq!(stack_environment(true), []);
+        assert_eq!(stack_environment(false), [("RUST_MIN_STACK", "16777216")]);
+        let user = std::env::join_paths(["/user/a", "/user/b"]).unwrap();
+        let environment =
+            library_path_environment(Path::new("/lib"), Path::new("/fixture"), Some(user));
+        assert_eq!(
+            std::env::split_paths(&environment[0].1).collect::<Vec<_>>(),
+            ["/", "/lib", "/user/a", "/user/b"].map(PathBuf::from)
+        );
+        let environment = library_path_environment(Path::new("/lib"), Path::new("/fixture"), None);
+        assert_eq!(
+            std::env::split_paths(&environment[0].1).collect::<Vec<_>>(),
+            ["/", "/lib"].map(PathBuf::from)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_configured_runner_launches_native_tests_but_not_one_of_several_targets() {
+        let root = scratch("artifact-launcher");
+        let host = String::from_utf8(Command::new("rustc").arg("-vV").output().unwrap().stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+            .unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!("[target.{host}]\nrunner = ['emulator', '--fast']\n"),
+        )
+        .unwrap();
+        let project = PreparedRustProject::empty(root.clone());
+        let invocation = |command: &[&str]| {
+            cargo_invocation(
+                &root,
+                &command
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let launcher =
+            ArtifactLauncher::for_invocation(&project, &invocation(&["cargo", "test"]), &root)
+                .unwrap();
+        let command = launcher.command(Path::new("/target/debug/deps/fixture"), None);
+        assert_eq!(command.get_program(), "emulator");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--fast", "/target/debug/deps/fixture"]
+        );
+        // A native target's tests load no wasm hook.
+        assert!(!command.get_envs().any(|(name, _)| name == "NODE_OPTIONS"));
+        let error = ArtifactLauncher::for_invocation(
+            &project,
+            &invocation(&[
+                "cargo",
+                "test",
+                &format!("--target={host}"),
+                "--target=wasm32-unknown-unknown",
+            ]),
+            &root,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("several targets, one of them with a target runner"),
+            "{error}"
+        );
+        // Several targets, none with a runner: each test binary runs itself.
+        fs::remove_file(root.join(".cargo/config.toml")).unwrap();
+        let launcher = ArtifactLauncher::for_invocation(
+            &project,
+            &invocation(&[
+                "cargo",
+                "test",
+                &format!("--target={host}"),
+                "--target=wasm32-unknown-unknown",
+            ]),
+            &root,
+        )
+        .unwrap();
+        let command = launcher.command(Path::new("/target/debug/deps/fixture"), None);
+        assert_eq!(command.get_program(), "/target/debug/deps/fixture");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run whose wasm tests a browser other than Chrome would run says
+    /// they go unmeasured, before it runs anything.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_names_the_browser_whose_wasm_it_cannot_read() {
+        let root = scratch("wasm-unmeasured-browser");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn one() -> u8 {\n    1\n}\n").unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.wasm32-unknown-unknown]\nrunner = 'wasm-bindgen-test-runner'\n",
+        )
+        .unwrap();
+        let project = prepare_rust_project(&root, None).unwrap();
+        let mut diagnostics = Vec::new();
+        // Whatever becomes of the doctests, which need wasm's standard library.
+        let _ = run_prepared_rust_tests(
+            &project,
+            &["cargo", "test", "--doc", "--target=wasm32-unknown-unknown"].map(String::from),
+            "rust-fixture-browser",
+            "2026-08-26T00:00:00.000Z",
+            None,
+            &[("GECKODRIVER".into(), "/opt/geckodriver".into())],
+            &mut diagnostics,
+        );
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains("[supercov] wasm tests run in geckodriver are not measured"),
+            "{diagnostics}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A wasm test's runner loads Supercov's hook after the user's own
+    /// `NODE_OPTIONS`.
+    #[cfg(unix)]
+    #[test]
+    fn a_wasm_runner_loads_the_hook_after_the_user_s_node_options() {
+        let root = scratch("wasm-node-options");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.wasm32-unknown-unknown]\nrunner = 'wasm-bindgen-test-runner'\n",
+        )
+        .unwrap();
+        let project = PreparedRustProject::empty(root.clone());
+        let invocation = cargo_invocation(
+            &root,
+            &["cargo", "test", "--target=wasm32-unknown-unknown"].map(String::from),
+        )
+        .unwrap();
+        let hooks = root.join("hooks");
+        let launcher = ArtifactLauncher::for_invocation_with(
+            &project,
+            &invocation,
+            &hooks,
+            Some("--max-old-space-size=64".into()),
+        )
+        .unwrap();
+        let command = launcher.command(Path::new("/target/fixture.wasm"), None);
+        assert_eq!(command.get_program(), "wasm-bindgen-test-runner");
+        let options = command
+            .get_envs()
+            .find(|(name, _)| *name == "NODE_OPTIONS")
+            .and_then(|(_, value)| value)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            options,
+            format!(
+                "--max-old-space-size=64 --import={}",
+                file_url(&hooks.join("rust-wasm-node.mjs"))
+            )
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn code_no_build_compiled_leaves_the_denominator_and_unanswered_code_is_named() {
+        let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
+        let source = (0..6)
+            .map(|index| {
+                format!("#[cfg(feature = \"f{index}\")]\npub fn f{index}() -> i32 {{ {index} }}\n")
+            })
+            .collect::<String>();
+        let mut manifest = crate::rust_instrumenter::instrument_rust_file_numbered(
+            "src/lib.rs",
+            &source,
+            "crate::__supercov_runtime_v1",
+            false,
+            None,
+            &mut probes,
+        )
+        .unwrap()
+        .manifest;
+        assert_eq!(probes.cfgs.len(), 6, "{:?}", probes.cfgs);
+        let first = probes.cfgs[0].line;
+        let past_last = probes.cfgs[5].end_line + 1;
+        // A boundary inside a gate left out goes with it; one beside it, or
+        // in another file, stays.
+        let limitation = |file: &str, line: usize| serde_json::json!({"id": format!("{file}:{line}"), "file": file, "line": line});
+        manifest.limitations = vec![
+            limitation("src/lib.rs", first),
+            limitation("src/lib.rs", past_last),
+            limitation("src/other.rs", first),
+        ];
+        // The fifth gate's code is the first's again, as a gate nested in
+        // another would be: nobody answered for it, but it is gone anyway.
+        probes.cfgs[4].obligations = probes.cfgs[0].obligations.clone();
+        let mut diagnostics = Vec::new();
+        let settled =
+            settle_cfg_gates_with(&manifest, &probes, &[1, 1, 1, 1, 0, 0], &mut diagnostics)
+                .unwrap();
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains("4 item(s) behind a #[cfg] no build compiled are outside the denominator: src/lib.rs:1 cfg(feature = \"f0\"), src/lib.rs:3 cfg(feature = \"f1\"), src/lib.rs:5 cfg(feature = \"f2\"), ..."),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("1 item(s) behind a #[cfg] are counted though no test ran code of their crate to show whether it was built: src/lib.rs:11 cfg(feature = \"f5\")"),
+            "{diagnostics}"
+        );
+        assert_eq!(
+            settled
+                .limitations
+                .iter()
+                .map(|limitation| limitation["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                format!("src/lib.rs:{past_last}"),
+                format!("src/other.rs:{first}")
+            ]
+        );
+        assert!(
+            settled
+                .points
+                .iter()
+                .all(|point| !probes.cfgs[0].obligations.contains(&point.id))
+        );
+    }
+
+    #[test]
+    fn files_the_build_did_not_read_are_declined_only_on_this_builds_depinfo() {
+        let root = scratch("declined-sources");
+        fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+        fs::write(
+            root.join("target/debug/deps/fixture.d"),
+            "target/debug/deps/fixture: src/lib.rs src/kept.rs\n",
+        )
+        .unwrap();
+        let mut project = PreparedRustProject::empty(root.clone());
+        project.source_files = ["src/gone.rs", "src/kept.rs", "src/lib.rs", "src/worker.rs"]
+            .map(String::from)
+            .to_vec();
+        project.crate_roots = vec!["src/lib.rs".into()];
+        project.manifest.scope = Some(serde_json::json!({"entries": [
+            {"file": "src/gone.rs", "status": "included"},
+            {"file": "src/lib.rs", "status": "included"},
+            "not an entry",
+        ]}));
+        // A Worker's crate that `wrangler dev` built counts.
+        let also = BTreeSet::from(["src/worker.rs".to_owned()]);
+        let (manifest, declined) = decline_uncompiled_sources(&project, &also);
+        assert_eq!(declined, BTreeSet::from(["src/gone.rs".to_owned()]));
+        let entries = manifest.scope.unwrap()["entries"].clone();
+        assert_eq!(entries[0]["status"], "excluded");
+        assert_eq!(entries[1]["status"], "included");
+        // Without a scope there is nothing to mark.
+        project.manifest.scope = None;
+        assert_eq!(decline_uncompiled_sources(&project, &also).1, declined);
+        // Depinfo that names no crate root of this project is another
+        // build's.
+        project.crate_roots = vec!["src/main.rs".into()];
+        assert!(decline_uncompiled_sources(&project, &also).1.is_empty());
+        let mut diagnostics = Vec::new();
+        report_declined(
+            &["a.rs", "b.rs", "c.rs", "d.rs"].map(String::from).into(),
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(diagnostics).unwrap(),
+            "[supercov] 4 source file(s) this build did not compile are outside the denominator: a.rs, b.rs, c.rs, ...\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_worker_at_the_workspace_root_that_no_test_ran_is_noted_once_per_file() {
+        let root = scratch("unrun-worker");
+        fs::write(
+            root.join("wrangler.toml"),
+            "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
+        let mut project = PreparedRustProject::empty(root.clone());
+        project.source_files = vec!["src/gone.rs".into(), "src/lib.rs".into()];
+        let original = project.clone();
+        let declined = BTreeSet::from(["src/gone.rs".to_owned()]);
+        for _ in 0..2 {
+            note_unrun_workers(&mut project, &original, &declined, &BTreeSet::new(), false);
+        }
+        assert_eq!(
+            project
+                .manifest
+                .limitations
+                .iter()
+                .map(|limitation| limitation["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["rust-worker-not-run#src/lib.rs"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_test_artifact_must_be_a_file_cargo_built_in_the_target_directory() {
+        let root = scratch("unsafe-artifacts");
+        fs::create_dir_all(root.join("target/debug/deps/a-directory")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        let project = PreparedRustProject::empty(root.clone());
+        // Cargo, as far as its build's messages go: `messages` is printed.
+        script(
+            &root.join("cargo"),
+            &format!("#!/bin/sh\ncat '{}'\n", root.join("messages").display()),
+        );
+        let built = |executable: &Path, test: bool| {
+            fs::write(
+                root.join("messages"),
+                serde_json::json!({
+                    "reason": "compiler-artifact",
+                    "target": {"name": "fixture", "kind": ["lib"], "src_path": root.join("src/lib.rs")},
+                    "profile": {"test": test},
+                    "executable": executable,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            build_test_artifacts(
+                &project,
+                &[root.join("cargo").display().to_string(), "test".into()],
+            )
+            .map(|artifacts| artifacts.len())
+            .map_err(|error| error.to_string())
+        };
+        let outside = fs::canonicalize("/bin/sh").unwrap();
+        assert!(
+            built(&outside, true)
+                .unwrap_err()
+                .contains(&outside.display().to_string())
+        );
+        let directory = root.join("target/debug/deps/a-directory");
+        assert!(
+            built(&directory, true)
+                .unwrap_err()
+                .contains(&directory.display().to_string())
+        );
+        // A build that made no test binary has nothing to run.
+        assert!(
+            built(&outside, false)
+                .unwrap_err()
+                .contains("Cargo emitted no libtest artifacts")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn small_paths_and_words_are_read_as_their_tools_read_them() {
+        // A Windows path is a file URL from its drive.
+        assert_eq!(
+            file_url(Path::new("C:\\hooks\\a b.mjs")),
+            "file:///C:/hooks/a%20b.mjs"
+        );
+        // A source is a path below the workspace and nothing else.
+        let root = Path::new("/work");
+        assert!(relative_source(root, Path::new("/work")).is_err());
+        assert!(relative_source(root, Path::new("/work/src/../../etc")).is_err());
+        assert_eq!(
+            relative_source(root, Path::new("/work/src/lib.rs")).unwrap(),
+            "src/lib.rs"
+        );
+        // A trailing space ends no word.
+        assert_eq!(shell_words("cargo test ").unwrap(), ["cargo", "test"]);
+        // An executable that is the root, or sits in it, has fewer
+        // directories to search.
+        let library_path = |executable: &str| {
+            let environment = dynamic_library_environment(Path::new("/lib"), Path::new(executable));
+            std::env::split_paths(&environment[0].1)
+                .take(3)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(library_path("/")[0], PathBuf::from("/lib"));
+        assert_eq!(
+            library_path("/fixture")[..2],
+            [PathBuf::from("/"), PathBuf::from("/lib")]
+        );
+        // `-vv` is nextest's verbosity; `-vx` is no option it knows.
+        let unknown = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::NextestRun,
+            arguments: ["nextest", "run", "-vx"].map(String::from).to_vec(),
+            runner_arguments: Vec::new(),
+        };
+        assert!(
+            nextest_list_invocation(&unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("does not recognize option -vx")
+        );
+    }
 
     #[test]
     fn a_test_binary_is_announced_as_cargo_announces_it() {
@@ -2793,6 +3578,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nextest_list_keeps_attached_selection_values_and_drops_run_only_options() {
+        let list = |arguments: &[&str]| {
+            nextest_list_invocation(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::NextestRun,
+                arguments: ["nextest", "run"]
+                    .iter()
+                    .chain(arguments)
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+                runner_arguments: Vec::new(),
+            })
+            .map(|listed| listed.arguments)
+            .map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            list(&[
+                "-pfoo",
+                "-Ffeat",
+                "-Eall()",
+                "-Pci",
+                "-Zflag",
+                "-vv",
+                "--timings=html",
+                "-j4",
+                "-j",
+                "2",
+                "--",
+                "--exact",
+                "x",
+            ])
+            .unwrap(),
+            [
+                "nextest",
+                "list",
+                "-pfoo",
+                "-Ffeat",
+                "-Eall()",
+                "-Pci",
+                "-Zflag",
+                "-vv",
+                "--timings=html",
+                "--",
+                "--exact",
+                "x",
+                "--message-format",
+                "json",
+            ]
+        );
+        for (arguments, refusal) in [
+            (&["-p"][..], "nextest option -p has no value"),
+            (
+                &["--test-threads"][..],
+                "nextest option --test-threads has no value",
+            ),
+            (&["--rerun"][..], "nextest option --rerun has no value"),
+            (&["-"][..], "does not recognize option -"),
+        ] {
+            let error = list(arguments).unwrap_err();
+            assert!(error.contains(refusal), "{arguments:?}: {error}");
+        }
+    }
+
     /// A package script's command split as `sh` runs it.
     #[test]
     fn a_script_command_splits_the_way_sh_splits_it() {
@@ -3002,6 +3851,212 @@ mod tests {
             let selection = rust_libtest_selection(&invocation).unwrap();
             assert!(selection.list_arguments.is_empty());
         }
+    }
+
+    /// Each libtest option that needs a value refuses to go without one,
+    /// an attached value is kept or dropped by what it does, and a second
+    /// `--` is the runner's own argument.
+    #[test]
+    fn libtest_options_keep_or_drop_their_values_by_what_they_do() {
+        let select = |runner: &[&str]| {
+            rust_libtest_selection(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::CargoTest,
+                arguments: vec!["test".into()],
+                runner_arguments: runner.iter().map(|argument| argument.to_string()).collect(),
+            })
+            .map(|selection| selection.list_arguments)
+            .map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            select(&[
+                "--skip=slow",
+                "-Zflag",
+                "--format=terse",
+                "--color",
+                "always"
+            ]),
+            Ok(vec!["--skip=slow".to_owned(), "-Zflag".to_owned()])
+        );
+        for (runner, refusal) in [
+            (&["--skip"][..], "libtest --skip has no filter value"),
+            (&["-Z"][..], "libtest -Z has no feature value"),
+            (&["--logfile"][..], "libtest --logfile has no value"),
+            (&["--skip="][..], "does not recognize option --skip="),
+            (&["--format="][..], "does not recognize option --format="),
+            (&["--list"][..], "does not execute a test suite"),
+        ] {
+            let error = select(runner).unwrap_err();
+            assert!(error.contains(refusal), "{runner:?}: {error}");
+        }
+        let words = |command: &str| {
+            cargo_invocation(
+                Path::new("."),
+                &command.split(' ').map(str::to_owned).collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .runner_arguments
+        };
+        assert_eq!(words("cargo test -- a -- b"), ["a", "--", "b"]);
+        // A nextest option that is refused says so before it says its value is missing.
+        let list = |arguments: &[&str]| {
+            nextest_list_invocation(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::NextestRun,
+                arguments: ["nextest", "run"]
+                    .iter()
+                    .chain(arguments)
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+                runner_arguments: Vec::new(),
+            })
+            .map_err(|error| error.to_string())
+        };
+        for (arguments, refusal) in [
+            (
+                &["--stress-count"][..],
+                "nextest option --stress-count has no value",
+            ),
+            (
+                &["--stress-count", "3"][..],
+                "cannot yet be assigned exact selected-test identity",
+            ),
+            (
+                &["--stress-count=3"][..],
+                "cannot yet be assigned exact selected-test identity",
+            ),
+            (
+                &["--no-run"][..],
+                "cannot yet be assigned exact selected-test identity",
+            ),
+        ] {
+            let error = list(arguments).unwrap_err();
+            assert!(error.contains(refusal), "{arguments:?}: {error}");
+        }
+    }
+
+    /// libtest is quiet with `-q`, `--quiet` or terse output in either
+    /// spelling; a run that ran nothing is a skip only when it passed.
+    #[test]
+    fn libtest_quiet_and_skipped_runs_are_read_from_their_arguments_and_output() {
+        let quiet = |runner: &[&str]| {
+            libtest_quiet(&CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::CargoTest,
+                arguments: vec!["test".into()],
+                runner_arguments: runner.iter().map(|argument| argument.to_string()).collect(),
+            })
+        };
+        assert!(quiet(&["-q"]) && quiet(&["--quiet"]) && quiet(&["--format=terse"]));
+        assert!(quiet(&["--format", "terse"]));
+        assert!(!quiet(&["--format", "json"]) && !quiet(&["terse"]) && !quiet(&[]));
+        assert!(libtest_skipped(0, "running 0 tests\n"));
+        assert!(libtest_skipped(
+            0,
+            "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured"
+        ));
+        assert!(!libtest_skipped(101, "running 0 tests\n"));
+        assert!(!libtest_skipped(0, "running 1 test\n"));
+    }
+
+    /// A record naming a probe the manifest does not have, or a decision
+    /// with the wrong number of conditions, is refused; a branch outcome's
+    /// hit and an assertion with what its thread wrote before it are kept.
+    #[test]
+    fn probe_records_are_read_against_the_manifest() {
+        use crate::coverage_analysis::PointKind;
+        use crate::coverage_report::{
+            BranchAlternativeMeta, BranchMeta, CoverageManifest, DecisionMeta, PointMeta,
+        };
+        use crate::rust_runtime::{RustProbeEntry, RustProbeObservation as O};
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![DecisionMeta {
+                id: "d".into(),
+                file: "src/lib.rs".into(),
+                line: 2,
+                column: 4,
+                source: "a && b".into(),
+                conditions: vec!["a".into(), "b".into()],
+                kind: "if".into(),
+            }],
+            points: vec![PointMeta {
+                id: "p".into(),
+                kind: PointKind::Statement,
+                file: "src/lib.rs".into(),
+                line: 1,
+                column: 1,
+                source: "assert!(a)".into(),
+                label: None,
+            }],
+            branches: vec![BranchMeta {
+                id: "b".into(),
+                kind: "if".into(),
+                file: "src/lib.rs".into(),
+                line: 2,
+                column: 4,
+                source: "a && b".into(),
+                alternatives: vec![BranchAlternativeMeta {
+                    id: "alt".into(),
+                    label: "true".into(),
+                }],
+            }],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let entry = |thread: u64, observation: O| RustProbeEntry {
+            thread,
+            observation,
+        };
+        let read = |entries: Vec<RustProbeEntry>| snapshot_regions(&manifest, [entries], "attempt");
+        for (entries, expected) in [
+            (vec![entry(1, O::Hit { id: "zzz".into() })], "zzz"),
+            (
+                vec![entry(
+                    1,
+                    O::Decision {
+                        id: "zzz".into(),
+                        values: vec![],
+                        outcome: true,
+                    },
+                )],
+                "zzz",
+            ),
+            (vec![entry(1, O::Assertion { id: "zzz".into() })], "zzz"),
+        ] {
+            assert!(
+                matches!(read(entries), Err(RustTestRunnerError::UnknownProbe(id)) if id == expected)
+            );
+        }
+        assert!(matches!(
+            read(vec![entry(
+                1,
+                O::Decision {
+                    id: "d".into(),
+                    values: vec![Some(true)],
+                    outcome: true
+                }
+            )]),
+            Err(RustTestRunnerError::InvalidVector {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        let evidence = read(vec![
+            entry(1, O::Hit { id: "alt".into() }),
+            entry(
+                2,
+                O::Decision {
+                    id: "d".into(),
+                    values: vec![Some(true), Some(false)],
+                    outcome: false,
+                },
+            ),
+            entry(1, O::Assertion { id: "p".into() }),
+        ]);
+        assert_eq!(evidence.err().map(|error| error.to_string()), None);
     }
 
     #[test]

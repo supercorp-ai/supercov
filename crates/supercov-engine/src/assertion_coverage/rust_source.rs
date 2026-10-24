@@ -157,6 +157,20 @@ pub(super) fn replacements(file: &str, source: &str, signatures: &Signatures) ->
                         // the `else` run.
                         let changed = if s.let_else().is_some() && pattern.starts_with("Some(") {
                             "None".to_owned()
+                        } else if s.let_else().is_some()
+                            && let Some((other, fallback)) = if pattern.starts_with("Ok(") {
+                                Some(("Err(", "Err(Default::default())"))
+                            } else if pattern.starts_with("Err(") {
+                                Some(("Ok(", "Ok(Default::default())"))
+                            } else {
+                                None
+                            }
+                        {
+                            // The other variant: `Result` has no default, and
+                            // `Default::default()` here never compiled.
+                            Some(typed(&value, ty.as_deref(), &crate_view))
+                                .filter(|changed| changed.starts_with(other))
+                                .unwrap_or_else(|| fallback.to_owned())
                         } else {
                             typed(&value, ty.as_deref(), &crate_view)
                         };
@@ -954,7 +968,8 @@ fn changed(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String> {
             .get(operand.as_str())
             .is_some_and(|t| INTEGERS.contains(&t.as_str()))
     });
-    if ty.is_some_and(|t| INTEGERS.contains(&t)) || integer_shaped(e) || integer_local {
+    // A type among `INTEGERS` was answered by `replacement` already.
+    if integer_shaped(e) || integer_local {
         return Some(format!("({e}) ^ 1"));
     }
     None
@@ -1375,28 +1390,19 @@ fn tail_type(list: &ast::StmtList) -> Option<String> {
         // Through `if`/`else if`/`else` and `match` arms to the expression
         // they form; it must itself be a block's value.
         let mut expression = node.clone();
-        while let Some(up) = expression.parent() {
-            if ast::IfExpr::can_cast(up.kind())
+        while let Some(up) = expression.parent().filter(|up| {
+            ast::IfExpr::can_cast(up.kind())
                 || ast::MatchArm::can_cast(up.kind())
                 || ast::MatchArmList::can_cast(up.kind())
                 || ast::MatchExpr::can_cast(up.kind())
-            {
-                expression = up;
-            } else {
-                break;
-            }
+        }) {
+            expression = up;
         }
-        if !(ast::IfExpr::can_cast(expression.kind())
-            || ast::MatchExpr::can_cast(expression.kind())
-            || ast::BlockExpr::can_cast(expression.kind()))
-        {
-            return None;
-        }
+        // `expression` is the block itself or the `if` or `match` it climbed
+        // to. One that stands in a block directly is that block's tail: the
+        // parser puts any other expression in a statement of its own.
         let holder = expression.parent()?;
         let list = ast::StmtList::cast(holder)?;
-        if list.tail_expr().map(|t| t.syntax().clone()) != Some(expression) {
-            return None;
-        }
         node = list.syntax().parent()?;
     }
 }
@@ -1579,7 +1585,8 @@ fn boolean(e: &str) -> bool {
     if block_like.iter().any(|k| e.starts_with(k)) {
         return false;
     }
-    if e.starts_with('!') && !e.starts_with("!=") {
+    // No expression starts with `!=`: a leading `!` is a negation.
+    if e.starts_with('!') {
         return true;
     }
     let mut depth = 0i32;
@@ -1752,6 +1759,37 @@ mod tests {
         );
     }
 
+    /// An integration test's helpers are the modules it declares, as a
+    /// directory or a file, from a nested crate's `tests` too; a unit test
+    /// has none; and a generic test on the file's first line is found.
+    #[test]
+    fn integration_helpers_and_a_generic_first_line_test() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("crates/x/tests/common")).unwrap();
+        std::fs::write(root.join("crates/x/tests/common/mod.rs"), "").unwrap();
+        std::fs::write(root.join("crates/x/tests/util.rs"), "").unwrap();
+        let text = "mod common;\npub mod util;\nmod missing;\nuse std::fmt;\n";
+        assert_eq!(
+            helpers(&root, "crates/x/tests/it.rs", text),
+            ["crates/x/tests/common/mod.rs", "crates/x/tests/util.rs"]
+        );
+        assert!(helpers(&root, "src/lib.rs", text).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+        let lines = ["fn generic<T>() {", "}"];
+        let found = locate(&lines, "tests/g.rs::generic").unwrap();
+        assert_eq!(
+            (found.context.clone(), found.start, found.end),
+            (vec![], 0, 1)
+        );
+    }
+
     #[test]
     fn tests_and_doctests_are_found() {
         let text = "//! ```\n//! assert!(a::f());\n//! ```\n\n#[test]\nfn works() {\n    assert!(f());\n}\n";
@@ -1822,6 +1860,36 @@ mod replacement_tests {
         assert_eq!(replacement("|x| x == 1", None), "Default::default()");
     }
 
+    /// An empty string built any way becomes a non-empty one, a suffixed or
+    /// grouped integer becomes zero of its kind, a negation or comparison is
+    /// negated, a vector of anything becomes an empty one, and an empty
+    /// tuple option takes a value.
+    #[test]
+    fn more_shapes_are_replaced_by_values_that_differ() {
+        for (expr, ty, expected) in [
+            (
+                "\"\".to_owned()",
+                Some("String"),
+                "String::from(\"supercov\")",
+            ),
+            (
+                "\"\".to_string()",
+                Some("String"),
+                "String::from(\"supercov\")",
+            ),
+            ("String::new()", None, "String::from(\"supercov\")"),
+            ("5usize", None, "0usize"),
+            ("1_000", None, "0"),
+            ("!flag", Some("bool"), "!(!flag)"),
+            ("a != b", Some("bool"), "!(a != b)"),
+            ("vec![Some(1), None]", Some("Vec<Option<u8>>"), "Vec::new()"),
+            ("None", Some("Option<(u8, u8)>"), "Some(Default::default())"),
+            ("(1, true)", Some("(u8, bool)"), "Default::default()"),
+        ] {
+            assert_eq!(replacement(expr, ty), expected, "{expr} {ty:?}");
+        }
+    }
+
     /// Every shape `replacement` reads, typed and untyped: the value it
     /// gives is of the same type and never the same value.
     #[test]
@@ -1890,6 +1958,197 @@ mod replacement_tests {
         assert_eq!(r[&2][0].1, "1.0");
         assert_eq!(r[&5][0].1, "Some(Default::default())");
         assert_eq!(r[&8][0].1, "1.0");
+    }
+
+    /// Tuples, arrays, comparisons and characters, each changed by its
+    /// shape: an element of a tuple in place, a computed tuple through a
+    /// copy, an order reversed.
+    #[test]
+    fn a_compound_value_is_changed_in_one_of_its_parts() {
+        let source = r#"fn f(name: String, foo: Foo, n: u8, t: &str, total: usize) -> u8 {
+    let t1: (String, u8) = (name, 1);
+    let t2: (Foo, u8) = (foo, n);
+    let t3: (_, Foo) = pair();
+    let t4: (String, u8) = pair2();
+    let e: [Foo; 0] = [];
+    let i = &t[1];
+    let c: char = t.chars().next().unwrap();
+    let d: char = t.chars().next_back().unwrap();
+    let k: usize = total;
+    let r4 = &t;
+    let s2 = name.as_str().trim();
+    let o = a.cmp(&b);
+    let o2 = Ord::cmp(&a, &b);
+    let nested = (foo, (n, foo));
+    0
+}
+"#;
+        let signatures = signatures([("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        for (line, expected) in [
+            (2, "(String::new(), 1)"),
+            (3, "(foo, 0)"),
+            // No element of a type it can change: no part to change.
+            (4, "Default::default()"),
+            (5, "{ let mut v = pair2(); v.0 = String::new(); v }"),
+            (6, "Default::default()"),
+            // An index is no slice.
+            (7, "Default::default()"),
+            (8, "'\\0'"),
+            (9, "'\\0'"),
+            (10, "0"),
+            (11, "Default::default()"),
+            (12, "\"\""),
+            (13, "(a.cmp(&b)).reverse()"),
+            (14, "(Ord::cmp(&a, &b)).reverse()"),
+            (15, "(foo, (0, foo))"),
+        ] {
+            assert_eq!(r[&line][0].1, expected, "line {line}");
+        }
+    }
+
+    /// Integer arithmetic by its shape, float literals, whole words, test
+    /// files by their directory, and tests and doctests by their names.
+    #[test]
+    fn small_readings_of_rust_text() {
+        for (e, integer) in [
+            ("a + 1", true),
+            ("v.len() - n", true),
+            ("x as u32 * y", true),
+            ("x.wrapping_add(1)", true),
+            ("(a + 1)", false),
+            ("a + b", false),
+            ("a - 0.5", false),
+            ("s + \"x\"", false),
+            ("c + 'x'", false),
+            ("é + 1", true),
+        ] {
+            assert_eq!(integer_shaped(e), integer, "{e}");
+        }
+        assert!(float_literal("0.5") && float_literal("x * 1.25"));
+        assert!(!float_literal("1.x") && !float_literal("v.0") && !float_literal(".5"));
+        assert!(contains_word("let a_b = a;", "a"));
+        assert!(!contains_word("a_b + ab", "a"));
+        assert_eq!(replace_word("a + a_b + (a)", "a", "z"), "z + a_b + (z)");
+        for (file, test) in [
+            ("tests/it.rs", true),
+            ("crates/x/benches/b.rs", true),
+            ("examples/demo.rs", true),
+            ("src/lib.rs", false),
+            ("src/testsuite.rs", false),
+        ] {
+            assert_eq!(test_path(file), test, "{file}");
+        }
+        let lines = [
+            "/// ```",
+            "/// assert!(a::f());",
+            "/// ```",
+            "#[inline]",
+            "",
+            "pub fn f() -> bool { true }",
+            "#[test]",
+            "#[ignore]",
+            "async fn works() {",
+            "}",
+            "fn worksnot() {}",
+        ];
+        let doctest = locate(&lines, "src/lib.rs - f (line 1)").unwrap();
+        assert_eq!((doctest.start, doctest.end), (0, 5));
+        assert!(locate(&lines, "src/lib.rs - f (line x)").is_none());
+        assert!(locate(&lines, "src/lib.rs - f (line 0)").is_none());
+        let test = locate(&lines, "src/lib.rs::works").unwrap();
+        assert_eq!((test.context, test.start), (vec![6, 7], 8));
+        assert!(locate(&lines, "src/lib.rs::work").is_none());
+    }
+
+    /// A value made for a type: from its shape, its fields where every one
+    /// can be set from here, or not at all -- three structs deep, a maker
+    /// private to another module, a field private to another module.
+    #[test]
+    fn a_made_value_stops_where_this_module_cannot_make_one() {
+        let lib = "pub struct Deep1 { pub a: Deep2 }\npub struct Deep2 { pub b: Deep3 }\npub struct Deep3 { pub c: Deep4 }\npub struct Deep4 { pub d: u8 }\npub struct Two { pub a: u8, pub b: bool }\npub struct NonZeroFoo;\npub struct Made;\nimpl Made {\n    fn hidden_new() -> Self { Made }\n}\npub struct Closed { x: u8 }\n";
+        let source = r#"fn f() -> u8 {
+    let a: Option<NonZeroFoo> = None;
+    let b: Option<[u8; 2]> = None;
+    let c: Option<[u8]> = None;
+    let d: Option<Deep1> = None;
+    let e: Option<Deep3> = None;
+    let g: Option<Made> = None;
+    let h: Option<Closed> = None;
+    let i: Option<Two> = None;
+    let j: Option<std::num::NonZeroU32> = None;
+    let k: Option<(u8, bool)> = None;
+    let l: Option<Result<u8, Two>> = None;
+    let m: Option<*const u8> = None;
+    let n: Option<Foo<u8>> = None;
+    0
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        for (line, expected) in [
+            // Named for a non-zero type, and no integer's.
+            (2, "Some(Default::default())"),
+            (3, "Some([0; 2])"),
+            // A slice has no length to repeat.
+            (4, "Some(Default::default())"),
+            (5, "Some(Default::default())"),
+            (6, "Some(Deep3 { c: crate::Deep4 { d: 0 } })"),
+            (7, "Some(Default::default())"),
+            (8, "Some(Default::default())"),
+            (9, "Some(Two { a: 0, b: false })"),
+            (10, "Some(std::num::NonZeroU32::MAX)"),
+            (11, "Some((0, false))"),
+            (12, "Some(Ok(0))"),
+            (13, "Some(std::ptr::null())"),
+            (14, "Some(Default::default())"),
+        ] {
+            assert_eq!(r[&line][0].1, expected, "line {line}");
+        }
+    }
+
+    /// A block's value takes the function's type through `match` arms,
+    /// nested blocks and `else if`, and not where the block is a `break`'s
+    /// value or a `let`'s.
+    #[test]
+    fn a_block_is_typed_by_the_function_only_along_its_returned_path() {
+        let source = r#"fn g(a: u8) -> String {
+    match a {
+        0 => { make() }
+        _ => {
+            make()
+        }
+    }
+}
+fn h() -> String {
+    { { make() } }
+}
+fn i() -> String {
+    loop {
+        break { make() };
+    }
+}
+fn j(a: bool) -> String {
+    let s = if a { make() } else { make() };
+    s
+}
+fn k(a: bool) -> String {
+    if a { make() } else if !a { make() } else { make() }
+}
+"#;
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        let at = |line: usize| r[&line].iter().map(|c| c.1.as_str()).collect::<Vec<_>>();
+        let typed = "String::new()";
+        let untyped = "Default::default()";
+        assert_eq!(at(2), [typed]);
+        assert_eq!(at(3), [typed]);
+        assert_eq!(at(5), [typed]);
+        assert_eq!(at(10), [typed; 3]);
+        assert_eq!(at(13), [typed]);
+        assert_eq!(at(14), [untyped]);
+        assert_eq!(at(18), [untyped; 3]);
+        assert_eq!(at(19), [typed]);
+        assert_eq!(at(22), [typed; 3]);
     }
 
     /// dtolnay/semver's shapes that used to fall back to
@@ -2063,5 +2322,367 @@ mod tests {
         for line in [25, 30, 36, 37] {
             assert_eq!(starts[&line][0].1, None, "line {line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod edge_shape_tests {
+    use super::*;
+
+    /// The shapes at the edges of each reading: a loop that is no value, a
+    /// bare `return`, a `let` with nothing to change, `let`-`else` on each
+    /// variant, constructors the crate cannot call, and `Self` only as a
+    /// whole word.
+    /// The readings' rarer paths: an associated type with no value, a
+    /// `let`-`else` on a pattern that is no variant, tuples of one or of
+    /// nothing known, a closure parameter called, a `match` over a call the
+    /// crate does not type, an `else if` with no `else`, an enum reached
+    /// through a module path or `Self`, and a struct of this module made
+    /// through its private constructor or its private fields.
+    #[test]
+    fn each_reading_takes_its_rarer_way() {
+        let lib = "pub enum Op { Exact, Greater }\npub struct P;\n";
+        let source = r#"impl std::str::FromStr for P {
+    type Err;
+    const C: u8 = 1;
+    fn from_str(s: Self::Err) -> Result<Self, Self::Err> {
+        let v: Self::Err = s;
+        v
+    }
+}
+fn f(a: bool, pair: (u8, u8), q: (u8,), call: impl Fn() -> u8) -> u8 {
+    let [x, y] = arr else { return 0; };
+    let u = (b, c);
+    let (o,) = q;
+    let mut = 1;
+    let w = call();
+    x = ;
+    let k = match unknown() { Ok(v) => v, Err(e) => return 0 };
+    let i = if a { 1 } else if b { 2 };
+    let my_op = my_mod::Op::Exact;
+    let o = Self::Exact;
+    let arr2 = [unknown(), 1];
+    let cl = |x| -> u8 { 1 };
+    let z = 2f64;
+    let ne = !a;
+    m + n
+}
+struct Inner { x: u8 }
+struct Made { y: u8 }
+impl Made {
+    fn new() -> Self { Made { y: 1 } }
+}
+fn g(e: E) -> Result<Inner, E> {
+    let one = (1,);
+    let c = || { return 1u8; };
+    Err(e)
+}
+fn h(e: E) -> Result<Made, E> {
+    Err(e)
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/parse.rs", source)].into_iter());
+        let r = replacements("src/parse.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(5), "Default::default()", "`type Err;` says nothing");
+        // Neither `Some`, `Ok` nor `Err`: the value's own change.
+        assert_eq!(at(10), "Default::default()");
+        assert_eq!(r[&10][1], ("return 0".to_owned(), "1".to_owned()));
+        assert_eq!(at(11), "Default::default()", "nothing in it is typed");
+        assert_eq!(at(12), "Default::default()");
+        assert_eq!(at(13), "0");
+        assert_eq!(at(14), "0", "a called parameter returns its `Fn`'s type");
+        assert!(!r.contains_key(&15), "an assignment of nothing");
+        assert_eq!(at(16), "Default::default()");
+        assert_eq!(r[&17].len(), 3, "both branches, with no `else`");
+        assert_eq!(at(18), "my_mod::Op::Greater");
+        assert_eq!(at(19), "Default::default()", "`Self` outside an impl");
+        assert_eq!(at(20), "Default::default()");
+        assert_eq!(at(21), "|x| -> u8 { 0 }");
+        assert_eq!(at(22), "0.0");
+        assert_eq!(at(23), "!(!a)");
+        assert_eq!(at(29), "Made { y: 0 }");
+        assert_eq!(at(32), "Default::default()", "a tuple of one");
+        assert_eq!(r[&33][1], ("return 1u8".to_owned(), "0u8".to_owned()));
+        assert_eq!(at(34), "Ok(Inner { x: 0 })");
+        assert_eq!(at(37), "Ok(Made::new())");
+        // An `else if` whose condition is missing is still a decision.
+        let starts = statement_starts("fn f(a: bool) {\n    if a {\n    } else if {\n    }\n}\n");
+        assert_eq!(starts[&3].len(), 1);
+    }
+
+    /// Text read word by word, brackets that close early, the output of a
+    /// callable type, and a doctest's item past more documentation.
+    #[test]
+    fn small_readings_at_their_edges() {
+        assert!(!contains_word("ab", "b"));
+        assert!(contains_word("ab b", "b"));
+        assert_eq!(enclosed("(a) (b)", '(', ')'), None);
+        assert_eq!(tuple("(a) (b)"), None);
+        assert_eq!(callable_output("u8"), None);
+        assert_eq!(callable_output("Box<dynFn()->u8>"), Some("u8"));
+        assert_eq!(float_literal_value("2f32"), Some(2.0));
+        assert!(boolean("!ready"));
+        let lines = [
+            "/// Doc",
+            "/// ```",
+            "/// f();",
+            "/// ```",
+            "/// more",
+            "//! module",
+            "#[inline]",
+            "",
+            "pub fn f() {}",
+        ];
+        let located = locate(&lines, "src/lib.rs - f (line 2)").unwrap();
+        assert_eq!((located.start, located.end), (1, 8));
+    }
+
+    #[test]
+    fn each_reading_takes_its_other_way() {
+        let lib = r#"pub struct Point { pub x: u8 }
+impl Point {
+    pub unsafe fn raw() -> Point { Point { x: 0 } }
+    pub fn generic<T>() -> Point { Point { x: 0 } }
+    pub fn origin() -> Point { Point { x: 0 } }
+    pub const ORIGIN: Point = Point { x: 0 };
+    pub const LIMIT: u8 = 9;
+    pub fn chain(&self) -> Vec<SelfRef> { Vec::new() }
+    pub fn mine(&self) -> MySelf { todo!() }
+    pub fn tail(&self) -> Self_ { todo!() }
+    pub fn me(&self) -> Option<Self> { None }
+}
+"#;
+        let source = r#"fn spins() {
+    loop {
+        break;
+    }
+}
+fn early(x: u8) {
+    if x > 1 {
+        return;
+    }
+    let pending;
+    pending = 1;
+    let Ok(v) = unknown(x) else {
+        return;
+    };
+    let Err(e) = unknown(x) else {
+        return;
+    };
+}
+fn made() -> Thing {
+    let m = Thing::with_capacity(3);
+    let n = thing::new();
+    let o = Point::origin();
+    m
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/parse.rs", source)].into_iter());
+        // Unsafe and generic functions, and a constant of another type, make
+        // nothing a test could be given.
+        let makers = signatures.makers["Point"]
+            .iter()
+            .map(|maker| maker.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(makers, ["origin", "ORIGIN"]);
+        // `Self` is replaced as a word, never inside one.
+        for (name, ty) in [
+            ("chain", "Vec<SelfRef>"),
+            ("mine", "MySelf"),
+            ("tail", "Self_"),
+            ("me", "Option<Point>"),
+        ] {
+            assert_eq!(signatures.returns[name].as_deref(), Some(ty), "{name}");
+        }
+        let r = replacements("src/parse.rs", source, &signatures);
+        let at = |line: usize| r.get(&line).map(|changes| changes[0].1.as_str());
+        // A loop that is no value and a bare `return` change nothing.
+        assert_eq!(at(2), None);
+        assert_eq!(at(8), None);
+        assert_eq!(at(10), None, "`let pending;` has no value");
+        assert_eq!(at(11), Some("0"));
+        // `let`-`else` takes the variant that runs the `else`, whatever the
+        // value's type: `Result` has no default.
+        assert_eq!(at(12), Some("Err(Default::default())"));
+        assert_eq!(at(15), Some("Ok(Default::default())"));
+        // A constructor read by name makes its type; one the crate cannot
+        // make, or a lowercase path, is no constructor.
+        assert_eq!(at(20), Some("Default::default()"));
+        assert_eq!(at(21), Some("Default::default()"));
+        assert_eq!(at(22), Some("Point::ORIGIN"));
+        let starts = statement_starts(source);
+        assert_eq!(starts[&2][0].1, Some(Change::Skip));
+        assert_eq!(starts[&8][0].1, Some(Change::Skip));
+        assert_eq!(starts[&10][0].1, None);
+        assert_eq!(starts[&12][0].1, Some(Change::ValueUndefined));
+    }
+
+    /// Types read from an expression's shape, through `match`, `if`/`else
+    /// if`, `?`, generics, tuples, arrays, comparisons and references.
+    #[test]
+    fn a_type_read_from_shapes_changes_the_value_it_belongs_to() {
+        let lib = "pub fn parse(t: &str) -> Result<u8, Error> { todo!() }\npub struct Error;\npub struct P;\nimpl std::ops::Add for P {\n    type Output = P;\n    fn add(self, o: P) -> Self::Output { o }\n}\n";
+        let source = r#"fn f(r: Wrapper, b: Box<u8>, t: &str, a: f64, z: f64, file: File) -> u8 {
+    let w = match r {
+        Ok(x) => x,
+        Err(_) => 0,
+    };
+    let j = if a > z { 1 } else if a < z { 2 } else { 3 };
+    let o = if a > z { Ordering::Less } else { std::cmp::Ordering::Greater };
+    let q = match a { _ => cmp::Ordering::Equal };
+    let n = b?;
+    let g: Result<u8,> = parse(t);
+    let (q1, q2): (u8, u8, u8) = triple();
+    let arr: [u8; 2] = [1, 2];
+    let rep = [0u8; 4];
+    let rep2 = [a; 4];
+    let pc = a.partial_cmp(&z);
+    let pc2 = PartialOrd::partial_cmp(&a, &z);
+    let r3 = &t[1..];
+    let rd = file.read();
+    let Ok(parsed) = parse(t) else {
+        return 0;
+    };
+    w
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        // `Ok(x) => x` of something that is no `Result` says nothing.
+        assert_eq!(at(2), "Default::default()");
+        assert_eq!(at(6), "Default::default()");
+        assert_eq!(
+            r[&6][1..].iter().map(|c| c.1.as_str()).collect::<Vec<_>>(),
+            ["0", "0", "0"]
+        );
+        assert_eq!(
+            at(7),
+            "(if a > z { Ordering::Less } else { std::cmp::Ordering::Greater }).reverse()"
+        );
+        assert_eq!(r[&7][1].1, "Ordering::Greater");
+        assert_eq!(r[&7][2].1, "Ordering::Less");
+        assert_eq!(at(8), "(match a { _ => cmp::Ordering::Equal }).reverse()");
+        assert_eq!(at(9), "Default::default()", "a `Box` is no `Result`");
+        assert_eq!(at(10), "Err(Default::default())");
+        assert_eq!(at(11), "{ let mut v = triple(); v.0 = v.0 ^ 1; v }");
+        assert_eq!(at(12), "[0, 2]");
+        assert_eq!(at(13), "[1u8; 4]");
+        assert_eq!(at(14), "[0.0; 4]");
+        assert_eq!(
+            at(15),
+            "(a.partial_cmp(&z)).map(std::cmp::Ordering::reverse)"
+        );
+        assert_eq!(
+            at(16),
+            "(PartialOrd::partial_cmp(&a, &z)).map(std::cmp::Ordering::reverse)"
+        );
+        assert_eq!(at(17), "&t[..0]");
+        assert_eq!(at(18), "Default::default()", "`file` is no pointer");
+        assert_eq!(at(19), "Err(Default::default())");
+    }
+
+    #[test]
+    fn each_type_shape_takes_a_value_of_its_own_type() {
+        let lib = "pub struct Open { pub a: u8 }\nmod inner { pub(crate) struct Hidden { x: u8 } }\npub trait Tr { type Item; }\nimpl Tr for Open { type Item = u8; }\n";
+        let source = r#"fn f(o: Open, s: &mut String) -> std::fmt::Result {
+    let e1: std::fmt::Error = std::fmt::Error;
+    let e2: core::fmt::Error = core::fmt::Error;
+    let r1: std::fmt::Result = Ok(());
+    let nz: std::num::NonZeroU8 = std::num::NonZeroU8::new(1).unwrap();
+    let sl: &[u8] = &[1, 2];
+    let ms: &mut String = s;
+    let arr: [bool; 2] = [true, false];
+    let arr2: [String; 1] = [String::new()];
+    let one: (u8,) = (1,);
+    let tup: (u8, String) = (1, String::new());
+    let opt: Option<u8> = None;
+    let cl = |x: u8| -> u8 { x + 1 };
+    let cl2 = |x: u8| -> u8 x;
+    let nested: Vec<Vec<Option<u8>>> = Vec::new();
+    let st = &v[1..];
+    let ch: char = 'a';
+    let fl: f32 = 1.5;
+    let un: () = ();
+    Ok(())
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        // A unit struct or `()` has one value, so lines 2, 3 and 19 are read
+        // but not pinned: their "change" is the value they already have.
+        for (line, changed) in [
+            (4, "Err(std::fmt::Error)"),
+            (5, "std::num::NonZeroU8::MAX"),
+            (8, "[false, false]"),
+            (9, "[String::from(\"supercov\")]"),
+            (11, "(0, String::new())"),
+            (12, "Some(0)"),
+            (13, "|x: u8| -> u8 { 0 }"),
+            (15, "vec![Default::default()]"),
+            (16, "&v[..0]"),
+            (17, "'\\0'"),
+            (18, "0.0"),
+            (20, "Err(std::fmt::Error)"),
+        ] {
+            assert_eq!(at(line), changed, "line {line}");
+        }
+        assert_eq!(r[&13][1].1, "(x + 1) ^ 1");
+    }
+
+    /// The rarest readings: an associated type with a value, a tuple element
+    /// whose change is itself, a closure whose changed body is a block
+    /// already, a `let` that names nothing, and a slice-shaped text with no
+    /// bracket.
+    #[test]
+    fn each_reading_takes_its_rarest_way() {
+        let source = r#"pub struct P;
+impl std::str::FromStr for P {
+    type Err = u8;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let e: Self::Err = s.len();
+        Err(e)
+    }
+}
+fn f() -> ((), u8) {
+    let cl = || -> (u8, u8) { make() };
+    ((), 1)
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(5), "0", "`Self::Err` is the impl's `u8`");
+        assert_eq!(
+            at(10),
+            "|| -> (u8, u8) { let mut v = { make() }; v.0 = v.0 ^ 1; v }"
+        );
+        assert_eq!(at(11), "((), 0)", "`()` has no other value");
+
+        let tree = parse("fn f() { let mut = 1; }").tree();
+        let pattern = tree
+            .syntax()
+            .descendants()
+            .find_map(ast::Pat::cast)
+            .unwrap();
+        let mut locals = BTreeMap::new();
+        bind(&pattern, "u8", &mut locals);
+        assert!(locals.is_empty());
+
+        let signatures = Signatures::default();
+        let crate_view = Crate {
+            signatures: &signatures,
+            module: String::new(),
+            source: "",
+            locals: BTreeMap::new(),
+            enclosing: None,
+        };
+        assert_eq!(
+            changed("&v[1..]", None, &crate_view),
+            Some("&v[..0]".into())
+        );
+        assert_eq!(changed("&v]", None, &crate_view), None);
     }
 }

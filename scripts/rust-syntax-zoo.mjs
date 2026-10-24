@@ -24,7 +24,61 @@ const root = resolve(temporary, 'zoo');
 
 const files = {
   'Cargo.toml': '[package]\nname = "zoo"\nversion = "0.1.0"\nedition = "2024"\n\n[dependencies]\n',
-  'src/lib.rs': 'pub mod consts;\npub mod flow;\npub mod macros;\npub mod shapes;\npub mod values;\n',
+  'src/lib.rs': 'pub mod consts;\npub mod flow;\npub mod macros;\npub mod shapes;\npub mod tail;\npub mod values;\n',
+  // The long tail: a \`break\` that belongs to an inner \`for\`, \`while\` or
+  // closure, a let chain in a \`const fn\` no probe can enter, an attributed
+  // statement macro closing a block, and an assertion that closes one.
+  'src/tail.rs': `pub fn first_hit(rows: &[Vec<u32>]) -> Option<u32> {
+    let mut found = None;
+    loop {
+        for row in rows {
+            for value in row {
+                if *value > 5 {
+                    found = Some(*value);
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let mut n = 0;
+        while n < rows.len() {
+            n += 1;
+            if n == 2 {
+                break;
+            }
+        }
+        let stop = || {
+            let mut i = 0;
+            loop {
+                i += 1;
+                if i > 1 {
+                    break i;
+                }
+            }
+        };
+        let _ = stop();
+        break found;
+    }
+}
+
+pub const fn chained(value: Option<u8>) -> u8 {
+    if let Some(v) = value && v > 1 { v } else { 0 }
+}
+
+pub fn logged(x: u32) -> u32 {
+    if x > 0 {
+        #[rustfmt::skip]
+        println! { "{x}" }
+    }
+    x
+}
+
+pub fn checked(x: u32) {
+    assert!(x < 100)
+}
+`,
   'src/flow.rs': `pub fn pick(value: Option<u32>, limit: u32) -> &'static str {
     if let Some(v) = value
         && v > limit
@@ -214,6 +268,13 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        // A loop the allocator runs cannot carry a probe either: a probe
+        // that allocated would re-enter it.
+        let mut freed = 0;
+        for _ in 0..1 {
+            freed += 1;
+        }
+        debug_assert_eq!(freed, 1);
         unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, pointer, layout) }
     }
 }
@@ -368,6 +429,36 @@ fn compile_time_code_runs_unprobed() {
     }
 }
 `,
+  'tests/tail.rs': `use zoo::tail::*;
+
+#[test]
+fn inner_breaks() {
+    assert_eq!(first_hit(&[vec![1, 7], vec![9]]), Some(7));
+    assert_eq!(first_hit(&[vec![], vec![9]]), Some(9));
+    assert_eq!(first_hit(&[vec![2]]), None);
+    assert_eq!(first_hit(&[]), None);
+}
+
+#[test]
+fn const_chains() {
+    assert_eq!(chained(Some(3)), 3);
+    assert_eq!(chained(Some(1)), 0);
+    assert_eq!(chained(None), 0);
+}
+
+#[test]
+fn closing_statements() {
+    assert_eq!(logged(2), 2);
+    assert_eq!(logged(0), 0);
+    checked(5);
+}
+
+#[test]
+#[should_panic]
+fn a_closing_assertion_fails() {
+    checked(100);
+}
+`,
   'tests/zoo.rs': `use zoo::consts::*;
 use zoo::flow::*;
 use zoo::macros::*;
@@ -457,7 +548,7 @@ try {
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['src/flow.rs', 'src/shapes.rs']) {
+  for (const file of ['src/flow.rs', 'src/shapes.rs', 'src/tail.rs']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {
@@ -467,6 +558,7 @@ try {
   }
   // Const contexts and macro expansions cannot hold a probe, and say so.
   assert.ok(byFile['src/macros.rs']?.measurementLimitations >= 1, report);
+  assert.equal(byFile['src/tail.rs'].measurementLimitations, 2, report);
   // Code that runs at compile time or in the allocator is declared unmeasured,
   // never owed: an array length read as a decision nothing evaluated would be
   // a gap no test could close.

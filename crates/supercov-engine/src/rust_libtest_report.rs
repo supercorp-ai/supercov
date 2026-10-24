@@ -625,5 +625,131 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
             "---- tests::overflows ----\n\nrunning 1 test\nthread 'tests::overflows' has overflowed its stack\n"
         ));
         assert!(report.contains("test result: FAILED. 0 passed; 1 failed;"));
+        // One that died after libtest listed its failure but before the
+        // result: all of what it wrote is shown, not the listing alone.
+        let stdout = "\nrunning 1 test\ntest t ... FAILED\n\nfailures:\n\n---- t stdout ----\nboom\n\n\nfailures:\n    t\n\n";
+        let report = libtest_report(
+            &[CaseOutput {
+                name: "t",
+                exit: 134,
+                stdout,
+                stderr: "fatal runtime error: failed to initiate panic\n",
+            }],
+            false,
+        );
+        assert!(
+            report.contains(&format!(
+                "---- t ----\n{stdout}fatal runtime error: failed to initiate panic\n"
+            )),
+            "{report}"
+        );
+    }
+
+    /// A test's line is its own name's, colour is what stands around the
+    /// word, and a result line libtest would not write reads as none.
+    #[test]
+    fn lines_colours_and_counts_are_read_as_libtest_writes_them() {
+        assert_eq!(result_line("test foo_bar ... ok\n", "foo"), None);
+        assert_eq!(
+            result_line(
+                "test foo_bar ... ok\ntest foo - should panic ... ok\n",
+                "foo"
+            ),
+            Some("test foo - should panic ... ok")
+        );
+        assert_eq!(colour_of("\u{1b}[0m"), ("", ""));
+        assert_eq!(
+            colour_of("\u{1b}[32mok\u{1b}(B\u{1b}[m"),
+            ("\u{1b}[32m", "\u{1b}(B\u{1b}[m")
+        );
+        assert_eq!(plain("a\u{1b}xb"), "axb");
+        assert_eq!(plain("a\u{1b}[1"), "a");
+        assert_eq!(plain("a\u{1b}("), "a");
+        for refused in [
+            "test result: ok",
+            "test result: ok. 1 passed; 2 weird",
+            "test result: ok. 1 passed; finished in soon",
+            "test result: ok. x passed",
+            "test result: ok. 1",
+            "nothing",
+        ] {
+            assert!(counts(refused).is_none(), "{refused}");
+        }
+    }
+
+    /// Reports with no lines and no result still make one report; a quiet
+    /// harness's cases come from what is known of them.
+    #[test]
+    fn empty_and_quiet_doctest_reports_still_read_as_one() {
+        let zero = "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n";
+        assert_eq!(merged_report(&["", ""], false, &[]), zero);
+        let known = merged_report(
+            &["", ""],
+            true,
+            &[("a", "failed"), ("b", "skipped"), ("c", "passed")],
+        );
+        assert!(
+            known.starts_with("\nrunning 3 tests\na --- FAILED\ni.\nfailures:\n"),
+            "{known}"
+        );
+        assert!(known.contains("\nfailures:\n    a\n"), "{known}");
+        assert!(known.contains("test result: FAILED."), "{known}");
+        assert_eq!(libtest_report(&[], false), zero);
+        assert_eq!(libtest_report(&[], true), zero);
+    }
+
+    /// A quiet binary breaks its line where libtest does, a failure ends the
+    /// open line, an ignored test is `i`, and a process that reported its
+    /// line but no result is shown as it ended.
+    #[test]
+    fn quiet_binaries_break_lines_and_mark_each_result() {
+        let names = (0..88).map(|at| format!("t{at}")).collect::<Vec<_>>();
+        let mut cases = names
+            .iter()
+            .map(|name| CaseOutput {
+                name,
+                exit: 0,
+                stdout: "",
+                stderr: "",
+            })
+            .collect::<Vec<_>>();
+        cases.push(CaseOutput {
+            name: "fail",
+            exit: 1,
+            stdout: "test fail ... FAILED\n",
+            stderr: "boom",
+        });
+        let report = libtest_report(&cases, true);
+        assert!(
+            report.contains(&format!("{} 87/89\n.", ".".repeat(87))),
+            "{report}"
+        );
+        assert!(report.contains(" 88/89\nfail --- FAILED\n"), "{report}");
+        assert!(
+            report.contains("---- fail ----\ntest fail ... FAILED\nboom\n\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("test result: FAILED. 88 passed; 1 failed;"),
+            "{report}"
+        );
+        let loud = libtest_report(&cases[87..], false);
+        assert!(
+            loud.contains("test t87 ... ok\ntest fail ... FAILED\n"),
+            "{loud}"
+        );
+        let ignored = libtest_report(
+            &[CaseOutput {
+                name: "ig",
+                exit: 0,
+                stdout: "test ig ... ignored\n\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 3 filtered out; finished in 0.00s\n",
+                stderr: "",
+            }],
+            true,
+        );
+        assert_eq!(
+            ignored,
+            "\nrunning 1 test\ni\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+        );
     }
 }
