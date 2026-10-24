@@ -58,7 +58,10 @@ jobs:
   runners:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,')) }}
     name: ${{ matrix.name }} runners
-    runs-on: ubuntu-latest
+    # The oldest Playwright supported predates the Ubuntu 26.04 that
+    # ubuntu-latest is now, and has no browser builds for it: the minimum leg
+    # runs on the last Ubuntu it supports, the current one on the latest.
+    runs-on: ${{ matrix.name == 'minimum' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
