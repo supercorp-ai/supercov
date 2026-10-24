@@ -644,16 +644,49 @@ pub(crate) fn read_archive_selected(
     Ok(entries)
 }
 
+/// The SHA-256 and length of an archive's compressed bytes: of exactly the
+/// bytes a reading of it went through, so what was read and what it is
+/// named by cannot differ, however the file changes meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveDigest {
+    pub sha256: [u8; 32],
+    pub bytes: u64,
+}
+
+/// A reader that hashes every byte it hands on.
+struct Hashing<R> {
+    inner: R,
+    hash: sha2::Sha256,
+    bytes: u64,
+}
+
+impl<R: Read> Read for Hashing<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        sha2::Digest::update(&mut self.hash, &buffer[..read]);
+        self.bytes += read as u64;
+        Ok(read)
+    }
+}
+
 /// Hand each retained entry to `visit` as it is read, validating the whole
 /// archive as [`read_archive_selected`] does. A reader that parses an entry
 /// and drops its bytes never holds the decompressed archive whole: a gigabyte
-/// on a 1,100-test run.
+/// on a 1,100-test run. The archive is read to its end, so the digest is of
+/// all of it.
 pub(crate) fn read_archive_each(
     path: &Path,
     retain: impl Fn(&str) -> bool,
     visit: impl FnMut(EvidenceArchiveEntry) -> Result<(), EvidenceArchiveError>,
-) -> Result<(), EvidenceArchiveError> {
-    let input = BufReader::new(File::open(path)?);
+) -> Result<ArchiveDigest, EvidenceArchiveError> {
+    let input = BufReader::with_capacity(
+        128 * 1024,
+        Hashing {
+            inner: File::open(path)?,
+            hash: sha2::Digest::new(),
+            bytes: 0,
+        },
+    );
     let mut decoder = GzDecoder::new(input);
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
@@ -664,7 +697,11 @@ pub(crate) fn read_archive_each(
     if input.read(&mut trailing)? != 0 {
         return Err(EvidenceArchiveError::TrailingCompressedData);
     }
-    Ok(())
+    let read = input.into_inner();
+    Ok(ArchiveDigest {
+        sha256: sha2::Digest::finalize(read.hash).into(),
+        bytes: read.bytes,
+    })
 }
 
 fn schema_version_from_magic(magic: &[u8]) -> Result<u32, EvidenceArchiveError> {

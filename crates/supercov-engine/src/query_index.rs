@@ -9,7 +9,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{self, File, OpenOptions},
-    io::{self, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -307,6 +307,20 @@ pub fn write_query_index(
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// The evidence an index says it was built from, its digest and length, read
+/// from its header alone. Opening the index checks them against what is
+/// expected, as always; this is what to expect when nothing has changed since
+/// the index was verified (`run_store`).
+pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError> {
+    let mut header = [0_u8; QUERY_INDEX_HEADER_SIZE];
+    File::open(path)?.read_exact(&mut header)?;
+    if Sha256::digest(&header[..HEADER_CHECKSUM_OFFSET])[..] != header[HEADER_CHECKSUM_OFFSET..] {
+        return Err(QueryIndexError::InvalidHeader("checksum"));
+    }
+    let sha256 = header[48..80].try_into().expect("a 32-byte slice");
+    Ok((sha256, get_u64(&header, 24)?))
 }
 
 pub struct QueryIndex {

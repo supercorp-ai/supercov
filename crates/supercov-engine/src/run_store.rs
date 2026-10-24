@@ -806,17 +806,164 @@ fn domain_hash(domain: &str, version: u32) -> [u8; 32] {
 }
 
 pub fn query_index_identity(run: &StoredRun) -> Result<QueryIndexIdentity, RunStoreError> {
-    let (evidence_sha256, evidence_bytes) = file_sha256(&run.evidence_path)?;
-    Ok(QueryIndexIdentity {
+    Ok(identity_with(
+        run,
+        file_sha256(&run.evidence_path)?,
+        analysis_digest(),
+    ))
+}
+
+fn analysis_digest() -> [u8; 32] {
+    domain_hash("supercov-analysis", RUST_ANALYSIS_ABI_VERSION)
+}
+
+/// The identity of an index of `run` built from evidence with this digest
+/// and length, by the analysis `analysis` names.
+fn identity_with(
+    run: &StoredRun,
+    (evidence_sha256, evidence_bytes): ([u8; 32], u64),
+    analysis: [u8; 32],
+) -> QueryIndexIdentity {
+    QueryIndexIdentity {
         evidence_sha256,
         evidence_bytes,
-        analysis_sha256: domain_hash("supercov-analysis", RUST_ANALYSIS_ABI_VERSION),
+        analysis_sha256: analysis,
         producer_sha256: domain_hash(
             "supercov-query-producer",
             RUST_QUERY_PRODUCER_ABI_VERSION ^ QUERY_INDEX_SCHEMA_VERSION,
         ),
         archive_schema_version: run.metadata.raw_evidence.schema_version,
+    }
+}
+
+/// A file as the filesystem last changed it: its device and inode, length,
+/// and modification and status-change times to the nanosecond. Any write
+/// moves the status-change time, which no tool can set back, so a file with
+/// the same stamp holds the same bytes. `None` where there is no such time.
+#[cfg(unix)]
+fn change_stamp(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path).ok().and_then(|metadata| {
+        stamp(
+            [metadata.dev(), metadata.ino(), metadata.size()],
+            (metadata.mtime(), metadata.mtime_nsec()),
+            (metadata.ctime(), metadata.ctime_nsec()),
+        )
     })
+}
+
+/// The stamp of those fields. A filesystem that keeps whole seconds (FAT,
+/// some network mounts) reports no nanoseconds, and a write within the second
+/// would leave the stamp as it was: its files get none, and are checked in
+/// full each time.
+#[cfg(unix)]
+fn stamp(file: [u64; 3], modified: (i64, i64), changed: (i64, i64)) -> Option<String> {
+    (changed.1 != 0).then(|| {
+        format!(
+            "{} {} {} {}.{} {}.{}",
+            file[0], file[1], file[2], modified.0, modified.1, changed.0, changed.1
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn change_stamp(_: &Path) -> Option<String> {
+    None
+}
+
+/// Beside an index, the change stamps of the evidence and of the index when
+/// the index was last known to be built from that evidence: verified in
+/// full, or written from it.
+fn verified_record(index: &Path) -> PathBuf {
+    let mut name = index.as_os_str().to_owned();
+    name.push(".verified");
+    PathBuf::from(name)
+}
+
+/// Record that `index` holds what the evidence stamped `evidence` gives. The
+/// evidence's stamp is taken before it was read, so a change while it was
+/// read is one the next open sees. A record that cannot be written costs
+/// the next open its full check, nothing more.
+fn record_verified(index: &Path, evidence: Option<&str>) {
+    let record = evidence
+        .zip(change_stamp(index))
+        .map(|(evidence, index)| format!("{evidence}\n{index}\n"));
+    let path = verified_record(index);
+    let temporary = path.with_extension(format!("tmp{}", std::process::id()));
+    let written = record.is_some_and(|record| {
+        fs::write(&temporary, record).is_ok() && fs::rename(&temporary, &path).is_ok()
+    });
+    if !written {
+        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(&path);
+    }
+}
+
+/// The index at `path`, opened without hashing the evidence or every page of
+/// the index, when neither has changed since the index was last verified: its
+/// identity is the one its header records, and each page is still checked
+/// against its digest the first time a query reads it. On a run with 150 MB
+/// of evidence and a 498 MB index the two hashes were 0.25 s of every 0.30 s
+/// query.
+fn open_unchanged_query_index(
+    run: &StoredRun,
+    path: &Path,
+    analysis: [u8; 32],
+    evidence: Option<&str>,
+) -> Option<QueryIndex> {
+    let recorded = fs::read_to_string(verified_record(path)).ok();
+    let current = evidence
+        .zip(change_stamp(path))
+        .map(|(evidence, index)| format!("{evidence}\n{index}\n"));
+    recorded
+        .filter(|recorded| current.as_ref() == Some(recorded))
+        .and_then(|_| crate::query_index::recorded_evidence(path).ok())
+        .and_then(|evidence| {
+            open_written_query_index(path, &identity_with(run, evidence, analysis)).ok()
+        })
+}
+
+/// Open the index at `path`, or build it from the evidence. One unchanged
+/// since it was verified opens at once; any other is verified in full, and
+/// one that fails is rebuilt. A rebuilt index is named by the digest of the
+/// very bytes it was built from, taken as they were read: an archive changed
+/// meanwhile can never lend its name to an index of other bytes, and the
+/// next open, finding the archive's name changed, builds again.
+fn open_or_build_query_index(
+    run: &StoredRun,
+    path: &Path,
+    analysis: [u8; 32],
+    filter: Option<&crate::coverage_report::TestFilter>,
+) -> Result<QueryIndex, RunIndexError> {
+    let evidence = change_stamp(&run.evidence_path);
+    // A filtered index is marked as used each time, for pruning to keep.
+    let used = filter.is_some();
+    if let Some(index) = open_unchanged_query_index(run, path, analysis, evidence.as_deref()) {
+        if used {
+            touch(path);
+            record_verified(path, evidence.as_deref());
+        }
+        return Ok(index);
+    }
+    let identity = identity_with(run, file_sha256(&run.evidence_path)?, analysis);
+    let index = match open_validated_query_index(path, &identity) {
+        Ok(index) => index,
+        Err(_) => {
+            let (sections, read) = index_sections(run, filter)?;
+            let identity = identity_with(run, (read.sha256, read.bytes), analysis);
+            write_query_index(&sections, &identity, path)?;
+            std::thread::spawn(move || drop(sections));
+            if used {
+                prune_filtered_indexes(path);
+            }
+            open_written_query_index(path, &identity)?
+        }
+    };
+    if used {
+        touch(path);
+    }
+    record_verified(path, evidence.as_deref());
+    Ok(index)
 }
 
 #[derive(Debug)]
@@ -826,7 +973,6 @@ pub enum RunIndexError {
     CoverageIndex(CoverageIndexError),
     Report(ReportError),
     Metadata(serde_json::Error),
-    EvidenceChanged,
 }
 
 impl std::fmt::Display for RunIndexError {
@@ -843,7 +989,6 @@ impl std::fmt::Display for RunIndexError {
             }
             Self::Report(error) => write!(formatter, "coverage analysis failed: {error:?}"),
             Self::Metadata(error) => write!(formatter, "run integrity is invalid: {error}"),
-            Self::EvidenceChanged => write!(formatter, "evidence changed while indexing"),
         }
     }
 }
@@ -939,13 +1084,20 @@ pub fn analyze_stored_run_filtered(
     })?)
 }
 
-/// A stored run's query index, its views built and written one at a time.
+/// A stored run's query index, its views built and written one at a time,
+/// with the digest of the evidence bytes they were built from.
 fn index_sections(
     run: &StoredRun,
     filter: Option<&crate::coverage_report::TestFilter>,
-) -> Result<Vec<crate::query_index::QueryIndexSection>, RunIndexError> {
+) -> Result<
+    (
+        Vec<crate::query_index::QueryIndexSection>,
+        crate::evidence_archive::ArchiveDigest,
+    ),
+    RunIndexError,
+> {
     use crate::coverage_index::CoverageViewId;
-    let (_, normalized, transport) =
+    let (_, normalized, transport, read) =
         crate::coverage_report::archive_request(&ArchiveReportRequest {
             archive_path: run.evidence_path.clone(),
             run_id: run.id.clone(),
@@ -968,7 +1120,7 @@ fn index_sections(
     )?;
     // Every test's records, freed by nobody's wait.
     std::thread::spawn(move || drop(normalized));
-    Ok(sections)
+    Ok((sections, read))
 }
 
 /// The filter as one key: its values normalized and sorted, so the same
@@ -1028,8 +1180,6 @@ pub fn open_or_build_filtered_query_index(
     filter: &crate::coverage_report::TestFilter,
 ) -> Result<QueryIndex, RunIndexError> {
     let digest = filter_digest(filter);
-    let mut identity = query_index_identity(run)?;
-    identity.analysis_sha256 = digest;
     let name = digest
         .iter()
         .take(8)
@@ -1038,20 +1188,7 @@ pub fn open_or_build_filtered_query_index(
     let path = run
         .query_index_path
         .with_file_name(format!("filtered-{name}.index"));
-    if let Ok(index) = open_validated_query_index(&path, &identity) {
-        touch(&path);
-        return Ok(index);
-    }
-    let sections = index_sections(run, Some(filter))?;
-    let mut current = query_index_identity(run)?;
-    current.analysis_sha256 = digest;
-    if current != identity {
-        return Err(RunIndexError::EvidenceChanged);
-    }
-    write_query_index(&sections, &identity, &path)?;
-    std::thread::spawn(move || drop(sections));
-    prune_filtered_indexes(&path);
-    open_written_query_index(&path, &identity)
+    open_or_build_query_index(run, &path, digest, Some(filter))
 }
 
 /// How many filtered indexes a run keeps. Each is about half the run's own
@@ -1085,6 +1222,7 @@ fn prune_filtered_indexes(kept: &Path) {
     filtered.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     for (_, path) in filtered.into_iter().skip(KEPT_FILTERED_INDEXES) {
         if path != kept {
+            let _ = fs::remove_file(verified_record(&path));
             let _ = fs::remove_file(path);
         }
     }
@@ -1147,10 +1285,12 @@ pub(crate) fn write_query_index_from(
     run: &StoredRun,
     report: &CoverageReport,
 ) -> Result<(), RunIndexError> {
+    let evidence = change_stamp(&run.evidence_path);
     let identity = query_index_identity(run)?;
     let sections = coverage_index_sections(report)?;
     write_query_index(&sections, &identity, &run.query_index_path)?;
     std::thread::spawn(move || drop(sections));
+    record_verified(&run.query_index_path, evidence.as_deref());
     Ok(())
 }
 
@@ -1158,25 +1298,9 @@ pub(crate) fn write_query_index_from(
 ///
 /// `evidence.raw.gz` remains authoritative. Any stale, truncated, linked or
 /// otherwise invalid index is ignored and replaced by a fully authenticated
-/// new inode. A second evidence hash prevents publishing a mixed-generation
-/// index if the supposedly immutable archive changes during analysis.
+/// new inode (`open_or_build_query_index`).
 pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunIndexError> {
-    let identity = query_index_identity(run)?;
-    if let Ok(index) = open_validated_query_index(&run.query_index_path, &identity) {
-        return Ok(index);
-    }
-
-    let sections = index_sections(run, None)?;
-    if query_index_identity(run)? != identity {
-        return Err(RunIndexError::EvidenceChanged);
-    }
-    write_query_index(&sections, &identity, &run.query_index_path)?;
-    std::thread::spawn(move || drop(sections));
-    let index = open_written_query_index(&run.query_index_path, &identity)?;
-    if query_index_identity(run)? != identity {
-        return Err(RunIndexError::EvidenceChanged);
-    }
-    Ok(index)
+    open_or_build_query_index(run, &run.query_index_path, analysis_digest(), None)
 }
 
 #[cfg(test)]
@@ -1299,6 +1423,119 @@ mod tests {
         run.query_index_path = run.metadata_path.join("index");
         assert!(open_existing_query_index(&run).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An index whose evidence and file are as they were when it was last
+    /// verified opens without reading the evidence at all; any change to
+    /// either sends the open back to the full check, which rebuilds what no
+    /// longer matches.
+    #[cfg(unix)]
+    #[test]
+    fn an_index_unchanged_since_it_was_verified_opens_without_hashing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temporary_directory("unchanged-index");
+        let run = create_indexable_python_run(&root);
+        drop(open_or_rebuild_query_index(&run).unwrap());
+        let record = verified_record(&run.query_index_path);
+        assert!(record.is_file(), "a rebuilt index is recorded as verified");
+
+        // The evidence cannot be read, and is recorded as it is now: only an
+        // open that never reads it succeeds.
+        fs::set_permissions(&run.evidence_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = fs::File::open(&run.evidence_path).is_err();
+        record_verified(
+            &run.query_index_path,
+            change_stamp(&run.evidence_path).as_deref(),
+        );
+        assert!(open_or_rebuild_query_index(&run).is_ok());
+        // Without the record, the open hashes the evidence, and cannot.
+        fs::remove_file(&record).unwrap();
+        if unreadable {
+            assert!(open_or_rebuild_query_index(&run).is_err());
+        }
+        fs::set_permissions(&run.evidence_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // A filtered index opened again is marked as used, and stays recorded.
+        let filter = crate::coverage_report::TestFilter {
+            kind: Some("unit".into()),
+            ..Default::default()
+        };
+        let first = open_or_build_filtered_query_index(&run, &filter).unwrap();
+        drop(first);
+        let filtered = run
+            .query_index_path
+            .with_file_name(format!("filtered-{}.index", {
+                filter_digest(&filter)
+                    .iter()
+                    .take(8)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            }));
+        let before = fs::metadata(&filtered).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(open_or_build_filtered_query_index(&run, &filter).unwrap());
+        assert!(fs::metadata(&filtered).unwrap().modified().unwrap() > before);
+        assert_eq!(
+            fs::read_to_string(verified_record(&filtered)).unwrap(),
+            format!(
+                "{}\n{}\n",
+                change_stamp(&run.evidence_path).unwrap(),
+                change_stamp(&filtered).unwrap()
+            )
+        );
+
+        // An index changed since: checked in full, rebuilt, recorded anew.
+        let mut bytes = fs::read(&run.query_index_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        fs::write(&run.query_index_path, bytes).unwrap();
+        let index = open_or_rebuild_query_index(&run).unwrap();
+        assert!(index.verify_all().is_ok());
+        assert_eq!(
+            fs::read_to_string(&record).unwrap(),
+            format!(
+                "{}\n{}\n",
+                change_stamp(&run.evidence_path).unwrap(),
+                change_stamp(&run.query_index_path).unwrap()
+            )
+        );
+    }
+
+    /// A record that cannot be written leaves none behind: the next open
+    /// checks in full. So does a file with no stamp to record.
+    #[test]
+    fn an_index_that_cannot_be_recorded_is_checked_in_full_next_time() {
+        let root = temporary_directory("unrecorded-index");
+        let run = create_indexable_python_run(&root);
+        drop(open_or_rebuild_query_index(&run).unwrap());
+        let record = verified_record(&run.query_index_path);
+        let evidence = change_stamp(&run.evidence_path);
+        // Nothing to stamp the evidence with: no record.
+        record_verified(&run.query_index_path, None);
+        assert!(!record.exists());
+        // Its place taken by a directory: written beside, never renamed in.
+        fs::create_dir(&record).unwrap();
+        fs::write(record.join("keep"), b"").unwrap();
+        record_verified(&run.query_index_path, evidence.as_deref());
+        assert!(record.is_dir());
+        fs::remove_dir_all(&record).unwrap();
+        // Nowhere to write it: the temporary's place taken by a directory.
+        let temporary = record.with_extension(format!("tmp{}", std::process::id()));
+        fs::create_dir(&temporary).unwrap();
+        record_verified(&run.query_index_path, evidence.as_deref());
+        assert!(!record.exists());
+        fs::remove_dir(&temporary).unwrap();
+        assert!(open_or_rebuild_query_index(&run).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_kept_to_the_second_has_no_stamp() {
+        assert_eq!(stamp([1, 2, 3], (4, 5), (6, 0)), None);
+        assert_eq!(
+            stamp([1, 2, 3], (4, 5), (6, 7)).as_deref(),
+            Some("1 2 3 4.5 6.7")
+        );
     }
 
     /// Pruning keeps the most recently used filtered indexes, never the one

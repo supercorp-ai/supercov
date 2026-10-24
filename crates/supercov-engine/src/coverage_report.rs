@@ -3077,7 +3077,7 @@ fn is_mcdc_journal(path: &str) -> bool {
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
-    let (_, normalized, transport) = archive_request(request)?;
+    let (_, normalized, transport, _) = archive_request(request)?;
     let report = analyze_coverage_results(&normalized).map(|mut report| {
         report.view.transport = Some(transport.clone());
         report.filters.passed.transport = Some(transport.clone());
@@ -3092,7 +3092,8 @@ pub fn analyze_coverage_archive(
 }
 
 /// A stored run's evidence as the request its views are built from, with the
-/// frontend that declared it and what its processes reported.
+/// frontend that declared it, what its processes reported, and the digest of
+/// the archive bytes it was read from.
 pub fn archive_request(
     request: &ArchiveReportRequest,
 ) -> Result<
@@ -3100,6 +3101,7 @@ pub fn archive_request(
         FrontendRunDeclaration,
         CoverageReportRequest,
         TransportStats,
+        crate::evidence_archive::ArchiveDigest,
     ),
     ReportError,
 > {
@@ -3137,7 +3139,7 @@ pub fn archive_request(
         results.clear();
         journals.clear();
     };
-    crate::evidence_archive::read_archive_each(
+    let digest = crate::evidence_archive::read_archive_each(
         Path::new(&request.archive_path),
         |_| true,
         |entry| {
@@ -3346,7 +3348,7 @@ pub fn archive_request(
     drop(entries);
     crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
-    Ok((frontend, normalized, transport))
+    Ok((frontend, normalized, transport, digest))
 }
 
 /// Give a test that ran again under the same identity phases of its own.
