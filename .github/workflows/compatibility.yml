@@ -159,7 +159,9 @@ jobs:
   python:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',python,')) }}
     name: CPython ${{ matrix.python }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    # 3.9 has no build for the Ubuntu 26.04 ubuntu-latest is now; it is
+    # still measured on Linux, on the last Ubuntu that has one.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.9' && 'ubuntu-24.04' || matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
