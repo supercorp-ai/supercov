@@ -11740,6 +11740,61 @@ fn ruby() -> Option<String> {
 
 #[cfg(unix)]
 #[test]
+fn the_parent_death_watchdog_kills_its_parents_group_when_its_input_ends() {
+    use std::io::{Read, Write};
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Command, Stdio};
+    // A shell leading its own process group stands in for the command: the
+    // watchdog says it is ready on descriptor 3, watches its input, and when
+    // the input ends kills the shell's group. Only the watchdog holds the
+    // input; the shell's own is moved away.
+    let watch = |script: &str| {
+        Command::new("sh")
+            .args(["-c", script, env!("CARGO_BIN_EXE_supercov")])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let killed = |mut shell: std::process::Child| {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = shell.try_wait().unwrap() {
+                return status.signal();
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "the watchdog never ended its parent's group"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    // Input that sends a byte, then ends.
+    let mut shell = watch(
+        "exec 4<&0 0</dev/null; \"$0\" __watch-process-group 3>&1 <&4 4<&- & exec 4<&-; sleep 30",
+    );
+    let mut ready = [0_u8; 1];
+    shell.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+    assert_eq!(ready, [1]);
+    let mut input = shell.stdin.take().unwrap();
+    input.write_all(b"x").unwrap();
+    drop(input);
+    assert_eq!(killed(shell), Some(libc::SIGKILL));
+    // Input it cannot read counts as ended.
+    let shell =
+        watch("exec 0</dev/null; \"$0\" __watch-process-group 3>/dev/null 0>/dev/null & sleep 30");
+    assert_eq!(killed(shell), Some(libc::SIGKILL));
+    // With nowhere to say it is ready, it refuses, and kills nothing.
+    let shell = watch("\"$0\" __watch-process-group 3>&- </dev/null; echo \"watchdog $?\"");
+    let output = shell.wait_with_output().unwrap();
+    assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "watchdog 125\n");
+}
+
+#[cfg(unix)]
+#[test]
 fn ctrl_c_during_a_go_python_ruby_or_jvm_run_exits_as_the_signal_and_publishes_nothing() {
     // As a JavaScript run does: 128 plus the signal, the signal named, and no
     // run recorded for a suite that never finished.
