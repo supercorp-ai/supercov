@@ -7,8 +7,6 @@ name: Next.js compatibility
 # the Node version, so both run.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '45 2 * * *'
   pull_request:
     paths:
       - 'crates/**'
