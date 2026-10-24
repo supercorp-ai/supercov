@@ -129,7 +129,12 @@ struct CargoMetadata {
     packages: Vec<CargoPackage>,
     workspace_members: Vec<String>,
     workspace_root: PathBuf,
-    target_directory: PathBuf,
+}
+
+/// Where Cargo builds the copy: inside it, named to Cargo by environment,
+/// which no configuration of the project overrides.
+fn copy_target_directory(root: &Path) -> PathBuf {
+    root.join(".supercov/rust-target")
 }
 
 #[derive(Deserialize)]
@@ -167,11 +172,10 @@ fn confined_relative(root: &Path, path: &Path) -> Result<String, RustProjectErro
 }
 
 fn cargo_metadata(root: &Path) -> Result<CargoMetadata, RustProjectError> {
-    let target_directory = root.join(".supercov/rust-target");
     let output = Command::new("cargo")
         .args(["metadata", "--format-version=1", "--no-deps"])
         .current_dir(root)
-        .env("CARGO_TARGET_DIR", &target_directory)
+        .env("CARGO_TARGET_DIR", copy_target_directory(root))
         .output()
         .map_err(|error| RustProjectError::MetadataLaunch(error.to_string()))?;
     if !output.status.success() {
@@ -1008,13 +1012,7 @@ pub fn prepare_rust_project_for(
             .and_then(|value| value.as_str())
             .cmp(&right.get("id").and_then(|value| value.as_str()))
     });
-    // Cargo reports the target directory as an absolute path.
-    let target_directory = metadata.target_directory;
-    if !target_directory.starts_with(&workspace) {
-        return Err(RustProjectError::UnsafePath(
-            target_directory.display().to_string(),
-        ));
-    }
+    let target_directory = copy_target_directory(&workspace);
     let kept = sources.keys().cloned().collect::<Vec<_>>();
     let scope = match source_roots {
         Some(source_roots) => source_roots

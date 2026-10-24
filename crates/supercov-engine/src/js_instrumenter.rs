@@ -697,8 +697,10 @@ fn restore_function_source(
 fn generated_statement_span(source: &str) -> Option<Span> {
     let last_line = source.rfind('\n').map_or(0, |newline| newline + 1);
     let length = u32::try_from(source.len()).ok()?;
-    (source[last_line..].is_ascii() && length < u32::MAX - 2)
-        .then(|| Span::new(length + 1, length + 2))
+    // Saturating only for a source of 4 GiB, which oxc does not parse.
+    source[last_line..]
+        .is_ascii()
+        .then(|| Span::new(length.saturating_add(1), length.saturating_add(2)))
 }
 
 /// A coverage tool the tests run itself (c8, nyc, Node's `--test-coverage`,
@@ -12207,6 +12209,13 @@ mod tests {
         let mixed = instrument_with_import_policy(source, "src/mixed.ts", "./capability.mjs", true)
             .unwrap();
         assert!(mixed.excluded_statements.is_empty());
+        // A binding re-exported by name may be a value, whatever else uses it
+        // as a type: it remains.
+        let source = "import { Shared } from './shared.js';\nexport function g(s: Shared) { return s; }\nexport { Shared };\n";
+        let reexported =
+            instrument_with_import_policy(source, "src/reexport.ts", "./capability.mjs", true)
+                .unwrap();
+        assert!(reexported.excluded_statements.is_empty());
     }
 
     /// A line's first mapping: `None` for no segment, `Some(None)` for an

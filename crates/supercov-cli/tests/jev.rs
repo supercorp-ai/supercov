@@ -3981,6 +3981,24 @@ fn a_test_over_jev_s_limit_is_left_unasked_and_counted() {
         statement.contains("the tests not asked were not judged"),
         "{statement}"
     );
+
+    // The only test is the one over the limit: no round has anything to
+    // send, and the assessment still finishes and counts what it left.
+    std::fs::remove_file(project.root.join("test/cart.test.js")).unwrap();
+    project.commit("only the fixture");
+    let alone = project.measure(&[]);
+    let (base, seen) = gateway(MODEL, answer_no);
+    let assessed = project
+        .supercov_with(
+            &["runs", &alone, "assertions", "assess", "--json"],
+            &through(&base),
+        )
+        .json();
+    assert!(
+        assessed["data"]["summary"]["pairsOverLimit"].as_u64() > Some(0),
+        "{assessed}"
+    );
+    assert!(seen.lock().unwrap().is_empty(), "nothing is sent");
 }
 
 /// More tests to ask than one round sends: forty requests go in the first,

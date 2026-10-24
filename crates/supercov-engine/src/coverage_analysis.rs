@@ -161,7 +161,6 @@ pub fn find_witnesses_for_conditions(
                     }
                 }
                 if let Some(second) = candidates.first() {
-                    debug_assert!(is_independence_pair(left, &vectors[second], target));
                     return Some(WitnessIndexes {
                         first: left_index,
                         second,
@@ -549,6 +548,43 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    /// The bitset search finds, for each condition, the pair a plain search
+    /// over every two vectors finds first: on a few thousand vector sets of
+    /// one to three conditions, drawn from every value a condition takes.
+    #[test]
+    fn bitset_search_finds_the_first_pair_a_plain_search_finds() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..3000 {
+            let width = 1 + next(3) as usize;
+            let vectors = (0..1 + next(8))
+                .map(|_| McdcVector {
+                    values: (0..width)
+                        .map(|_| [None, Some(false), Some(true)][next(3) as usize])
+                        .collect(),
+                    outcome: next(2) == 1,
+                })
+                .collect::<Vec<_>>();
+            let plain = (0..width)
+                .map(|target| {
+                    (0..vectors.len()).find_map(|first| {
+                        ((first + 1)..vectors.len())
+                            .find(|&second| {
+                                is_independence_pair(&vectors[first], &vectors[second], target)
+                            })
+                            .map(|second| WitnessIndexes { first, second })
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(find_witnesses(&vectors).unwrap(), plain, "{vectors:?}");
+        }
     }
 
     #[test]

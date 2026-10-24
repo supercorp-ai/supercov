@@ -473,6 +473,10 @@ export function chain(o) {
   return o?.inner?.['value'] ?? -1;
 }
 
+export function keyed(o, k) {
+  return o?.[k]?.name ?? 'none';
+}
+
 export function nested(a, b) {
   const result = ((a)) ? ((b || a)) : null;
   return result;
@@ -488,7 +492,7 @@ export function neither(a, b) {
 `,
   'test/grouped.test.mjs': `import assert from 'node:assert/strict';
 import test from 'node:test';
-import { both, call, chain, fallback, grouped, inIf, neither, nested } from '../src/grouped.js';
+import { both, call, chain, fallback, grouped, inIf, keyed, neither, nested } from '../src/grouped.js';
 
 test('parenthesized logic, computed optional calls and chains', () => {
   assert.equal(both(1, 2), 2);
@@ -508,6 +512,10 @@ test('parenthesized logic, computed optional calls and chains', () => {
   assert.equal(chain(null), -1);
   assert.equal(chain({}), -1);
   assert.equal(chain({ inner: {} }), -1);
+  assert.equal(keyed({ a: { name: 'n' } }, 'a'), 'n');
+  assert.equal(keyed(null, 'a'), 'none');
+  assert.equal(keyed({}, 'a'), 'none');
+  assert.equal(keyed({ a: {} }, 'a'), 'none');
   assert.equal(nested(1, 0), 1);
   assert.equal(nested(1, 2), 2);
   assert.equal(nested(0, 0), null);
