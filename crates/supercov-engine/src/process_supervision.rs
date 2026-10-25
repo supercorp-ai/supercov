@@ -211,7 +211,9 @@ impl Terminal {
             let mut settings: libc::termios = std::mem::zeroed();
             let mut size: libc::winsize = std::mem::zeroed();
             if libc::tcgetattr(real.as_raw_fd(), &mut settings) != 0
-                || libc::ioctl(real.as_raw_fd(), libc::TIOCGWINSZ, &mut size) != 0
+                || crate::fault::libc("terminal-size", libc::ENOTTY, || {
+                    libc::ioctl(real.as_raw_fd(), libc::TIOCGWINSZ, &mut size)
+                }) != 0
             {
                 return None;
             }
@@ -221,13 +223,15 @@ impl Terminal {
             let (mut ours, mut theirs) = (-1, -1);
             // Raw pointers: Linux declares the last two as read only, macOS
             // does not.
-            if libc::openpty(
-                &mut ours,
-                &mut theirs,
-                std::ptr::null_mut(),
-                &raw mut settings,
-                &raw mut size,
-            ) != 0
+            if crate::fault::libc("openpty", libc::ENOENT, || {
+                libc::openpty(
+                    &mut ours,
+                    &mut theirs,
+                    std::ptr::null_mut(),
+                    &raw mut settings,
+                    &raw mut size,
+                )
+            }) != 0
             {
                 return None;
             }
@@ -344,7 +348,10 @@ impl Relays {
                 // One terminal for both, so the command's lines keep their order.
                 (Some(stdout), Some(stderr)) if one_place(&stdout, &stderr) => {
                     if let Some((terminal, theirs)) = Terminal::like(stdout)
-                        && let Ok(second) = theirs.try_clone()
+                        && let Ok(second) =
+                            crate::fault::io("terminal-clone", io::ErrorKind::Other, || {
+                                theirs.try_clone()
+                            })
                     {
                         command.stdout(theirs).stderr(second);
                         targets.terminals.push(terminal);
@@ -364,8 +371,10 @@ impl Relays {
         }
         if let (Some(stdout), Some(stderr)) = (&targets.stdout, &targets.stderr)
             && one_place(stdout, stderr)
-            && let Ok((reader, writer)) = io::pipe()
-            && let Ok(second) = writer.try_clone()
+            && let Ok((reader, writer)) =
+                crate::fault::io("output-pipe", io::ErrorKind::Other, io::pipe)
+            && let Ok(second) =
+                crate::fault::io("output-clone", io::ErrorKind::Other, || writer.try_clone())
         {
             command.stdout(writer).stderr(second);
             targets.both = targets.stderr.take().map(|to| (reader, to));
@@ -519,7 +528,9 @@ fn relay_terminal(mut terminal: Terminal, names: ConsoleNames) -> std::sync::mps
             }
             // The last process holding the other end has gone: a read of
             // nothing on macOS, an error on Linux.
-            let read = match terminal.ours.read(&mut buffer) {
+            let read = match crate::fault::io("terminal-read", io::ErrorKind::Interrupted, || {
+                terminal.ours.read(&mut buffer)
+            }) {
                 Ok(0) => break,
                 Ok(read) => read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -1254,7 +1265,10 @@ struct ParentDeathGuard {
 fn parent_death_pipe() -> Result<(OwnedFd, OwnedFd), SupervisionError> {
     let mut descriptors = [-1_i32; 2];
     // SAFETY: `descriptors` is a live two-element output buffer for pipe(2).
-    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } != 0 {
+    if crate::fault::libc("parent-death-pipe", libc::EMFILE, || unsafe {
+        libc::pipe(descriptors.as_mut_ptr())
+    }) != 0
+    {
         return Err(SupervisionError::PlatformOperation {
             operation: "create parent-death supervision pipe",
             source: io::Error::last_os_error(),
@@ -1266,7 +1280,10 @@ fn parent_death_pipe() -> Result<(OwnedFd, OwnedFd), SupervisionError> {
     let write = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
     for descriptor in [read.as_raw_fd(), write.as_raw_fd()] {
         // SAFETY: the descriptor is live and F_SETFD accepts FD_CLOEXEC.
-        if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        if crate::fault::libc("parent-death-cloexec", libc::EBADF, || unsafe {
+            libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC)
+        }) != 0
+        {
             return Err(SupervisionError::PlatformOperation {
                 operation: "protect parent-death supervision pipe across exec",
                 source: io::Error::last_os_error(),
@@ -1275,6 +1292,11 @@ fn parent_death_pipe() -> Result<(OwnedFd, OwnedFd), SupervisionError> {
     }
     Ok((read, write))
 }
+
+/// What a command's pre-exec step reports when its watchdog ended before
+/// saying it was ready.
+#[cfg(unix)]
+const WATCHDOG_ENDED: i32 = libc::ECHILD;
 
 #[cfg(unix)]
 fn spawn_contained(
@@ -1300,12 +1322,13 @@ fn spawn_contained(
         })?;
     let watchdog_argument =
         std::ffi::CString::new("__watch-process-group").expect("static CString");
+    crate::fault::prepare();
     // SAFETY: this closure calls only async-signal-safe syscalls between fork
     // and exec. The forked watchdog immediately execs the already-loaded
     // Supercov binary; it never returns to Rust or touches an inherited lock.
     unsafe {
         command.pre_exec(move || {
-            if libc::setpgid(0, 0) != 0 {
+            if crate::fault::libc("command-setpgid", libc::EPERM, || libc::setpgid(0, 0)) != 0 {
                 return Err(io::Error::last_os_error());
             }
             let _ = libc::close(write_descriptor);
@@ -1314,17 +1337,26 @@ fn spawn_contained(
             // is ready ends the pipe, where one this process also held would
             // keep the command waiting for good.
             let mut ready_descriptors = [-1_i32; 2];
-            if libc::pipe(ready_descriptors.as_mut_ptr()) != 0 {
+            if crate::fault::libc("ready-pipe", libc::EMFILE, || {
+                libc::pipe(ready_descriptors.as_mut_ptr())
+            }) != 0
+            {
                 return Err(io::Error::last_os_error());
             }
             let [ready_read_descriptor, ready_write_descriptor] = ready_descriptors;
-            let watchdog = libc::fork();
+            let watchdog = crate::fault::libc("watchdog-fork", libc::EAGAIN, || libc::fork());
             if watchdog < 0 {
                 return Err(io::Error::last_os_error());
             }
             if watchdog == 0 {
                 let _ = libc::close(ready_read_descriptor);
-                if libc::dup2(read_descriptor, 0) < 0 || libc::dup2(ready_write_descriptor, 3) < 0 {
+                if crate::fault::libc("watchdog-dup-input", libc::EBADF, || {
+                    libc::dup2(read_descriptor, 0)
+                }) < 0
+                    || crate::fault::libc("watchdog-dup-ready", libc::EBADF, || {
+                        libc::dup2(ready_write_descriptor, 3)
+                    }) < 0
+                {
                     libc::_exit(125);
                 }
                 for descriptor in [read_descriptor, ready_write_descriptor, 1, 2] {
@@ -1344,24 +1376,35 @@ fn spawn_contained(
             let _ = libc::close(ready_write_descriptor);
             let mut ready = 0_u8;
             loop {
-                let received = libc::read(ready_read_descriptor, (&raw mut ready).cast(), 1);
+                let received = crate::fault::libc("ready-read", libc::EINTR, || {
+                    libc::read(ready_read_descriptor, (&raw mut ready).cast(), 1)
+                });
                 if received == 1 && ready == 1 {
                     break;
                 }
                 if received < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                return Err(io::Error::other(
-                    "parent-death watchdog failed before command exec",
-                ));
+                // Only an errno crosses back to the parent, and none of the
+                // calls above or exec sets this one: the parent names it.
+                return Err(io::Error::from_raw_os_error(WATCHDOG_ENDED));
             }
             let _ = libc::close(ready_read_descriptor);
             Ok(())
         });
     }
-    let child = command.spawn().map_err(|source| SupervisionError::Spawn {
-        program: program.clone(),
-        source,
+    let child = command.spawn().map_err(|source| {
+        if source.raw_os_error() == Some(WATCHDOG_ENDED) {
+            SupervisionError::PlatformOperation {
+                operation: "start the watchdog that stops the command if Supercov is killed",
+                source: io::Error::other("it ended before the command started"),
+            }
+        } else {
+            SupervisionError::Spawn {
+                program: program.clone(),
+                source,
+            }
+        }
     })?;
     drop(read);
     Ok((child, Some(ParentDeathGuard { _writer: write })))
@@ -1371,21 +1414,22 @@ fn spawn_contained(
 pub fn watch_parent_process_group() -> io::Result<()> {
     // The target waits for our readiness byte, so its PID remains both our
     // parent PID and the process-group ID until containment is armed.
-    let process_group = unsafe { libc::getppid() };
+    let process_group = crate::fault::or("watchdog-orphaned", || 1, || unsafe { libc::getppid() });
     if process_group <= 1 {
         return Err(io::Error::other(
             "parent-death watchdog has no target process",
         ));
     }
     // SAFETY: the watchdog is a non-leader child in the target's process group.
-    if unsafe { libc::setsid() } < 0 {
+    if crate::fault::libc("watchdog-setsid", libc::EPERM, || unsafe { libc::setsid() }) < 0 {
         return Err(io::Error::last_os_error());
     }
-    let descriptor_root = if Path::new("/proc/self/fd").is_dir() {
-        Path::new("/proc/self/fd")
-    } else {
-        Path::new("/dev/fd")
-    };
+    let descriptor_root =
+        if crate::fault::or("proc-fd", || false, || Path::new("/proc/self/fd").is_dir()) {
+            Path::new("/proc/self/fd")
+        } else {
+            Path::new("/dev/fd")
+        };
     let descriptors = fs::read_dir(descriptor_root)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
@@ -1406,7 +1450,9 @@ pub fn watch_parent_process_group() -> io::Result<()> {
     loop {
         // The supervisor never writes. EOF means normal supervisor teardown,
         // unwind, or uncatchable process death.
-        let read = unsafe { libc::read(0, buffer.as_mut_ptr().cast(), buffer.len()) };
+        let read = crate::fault::libc("watchdog-read", libc::EINTR, || unsafe {
+            libc::read(0, buffer.as_mut_ptr().cast(), buffer.len())
+        });
         if read == 0 {
             break;
         }
@@ -2934,10 +2980,16 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = scratch_directory("never-ready");
         // One that ends saying nothing, and one that says something else.
+        let silent = root.join("silent-watchdog");
         let other = root.join("other-watchdog");
-        std::fs::write(&other, "#!/bin/sh\nprintf x >&3\n").unwrap();
-        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for watchdog in [Path::new("/bin/true"), &other] {
+        for (watchdog, script) in [
+            (&silent, "#!/bin/sh\n"),
+            (&other, "#!/bin/sh\nprintf x >&3\n"),
+        ] {
+            std::fs::write(watchdog, script).unwrap();
+            std::fs::set_permissions(watchdog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for watchdog in [&silent, &other] {
             let supervisor = ProcessSupervisor::new_crash_safe(watchdog).unwrap();
             let marker = root.join("ran");
             let spec = CommandSpec {
@@ -2950,9 +3002,10 @@ mod tests {
             };
             let refused =
                 supervisor.supervise(&spec, SupervisionOptions::default(), &mut Vec::new());
-            assert!(
-                matches!(refused, Err(SupervisionError::Spawn { .. })),
-                "{}: {refused:?}",
+            assert_eq!(
+                refused.as_ref().map(|_| ()).map_err(ToString::to_string),
+                Err("could not start the watchdog that stops the command if Supercov is killed: it ended before the command started".into()),
+                "{}",
                 watchdog.display()
             );
             assert!(!marker.exists());

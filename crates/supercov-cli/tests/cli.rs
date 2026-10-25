@@ -11738,6 +11738,98 @@ fn ruby() -> Option<String> {
     })
 }
 
+/// Each system call that starts and contains a command, made to fail
+/// (`SUPERCOV_TEST_FAULT`): a failure to set up says what could not be done
+/// and runs nothing, and an interrupted call is made again.
+#[cfg(unix)]
+#[test]
+fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
+    let project = Project::cart("start-faults");
+    let run = |fault: &str| {
+        project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)])
+    };
+    let watchdog = "could not start the watchdog that stops the command if Supercov is killed: it ended before the command started";
+    for (fault, said) in [
+        (
+            "parent-death-pipe",
+            "could not create parent-death supervision pipe",
+        ),
+        (
+            "parent-death-cloexec",
+            "could not protect parent-death supervision pipe across exec",
+        ),
+        (
+            "command-setpgid",
+            "could not spawn node: Operation not permitted",
+        ),
+        ("ready-pipe", "could not spawn node: Too many open files"),
+        (
+            "watchdog-fork",
+            "could not spawn node: Resource temporarily unavailable",
+        ),
+        ("watchdog-dup-input", watchdog),
+        ("watchdog-dup-ready", watchdog),
+        ("watchdog-orphaned", watchdog),
+        ("watchdog-setsid", watchdog),
+        // A readiness read that fails other than by being interrupted.
+        (&format!("ready-read:{}", libc::EIO), watchdog),
+    ] {
+        let failed = run(fault);
+        assert_eq!(failed.code(), 1, "{fault}: {}", failed.stderr());
+        assert!(
+            failed.stderr().contains(said),
+            "{fault}: {}",
+            failed.stderr()
+        );
+    }
+    assert!(
+        !project.root.join(".supercov/runs").exists() || {
+            let runs = project.supercov(&["runs", "--json"]).json();
+            runs["data"]["runs"].as_array().is_some_and(Vec::is_empty)
+        }
+    );
+    // Interrupted once, then made again; no /proc to list descriptors from.
+    for fault in ["ready-read=1", "watchdog-read=1", "proc-fd"] {
+        let passed = run(fault);
+        assert_eq!(passed.code(), 0, "{fault}: {}", passed.stderr());
+    }
+    // Output and errors to one file: one pipe for both, or, when it cannot be
+    // made, one for each, and the file gets both either way.
+    for fault in ["output-pipe", "output-clone", ""] {
+        let log = project.root.join(format!("log-{fault}.txt"));
+        let file = std::fs::File::create(&log).unwrap();
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+            .args(["--", "node", "--test"])
+            .current_dir(&project.root)
+            .env("SUPERCOV_TEST_FAULT", fault)
+            .stdout(file.try_clone().unwrap())
+            .stderr(file)
+            .status()
+            .unwrap();
+        let written = std::fs::read_to_string(&log).unwrap();
+        assert!(status.success(), "{fault}: {written}");
+        assert!(written.contains("pass 3"), "{fault}: {written}");
+        assert!(written.contains("[supercov]"), "{fault}: {written}");
+    }
+    // On a terminal: one that cannot be sized or opened leaves the command
+    // the streams it had; an interrupted read is read again.
+    for fault in [
+        "terminal-size",
+        "openpty",
+        "terminal-clone",
+        "terminal-read=1",
+    ] {
+        let terminal = common::OnTerminal::start_with(
+            &project,
+            &["--", "node", "--test"],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let (code, seen) = terminal.finish();
+        assert_eq!(code, 0, "{fault}: {seen}");
+        assert!(seen.contains("pass"), "{fault}: {seen}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn the_parent_death_watchdog_kills_its_parents_group_when_its_input_ends() {
