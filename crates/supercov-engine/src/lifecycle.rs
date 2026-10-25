@@ -231,16 +231,20 @@ pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(),
                 .unwrap_or("state"),
             unique_name()
         ));
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(source) => return Err(io_error(&temporary, source)),
-        };
-        if let Err(source) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let mut file =
+            match crate::fault::io("atomic-write-create", io::ErrorKind::AlreadyExists, || {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)
+            }) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(source) => return Err(io_error(&temporary, source)),
+            };
+        if let Err(source) = crate::fault::io("atomic-write-sync", io::ErrorKind::Other, || {
+            file.write_all(bytes).and_then(|_| file.sync_all())
+        }) {
             let _ = fs::remove_file(&temporary);
             return Err(io_error(&temporary, source));
         }
@@ -337,7 +341,9 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
     let root = absolute_root(project_root)?;
     let trash = root.join(TRASH);
     reject_linked_ancestors(&root, &trash, true)?;
-    let entries = match fs::read_dir(&trash) {
+    let entries = match crate::fault::io("trash-list", io::ErrorKind::PermissionDenied, || {
+        fs::read_dir(&trash)
+    }) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(source) => return Err(io_error(&trash, source)),
@@ -355,16 +361,20 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
         // An entry already gone -- removed by hand, or by a sweeper whose
         // lock was replaced -- is as swept as one removed here.
         let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
-        let metadata = match fs::symlink_metadata(&path) {
+        let metadata = match crate::fault::io("trash-entry", io::ErrorKind::NotFound, || {
+            fs::symlink_metadata(&path)
+        }) {
             Ok(metadata) => metadata,
             Err(error) if gone(&error) => continue,
             Err(source) => return Err(io_error(&path, source)),
         };
-        let removal = if metadata.file_type().is_dir() {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
+        let removal = crate::fault::io("trash-remove", io::ErrorKind::NotFound, || {
+            if metadata.file_type().is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            }
+        });
         match removal {
             Ok(()) => removed += 1,
             Err(error) if gone(&error) => {}
@@ -382,7 +392,9 @@ impl TrashLock {
     fn acquire(trash: &Path) -> Result<Option<Self>, LifecycleError> {
         let path = trash.join(".deleter.lock");
         for _ in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            match crate::fault::io("trash-lock", io::ErrorKind::PermissionDenied, || {
+                OpenOptions::new().write(true).create_new(true).open(&path)
+            }) {
                 Ok(mut file) => {
                     write!(file, "{}", std::process::id())
                         .and_then(|_| file.sync_all())
@@ -683,11 +695,12 @@ impl ProjectLock {
         // the store's ignore file here as well, without replacing user rules
         // or following a pre-existing symlink.
         let ignore = root.join(".supercov/.gitignore");
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&ignore)
-        {
+        match crate::fault::io("store-ignore", io::ErrorKind::PermissionDenied, || {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&ignore)
+        }) {
             Ok(mut file) => file
                 .write_all(b"*\n")
                 .map_err(|source| io_error(&ignore, source))?,
@@ -934,7 +947,12 @@ pub(crate) fn publish_run_with_fault(
     }
     // What is published is the copy: it must be the evidence as hashed
     // before it was taken.
-    if file_sha256(&staging.join("evidence.raw.gz"))? != evidence_sha256 {
+    if crate::fault::or(
+        "published-copy-differs",
+        || Ok([0; 32]),
+        || file_sha256(&staging.join("evidence.raw.gz")),
+    )? != evidence_sha256
+    {
         remove_stored_tree_deferred(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
@@ -1107,7 +1125,9 @@ fn child_directories(path: &Path) -> Result<Vec<String>, LifecycleError> {
         .and_then(Path::parent)
         .unwrap_or(path);
     reject_linked_ancestors(root, path, true)?;
-    let entries = match fs::read_dir(path) {
+    let entries = match crate::fault::io("store-list", io::ErrorKind::PermissionDenied, || {
+        fs::read_dir(path)
+    }) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => return Err(io_error(path, source)),
@@ -1560,6 +1580,81 @@ mod tests {
         let path = root.join("evidence.gz");
         let metadata = write_archive(entries, &path).unwrap();
         (path, metadata.compressed_bytes)
+    }
+
+    /// Each store operation whose system call fails: a write retries a name
+    /// taken and cleans up after one it could not finish, the sweep passes
+    /// over what is already gone and stops at anything else, and publication
+    /// refuses a copy that is not the evidence it hashed.
+    #[test]
+    fn a_failing_system_call_in_the_store_is_retried_skipped_or_reported() {
+        use crate::fault::during;
+        let root = project();
+        let state = root.join(".supercov/state.json");
+        during("atomic-write-create=1", || {
+            atomic_write(&root, &state, b"one")
+        })
+        .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), b"one");
+        assert!(during("atomic-write-sync", || atomic_write(&root, &state, b"two")).is_err());
+        assert_eq!(fs::read(&state).unwrap(), b"one");
+        let leftovers = fs::read_dir(state.parent().unwrap())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 0, "a write it could not finish leaves nothing");
+
+        let trashed = || {
+            let owned = root.join(".supercov/evidence/run");
+            fs::create_dir_all(&owned).unwrap();
+            fs::write(owned.join("hit"), "hit").unwrap();
+            remove_stored_tree_deferred(&root, &owned).unwrap().unwrap()
+        };
+        // Any error but one that says the entry is gone (13 is EACCES).
+        let denied = ":13";
+        let entry = trashed();
+        // Gone already, by hand or another sweeper: as swept as removed here.
+        assert_eq!(during("trash-entry", || sweep_trash(&root)).unwrap(), 0);
+        assert_eq!(during("trash-remove", || sweep_trash(&root)).unwrap(), 0);
+        for fault in ["trash-list", "trash-lock"] {
+            assert!(during(fault, || sweep_trash(&root)).is_err(), "{fault}");
+        }
+        for fault in ["trash-entry", "trash-remove"] {
+            assert!(
+                during(&format!("{fault}{denied}"), || sweep_trash(&root)).is_err(),
+                "{fault}"
+            );
+        }
+        assert!(entry.exists());
+        assert_eq!(sweep_trash(&root).unwrap(), 1);
+
+        assert!(
+            during("store-ignore", || ProjectLock::acquire(
+                &root, "run_a", "now"
+            ))
+            .is_err()
+        );
+        assert!(during("store-list", || recover_abandoned_runs(&root, "now")).is_err());
+
+        let id = "2026-01-01T00-00-00-000Z";
+        let (evidence, bytes) = evidence(&root);
+        assert!(matches!(
+            during("published-copy-differs", || publish_run(
+                &root,
+                &metadata(id, bytes),
+                &evidence
+            )),
+            Err(LifecycleError::EvidenceChanged)
+        ));
+        assert!(!root.join(".supercov/runs").join(id).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

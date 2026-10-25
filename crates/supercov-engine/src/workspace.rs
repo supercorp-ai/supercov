@@ -467,20 +467,18 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
             (WORKSPACE_MARKER, WORKSPACE_MARKER_CONTENTS),
         ] {
             let path = container.join(name);
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            match crate::fault::io("workspace-file", io::ErrorKind::PermissionDenied, || {
+                OpenOptions::new().write(true).create_new(true).open(&path)
+            }) {
                 Ok(mut file) => file
                     .write_all(contents)
                     .and_then(|_| file.sync_all())
                     .map_err(|source| io_error(&path, source))?,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    // The marker's contents were checked as the container
+                    // was found, or written as it was made.
                     if !fs::symlink_metadata(&path)
                         .is_ok_and(|metadata| metadata.file_type().is_file())
-                    {
-                        return Err(WorkspaceError::UnsafePath(path));
-                    }
-                    if name == WORKSPACE_MARKER
-                        && !fs::read(&path)
-                            .is_ok_and(|contents| contents == WORKSPACE_MARKER_CONTENTS)
                     {
                         return Err(WorkspaceError::UnsafePath(path));
                     }
@@ -1954,7 +1952,11 @@ pub fn sync_outputs_of(
         match naming_the_project(&from, &places)? {
             Some(text) => {
                 fs::write(&to, text).map_err(|error| io_error(&to, error))?;
-                if let Ok(metadata) = fs::metadata(&from) {
+                if let Ok(metadata) =
+                    crate::fault::io("writeback-mode", io::ErrorKind::NotFound, || {
+                        fs::metadata(&from)
+                    })
+                {
                     let _ = fs::set_permissions(&to, metadata.permissions());
                 }
             }
@@ -2467,7 +2469,12 @@ mod tests {
         binary.push(0);
         fs::write(workspace.join("coverage/cache.bin"), &binary).unwrap();
         fs::write(workspace.join("coverage/plain.txt"), "nothing to name").unwrap();
-        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        // The copy's mode is kept where it can be read, and the file written
+        // where it cannot.
+        let sync = crate::fault::during("writeback-mode=1", || {
+            sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new())
+        })
+        .unwrap();
         assert_eq!(sync.synced, 5);
         assert_eq!(
             fs::read_to_string(root.join("coverage/coverage-final.json")).unwrap(),
@@ -3700,6 +3707,10 @@ mod tests {
             b"kept\n"
         );
         assert_eq!(ensure_container(&root).unwrap(), container);
+        // A container it made and could not finish is taken away again.
+        let unfinished = fresh_root();
+        assert!(crate::fault::during("workspace-file", || ensure_container(&unfinished)).is_err());
+        assert!(!workspace_container(&unfinished).exists());
         // Something else at the usual place is left alone: the container
         // goes beside it.
         for foreign in [true, false] {

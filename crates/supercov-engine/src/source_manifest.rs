@@ -7,7 +7,7 @@ use crate::{
     coverage_report::{
         ArchiveReportRequest, CoverageReport, ExitCodeInput, analyze_coverage_archive,
     },
-    evidence_archive::read_archive_selected,
+    evidence_archive::{read_archive_each, read_archive_selected},
     lifecycle::atomic_write,
     run_store::{RunMetadata, StoredRun},
     source_units::{Code, Diff, named},
@@ -352,8 +352,15 @@ fn the_one(
 }
 fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String> {
     let merged = run.metadata.merged == Some(true);
-    let bytes = fs::read(&run.evidence_path).map_err(|e| e.to_string())?;
-    let evidence_digest = format!("{:x}", Sha256::digest(&bytes));
+    let hex = |digest: [u8; 32]| {
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let (digest, _) =
+        crate::run_store::file_sha256(&run.evidence_path).map_err(|e| e.to_string())?;
+    let evidence_digest = hex(digest);
     if let Some(cached) = fs::read(run.directory.join(MANIFEST_CACHE_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<ManifestCache>(&bytes).ok())
@@ -373,10 +380,19 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
             path == name
         }
     };
-    let entries = read_archive_selected(&run.evidence_path, |path| {
-        named(path, ARCHIVE_PATH) || named(path, "statement-exclusions.json")
-    })
+    // Named by the bytes the entries were read from, whatever the file holds
+    // by the time they are parsed.
+    let mut entries = Vec::new();
+    let read = read_archive_each(
+        &run.evidence_path,
+        |path| named(path, ARCHIVE_PATH) || named(path, "statement-exclusions.json"),
+        |entry| {
+            entries.push(entry);
+            Ok(())
+        },
+    )
     .map_err(|e| e.to_string())?;
+    let evidence_digest = hex(read.sha256);
     let Some(value) = the_one(&entries, |path| named(path, ARCHIVE_PATH))? else {
         return Ok(None);
     };
@@ -387,9 +403,6 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
     }
     let manifest = serde_json::from_value::<InputManifest>(value).map_err(|e| e.to_string())?;
     validate_manifest(&manifest)?;
-    if fs::read(&run.evidence_path).map_err(|e| e.to_string())? != bytes {
-        return Err("Run archive changed during read".into());
-    }
     Ok(Some(RunManifest {
         manifest,
         evidence_digest,

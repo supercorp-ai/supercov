@@ -773,7 +773,7 @@ fn compare_run_integrity_to(
     }
 }
 
-fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError> {
+pub(crate) fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError> {
     let metadata = regular_file(path)?;
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();

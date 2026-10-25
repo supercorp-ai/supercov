@@ -1,14 +1,14 @@
 //! Faults a test injects, so the code that handles a system call failing runs
 //! under test. `SUPERCOV_TEST_FAULT` names call sites, comma-separated: `site`
 //! fails every call there, `site=N` only the first N, and `site:E` (or
-//! `site:E=N`) fails a libc call with errno `E` instead of its usual one. A
-//! failing site does not make its call; it returns what the call returns when
-//! it fails. Only debug builds read the variable: a release build has no such
-//! switch.
+//! `site:E=N`) fails it with errno `E` instead of its usual error. A failing
+//! site does not make its call; it returns what the call returns when it
+//! fails. Only debug builds read the variable: a release build has no such
+//! switch. The engine's own tests set faults for one thread with [`during`].
 
 use std::io;
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 struct Fault {
     site: String,
     errno: Option<i32>,
@@ -20,7 +20,7 @@ struct Fault {
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
     std::sync::LazyLock::new(|| parse(&std::env::var("SUPERCOV_TEST_FAULT").unwrap_or_default()));
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 fn parse(text: &str) -> Vec<Fault> {
     text.split(',')
         .filter(|entry| !entry.is_empty())
@@ -48,25 +48,31 @@ pub fn injected(site: &str) -> bool {
     failing(site).is_some()
 }
 
+#[cfg(test)]
+thread_local! {
+    static DURING: std::cell::RefCell<Vec<Fault>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `body` with the faults `faults` names (as `SUPERCOV_TEST_FAULT` does)
+/// on this thread.
+#[cfg(test)]
+pub fn during<R>(faults: &str, body: impl FnOnce() -> R) -> R {
+    let earlier = DURING.with(|during| during.replace(parse(faults)));
+    let result = body();
+    DURING.with(|during| during.replace(earlier));
+    result
+}
+
 /// When the call at `site` fails this time, the errno the test chose for
 /// it, if any.
 fn failing(site: &str) -> Option<Option<i32>> {
+    #[cfg(test)]
+    if let Some(failing) = DURING.with(|during| take(&during.borrow(), site)) {
+        return failing;
+    }
     #[cfg(debug_assertions)]
     {
-        use std::sync::atomic::Ordering;
-        FAULTS
-            .iter()
-            .find(|fault| fault.site == site)
-            .filter(|fault| {
-                fault.remaining.as_ref().is_none_or(|remaining| {
-                    remaining
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                            left.checked_sub(1)
-                        })
-                        .is_ok()
-                })
-            })
-            .map(|fault| fault.errno)
+        take(&FAULTS, site).flatten()
     }
     #[cfg(not(debug_assertions))]
     {
@@ -75,22 +81,43 @@ fn failing(site: &str) -> Option<Option<i32>> {
     }
 }
 
+/// Of the faults `faults`, whether the one at `site` fails this time, and
+/// with which errno: `None` when no fault names the site.
+#[cfg(any(test, debug_assertions))]
+fn take(faults: &[Fault], site: &str) -> Option<Option<Option<i32>>> {
+    use std::sync::atomic::Ordering;
+    faults.iter().find(|fault| fault.site == site).map(|fault| {
+        fault
+            .remaining
+            .as_ref()
+            .is_none_or(|remaining| {
+                remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_ok()
+            })
+            .then_some(fault.errno)
+    })
+}
+
 /// `call`'s value, or `failed`'s when the call at `site` fails.
 pub fn or<T>(site: &str, failed: impl FnOnce() -> T, call: impl FnOnce() -> T) -> T {
     if injected(site) { failed() } else { call() }
 }
 
-/// `call`'s result, or an error of `kind` when the call at `site` fails.
+/// `call`'s result, or an error when the call at `site` fails: of `kind`, or
+/// the system's error for the errno the test chose.
 pub fn io<T>(
     site: &str,
     kind: io::ErrorKind,
     call: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    or(
-        site,
-        || Err(io::Error::new(kind, format!("injected fault at {site}"))),
-        call,
-    )
+    match failing(site) {
+        Some(Some(errno)) => Err(io::Error::from_raw_os_error(errno)),
+        Some(None) => Err(io::Error::new(kind, format!("injected fault at {site}"))),
+        None => call(),
+    }
 }
 
 /// A libc call's return, or -1 with errno set when the call at `site`
