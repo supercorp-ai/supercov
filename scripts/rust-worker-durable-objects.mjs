@@ -249,10 +249,13 @@ fn start(directory: &std::path::Path, configs: &[String], vars: &[&str]) -> Dev 
     for var in vars {
         command.args(["--var", var]);
     }
+    // What wrangler says, kept to say why a Worker never answered.
+    let log = std::env::temp_dir().join(format!("planes-wrangler-{}-{port}.log", std::process::id()));
+    let output = std::fs::File::create(&log).unwrap();
     let child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(output.try_clone().unwrap())
+        .stderr(output)
         .process_group(0)
         .spawn()
         .expect("wrangler on PATH");
@@ -263,7 +266,9 @@ fn start(directory: &std::path::Path, configs: &[String], vars: &[&str]) -> Dev 
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    panic!("wrangler dev never answered");
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    let tail = said.lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    panic!("wrangler dev never answered:\n{tail}");
 }
 
 #[test]
