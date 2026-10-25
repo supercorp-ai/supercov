@@ -2424,7 +2424,7 @@ fn confirm_paths(
     refresh: bool,
     answers: &[Answers],
     structures: &BTreeMap<String, (candidates::Structure, String)>,
-) -> (Vec<Value>, Usage, Usage) {
+) -> (Vec<Value>, Vec<Value>, Usage, Usage) {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
     let body = |source: &str, f: &candidates::FunctionSpan| -> String {
@@ -2440,6 +2440,7 @@ fn confirm_paths(
     };
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
+    let mut unasked = Vec::new();
     for (file, (structure, source)) in structures {
         let Some(answer) = by_path.get(file.as_str()) else {
             continue;
@@ -2517,20 +2518,34 @@ fn confirm_paths(
                         },
                         &label.sink_kind,
                     );
-                    if let Some(bytes) = within_budget(&request) {
-                        let index = candidates_found.len();
-                        candidates_found.push(json!({
-                            "caller": { "file": file, "function": caller.name, "line": call_line },
-                            "callee": { "file": target, "function": callee.name, "line": callee.start },
-                            "check": label.sink_kind,
-                        }));
-                        pending.push(((index, None), request, bytes));
+                    let ends = json!({
+                        "caller": { "file": file, "function": caller.name, "line": call_line },
+                        "callee": { "file": target, "function": callee.name, "line": callee.start },
+                    });
+                    match within_budget(&request) {
+                        Some(bytes) => {
+                            let index = candidates_found.len();
+                            let mut found = ends;
+                            found["check"] = json!(label.sink_kind);
+                            candidates_found.push(found);
+                            pending.push(((index, None), request, bytes));
+                        }
+                        // Named, not dropped.
+                        None => unasked.push(too_large_to_ask(ends)),
                     }
                 }
             }
         }
     }
-    confirm_pending(root, key, refresh, pending, candidates_found)
+    let (paths, usage, reused) = confirm_pending(root, key, refresh, pending, candidates_found);
+    (paths, unasked, usage, reused)
+}
+
+/// A cross-file path left unasked because its two functions together do
+/// not fit in one request.
+fn too_large_to_ask(mut ends: Value) -> Value {
+    ends["reason"] = json!("too large");
+    ends
 }
 
 /// Confirm candidate paths, however they were found: one question each with
@@ -2705,6 +2720,7 @@ fn run_paths(
                             unasked.push(json!({
                                 "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
                                 "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
+                                "reason": "three per function",
                             }));
                             continue;
                         }
@@ -2724,14 +2740,21 @@ fn run_paths(
                             },
                             &label.sink_kind,
                         );
-                        if let Some(bytes) = within_budget(&request) {
-                            let index = candidates_found.len();
-                            candidates_found.push(json!({
-                                "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
-                                "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
-                                "check": label.sink_kind, "via": "run", "test": test,
-                            }));
-                            pending.push(((index, None), request, bytes));
+                        let ends = json!({
+                            "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
+                            "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
+                        });
+                        match within_budget(&request) {
+                            Some(bytes) => {
+                                let index = candidates_found.len();
+                                let mut found = ends;
+                                found["check"] = json!(label.sink_kind);
+                                found["via"] = json!("run");
+                                found["test"] = json!(test);
+                                candidates_found.push(found);
+                                pending.push(((index, None), request, bytes));
+                            }
+                            None => unasked.push(too_large_to_ask(ends)),
                         }
                     }
                 }
@@ -3185,11 +3208,12 @@ fn run_health(
         let (_, more, cached) = ask_lines(root, key, options.refresh, &mut answers);
         usage.input_tokens += more.input_tokens;
         reused.input_tokens += cached.input_tokens;
-        let (paths, more, cached) =
+        let (paths, not_asked, more, cached) =
             confirm_paths(root, key, options.refresh, &answers, &structures);
         usage.input_tokens += more.input_tokens;
         reused.input_tokens += cached.input_tokens;
         paths_found = paths;
+        paths_not_asked = not_asked;
         if let Some(RunCoverage { points, .. }) = run {
             let (paths, not_asked, more, cached) = run_paths(
                 root,
@@ -3203,7 +3227,7 @@ fn run_health(
             usage.input_tokens += more.input_tokens;
             reused.input_tokens += cached.input_tokens;
             paths_found.extend(paths);
-            paths_not_asked = not_asked;
+            paths_not_asked.extend(not_asked);
             handlers_by_file = run_guards(&answers, &structures, points);
         }
     }
@@ -3811,12 +3835,26 @@ fn human_security(report: &Value) -> String {
             out.push_str(&format!("  ... and {} more\n", paths.len() - 10));
         }
     }
-    let not_asked = report["paths_not_asked"].as_array().unwrap_or(&empty);
-    if !not_asked.is_empty() {
-        out.push_str(&format!(
-            "{} more caller(s) ran with a flagged function in a test and were not asked, three being asked per function:\n",
-            not_asked.len()
-        ));
+    let all_not_asked = report["paths_not_asked"].as_array().unwrap_or(&empty);
+    for (reason, heading) in [
+        (
+            "three per function",
+            "more caller(s) ran with a flagged function in a test and were not asked, three being asked per function",
+        ),
+        (
+            "too large",
+            "cross-file path(s) not asked: the two functions together are larger than one request",
+        ),
+    ] {
+        let not_asked: Vec<&Value> = all_not_asked
+            .iter()
+            // A snapshot from before reasons were kept had only the one.
+            .filter(|path| path["reason"].as_str().unwrap_or("three per function") == reason)
+            .collect();
+        if not_asked.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{} {heading}:\n", not_asked.len()));
         for path in not_asked.iter().take(5) {
             out.push_str(&format!(
                 "  {}:{} {} -> {}:{} {}\n",

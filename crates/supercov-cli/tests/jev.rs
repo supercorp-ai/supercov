@@ -1025,6 +1025,51 @@ fn security_follows_outside_data_across_an_import() {
     );
 }
 
+/// A path whose two functions are together larger than one request is
+/// named as not asked, by import and as a test ran it, where it was once
+/// dropped without a word.
+#[test]
+fn a_cross_file_path_too_large_to_ask_is_named() {
+    let project = Project::empty("security-paths-large");
+    project.write("package.json", r#"{"name":"orders","type":"module"}"#);
+    // Dense as base64, so each byte is a token: a function fits in a request
+    // of its own, two do not.
+    let padding = (0..250)
+        .map(|i| format!("  // {i:04}{}\n", "Ab0+".repeat(16)))
+        .collect::<String>();
+    project.write(
+        "src/handler.js",
+        &format!("import {{ findOrders }} from \"./db.js\";\n\nexport async function handler(req, db) {{\n{padding}  const rows = await findOrders(db, req.query.customer);\n  return {{ count: rows.length }};\n}}\n"),
+    );
+    project.write(
+        "src/db.js",
+        &format!("export function findOrders(db, customer) {{\n{padding}  return db.query(\"SELECT * FROM orders WHERE customer = '\" + customer + \"'\");\n}}\n"),
+    );
+    project.write(
+        "src/router.js",
+        &format!("export async function route(req, deps) {{\n{padding}  return deps.findOrders(deps.db, req.params.id);\n}}\n"),
+    );
+    project.write(
+        "test/router.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { route } from \"../src/router.js\";\nimport { findOrders } from \"../src/db.js\";\n\ntest(\"routes to the orders query\", async () => {\n  const db = { query: async () => [1] };\n  assert.deepEqual(await route({ params: { id: \"7\" } }, { db, findOrders }), [1]);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_taint);
+    let report = project
+        .supercov_with(&["security", "src/", "--run", "latest"], &through(&base))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "2 cross-file path(s) not asked: the two functions together are larger than one request:",
+            "src/handler.js:",
+            "src/router.js:1 route -> src/db.js:1 findOrders",
+        ],
+    );
+    assert!(!report.contains("Cross-file paths confirmed"), "{report}");
+}
+
 #[test]
 fn a_patch_review_reads_only_changed_source_and_says_what_it_skipped() {
     let project = Project::cart("patch-edges");
