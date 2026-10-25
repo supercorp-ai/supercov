@@ -153,10 +153,12 @@ const files = {
   '.gitignore': 'node_modules/\ntarget/\n.wrangler/\nbuild/\n',
   'Cargo.toml': '[workspace]\nmembers = ["plane", "runners", "host"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
   'plane/Cargo.toml': worker('plane', '\n[features]\ndefault = ["audit"]\naudit = []\n'),
-  'plane/wrangler.toml': 'name = "plane"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\n\n[[durable_objects.bindings]]\nname = "COUNTER"\nclass_name = "Counter"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["Counter"]\n\n[[services]]\nbinding = "RUNNERS"\nservice = "runners"\n',
+  // Started from the workspace root, as a test kit of a monorepo starts
+  // them: wrangler runs a build where it was started, unless told where.
+  'plane/wrangler.toml': 'name = "plane"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\ncwd = "plane"\n\n[[durable_objects.bindings]]\nname = "COUNTER"\nclass_name = "Counter"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["Counter"]\n\n[[services]]\nbinding = "RUNNERS"\nservice = "runners"\n',
   'plane/src/lib.rs': PLANE,
   'runners/Cargo.toml': worker('runners'),
-  'runners/wrangler.toml': 'name = "runners"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\n',
+  'runners/wrangler.toml': 'name = "runners"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\ncwd = "runners"\n',
   'runners/src/lib.rs': RUNNERS,
   'host/Cargo.toml': '[package]\nname = "host"\nversion = "0.1.0"\nedition = "2021"\n',
   'host/src/lib.rs': '//! The suite that starts the Workers.\n',
@@ -222,8 +224,8 @@ fn workspace() -> std::path::PathBuf {
 /// The Worker in \`crate_name\`, or none where it is not built: a test kit
 /// that will not run an unbuilt Worker.
 fn serve(crate_name: &str, vars: &[&str]) -> Option<Dev> {
-    let directory = workspace().join(crate_name);
-    directory.join("build").exists().then(|| start(&directory, &[], vars))
+    let configs = ["-c".to_owned(), format!("{crate_name}/wrangler.toml")];
+    workspace().join(crate_name).join("build").exists().then(|| start(&workspace(), &configs, vars))
 }
 
 /// Several Workers in one \`wrangler dev\`, the first serving and the others
@@ -344,6 +346,7 @@ try {
     return { measured, id: JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id };
   };
   const { measured, id } = measure();
+  console.log(measured.stderr.split('\n').filter((line) => line.includes('synced')).join('\n'));
   assert.match(measured.stderr, /Rust coverage: 5 test\(s\)/u, measured.stderr);
   const lines = (runId, name, file) => [...new Set(run(root, binary, ['runs', runId, 'test', name, '--limit', '0']).stdout.match(new RegExp(`${file.replace(/[/.]/gu, '\\$&')}:\\d+`, 'gu')) ?? [])];
   const at = (file, source, text) => `${file}:${lineOf(source, text)}`;
