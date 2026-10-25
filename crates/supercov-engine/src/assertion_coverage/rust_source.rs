@@ -177,11 +177,16 @@ pub(super) fn replacements(file: &str, source: &str, signatures: &Signatures) ->
                         push(s.syntax(), changed);
                     }
                 }
-                ast::Stmt::ExprStmt(s) => {
-                    if let Some(e) = s.expr() {
-                        value_change(&e, &mut push, None, &crate_view);
-                    }
-                }
+                // An expression statement holds its expression; one a parser
+                // could not finish is a bug of the file's reading, which
+                // assessment keeps to that file.
+                ast::Stmt::ExprStmt(s) => value_change(
+                    &s.expr()
+                        .expect("an expression statement holds an expression"),
+                    &mut push,
+                    None,
+                    &crate_view,
+                ),
                 ast::Stmt::Item(_) => {}
             }
         }

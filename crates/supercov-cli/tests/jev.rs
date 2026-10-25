@@ -953,6 +953,31 @@ fn rust_statements_are_asked_as_changes_of_their_own_type() {
     ] {
         assert!(asked.contains(change), "{change} not asked:\n{asked}");
     }
+    // A bug reading a file's values costs only its questions their
+    // replacements: the assessment still answers, describing the changes.
+    let (base, seen) = gateway(MODEL, answer_no);
+    let mut env = through(&base).to_vec();
+    env.push(("SUPERCOV_TEST_FAULT", "value-changes-panic"));
+    let degraded = project.supercov_with(
+        &["runs", "latest", "assertions", "assess", "--refresh"],
+        &env,
+    );
+    assert_eq!(degraded.code(), 0, "{}", degraded.stderr());
+    assert!(
+        degraded
+            .stderr()
+            .contains("test fault at value-changes-panic"),
+        "{}",
+        degraded.stderr()
+    );
+    assert!(
+        degraded
+            .stdout()
+            .contains("0% asserted (0 of 10 executed statements)"),
+        "{}",
+        degraded.stdout()
+    );
+    assert!(!seen.lock().unwrap().is_empty());
 }
 
 #[test]

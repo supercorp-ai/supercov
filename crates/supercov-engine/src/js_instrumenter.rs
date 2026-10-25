@@ -1069,6 +1069,9 @@ pub struct CandidateLimitation {
 pub enum CandidateError {
     UnknownSourceType(String),
     Parse(Vec<String>),
+    /// Supercov broke one of its own invariants on this file: a bug, with
+    /// the message it panicked with.
+    Internal(String),
     CommentPreservation {
         expected: usize,
         actual: usize,
@@ -1083,6 +1086,7 @@ impl std::fmt::Display for CandidateError {
                 write!(formatter, "no JavaScript source type for {file}")
             }
             Self::Parse(messages) => write!(formatter, "{}", messages.join("; ")),
+            Self::Internal(message) => write!(formatter, "an internal error: {message}"),
             Self::CommentPreservation {
                 expected,
                 actual,
@@ -2922,14 +2926,20 @@ fn erased_imports(program: &Program<'_>, elide_type_imports: bool) -> HashSet<Sp
                                         scoping.get_resolved_references(symbol).peekable();
                                     // An unused binding may be needed by a JSX/decorator
                                     // transform. Only positively identified type uses count.
-                                    refs.peek().is_some()
-                                        && refs.all(|r| r.is_type() && !r.is_value())
+                                    refs.peek().is_some() && refs.all(|r| r.flags().is_type_only())
                                 })
                             })
                     }));
             erased.then_some(span_key(declaration.span))
         })
         .collect()
+}
+
+/// Holds the rewrite to the plan: a tree it rewrites as planned is planned.
+fn assert_planned<T>(targets: &HashMap<SpanKey, T>, span: Span) {
+    targets
+        .get(&span_key(span))
+        .expect("a declarator's logical initializer is planned");
 }
 
 fn executable_statement(statement: &Statement<'_>) -> bool {
@@ -3913,13 +3923,23 @@ pub fn instrument_with_import_policy(
     capability_wrapper: &str,
     elide_type_imports: bool,
 ) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(
-        source,
-        file,
-        RuntimeBinding::DirectGlobal,
-        Some(capability_wrapper),
-        elide_type_imports,
-    )
+    // One file's bug costs that file its measurement, not the run.
+    crate::contained::contained(|| {
+        crate::fault::or(
+            "instrument-panic",
+            || panic!("injected fault at instrument-panic"),
+            || {
+                instrument_candidate_with_binding(
+                    source,
+                    file,
+                    RuntimeBinding::DirectGlobal,
+                    Some(capability_wrapper),
+                    elide_type_imports,
+                )
+            },
+        )
+    })
+    .unwrap_or_else(|message| Err(CandidateError::Internal(message)))
 }
 
 fn instrument_candidate_with_binding(
@@ -6242,9 +6262,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         while let Expression::ParenthesizedExpression(parenthesized) = inner {
             inner = &mut parenthesized.expression;
         }
-        if matches!(inner, Expression::LogicalExpression(_))
-            && self.logical_targets.contains_key(&span_key(inner.span()))
-        {
+        // Planned, as every logical operand of a planned tree is: the plan
+        // leaves out only trees in a decision, a `with` body or a function
+        // whose source is read, and an operand shares its tree's context.
+        // `instrument_tree` holds it to that.
+        if matches!(inner, Expression::LogicalExpression(_)) {
             self.instrument_tree(inner, path);
             return;
         }
@@ -6299,9 +6321,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         while let Expression::ParenthesizedExpression(parenthesized) = inner {
             inner = &parenthesized.expression;
         }
-        if let Expression::LogicalExpression(logical) = inner
-            && let Some(first) = self.logical_targets.remove(&span_key(logical.span))
-        {
+        if let Expression::LogicalExpression(logical) = inner {
+            let first = self
+                .logical_targets
+                .remove(&span_key(logical.span))
+                .expect("every logical operand of a planned tree is planned: the plan leaves out only trees in a decision, a `with` body or a function whose source is read, and an operand shares its tree's context");
             let kind = match logical.operator {
                 LogicalOperator::Or => 0,
                 LogicalOperator::And => 1,
@@ -6601,9 +6625,11 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
             while let Expression::ParenthesizedExpression(parenthesized) = tree {
                 tree = &mut parenthesized.expression;
             }
-            if matches!(tree, Expression::LogicalExpression(_))
-                && self.logical_targets.contains_key(&span_key(tree.span()))
-            {
+            // An initializer's tree is planned: it is in no decision, and a
+            // declarator in a `with` body or a source-read function is not
+            // visited.
+            if matches!(tree, Expression::LogicalExpression(_)) {
+                assert_planned(&self.logical_targets, tree.span());
                 let site = self.name_tree(tree);
                 let recorded = self.record_tree(&site, self.identifier(&name.name));
                 self.after_declaration.push(recorded);
@@ -8096,7 +8122,10 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
                 .or_default()
                 .push((applied, shape));
         }
-        if is_root && let Some(pending) = self.pending_values.remove(&key) {
+        if is_root {
+            let pending = self.pending_values.remove(&key).expect(
+                "a value tree's root is visited after the decisions inside it, each of which leaves its value pending",
+            );
             self.record_value_outcomes(expression, pending);
         }
     }

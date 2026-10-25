@@ -1729,18 +1729,34 @@ pub fn prepare_javascript_frontend(
             // A file the parser rejects runs as written: the suite may never
             // load it, and one that does fails there as it would without
             // Supercov. Nothing in it is measured, and the run says so.
-            Err(crate::js_instrumenter::CandidateError::Parse(messages)) => {
+            Err(
+                error @ (crate::js_instrumenter::CandidateError::Parse(_)
+                | crate::js_instrumenter::CandidateError::Internal(_)),
+            ) => {
+                let (id, reason) = match error {
+                    crate::js_instrumenter::CandidateError::Parse(messages) => (
+                        "javascript-file-not-parsed",
+                        format!(
+                            "Supercov could not parse this file ({}); it runs as written and nothing in it is measured",
+                            messages.join("; ")
+                        ),
+                    ),
+                    // A bug in Supercov, kept to this file.
+                    other => (
+                        "javascript-file-not-instrumented",
+                        format!(
+                            "Supercov hit {other} instrumenting this file, a bug to report; it runs as written and nothing in it is measured"
+                        ),
+                    ),
+                };
                 let limitation = CandidateLimitation {
-                    id: format!("javascript-file-not-parsed#{file}"),
+                    id: format!("{id}#{file}"),
                     kind: "source-scope".into(),
                     file: file.clone(),
                     line: 1,
                     column: 0,
                     source: String::new(),
-                    reason: format!(
-                        "Supercov could not parse this file ({}); it runs as written and nothing in it is measured",
-                        messages.join("; ")
-                    ),
+                    reason,
                 };
                 limitations.insert(limitation.id.clone(), limitation);
                 continue;

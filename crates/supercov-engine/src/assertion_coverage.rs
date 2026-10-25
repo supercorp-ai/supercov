@@ -505,7 +505,18 @@ pub fn population_from(
                 let first = first.trim_end_matches(';');
                 replacements
                     .entry(file.clone())
-                    .or_insert_with(|| rust_source::replacements(file, source, &signatures))
+                    // A bug reading one file's values costs its questions
+                    // their replacements, which then describe the change.
+                    .or_insert_with(|| {
+                        crate::contained::contained(|| {
+                            crate::fault::or(
+                                "value-changes-panic",
+                                || panic!("injected fault at value-changes-panic"),
+                                || rust_source::replacements(file, source, &signatures),
+                            )
+                        })
+                        .unwrap_or_default()
+                    })
                     .get(&line)
                     .and_then(|all| all.iter().find(|(t, _)| t.starts_with(first)))
                     .map(|(_, r)| r.clone())

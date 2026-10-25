@@ -27,6 +27,9 @@ pub enum RustInstrumenterError {
     Parse(Vec<String>),
     InvalidRange,
     InvalidRuntimePath,
+    /// Supercov broke one of its own invariants on this file: a bug, with
+    /// the message it panicked with.
+    Internal(String),
 }
 
 impl std::fmt::Display for RustInstrumenterError {
@@ -35,6 +38,7 @@ impl std::fmt::Display for RustInstrumenterError {
             Self::SourceTooLarge => write!(formatter, "Rust source exceeds the parser range"),
             Self::Parse(errors) => write!(formatter, "Rust parse failed: {}", errors.join("; ")),
             Self::InvalidRange => write!(formatter, "Rust parser returned an invalid range"),
+            Self::Internal(message) => write!(formatter, "an internal error: {message}"),
             Self::InvalidRuntimePath => write!(formatter, "invalid generated Rust runtime path"),
         }
     }
@@ -2238,6 +2242,25 @@ pub fn instrument_rust_file_numbered(
     cfg: Option<&TargetCfg>,
     layout: &mut RustProbeLayout,
 ) -> Result<RustInstrumentedSource, RustInstrumenterError> {
+    // One file's bug costs that file its measurement, not the run.
+    crate::contained::contained(|| {
+        crate::fault::or(
+            "instrument-panic",
+            || panic!("injected fault at instrument-panic"),
+            || numbered_file(file, source, runtime_path, test_file, cfg, layout),
+        )
+    })
+    .unwrap_or_else(|message| Err(RustInstrumenterError::Internal(message)))
+}
+
+fn numbered_file(
+    file: &str,
+    source: &str,
+    runtime_path: &str,
+    test_file: bool,
+    cfg: Option<&TargetCfg>,
+    layout: &mut RustProbeLayout,
+) -> Result<RustInstrumentedSource, RustInstrumenterError> {
     let _numbering = NumberingScope::enter(layout);
     if !valid_runtime_path(runtime_path) {
         return Err(RustInstrumenterError::InvalidRuntimePath);
@@ -2798,17 +2821,20 @@ pub fn instrument_rust_file_numbered(
         );
     }
     for guard in root.descendants().filter_map(ast::MatchGuard::cast) {
-        if let Some(condition) = guard.condition() {
-            let frame_name = allocate_frame_name(file, &condition, "match-guard", &mut identifiers);
-            instrument_decision(
-                &mut insertions,
-                runtime_path,
-                file,
-                &condition,
-                "match-guard",
-                &frame_name,
-            );
-        }
+        // The grammar gives a guard its condition, and a file that does not
+        // parse is refused before this.
+        let condition = guard
+            .condition()
+            .expect("a parsed match guard has a condition");
+        let frame_name = allocate_frame_name(file, &condition, "match-guard", &mut identifiers);
+        instrument_decision(
+            &mut insertions,
+            runtime_path,
+            file,
+            &condition,
+            "match-guard",
+            &frame_name,
+        );
     }
     // `assert!(cond, ...)`: the condition decides whether the program goes
     // on, and the macro takes an instrumented expression like any other.

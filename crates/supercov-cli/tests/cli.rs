@@ -1672,6 +1672,67 @@ fn the_report_compares_two_runs_and_names_a_mistake() {
     assert!(missing.contains("run_0000000000000009"), "{missing}");
 }
 
+/// A bug in Supercov's instrumenter, made to happen on a file
+/// (`SUPERCOV_TEST_FAULT`), costs that file its measurement and nothing more:
+/// it runs as written, the suite passes, and the run names the file and the
+/// error to report.
+#[test]
+fn an_internal_error_instrumenting_a_file_leaves_it_unmeasured_and_said() {
+    let project = Project::cart("instrumenter-bug");
+    let fault = [("SUPERCOV_TEST_FAULT", "instrument-panic")];
+    let measured = project.supercov_with(&["--", "node", "--test"], &fault);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stdout().contains("pass 3"),
+        "{}",
+        measured.stdout()
+    );
+    assert!(
+        measured.stderr().contains("test fault at instrument-panic"),
+        "{}",
+        measured.stderr()
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:1"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "NOT MEASURED",
+            "Supercov hit an internal error: injected fault at instrument-panic instrumenting this file, a bug to report",
+        ],
+    );
+
+    // The same in Rust: the file compiles as written.
+    let project = Project::empty("instrumenter-bug-rust");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn half(x: i32) -> i32 { x / 2 }\n#[cfg(test)]\nmod tests { #[test] fn h() { assert_eq!(super::half(4), 2); } }\n",
+    );
+    project.git(&["init", "-q"]);
+    let measured = project.supercov_with(&["--", "cargo", "test"], &fault);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stderr().contains("test fault at instrument-panic"),
+        "{}",
+        measured.stderr()
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/lib.rs:1"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "NOT MEASURED",
+            "Supercov hit an internal error: injected fault at instrument-panic instrumenting this file, a bug to report",
+        ],
+    );
+}
+
 #[test]
 fn a_source_file_that_does_not_parse_runs_as_written_and_is_declared() {
     let project = Project::cart("unparsable");

@@ -925,18 +925,37 @@ pub fn prepare_rust_project_for(
     let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
     for (relative, source) in &sources {
         let test_file = tests.contains(relative) || test_code_path(relative);
-        let transformed = instrument_rust_file_numbered(
+        let transformed = match instrument_rust_file_numbered(
             relative,
             source,
             &runtime_path,
             test_file,
             cfg,
             &mut probes,
-        )
-        .map_err(|error| RustProjectError::Instrument {
-            file: relative.clone(),
-            reason: error.to_string(),
-        })?;
+        ) {
+            Ok(transformed) => transformed,
+            // A bug in Supercov, kept to this file: it compiles as written,
+            // and the run says nothing in it is measured.
+            Err(error @ crate::rust_instrumenter::RustInstrumenterError::Internal(_)) => {
+                manifest.limitations.push(serde_json::json!({
+                    "id": format!("rust-file-not-instrumented#{relative}"),
+                    "kind": "source-scope",
+                    "file": relative,
+                    "line": 1,
+                    "column": 0,
+                    "source": "",
+                    "blocking": false,
+                    "reason": format!("Supercov hit {error} instrumenting this file, a bug to report; it compiles as written and nothing in it is measured"),
+                }));
+                continue;
+            }
+            Err(error) => {
+                return Err(RustProjectError::Instrument {
+                    file: relative.clone(),
+                    reason: error.to_string(),
+                });
+            }
+        };
         merge_manifest(&mut manifest, transformed.manifest)?;
         fs::write(workspace.join(relative), transformed.code).map_err(|error| {
             RustProjectError::Io {
