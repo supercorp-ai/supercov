@@ -1829,7 +1829,6 @@ impl ProcessSupervisor {
         let mut termination: Option<(Instant, Option<ForwardedSignal>)> = None;
         let mut timed_out = false;
         let mut interrupted_signal = None;
-        let mut escalated = false;
         let mut keyboard = Keyboard::default();
 
         loop {
@@ -1895,13 +1894,15 @@ impl ProcessSupervisor {
                     next_diagnostic += options.diagnostic_interval;
                 }
             }
-            if !escalated
-                && termination.is_some_and(|(terminated_at, _)| {
-                    now.duration_since(terminated_at) >= options.termination_grace
-                })
-            {
+            if termination.is_some_and(|(terminated_at, _)| {
+                now.duration_since(terminated_at) >= options.termination_grace
+            }) {
+                // Nothing outlives SIGKILL, and the command leads the group
+                // it is sent to: wait for it to go, and the next pass returns
+                // how it ended.
                 signal_process_group(child, libc::SIGKILL);
-                escalated = true;
+                let _ = child.wait();
+                continue;
             }
             thread::sleep(POLL_INTERVAL);
         }
