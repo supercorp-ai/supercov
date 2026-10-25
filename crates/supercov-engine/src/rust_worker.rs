@@ -1002,14 +1002,27 @@ fn watched_arguments(
         }
         let port = match named_inspector_port(&arguments) {
             Some(port) => Some(port),
-            None => free_port().ok().inspect(|port| {
+            None => crate::fault::or(
+                "inspector-port",
+                || Err("injected fault at inspector-port".to_owned()),
+                free_port,
+            )
+            .ok()
+            .inspect(|port| {
                 arguments.push("--inspector-port".into());
                 arguments.push(port.to_string().into());
             }),
         };
         // Neither fails short of the system running out of ports or losing
         // track of this program's own file.
-        if let (Some(port), Ok(supercov)) = (port, std::env::current_exe()) {
+        if let (Some(port), Ok(supercov)) = (
+            port,
+            crate::fault::io(
+                "poller-executable",
+                std::io::ErrorKind::NotFound,
+                std::env::current_exe,
+            ),
+        ) {
             let windows = evidence.join(format!("worker-{}.windows", std::process::id()));
             let _ = std::process::Command::new(supercov)
                 .arg(WRANGLER_POLL_COMMAND)
@@ -1939,6 +1952,20 @@ mod tests {
             evidence
                 .join(format!("{REMOTE_NOTE}{}", std::process::id()))
                 .exists()
+        );
+        // A local one with no port to give the inspector, or no way to name
+        // this program to poll it: started as it was asked, unwatched.
+        assert_eq!(
+            crate::fault::during("inspector-port", || {
+                watched_arguments(words("dev"), Some(evidence.clone()))
+            }),
+            words("dev")
+        );
+        assert_eq!(
+            crate::fault::during("poller-executable", || {
+                watched_arguments(words("dev --inspector-port 9229"), Some(evidence.clone()))
+            }),
+            words("dev --inspector-port 9229")
         );
         fs::remove_dir_all(evidence).unwrap();
     }

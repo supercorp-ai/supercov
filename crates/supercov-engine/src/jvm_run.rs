@@ -1390,7 +1390,9 @@ fn instrument_workspace(
     }) {
         let frameworks = frameworks_of(&module.directory);
         let resources = workspace.join(&module.directory).join("src/test/resources");
-        if frameworks.platform || frameworks.junit4 {
+        // A JUnit 4 module runs on the platform by now, through the Vintage
+        // engine added above, and reads as a platform module.
+        if frameworks.platform {
             write(
                 &resources.join(SERVICES_FILE),
                 &format!("{LISTENER_CLASS}\n"),
