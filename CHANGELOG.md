@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `supercov merge` merges Rust runs whose tests started different Cloudflare Workers of one workspace, instead of refusing them for different coverage denominators; a Worker stays marked as started by no test only where no merged run started it.
 - Ruby code a test calls from inside a `Ractor` no longer raises `Ractor::IsolationError` under measurement: a project whose code or tests mention `Ractor` is probed through a receiver any Ractor can call. What a non-main Ractor runs is not recorded, and the run declares it (`ruby-ractor-unrecorded`), against the file that started the Ractor when that file is measured. Before, only code written inside a `Ractor.new` block was safe.
 - A Ruby local variable first assigned with `||=` or `&&=` (`mod ||= path.gsub!(...)`) no longer raises `NameError` under measurement: the probe read the variable before the assignment that declares it. addressable's suite failed 357 examples on it.
 - The trash a run starts emptying is empty when the run ends, however long that takes within the end's ten seconds: the sweep at the end waits for the one started with the run instead of finding the trash locked and leaving, which left files and a `__sweep-trash` process behind after Supercov exited.
