@@ -611,7 +611,9 @@ fn clone_directory(source: &Path, destination: &Path) -> bool {
     };
     // SAFETY: both arguments are valid NUL-terminated paths that outlive the
     // call, and clonefile touches nothing else.
-    let status = unsafe { libc::clonefile(source_c.as_ptr(), destination_c.as_ptr(), 0) };
+    let status = crate::fault::libc("directory-clone", libc::EXDEV, || unsafe {
+        libc::clonefile(source_c.as_ptr(), destination_c.as_ptr(), 0)
+    });
     if status == 0 {
         return true;
     }
@@ -3838,10 +3840,30 @@ mod tests {
 
     /// A nested node_modules holding what cannot be hard linked, a FIFO, is
     /// linked package by package instead: its own tools in a directory of
-    /// the copy's, and a `.bin` that is a file linked like a package.
+    /// the copy's, and a `.bin` that is a file linked like a package. Where
+    /// the file system clones directories (APFS) it is cloned first; a clone
+    /// that fails, as one across volumes does, falls back the same way.
     #[cfg(unix)]
     #[test]
     fn a_nested_dependency_tree_that_cannot_be_hard_linked_is_linked_by_package() {
+        crate::fault::during("directory-clone", linked_by_package);
+        #[cfg(target_os = "macos")]
+        {
+            let root = project();
+            let first = root.join("packages/a/node_modules");
+            fs::create_dir_all(first.join("left-pad")).unwrap();
+            fifo(&first.join("pipe"));
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+            let cloned = workspace.join("packages/a/node_modules/left-pad");
+            assert!(fs::symlink_metadata(&cloned).unwrap().file_type().is_dir());
+            lock.release().unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn linked_by_package() {
         let root = project();
         let first = root.join("packages/a/node_modules");
         fs::create_dir_all(first.join("left-pad")).unwrap();
