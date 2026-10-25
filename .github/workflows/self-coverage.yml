@@ -79,9 +79,10 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.platforms.outputs.os) }}
-        # Slice 0 is every test but the gates; slices 1..8 share the gates
-        # round-robin, in the order the harness declares them.
-        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        # Slice 0 is every test but the gates and half the CLI's; slice 9
+        # is that half, which ran last and longest in slice 0; slices 1..8
+        # share the gates by their time.
+        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       # The instrumented workspace, its build and the gates' toolchains do not
       # fit a Linux runner's free space as it comes.
@@ -203,9 +204,16 @@ jobs:
             | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
           gates=$(echo "$all" | grep -vxF -f <(echo "$elsewhere" | tr ' ' '\n'))
           slice=${{ matrix.slice }}
+          # Every second test of the CLI's, by name: slice 9's.
+          cli_half=$(awk '/^#\[test\]/ { test = 1; next }
+            test && /^fn [a-z0-9_]+\(/ { match($0, /fn [a-z0-9_]+/); print substr($0, RSTART + 3, RLENGTH - 3); test = 0; next }
+            test && !/^#\[/ { test = 0 }' crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')
           if [ "$slice" = 0 ]; then
-            skips=$(printf -- '--skip %s ' $all $tests_elsewhere)
+            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $cli_half)
             echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
+          elif [ "$slice" = 9 ]; then
+            # The whole workspace builds here too; only these tests run.
+            echo "command=cargo test --workspace -- --include-ignored --exact $(echo $cli_half)" >> "$GITHUB_OUTPUT"
           else
             # Longest first, each to the slice with the least so far, by the
             # seconds each took (a gate not timed counts as a minute): dealt

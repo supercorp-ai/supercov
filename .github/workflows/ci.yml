@@ -56,9 +56,18 @@ jobs:
   # which nothing but a release chain runs, so a stale assertion in one of them
   # sat in main through the 1.0.1 release and was found by the 1.1.0 release
   # chain -- the worst moment to find it. They run on the change now.
+  #
+  # Four groups side by side, each about a quarter of the scripts' time
+  # (scripts/engine-integrations-group.mjs): one after another they took
+  # twelve minutes, the longest job of a run.
   engine-integrations:
+    name: engine-integrations (${{ matrix.group }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -70,6 +79,10 @@ jobs:
           # The import gate reads an LLVM profile with llvm-profdata and llvm-cov.
           components: llvm-tools
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The four groups build the same Rust: one cache.
+          shared-key: engine-integrations
+          save-if: ${{ matrix.group == 1 }}
       # The Ruby server gate measures a Puma app; Supercov measures Ruby 3.3
       # and newer, and the runner's own Ruby is older.
       - uses: ruby/setup-ruby@v1
@@ -88,7 +101,7 @@ jobs:
       - run: npm ci
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps
-      - run: npm run test:engine-integrations
+      - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} 4
         env:
           SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
       # A failure here ends this commit's other runs too: no waiting on them.
