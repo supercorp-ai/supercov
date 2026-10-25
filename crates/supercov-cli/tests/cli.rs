@@ -11758,13 +11758,36 @@ fn ruby() -> Option<String> {
 
 /// Each system call that starts and contains a command, made to fail
 /// (`SUPERCOV_TEST_FAULT`): a failure to set up says what could not be done
-/// and runs nothing, and an interrupted call is made again.
+/// and runs nothing, and an interrupted call is made again. Each case checks
+/// its fault was reached: Supercov says so when one fires.
 #[cfg(unix)]
 #[test]
 fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
+    // The watchdog's own sites cannot say so: it has no standard error.
+    let silent = [
+        "watchdog-orphaned",
+        "watchdog-setsid",
+        "watchdog-read",
+        "proc-fd",
+    ];
+    let reached = |fault: &str, said: &str| {
+        for site in fault.split(',') {
+            let site = site.split([':', '=']).next().unwrap();
+            if silent.contains(&site) {
+                continue;
+            }
+            assert!(
+                said.contains(&format!("[supercov] test fault at {site}")),
+                "{site} was never reached:\n{said}"
+            );
+        }
+    };
     let project = Project::cart("start-faults");
     let run = |fault: &str| {
-        project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)])
+        let output =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        reached(fault, &output.stderr());
+        output
     };
     let watchdog = "could not start the watchdog that stops the command if Supercov is killed: it ended before the command started";
     for (fault, said) in [
@@ -11816,23 +11839,53 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         unrecorded.stderr()
     );
     // Interrupted once, then made again; no /proc to list descriptors from;
-    // a PATH for launchers that is not text, left as it was.
-    for fault in [
-        "ready-read=1",
-        "watchdog-read=1",
-        "proc-fd",
-        "launcher-path-text",
-    ] {
+    // a copy taken by another run, with no server to prepare again.
+    for fault in ["ready-read=1", "watchdog-read=1", "proc-fd", "copy-moved"] {
         let passed = run(fault);
         assert_eq!(passed.code(), 0, "{fault}: {}", passed.stderr());
     }
+    // A source tool on PATH, and a PATH for its launchers that is not text:
+    // the command keeps the PATH it had.
+    project.write_script("bin/biome", "#!/bin/sh\n");
+    let path = format!(
+        "{}:{}",
+        project.root.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let kept = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            ("SUPERCOV_TEST_FAULT", "launcher-path-text"),
+            ("PATH", &path),
+        ],
+    );
+    assert_eq!(kept.code(), 0, "{}", kept.stderr());
+    reached("launcher-path-text", &kept.stderr());
+
+    // A Go run passes the command's output on itself, so its relay is what
+    // the remaining faults reach.
+    let Some(go) = go() else {
+        eprintln!("skipping the relay's faults: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("start-faults-go");
+    project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+    project.write(
+        "w.go",
+        "package w\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "w_test.go",
+        "package w\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    project.git(&["init", "-q"]);
     // Output and errors to one file: one pipe for both, or, when it cannot be
     // made, one for each, and the file gets both either way.
-    for fault in ["output-pipe", "output-clone", ""] {
+    for fault in ["output-pipe", "output-clone"] {
         let log = project.root.join(format!("log-{fault}.txt"));
         let file = std::fs::File::create(&log).unwrap();
         let status = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
-            .args(["--", "node", "--test"])
+            .args(["--", go, "test", "-v", "./..."])
             .current_dir(&project.root)
             .env("SUPERCOV_TEST_FAULT", fault)
             .stdout(file.try_clone().unwrap())
@@ -11841,8 +11894,11 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
             .unwrap();
         let written = std::fs::read_to_string(&log).unwrap();
         assert!(status.success(), "{fault}: {written}");
-        assert!(written.contains("pass 3"), "{fault}: {written}");
-        assert!(written.contains("[supercov]"), "{fault}: {written}");
+        reached(fault, &written);
+        assert!(
+            written.contains("--- PASS: TestDouble"),
+            "{fault}: {written}"
+        );
     }
     // On a terminal: one that cannot be sized or opened leaves the command
     // the streams it had; an interrupted read is read again.
@@ -11854,12 +11910,13 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
     ] {
         let terminal = common::OnTerminal::start_with(
             &project,
-            &["--", "node", "--test"],
+            &["--", go, "test", "-v", "./..."],
             &[("SUPERCOV_TEST_FAULT", fault)],
         );
         let (code, seen) = terminal.finish();
         assert_eq!(code, 0, "{fault}: {seen}");
-        assert!(seen.contains("pass"), "{fault}: {seen}");
+        reached(fault, &seen);
+        assert!(seen.contains("PASS"), "{fault}: {seen}");
     }
 }
 

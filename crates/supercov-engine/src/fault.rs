@@ -3,8 +3,9 @@
 //! fails every call there, `site=N` only the first N, and `site:E` (or
 //! `site:E=N`) fails it with errno `E` instead of its usual error. A failing
 //! site does not make its call; it returns what the call returns when it
-//! fails. Only debug builds read the variable: a release build has no such
-//! switch. The engine's own tests set faults for one thread with [`during`].
+//! fails, and says so on standard error (`test fault at <site>`), so a test
+//! knows the site was reached. Only debug builds read the variable: a release
+//! build has no such switch. The engine's own tests set faults for one thread with [`during`].
 //! Every part of it is compiled into every debug build alike: a part only
 //! the engine's test build had would make that build's coverage count lines
 //! the others' do not, and runs of the two could not be merged.
@@ -76,12 +77,31 @@ fn failing(site: &str) -> Option<Option<i32>> {
             .with(|during| take(&during.borrow(), site))
             .or_else(|| take(&FAULTS, site))
             .flatten()
+            .inspect(|_| announce(site))
     }
     #[cfg(not(any(test, debug_assertions)))]
     {
         let _ = site;
         None
     }
+}
+
+/// Say that the call at `site` failed by request. Written to the descriptor
+/// itself: a child forked to exec a command may not allocate or take the
+/// lock `eprintln!` takes.
+#[cfg(any(test, debug_assertions))]
+fn announce(site: &str) {
+    #[cfg(unix)]
+    for part in [
+        b"[supercov] test fault at ".as_slice(),
+        site.as_bytes(),
+        b"\n",
+    ] {
+        // SAFETY: a write of a live buffer to standard error.
+        unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
+    }
+    #[cfg(not(unix))]
+    eprintln!("[supercov] test fault at {site}");
 }
 
 /// Of the faults `faults`, whether the one at `site` fails this time, and

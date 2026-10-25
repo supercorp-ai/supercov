@@ -228,13 +228,16 @@ test('a test that reaches no server', async () => {
   // test whose servers publish nothing.
   const moved = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'copy-moved' });
   assert.equal(moved.status, 0, moved.stdout + moved.stderr);
+  assert.match(moved.stderr, /test fault at copy-moved/u, moved.stderr);
   assert.match(moved.stderr, /Python server coverage: 1 test/u, moved.stderr);
   assert.match(moved.stderr, /Ruby server coverage: 1 test/u, moved.stderr);
   const unpublishable = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'server-publish' });
   assert.notEqual(unpublishable.status, 0, unpublishable.stdout + unpublishable.stderr);
+  assert.match(unpublishable.stderr, /test fault at server-publish/u, unpublishable.stderr);
   assert.match(unpublishable.stderr, /server's run could not be published: injected fault at server-publish/u, unpublishable.stderr);
   const unpublished = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given'], { SUPERCOV_TEST_FAULT: 'server-unpublished' });
   assert.notEqual(unpublished.status, 0, unpublished.stdout + unpublished.stderr);
+  assert.match(unpublished.stderr, /test fault at server-unpublished/u, unpublished.stderr);
   assert.match(unpublished.stderr, /no run was published/u, unpublished.stderr);
   // A failing test still publishes what it reached, and the run says it failed.
   const failing = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given']);

@@ -87,6 +87,7 @@ try {
   // is published without it.
   const unrecorded = spawnSync(binary, ['--', 'npx', 'playwright', 'test'], { cwd: root, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', CI: '1', SUPERCOV_TEST_FAULT: 'support-inputs' } });
   assert.equal(unrecorded.status, 0, unrecorded.stdout + unrecorded.stderr);
+  assert.match(unrecorded.stderr, /test fault at support-inputs/u, unrecorded.stderr);
   console.log('[mock-reach] a changed mock affects only the tests it served, and measuring those alone merges into the suite\'s run');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'mock-reach-'))) rmSync(root, { recursive: true, force: true });

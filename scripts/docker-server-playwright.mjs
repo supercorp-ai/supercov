@@ -159,6 +159,7 @@ try {
     for (const fault of ['compose-context-outside', 'compose-build']) {
       const measured = run(cwd, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: fault });
       assert.equal(measured.status, 0, `${fault}: ${measured.stdout}${measured.stderr}`);
+      assert.ok(measured.stderr.includes(`test fault at ${fault}`), `${fault} was never reached:\n${measured.stderr}`);
     }
   }
   console.log('[docker-server-playwright] Go, Java, Node, Python and Ruby servers compose builds from the copy are measured, each test credited its own work, and left stopped');
