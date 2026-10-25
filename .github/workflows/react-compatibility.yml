@@ -39,12 +39,28 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The two Node versions build the same Rust: one cache.
+          shared-key: react-focused
+          save-if: ${{ matrix.node == 24 }}
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm ci
-        working-directory: examples/react-verification
-      - run: npx playwright install --with-deps chromium
-        working-directory: examples/react-verification
+      # Chromium's system libraries, once and from the Actions cache (fetched
+      # from the Ubuntu mirror, they took six minutes of a run), and the
+      # Chromium of each Playwright pinned: the repository's and the
+      # example's, read from its lockfile. `test:react` installs the
+      # example's packages itself.
+      - uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+      - run: |
+          mkdir -p ~/apt-archives/partial
+          printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
+            | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+          npx playwright install --with-deps chromium
+          sudo chown -R "$USER" ~/apt-archives
+          npx -y "playwright@$(jq -r '.packages["node_modules/playwright-core"].version' examples/react-verification/package-lock.json)" install chromium
       # The runtime tests and the direct Jest and Vitest scripts run in CI.
       - run: cargo build -p supercov
       - run: npm run test:react
@@ -72,6 +88,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build -p supercov
       - run: node scripts/react-native-compatibility.mjs
       # A failure here ends this commit's other runs too: no waiting on them.
