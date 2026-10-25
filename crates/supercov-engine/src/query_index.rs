@@ -310,15 +310,12 @@ pub fn write_query_index(
 }
 
 /// The evidence an index says it was built from, its digest and length, read
-/// from its header alone. Opening the index checks them against what is
-/// expected, as always; this is what to expect when nothing has changed since
-/// the index was verified (`run_store`).
+/// from its header alone: what to expect when nothing has changed since the
+/// index was verified (`run_store`). Opening the index checks the header,
+/// its checksum included, so a damaged one is refused there.
 pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError> {
     let mut header = [0_u8; QUERY_INDEX_HEADER_SIZE];
     File::open(path)?.read_exact(&mut header)?;
-    if Sha256::digest(&header[..HEADER_CHECKSUM_OFFSET])[..] != header[HEADER_CHECKSUM_OFFSET..] {
-        return Err(QueryIndexError::InvalidHeader("checksum"));
-    }
     let sha256 = header[48..80].try_into().expect("a 32-byte slice");
     Ok((sha256, get_u64(&header, 24)?))
 }
