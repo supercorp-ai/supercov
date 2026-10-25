@@ -827,7 +827,11 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
             if !compare_run_integrity(Some(recorded), &current).stale {
                 return true;
             }
-            let files = supercov_engine::source_manifest::load_manifest(run).ok();
+            let files = supercov_engine::fault::or(
+                "manifest-unreadable",
+                || None,
+                || supercov_engine::source_manifest::load_manifest(run).ok(),
+            );
             // What is measured has moved on: nothing makes this run a
             // record of it. Said, with the files, so that a run left out
             // is not a run silently missing from the total.

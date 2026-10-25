@@ -10521,6 +10521,24 @@ fn a_run_left_out_of_a_merge_or_read_stale_says_what_moved() {
     );
     assert!(!said.contains("test/cart.test.js"), "{said}");
 
+    // A measured file edited, with no record of the run's files to judge it
+    // by: left out, as the measured source has changed.
+    let project = Project::cart("merge-no-record");
+    let run = project.measure(&[]);
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
+    let said = project
+        .supercov_with(
+            &["merge"],
+            &[("SUPERCOV_TEST_FAULT", "manifest-unreadable")],
+        )
+        .exits(2);
+    assert!(
+        said.contains(&format!(
+            "left out {run} (node --test): the source has changed. Measure it again"
+        )),
+        "{said}"
+    );
+
     // A measured file removed whose name reads as configuration.
     let project = Project::cart("merge-config-named");
     project.write("src/app.config.js", "export const rate = 1;\n");
