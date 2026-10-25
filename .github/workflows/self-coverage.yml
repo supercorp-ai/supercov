@@ -132,6 +132,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # What the Maven and Gradle tests resolve, kept: fetched each run, they
+      # took nine minutes of one slice.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: jvm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/supercov-engine/tests/jvm_*.rs', 'scripts/*jvm*.mjs', 'scripts/java-*.mjs') }}
+          restore-keys: jvm-${{ runner.os }}-${{ runner.arch }}-
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -222,16 +232,22 @@ jobs:
             | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
           gates=$(echo "$all" | grep -vxF -f <(echo "$elsewhere" | tr ' ' '\n'))
           slice=${{ matrix.slice }}
-          # Every second test of the CLI's, by name: slice 9's.
-          cli_half=$(awk '/^#\[test\]/ { test = 1; next }
-            test && /^fn [a-z0-9_]+\(/ { match($0, /fn [a-z0-9_]+/); print substr($0, RSTART + 3, RLENGTH - 3); test = 0; next }
-            test && !/^#\[/ { test = 0 }' crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')
+          # The tests a file declares, by name.
+          tests_of() {
+            awk '/^#\[test\]/ { test = 1; next }
+              test && /^fn [a-z0-9_]+\(/ { match($0, /fn [a-z0-9_]+/); print substr($0, RSTART + 3, RLENGTH - 3); test = 0; next }
+              test && !/^#\[/ { test = 0 }' "$1"
+          }
+          # Slice 9's: every second test of the CLI's, and the Maven, Gradle
+          # and overhead tests, the longest test binaries of slice 0.
+          moved="$(tests_of crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')
+          $(for file in jvm_run jvm_frontend jvm_overhead go_overhead; do tests_of "crates/supercov-engine/tests/$file.rs"; done)"
           if [ "$slice" = 0 ]; then
-            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $cli_half)
+            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $moved)
             echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
           elif [ "$slice" = 9 ]; then
             # The whole workspace builds here too; only these tests run.
-            echo "command=cargo test --workspace -- --include-ignored --exact $(echo $cli_half)" >> "$GITHUB_OUTPUT"
+            echo "command=cargo test --workspace -- --include-ignored --exact $(echo $moved)" >> "$GITHUB_OUTPUT"
           else
             # Longest first, each to the slice with the least so far, by the
             # seconds each took (a gate not timed counts as a minute): dealt
