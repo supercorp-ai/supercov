@@ -99,8 +99,20 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: npm ci
-      # Three of the scripts drive a real browser through Playwright.
-      - run: npx playwright install --with-deps
+      # The scripts drive Chromium alone: only its system libraries, not
+      # Firefox's and WebKit's media stack, and those kept in the Actions
+      # cache. Fetched every run, one mirror served them at tens of kB/s and
+      # held a group for half an hour.
+      - uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+      - run: |
+          mkdir -p ~/apt-archives/partial
+          printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
+            | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+          npx playwright install --with-deps chromium
+          sudo chown -R "$USER" ~/apt-archives
       - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} 4
         env:
           SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
@@ -224,7 +236,18 @@ jobs:
         with:
           tool: wasm-bindgen@0.2.129
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      # Chromium's system libraries kept in the Actions cache, as in
+      # engine-integrations.
+      - uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+      - run: |
+          mkdir -p ~/apt-archives/partial
+          printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
+            | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+          npx playwright install --with-deps chromium
+          sudo chown -R "$USER" ~/apt-archives
       - run: cargo build -p supercov
       - run: node scripts/rust-wasm-js.mjs
         env:
