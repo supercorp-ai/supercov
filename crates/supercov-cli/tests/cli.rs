@@ -11969,9 +11969,14 @@ fn a_sweep_that_outlasts_the_command_empties_the_trash_after_it() {
     }
     let measured = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "sweep-impatient")],
+        &[("SUPERCOV_TEST_FAULT", "sweep-impatient,sweep-outlasts")],
     );
     assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stderr().contains("test fault at sweep-outlasts"),
+        "{}",
+        measured.stderr()
+    );
     let started = std::time::Instant::now();
     while big.exists() {
         assert!(

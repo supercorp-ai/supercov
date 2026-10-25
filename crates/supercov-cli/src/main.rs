@@ -3611,9 +3611,15 @@ fn finish_trash_sweep(root: &Path) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
-    if let Some(child) = start
-        && wait_until(child, deadline).is_some()
-    {
+    let still_sweeping = start.and_then(|child| {
+        // A test makes it still be at it, however fast the trash empties.
+        if supercov_engine::fault::injected("sweep-outlasts") {
+            Some(child)
+        } else {
+            wait_until(child, deadline)
+        }
+    });
+    if still_sweeping.is_some() {
         // Still at it: it goes on by itself, as a sweep given up on does.
         return;
     }
