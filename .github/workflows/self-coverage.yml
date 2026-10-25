@@ -151,13 +151,29 @@ jobs:
             ~/.cache/ms-playwright
             ~/Library/Caches/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
+      # The system libraries the browsers need are 142 MB of packages a
+      # slice fetched every run; one run's mirror gave them at 74 kB/s, 32
+      # minutes. Kept, and apt installs from what is kept.
+      - uses: actions/cache@v4
+        if: runner.os == 'Linux'
+        with:
+          path: ~/apt-archives
+          key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
       # Each fixture pins its own Playwright, and each version launches its
       # own browser builds: install them for every version a lockfile names.
       - name: Install every pinned Playwright's browsers
         run: |
           versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
+          if [ "${{ runner.os }}" = Linux ]; then
+            mkdir -p ~/apt-archives/partial
+            printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
+              | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+          fi
           # The system's libraries by the newest, which knows this system.
           npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
+          if [ "${{ runner.os }}" = Linux ]; then
+            sudo chown -R "$USER" ~/apt-archives
+          fi
           for version in $versions; do
             # A version older than the runner's OS knows no browser build for
             # it -- the Next fixture keeps the reporter's 1.60 -- and fetches
@@ -191,7 +207,23 @@ jobs:
             skips=$(printf -- '--skip %s ' $all $tests_elsewhere)
             echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
           else
-            picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '(NR - 1) % n == s - 1' | tr '\n' ' ')
+            # Longest first, each to the slice with the least so far, by the
+            # seconds each took (a gate not timed counts as a minute): dealt
+            # in turn, one slice drew 487 s of gates and another 81 s.
+            picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '
+              FILENAME == ".github/gate-seconds.tsv" { if ($0 !~ /^#/) seconds[$1] = $2; next }
+              { gate[++count] = $1; cost[count] = ($1 in seconds) ? seconds[$1] : 60 }
+              END {
+                for (i = 1; i <= count; i++) order[i] = i
+                for (i = 1; i <= count; i++) for (j = i + 1; j <= count; j++)
+                  if (cost[order[j]] > cost[order[i]] || (cost[order[j]] == cost[order[i]] && gate[order[j]] < gate[order[i]])) { t = order[i]; order[i] = order[j]; order[j] = t }
+                for (i = 1; i <= count; i++) {
+                  best = 1
+                  for (k = 2; k <= n; k++) if (load[k] < load[best]) best = k
+                  load[best] += cost[order[i]]
+                  if (best == s) printf "%s ", gate[order[i]]
+                }
+              }' .github/gate-seconds.tsv -)
             # The whole workspace builds in every slice, so every run counts
             # the same files; only the named gates run.
             echo "command=cargo test --workspace -- --include-ignored --exact $picked" >> "$GITHUB_OUTPUT"

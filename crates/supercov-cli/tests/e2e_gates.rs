@@ -24,7 +24,7 @@ fn repository() -> PathBuf {
         .expect("the repository root")
 }
 
-fn gate(script: &str, arguments: &[&str]) {
+fn gate(name: &str, script: &str, arguments: &[&str]) {
     let turn = File::create(std::env::temp_dir().join("supercov-e2e-gates.lock"))
         .expect("the gate lock file");
     turn.lock().expect("a turn at the gates");
@@ -45,13 +45,7 @@ fn gate(script: &str, arguments: &[&str]) {
             .append(true)
             .open(path)
             .expect("the gate timings file");
-        writeln!(
-            timings,
-            "{script} {}\t{}",
-            arguments.join(" "),
-            started.elapsed().as_secs()
-        )
-        .expect("a gate timing");
+        writeln!(timings, "{name}\t{}", started.elapsed().as_secs()).expect("a gate timing");
     }
     assert!(
         output.status.success(),
@@ -68,7 +62,7 @@ macro_rules! gates {
             #[test]
             #[ignore = "an end-to-end gate: needs its toolchains and takes minutes"]
             fn $name() {
-                gate($script, &[$($($argument),*)?]);
+                gate(stringify!($name), $script, &[$($($argument),*)?]);
             }
         )*
     };
