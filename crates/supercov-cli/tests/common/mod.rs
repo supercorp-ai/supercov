@@ -454,7 +454,7 @@ pub fn answer_taint(id: &str, question: &Value) -> Value {
     if let Some((_, label)) = id.split_once('_').filter(|_| id.starts_with('f')) {
         return match label {
             "takes_outside" => {
-                if function == "handler" || function == "route" {
+                if matches!(function, "handler" | "route" | "lookup") {
                     yes
                 } else {
                     no
