@@ -1895,6 +1895,38 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    /// A connection the inspector resets, as a Worker's runtime killed
+    /// mid-run leaves it, ends the session: only a read that timed out is
+    /// waited past.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_ends_when_its_connection_is_reset() {
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            TAKE_PATIENCE,
+            |socket, _, _| {
+                use std::os::fd::AsRawFd;
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                // No lingering: closed, the connection is reset, not ended.
+                let linger = libc::linger {
+                    l_onoff: 1,
+                    l_linger: 0,
+                };
+                let set = unsafe {
+                    libc::setsockopt(
+                        socket.get_ref().as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_LINGER,
+                        (&raw const linger).cast(),
+                        std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                    )
+                };
+                assert_eq!(set, 0);
+            },
+        );
+        assert_eq!(written, "");
+    }
+
     /// A poller whose thread never started has nothing to wait for.
     #[test]
     fn a_poller_without_its_thread_finishes_at_once() {
