@@ -151,6 +151,16 @@ try {
       assert.equal(closed, '', `${entry.language}: directories the run cannot empty:\n${closed}`);
     }
   }
+  // A service whose build context is outside the copy, or whose build from
+  // the copy fails (SUPERCOV_TEST_FAULT), is left as compose builds it: the
+  // run goes on.
+  if (!process.env.ONLY || process.env.ONLY === 'JavaScript') {
+    const cwd = resolve(root, 'javascript');
+    for (const fault of ['compose-context-outside', 'compose-build']) {
+      const measured = run(cwd, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: fault });
+      assert.equal(measured.status, 0, `${fault}: ${measured.stdout}${measured.stderr}`);
+    }
+  }
   console.log('[docker-server-playwright] Go, Java, Node, Python and Ruby servers compose builds from the copy are measured, each test credited its own work, and left stopped');
 } finally {
   for (const project of projects)

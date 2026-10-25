@@ -1359,8 +1359,10 @@ fn spawn_contained(
                 {
                     libc::_exit(125);
                 }
+                // The pipes were made while 0 to 2 were open, so neither is
+                // 0; one may be 3, now the readiness pipe's copy.
                 for descriptor in [read_descriptor, ready_write_descriptor, 1, 2] {
-                    if descriptor != 0 && descriptor != 3 {
+                    if descriptor != 3 {
                         let _ = libc::close(descriptor);
                     }
                 }

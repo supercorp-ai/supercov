@@ -299,9 +299,8 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
                         let _ = relay_connection(client, &shared);
                     });
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            // Nothing waiting, or a connection that failed before it was
+            // taken: look again shortly.
             Err(_) => std::thread::sleep(Duration::from_millis(10)),
         }
     }
@@ -834,19 +833,29 @@ impl Shared {
         }
         let resolved = serde_json::from_slice::<Value>(&output.stdout).ok()?;
         let context = resolved["services"][service]["build"]["context"].as_str()?;
-        if !Path::new(context).starts_with(&self.settings.copy) {
+        if crate::fault::or(
+            "compose-context-outside",
+            || true,
+            || !Path::new(context).starts_with(&self.settings.copy),
+        ) {
             return Some(false);
         }
-        let built = Command::new("docker")
-            .args(&arguments)
-            .args(["build", service])
-            .env("DOCKER_HOST", format!("unix://{}", self.upstream.display()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok()?
-            .success();
+        let built = crate::fault::or(
+            "compose-build",
+            || Some(false),
+            || {
+                Command::new("docker")
+                    .args(&arguments)
+                    .args(["build", service])
+                    .env("DOCKER_HOST", format!("unix://{}", self.upstream.display()))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .ok()
+                    .map(|status| status.success())
+            },
+        )?;
         if built {
             // Never poisoned: nothing that holds it can panic.
             self.built
