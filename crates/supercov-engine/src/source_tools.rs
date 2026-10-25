@@ -496,7 +496,9 @@ fn reconcile_directory(
             link_file(&from, &to)?;
         } else if file_type.is_symlink()
             && fs::symlink_metadata(&to).is_err()
-            && let Ok(target) = fs::read_link(&from)
+            && let Ok(target) = crate::fault::io("view-link", io::ErrorKind::NotFound, || {
+                fs::read_link(&from)
+            })
         {
             link_to(&target, &to)?;
         }
@@ -1186,6 +1188,9 @@ mod tests {
         // the workspace's.
         fs::write(view.join(".git/FETCH_HEAD"), "").unwrap();
         std::os::unix::fs::symlink("src/a.js", view.join("main")).unwrap();
+        // One gone again before it could be read is passed over.
+        crate::fault::during("view-link", || reconcile(&workspace, &view, &state)).unwrap();
+        assert!(fs::symlink_metadata(workspace.join("main")).is_err());
         reconcile(&workspace, &view, &state).unwrap();
         assert!(workspace.join(".git/FETCH_HEAD").is_file());
         assert_eq!(

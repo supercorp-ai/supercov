@@ -11845,6 +11845,43 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
     }
 }
 
+/// A Rust run whose evidence cannot be published says so, and leaves none
+/// of its work behind, even when its copy cannot be found again to clear.
+#[test]
+fn a_rust_run_that_cannot_publish_says_so_and_clears_its_work() {
+    let project = Project::empty("rust-unpublished");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn half(x: i32) -> i32 { x / 2 }\n#[cfg(test)]\nmod tests { #[test] fn h() { assert_eq!(super::half(4), 2); } }\n",
+    );
+    project.git(&["init", "-q"]);
+    for fault in [
+        "published-copy-differs",
+        "published-copy-differs,cleanup-copy-path",
+    ] {
+        let failed =
+            project.supercov_with(&["--", "cargo", "test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        assert_ne!(failed.code(), 0, "{fault}: {}", failed.stderr());
+        assert!(
+            failed
+                .stderr()
+                .contains("evidence changed during publication"),
+            "{fault}: {}",
+            failed.stderr()
+        );
+    }
+    let runs = project.supercov(&["runs", "--json"]).json();
+    assert_eq!(
+        runs["data"]["runs"].as_array().map(Vec::len),
+        Some(0),
+        "{runs}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn the_parent_death_watchdog_kills_its_parents_group_when_its_input_ends() {

@@ -566,7 +566,11 @@ fn run_direct_rust_timed(
     if result.is_err() {
         let _ =
             remove_stored_tree_deferred(&root, &root.join(".supercov/work").join(&request.run_id));
-        if let Ok(workspace) = cached_workspace_path(&root, &lock) {
+        if let Ok(workspace) = crate::fault::or(
+            "cleanup-copy-path",
+            || Err(crate::workspace::WorkspaceError::UnsafePath(root.clone())),
+            || cached_workspace_path(&root, &lock),
+        ) {
             let _ = remove_stored_tree_deferred(
                 &root,
                 &workspace
