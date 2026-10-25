@@ -177,7 +177,10 @@ jobs:
       - run: node scripts/packed-npx-integration.mjs
         env:
           SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
-      - run: npm run benchmark:check
+      # The benchmark, likewise with the release build above.
+      - run: node scripts/rust-transform-benchmark.mjs
+        env:
+          SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
