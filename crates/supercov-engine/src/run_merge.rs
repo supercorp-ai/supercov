@@ -404,7 +404,10 @@ fn settle_unrun_workers(manifests: &[Option<&[u8]>]) -> (Vec<Option<Vec<u8>>>, B
         .zip(parsed)
         .map(|(raw, parsed)| match parsed {
             Some(mut manifest) => {
-                if let Some(limitations) = manifest["limitations"].as_array_mut() {
+                if let Some(limitations) = manifest
+                    .get_mut("limitations")
+                    .and_then(Value::as_array_mut)
+                {
                     limitations.retain(|limitation| {
                         limitation["id"]
                             .as_str()
