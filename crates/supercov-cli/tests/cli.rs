@@ -11788,8 +11788,23 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
             runs["data"]["runs"].as_array().is_some_and(Vec::is_empty)
         }
     );
-    // Interrupted once, then made again; no /proc to list descriptors from.
-    for fault in ["ready-read=1", "watchdog-read=1", "proc-fd"] {
+    // A command that could not start, its run's state not recorded either:
+    // the failure is still the one said.
+    let unrecorded = run("command-setpgid,failed-run-state");
+    assert_eq!(unrecorded.code(), 1, "{}", unrecorded.stderr());
+    assert!(
+        unrecorded.stderr().contains("could not spawn node"),
+        "{}",
+        unrecorded.stderr()
+    );
+    // Interrupted once, then made again; no /proc to list descriptors from;
+    // a PATH for launchers that is not text, left as it was.
+    for fault in [
+        "ready-read=1",
+        "watchdog-read=1",
+        "proc-fd",
+        "launcher-path-text",
+    ] {
         let passed = run(fault);
         assert_eq!(passed.code(), 0, "{fault}: {}", passed.stderr());
     }

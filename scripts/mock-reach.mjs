@@ -83,6 +83,10 @@ try {
   const summary = run(binary, ['runs', 'latest']).stdout;
   assert.match(summary, /merged across: tests\/mocks\/pay-api\/answers\.json \(the 1 test\(s\)/u, summary);
   assert.match(summary, /Total {7}2/u, summary);
+  // What the mocks read cannot be recorded (SUPERCOV_TEST_FAULT): the run
+  // is published without it.
+  const unrecorded = spawnSync(binary, ['--', 'npx', 'playwright', 'test'], { cwd: root, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', CI: '1', SUPERCOV_TEST_FAULT: 'support-inputs' } });
+  assert.equal(unrecorded.status, 0, unrecorded.stdout + unrecorded.stderr);
   console.log('[mock-reach] a changed mock affects only the tests it served, and measuring those alone merges into the suite\'s run');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'mock-reach-'))) rmSync(root, { recursive: true, force: true });

@@ -643,7 +643,14 @@ pub fn run_direct_javascript(
             Ok(servers)
         }
     };
-    let preparing_servers = std::thread::spawn(prepare_servers(prior_workspace.clone()));
+    // Where the servers are prepared for: the copy as it was found, which a
+    // run beside this one may take first.
+    let prepared_for = crate::fault::or(
+        "copy-moved",
+        || prior_workspace.with_file_name("moved"),
+        || prior_workspace.clone(),
+    );
+    let preparing_servers = std::thread::spawn(prepare_servers(prepared_for.clone()));
 
     let workspace_started = Instant::now();
     let workspace_progress = crate::progress::ProgressLine::start("preparing isolated workspace");
@@ -712,7 +719,7 @@ pub fn run_direct_javascript(
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
     // Prepared for where the workspace was to be; one moved since is
     // prepared again for where it is.
-    if workspace != prior_workspace && !servers.is_empty() {
+    if workspace != prepared_for && !servers.is_empty() {
         servers = prepare_servers(workspace.clone())()?;
     }
     // Go, Java and Kotlin are rewritten in the copy, so they wait for it.
@@ -901,7 +908,7 @@ pub fn run_direct_javascript(
     // A tool that judges source as text, started without a package manager
     // or installed outside the project, is found through PATH.
     if let Some(path) = crate::source_tools::path_with_launchers(&workspace)
-        && let Some(path) = path.to_str()
+        && let Some(path) = crate::fault::or("launcher-path-text", || None, || path.to_str())
     {
         overrides.insert("PATH".into(), path.to_owned());
     }
@@ -1016,14 +1023,20 @@ pub fn run_direct_javascript(
         Ok(execution) => execution,
         Err(error) => {
             let message = error.to_string();
-            let state_updated = update_run_state(
-                &root,
-                &run_id,
-                RunStateStatus::Failed,
-                &started_at,
-                Some(message.clone()),
-            )
-            .is_ok();
+            let state_updated = crate::fault::or(
+                "failed-run-state",
+                || false,
+                || {
+                    update_run_state(
+                        &root,
+                        &run_id,
+                        RunStateStatus::Failed,
+                        &started_at,
+                        Some(message.clone()),
+                    )
+                    .is_ok()
+                },
+            );
             if state_updated {
                 cleanup.mark_terminal();
             }
@@ -1065,7 +1078,11 @@ pub fn run_direct_javascript(
     // snapshots, generated fixtures, and reports belong in the repository,
     // not in the cache. Deletions and instrumented-source rewrites are
     // reported, never propagated.
-    if let Some(baseline) = output_baseline.borrow().as_ref() {
+    {
+        // Taken as the first phase began, which a run that got here did.
+        let baseline = &output_baseline
+            .into_inner()
+            .expect("the first phase took the output baseline");
         let protected = project
             .source_files
             .iter()
@@ -1184,16 +1201,29 @@ pub fn run_direct_javascript(
                 companion_run_id(&run_id, server_runs.len() + 1)
             };
             let language = server.language();
-            match server.publish(
-                &root,
-                &run_id,
-                RunMetadata {
-                    id: id.clone(),
-                    ..metadata.clone()
+            let published_run = crate::fault::or(
+                "server-unpublished",
+                || Ok(None),
+                || {
+                    crate::fault::or(
+                        "server-publish",
+                        || Err("injected fault at server-publish".to_owned()),
+                        || {
+                            server.publish(
+                                &root,
+                                &run_id,
+                                RunMetadata {
+                                    id: id.clone(),
+                                    ..metadata.clone()
+                                },
+                                &served,
+                                diagnostics,
+                            )
+                        },
+                    )
                 },
-                &served,
-                diagnostics,
-            ) {
+            );
+            match published_run {
                 Ok(Some(run)) if published.is_none() => published = Some(run),
                 Ok(Some((directory, _))) => {
                     finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
@@ -1299,10 +1329,16 @@ pub fn run_direct_javascript(
     // code -- is seen, and judged by the tests that reached it.
     let mut recorded_inputs = source_inputs.clone();
     if let Some(support) = &support
-        && let Ok(reached) = crate::source_capture::capture(
-            &root,
-            "javascript",
-            support.files.keys().map(PathBuf::from),
+        && let Ok(reached) = crate::fault::or(
+            "support-inputs",
+            || Err("injected fault at support-inputs".to_owned()),
+            || {
+                crate::source_capture::capture(
+                    &root,
+                    "javascript",
+                    support.files.keys().map(PathBuf::from),
+                )
+            },
         )
     {
         for (file, text) in reached.files {
