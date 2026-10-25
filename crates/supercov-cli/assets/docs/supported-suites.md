@@ -258,13 +258,20 @@ dev` builds it in the copy as usual. The tests find a `wrangler` of
 Supercov's first on `PATH`: for `wrangler dev` it picks an inspector port,
 starts a reader of the Worker through it, and then runs your `wrangler` with
 the test's own arguments, process and signals. What the Worker ran is
-credited to the test that started it, exactly, as its own coverage. The
-Worker crate counts though `cargo test` never compiles it, once a test has
-run it. This needs a `wrangler` on `PATH` when the run starts; without one,
-nothing is put in front of it. A run whose tests start no Worker still compiles the crate under
-`cargo test --workspace`; its files then say they are a Rust Worker no test
-started, in `gaps` and the file view, rather than reading as code the tests
-missed.
+credited to the test that started it, exactly, as its own coverage. This
+needs a `wrangler` on `PATH` when the run starts; without one, nothing is
+put in front of it.
+
+A Worker crate's code is what worker-build compiles: for wasm, as a release
+unless its `[build]` command passes `--dev`, never as a test, with the
+features the command and the crate's defaults enable. Code a
+`#[cfg(target_arch = "wasm32")]`, a feature or `debug_assertions` keeps out
+of that build is not counted, and wasm-only code is, whatever target
+`cargo test` builds the rest for. The crate counts whether or not
+`cargo test` compiles it (`cargo test -p host` does not) and whether or not
+a test started its Worker, so every run of the workspace has one
+denominator. Where no test of a run started a Worker, its files say so, in
+`gaps` and the file view, rather than reading as code the tests missed.
 
 `wrangler dev --remote` runs the Worker on Cloudflare's edge, and wrangler
 opens no inspector into it there, so nothing can read what it ran. A test
@@ -275,8 +282,8 @@ measure it.
 Code in a Durable Object (`#[durable_object]` and its `impl DurableObject`)
 is measured like the rest of the Worker and credited to the test whose
 requests reached it. A workspace with several Worker crates counts each crate
-once, and runs of different tests merge with `supercov merge` under one
-denominator. Tests that run a Worker only when its `build/` exists, as a test
+once, and runs of different tests -- each starting different Workers, or
+none -- merge with `supercov merge`. Tests that run a Worker only when its `build/` exists, as a test
 kit that will not start an unbuilt Worker does, run it: a `build/` you made
 beforehand and keep out of git is in the copy, and `wrangler dev` builds the
 crate with probes over it there.

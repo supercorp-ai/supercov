@@ -12,7 +12,7 @@
 //! what no single test's window holds is the run's background.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
@@ -360,6 +360,74 @@ pub(crate) fn wasm_target_cfg(
         .output()
         .ok()?;
     target_cfg_of(&output)
+}
+
+/// How the Rust Worker in `package` -- a wrangler configuration beside its
+/// Cargo.toml whose build runs worker-build -- compiles its crate: for wasm,
+/// never as a test, as a release build unless the command asks for `--dev`,
+/// with the features the command and the package's own defaults enable.
+/// None for a package that is no Worker, or where rustc cannot say what
+/// wasm is.
+pub(crate) fn worker_build_cfg(
+    package: &Path,
+    features: &BTreeMap<String, Vec<String>>,
+) -> Option<crate::rust_instrumenter::TargetCfg> {
+    let command = ["wrangler.toml", "wrangler.json", "wrangler.jsonc"]
+        .iter()
+        .filter_map(|name| read_config(&package.join(name)))
+        .filter_map(|(_, document)| build_command(&document))
+        .find(|command| command.contains("worker-build"))?;
+    let target = wasm_target_cfg(package)?;
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    Some(target.for_build(
+        false,
+        words.contains(&"--dev"),
+        enabled_features(&words, features),
+    ))
+}
+
+/// The features a build command enables in a package with `features`:
+/// those it names, the package's defaults unless it says not to, and what
+/// each of those enables in turn.
+fn enabled_features(words: &[&str], features: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
+    if words.contains(&"--all-features") {
+        return features.keys().cloned().collect();
+    }
+    let mut pending = Vec::new();
+    if !words.contains(&"--no-default-features") {
+        pending.push("default".to_owned());
+    }
+    for (index, word) in words.iter().enumerate() {
+        let named = match word.split_once('=') {
+            Some(("--features", list)) => Some(list),
+            _ if matches!(*word, "--features" | "-F") => words.get(index + 1).copied(),
+            _ => None,
+        };
+        pending.extend(
+            named
+                .into_iter()
+                .flat_map(|list| list.split(','))
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    let mut enabled = BTreeSet::new();
+    while let Some(feature) = pending.pop() {
+        // `dep:name` turns on a dependency, not a feature; `name/feature` a
+        // dependency's feature, and `name` with it unless written `name?/`.
+        let feature = match feature.split_once('/') {
+            Some((name, _)) if !name.ends_with('?') => name.to_owned(),
+            Some(_) => continue,
+            None => feature,
+        };
+        if feature.starts_with("dep:") || !features.contains_key(&feature) {
+            continue;
+        }
+        if enabled.insert(feature.clone()) {
+            pending.extend(features[&feature].iter().cloned());
+        }
+    }
+    enabled
 }
 
 /// The cfg values `rustc --print cfg` answered with, if it answered.
@@ -1216,16 +1284,6 @@ pub(crate) fn region_token(bytes: &[u8]) -> Option<&str> {
 }
 
 /// The root of the Cargo workspace `directory`'s crate belongs to.
-/// The directories, relative to `workspace` and `/`-separated, of the Rust
-/// Workers in it: each wrangler configuration that builds with worker-build.
-pub(crate) fn worker_crate_directories(workspace: &Path) -> Vec<String> {
-    worker_configs(workspace)
-        .iter()
-        .filter_map(|config| config.parent()?.strip_prefix(workspace).ok())
-        .map(|directory| directory.to_string_lossy().replace('\\', "/"))
-        .collect()
-}
-
 pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
@@ -1925,6 +1983,83 @@ mod tests {
             },
         );
         assert_eq!(written, "");
+    }
+
+    /// A build command enables what it names and the package's defaults,
+    /// unless it says otherwise, and what each of those enables in turn.
+    #[test]
+    fn a_worker_builds_the_features_its_command_and_defaults_enable() {
+        let features = [
+            (
+                "default",
+                &["audit", "dep:serde", "tracing/log", "metrics?/fast", "nope"][..],
+            ),
+            ("audit", &[]),
+            ("tracing", &[]),
+            ("metrics", &[]),
+            ("extra", &["audit"]),
+            ("unused", &[]),
+        ]
+        .into_iter()
+        .map(|(name, enables)| {
+            (
+                name.to_owned(),
+                enables.iter().map(|&feature| feature.to_owned()).collect(),
+            )
+        })
+        .collect::<BTreeMap<String, Vec<String>>>();
+        let enabled = |command: &str| {
+            enabled_features(&command.split_whitespace().collect::<Vec<_>>(), &features)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            enabled("worker-build --release"),
+            ["audit", "default", "tracing"]
+        );
+        assert_eq!(
+            enabled("worker-build --no-default-features --features extra,audit"),
+            ["audit", "extra"]
+        );
+        assert_eq!(
+            enabled("worker-build --no-default-features --features=unused, -F tracing --features"),
+            ["tracing", "unused"]
+        );
+        assert_eq!(enabled("worker-build --all-features").len(), features.len());
+    }
+
+    /// Only a package whose wrangler configuration builds with worker-build
+    /// is a Worker's, and its build is a release unless it asks for `--dev`.
+    #[test]
+    fn a_package_is_a_workers_when_its_configuration_runs_worker_build() {
+        let package = temporary("worker-build-cfg");
+        let features = BTreeMap::from([("audit".to_owned(), Vec::new())]);
+        assert!(worker_build_cfg(&package, &features).is_none());
+        fs::write(
+            package.join("wrangler.toml"),
+            "[build]\ncommand = \"npm run build\"\n",
+        )
+        .unwrap();
+        assert!(worker_build_cfg(&package, &features).is_none());
+        fs::write(
+            package.join("wrangler.toml"),
+            "[build]\ncommand = \"worker-build --dev --features audit\"\n",
+        )
+        .unwrap();
+        let cfg = worker_build_cfg(&package, &features).unwrap();
+        for (predicate, value) in [
+            ("target_arch = \"wasm32\"", true),
+            ("test", false),
+            ("debug_assertions", true),
+            ("feature = \"audit\"", true),
+        ] {
+            assert_eq!(
+                cfg.evaluate(&predicate.parse().unwrap()),
+                Some(value),
+                "{predicate}"
+            );
+        }
+        fs::remove_dir_all(package).unwrap();
     }
 
     /// A poller whose thread never started has nothing to wait for.

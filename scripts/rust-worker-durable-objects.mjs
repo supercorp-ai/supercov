@@ -12,7 +12,10 @@
 // does. Each test must be credited its own path through the Durable Object's
 // methods and the other Worker's code, each crate counted once, runs of
 // different tests merged under one denominator, and the project's own build
-// left as the project made it.
+// left as the project made it. The suite runs as `cargo test -p host`, which
+// never compiles the Workers' crates itself: they count all the same, as
+// worker-build compiles them -- for wasm, as a release, with their default
+// features.
 // Without worker-build or the wasm target there is nothing to build, and the
 // gate says so; a job that installed them sets SUPERCOV_REQUIRE_RUST_WORKER=1.
 import assert from 'node:assert/strict';
@@ -36,13 +39,16 @@ if (process.platform === 'win32' || run(repository, 'worker-build', ['--version'
   process.exit(0);
 }
 
-const worker = (name) => `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nworker = "0.8"\n`;
+const worker = (name, extra = '') => `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nworker = "0.8"\n${extra}`;
 const PLANE = `use worker::*;
 
 #[event(fetch)]
 async fn fetch(request: Request, env: Env, _ctx: Context) -> Result<Response> {
     if request.path() == "/ready" {
         return Response::ok("ready");
+    }
+    if request.path() == "/build" {
+        return Response::ok(format!("{} {}", runtime(), build()));
     }
     let stub = env.durable_object("COUNTER")?.id_from_name("one")?.get_stub()?;
     stub.fetch_with_request(request).await
@@ -71,10 +77,42 @@ impl DurableObject for Counter {
             storage.put("count", 0u32).await?;
             return Response::ok("0");
         }
-        let next = count + self.step;
+        let next = audited(count + self.step);
         storage.put("count", next).await?;
         Response::ok(next.to_string())
     }
+}
+
+// What the Worker's build compiles is what counts: worker-build builds for
+// wasm, as a release, with the crate's default features.
+#[cfg(target_arch = "wasm32")]
+fn runtime() -> &'static str {
+    "wasm"
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn runtime() -> &'static str {
+    "native"
+}
+
+#[cfg(debug_assertions)]
+fn build() -> &'static str {
+    "debug"
+}
+
+#[cfg(not(debug_assertions))]
+fn build() -> &'static str {
+    "release"
+}
+
+#[cfg(feature = "audit")]
+fn audited(count: u32) -> u32 {
+    count
+}
+
+#[cfg(not(feature = "audit"))]
+fn audited(count: u32) -> u32 {
+    count + 1000
 }
 `;
 const RUNNERS = `use worker::*;
@@ -109,7 +147,7 @@ const files = {
   // never committed, as a project that embeds them keeps them.
   '.gitignore': 'node_modules/\ntarget/\n.wrangler/\nbuild/\n',
   'Cargo.toml': '[workspace]\nmembers = ["plane", "runners", "host"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
-  'plane/Cargo.toml': worker('plane'),
+  'plane/Cargo.toml': worker('plane', '\n[features]\ndefault = ["audit"]\naudit = []\n'),
   'plane/wrangler.toml': 'name = "plane"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\n\n[[durable_objects.bindings]]\nname = "COUNTER"\nclass_name = "Counter"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["Counter"]\n',
   'plane/src/lib.rs': PLANE,
   'runners/Cargo.toml': worker('runners'),
@@ -212,6 +250,7 @@ fn counts_through_the_durable_object() {
     let Some(dev) = serve("plane", &["STEP:2"]) else { return };
     assert_eq!(get(dev.port, "/count").as_deref(), Some("2"));
     assert_eq!(get(dev.port, "/count").as_deref(), Some("4"));
+    assert_eq!(get(dev.port, "/build").as_deref(), Some("wasm release"));
 }
 
 #[test]
@@ -266,7 +305,7 @@ try {
 
   const path = `${resolve(root, 'node_modules/.bin')}${delimiter}${process.env.PATH}`;
   const measure = (filter = []) => {
-    const measured = run(root, binary, ['--', 'cargo', 'test', '--workspace', '--', ...filter], { PATH: path });
+    const measured = run(root, binary, ['--', 'cargo', 'test', '-p', 'host', '--', ...filter], { PATH: path });
     assert.equal(measured.status, 0, `${filter.join(' ')}\n${measured.stdout}${measured.stderr}`);
     return { measured, id: JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id };
   };
@@ -279,7 +318,7 @@ try {
   // skipped for want of a build, nor credited the other's branch.
   const counted = lines(id, 'counts_through_the_durable_object', 'plane/src/lib.rs');
   const reset = lines(id, 'resets_the_count', 'plane/src/lib.rs');
-  const next = at('plane/src/lib.rs', PLANE, 'let next = count + self.step;');
+  const next = at('plane/src/lib.rs', PLANE, 'let next = audited(count + self.step);');
   const zero = at('plane/src/lib.rs', PLANE, 'return Response::ok("0");');
   const step = at('plane/src/lib.rs', PLANE, 'let step = env');
   assert.ok(counted.includes(next) && counted.includes(step), `the counting test: ${counted.join(' ')}`);
@@ -288,6 +327,21 @@ try {
   const decision = run(root, binary, ['runs', id, 'decision', at('plane/src/lib.rs', PLANE, 'if request.path() == "/reset" || count >= 100')]).stdout;
   assert.match(decision, /FF -> F +tests=1/u, decision);
   assert.match(decision, /T- -> T +tests=1/u, decision);
+  // The Worker's build decides what is code: what it compiles counts and
+  // ran, what it leaves out is no code of the run.
+  for (const [gate, compiled] of [
+    ['#[cfg(target_arch = "wasm32")]', true],
+    ['#[cfg(not(debug_assertions))]', true],
+    ['#[cfg(feature = "audit")]', true],
+    ['#[cfg(not(target_arch = "wasm32"))]', false],
+    ['#[cfg(debug_assertions)]', false],
+    ['#[cfg(not(feature = "audit"))]', false],
+  ]) {
+    const item = `plane/src/lib.rs:${lineOf(PLANE, gate) + 1}`;
+    const shown = run(root, binary, ['runs', id, 'line', item]).stdout;
+    if (compiled) assert.ok(counted.includes(item), `${gate}: ${counted.join(' ')}`);
+    else assert.match(shown, /Nothing on this line is code the run measures/u, `${gate}\n${shown}`);
+  }
   const busy = lines(id, 'a_runner_with_two_slots_is_busy', 'runners/src/lib.rs');
   assert.ok(busy.includes(at('runners/src/lib.rs', RUNNERS, '"busy"')), `the runner test: ${busy.join(' ')}`);
   assert.ok(!busy.includes(at('runners/src/lib.rs', RUNNERS, '"full"')), `the runner test: ${busy.join(' ')}`);

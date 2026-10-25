@@ -1357,6 +1357,7 @@ fn main() {
             decisions: decisions.iter().map(|id| (*id).to_owned()).collect(),
             cfgs: Vec::new(),
             crates: Default::default(),
+            workers: Default::default(),
         }
     }
 

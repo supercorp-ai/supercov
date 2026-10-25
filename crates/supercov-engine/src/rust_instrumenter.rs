@@ -5,7 +5,7 @@
 //! product input. Probe insertion and Cargo execution build on this exact
 //! source denominator.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile, SyntaxKind, TextRange,
@@ -77,8 +77,13 @@ pub struct RustProbeLayout {
     /// under. A crate a test's Worker returned a region for was built --
     /// by `wrangler dev`, for wasm -- though the run's own build never
     /// compiled it, and its files count.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub crates: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub crates: BTreeMap<String, Vec<String>>,
+    /// The keys of `crates` that are Rust Workers' crates: built by
+    /// worker-build when a test starts the Worker, and counted whether or not
+    /// one did.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub workers: BTreeSet<String>,
 }
 
 /// Code a `#[cfg]` predicate keeps or leaves out, and the obligations in it.
@@ -1578,6 +1583,12 @@ fn standalone_matches(
 pub struct TargetCfg {
     names: BTreeSet<String>,
     pairs: BTreeSet<(String, String)>,
+    /// What one known build settles beyond the target: `test` and
+    /// `debug_assertions`, and the features it enables. A Rust Worker's
+    /// build is one such: worker-build compiles the crate once, never as a
+    /// test, with the features its command names.
+    build: BTreeMap<String, bool>,
+    features: Option<BTreeSet<String>>,
 }
 
 impl TargetCfg {
@@ -1596,12 +1607,28 @@ impl TargetCfg {
         cfg
     }
 
+    /// This target as one build compiles for it: `test`, `debug_assertions`
+    /// and the enabled features settled too.
+    pub fn for_build(
+        mut self,
+        test: bool,
+        debug_assertions: bool,
+        features: BTreeSet<String>,
+    ) -> Self {
+        self.build = BTreeMap::from([
+            ("test".to_owned(), test),
+            ("debug_assertions".to_owned(), debug_assertions),
+        ]);
+        self.features = Some(features);
+        self
+    }
+
     /// The keys `rustc --print cfg` settles for a target.
     fn decides(key: &str) -> bool {
         matches!(key, "unix" | "windows" | "panic") || key.starts_with("target_")
     }
 
-    fn evaluate(&self, expression: &cargo_platform::CfgExpr) -> Option<bool> {
+    pub(crate) fn evaluate(&self, expression: &cargo_platform::CfgExpr) -> Option<bool> {
         use cargo_platform::{Cfg, CfgExpr};
         match expression {
             CfgExpr::True => Some(true),
@@ -1629,11 +1656,18 @@ impl TargetCfg {
                     values.iter().all(Option::is_some).then_some(false)
                 }
             }
-            CfgExpr::Value(Cfg::Name(name)) => {
-                Self::decides(&name.name).then(|| self.names.contains(&name.name))
+            CfgExpr::Value(Cfg::Name(name)) if Self::decides(&name.name) => {
+                Some(self.names.contains(&name.name))
             }
-            CfgExpr::Value(Cfg::KeyPair(key, value)) => Self::decides(&key.name)
-                .then(|| self.pairs.contains(&(key.name.clone(), value.clone()))),
+            CfgExpr::Value(Cfg::Name(name)) => self.build.get(&name.name).copied(),
+            CfgExpr::Value(Cfg::KeyPair(key, value)) if Self::decides(&key.name) => {
+                Some(self.pairs.contains(&(key.name.clone(), value.clone())))
+            }
+            CfgExpr::Value(Cfg::KeyPair(key, value)) if key.name == "feature" => self
+                .features
+                .as_ref()
+                .map(|features| features.contains(value)),
+            CfgExpr::Value(Cfg::KeyPair(..)) => None,
         }
     }
 
@@ -5128,6 +5162,25 @@ pub fn documented(value: i32) -> i32 {
             ]
             .map(|value| value.parse::<cargo_platform::Cfg>().unwrap()),
         )
+    }
+
+    /// A known build settles `test`, `debug_assertions` and its features as
+    /// the target settles its own keys; anything else stays for the build to
+    /// answer.
+    #[test]
+    fn a_known_build_settles_test_debug_assertions_and_features() {
+        let wasm = TargetCfg::new(&["target_arch=\"wasm32\"".parse().unwrap()]);
+        let evaluate = |cfg: &TargetCfg, predicate: &str| cfg.evaluate(&predicate.parse().unwrap());
+        assert_eq!(evaluate(&wasm, "feature = \"audit\""), None);
+        assert_eq!(evaluate(&wasm, "test"), None);
+        let build = wasm.for_build(false, true, BTreeSet::from(["audit".to_owned()]));
+        assert_eq!(evaluate(&build, "target_arch = \"wasm32\""), Some(true));
+        assert_eq!(evaluate(&build, "test"), Some(false));
+        assert_eq!(evaluate(&build, "debug_assertions"), Some(true));
+        assert_eq!(evaluate(&build, "feature = \"audit\""), Some(true));
+        assert_eq!(evaluate(&build, "feature = \"other\""), Some(false));
+        assert_eq!(evaluate(&build, "custom"), None);
+        assert_eq!(evaluate(&build, "custom = \"value\""), None);
     }
 
     fn limitation_kinds(manifest: &CoverageManifest) -> BTreeSet<String> {

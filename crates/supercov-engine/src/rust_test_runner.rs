@@ -2068,32 +2068,13 @@ pub(crate) fn structural_limitations(manifest: &CoverageManifest) -> Vec<String>
         .collect()
 }
 
-/// The project to report against once the tests have run: where a test's
-/// Worker returned a region, `wrangler dev` built that crate, and its files
-/// count though the run's own build never compiled them.
-fn redecline_for_workers(
-    original: &PreparedRustProject,
-    project: &PreparedRustProject,
-    declined: BTreeSet<String>,
-    built_crates: &BTreeSet<String>,
-) -> (PreparedRustProject, BTreeSet<String>) {
-    if built_crates.is_empty() {
-        return (project.clone(), declined);
-    }
-    let built = built_crates
-        .iter()
-        .filter_map(|key| original.probes.crates.get(key))
+/// The files of the crates `keys` names.
+fn worker_files(project: &PreparedRustProject, keys: &BTreeSet<String>) -> BTreeSet<String> {
+    keys.iter()
+        .filter_map(|key| project.probes.crates.get(key))
         .flatten()
         .cloned()
-        .collect::<BTreeSet<_>>();
-    let (manifest, declined) = decline_uncompiled_sources(original, &built);
-    (
-        PreparedRustProject {
-            manifest,
-            ..project.clone()
-        },
-        declined,
-    )
+        .collect()
 }
 
 /// A Rust Worker's code runs in Cloudflare's runtime, and only when a test
@@ -2102,32 +2083,20 @@ fn redecline_for_workers(
 /// rather than reading as code the tests missed.
 fn note_unrun_workers(
     project: &mut PreparedRustProject,
-    original: &PreparedRustProject,
-    declined: &BTreeSet<String>,
     built_crates: &BTreeSet<String>,
     remote: bool,
 ) {
-    let directories = crate::rust_worker::worker_crate_directories(&project.workspace_root);
     let reason = if remote {
         "A Rust Worker started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector, so what it ran cannot be read; a test that starts it with `wrangler dev` measures it"
     } else {
         "A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`, and no test of this run did"
     };
-    if directories.is_empty() {
-        return;
-    }
-    let ran = built_crates
-        .iter()
-        .filter_map(|key| original.probes.crates.get(key))
-        .flatten()
-        .collect::<BTreeSet<_>>();
-    for file in &project.source_files {
-        let in_worker = directories
-            .iter()
-            .any(|directory| directory.is_empty() || file.starts_with(&format!("{directory}/")));
-        if !in_worker || declined.contains(file) || ran.contains(file) {
-            continue;
-        }
+    let ran = worker_files(project, built_crates);
+    let unrun = worker_files(project, &project.probes.workers)
+        .into_iter()
+        .filter(|file| !ran.contains(file) && project.source_files.contains(file))
+        .collect::<Vec<_>>();
+    for file in unrun {
         let id = format!("rust-worker-not-run#{file}");
         if project.manifest.limitations.iter().any(|limitation| {
             limitation.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())
@@ -2196,9 +2165,13 @@ pub fn run_prepared_rust_tests(
     let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
     // The denominator is what the compiler built, not what the module tree
     // resolves: a module behind a `#[cfg]` that is off is resolved, never
-    // compiled, and could never be covered.
-    let (manifest, declined) = decline_uncompiled_sources(project, &BTreeSet::new());
-    let original = project;
+    // compiled, and could never be covered. A Rust Worker's crate counts
+    // though `cargo test` may never compile it: worker-build does, when a
+    // test starts the Worker, and runs that started different Workers have
+    // one denominator.
+    let (manifest, declined) =
+        decline_uncompiled_sources(project, &worker_files(project, &project.probes.workers));
+    report_declined(&declined, diagnostics)?;
     let project = &PreparedRustProject {
         manifest,
         ..project.clone()
@@ -2228,16 +2201,8 @@ pub fn run_prepared_rust_tests(
             rust_workers,
             diagnostics,
         )?;
-        let (mut project, declined) =
-            redecline_for_workers(original, project, declined, &outcome.built_crates);
-        note_unrun_workers(
-            &mut project,
-            original,
-            &declined,
-            &outcome.built_crates,
-            outcome.remote_workers,
-        );
-        report_declined(&declined, diagnostics)?;
+        let mut project = project.clone();
+        note_unrun_workers(&mut project, &outcome.built_crates, outcome.remote_workers);
         let project = &project;
         let artifact_count = outcome.artifact_files.len();
         let project = &PreparedRustProject {
@@ -2431,9 +2396,8 @@ pub fn run_prepared_rust_tests(
             );
         }
     }
-    let (mut project, declined) = redecline_for_workers(original, project, declined, &built_crates);
-    note_unrun_workers(&mut project, original, &declined, &built_crates, remote);
-    report_declined(&declined, diagnostics)?;
+    let mut project = project.clone();
+    note_unrun_workers(&mut project, &built_crates, remote);
     let project = &project;
     // What `cargo test` prints for each binary: every test, the failures
     // together, one result.
@@ -3212,20 +3176,24 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_at_the_workspace_root_that_no_test_ran_is_noted_once_per_file() {
-        let root = scratch("unrun-worker");
-        fs::write(
-            root.join("wrangler.toml"),
-            "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
-        )
-        .unwrap();
-        fs::write(root.join("Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
-        let mut project = PreparedRustProject::empty(root.clone());
-        project.source_files = vec!["src/gone.rs".into(), "src/lib.rs".into()];
-        let original = project.clone();
-        let declined = BTreeSet::from(["src/gone.rs".to_owned()]);
+    fn each_file_of_a_worker_no_test_started_is_noted_once() {
+        let mut project = PreparedRustProject::empty(std::env::temp_dir());
+        project.source_files = vec!["plane/src/lib.rs".into(), "runners/src/lib.rs".into()];
+        project.probes.crates = BTreeMap::from([
+            ("plane".to_owned(), vec!["plane/src/lib.rs".to_owned()]),
+            // A file the source roots left out is no file of the run.
+            (
+                "runners".to_owned(),
+                vec![
+                    "runners/src/lib.rs".to_owned(),
+                    "runners/src/outside.rs".to_owned(),
+                ],
+            ),
+            ("host".to_owned(), vec!["host/src/lib.rs".to_owned()]),
+        ]);
+        project.probes.workers = BTreeSet::from(["plane".to_owned(), "runners".to_owned()]);
         for _ in 0..2 {
-            note_unrun_workers(&mut project, &original, &declined, &BTreeSet::new(), false);
+            note_unrun_workers(&mut project, &BTreeSet::from(["plane".to_owned()]), false);
         }
         assert_eq!(
             project
@@ -3234,9 +3202,8 @@ mod tests {
                 .iter()
                 .map(|limitation| limitation["id"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["rust-worker-not-run#src/lib.rs"]
+            ["rust-worker-not-run#runners/src/lib.rs"]
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

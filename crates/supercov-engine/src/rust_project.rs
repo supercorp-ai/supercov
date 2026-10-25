@@ -142,6 +142,8 @@ struct CargoPackage {
     id: String,
     manifest_path: PathBuf,
     targets: Vec<CargoTarget>,
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -598,6 +600,37 @@ fn crate_roots(
     Ok(roots)
 }
 
+/// The library roots of the workspace's Rust Workers, each with the cfg of
+/// the build that compiles it: worker-build's, for wasm, whatever target
+/// `cargo test` builds the rest for.
+fn worker_library_roots(
+    packages: &[CargoPackage],
+) -> BTreeMap<PathBuf, crate::rust_instrumenter::TargetCfg> {
+    packages
+        .iter()
+        .filter_map(|package| {
+            let directory = package.manifest_path.parent()?;
+            let cfg = crate::rust_worker::worker_build_cfg(directory, &package.features)?;
+            Some(
+                package
+                    .targets
+                    .iter()
+                    .filter(|target| {
+                        target.kind.iter().any(|kind| {
+                            matches!(
+                                kind.as_str(),
+                                "lib" | "rlib" | "cdylib" | "dylib" | "staticlib"
+                            )
+                        })
+                    })
+                    .filter_map(|target| fs::canonicalize(&target.src_path).ok())
+                    .map(move |root| (root, cfg.clone())),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
 /// The crate roots of test, benchmark and example targets, whose module
 /// trees are test code.
 fn test_target_roots(packages: &[CargoPackage]) -> BTreeSet<PathBuf> {
@@ -854,6 +887,7 @@ pub fn prepare_rust_project_for(
 
     let started = std::time::Instant::now();
     let roots = crate_roots(&workspace, &packages)?;
+    let worker_roots = worker_library_roots(&packages);
     let proc_macro_roots = proc_macro_crate_roots(&packages)?;
     let mut files = BTreeSet::new();
     let mut tests = BTreeSet::new();
@@ -925,12 +959,29 @@ pub fn prepare_rust_project_for(
     let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
     for (relative, source) in &sources {
         let test_file = tests.contains(relative) || test_code_path(relative);
+        // A file is compiled as each crate that holds it is built: a Worker's
+        // library by worker-build, the rest for the command's target. Items
+        // are left out only where every one of those builds leaves them out.
+        let builds = owners.get(relative).map(|roots| {
+            roots
+                .iter()
+                .map(|root| worker_roots.get(root).or(cfg))
+                .collect::<Vec<_>>()
+        });
+        let file_cfg = match builds.as_deref() {
+            Some([first, rest @ ..]) => rest
+                .iter()
+                .all(|other| other == first)
+                .then_some(*first)
+                .flatten(),
+            _ => cfg,
+        };
         let transformed = match instrument_rust_file_numbered(
             relative,
             source,
             &runtime_path,
             test_file,
-            cfg,
+            file_cfg,
             &mut probes,
         ) {
             Ok(transformed) => transformed,
@@ -988,6 +1039,9 @@ pub fn prepare_rust_project_for(
             .map(|(ordinal, _)| ordinal)
             .collect::<Vec<_>>();
         let key = crate_key(&token, &relative);
+        if worker_roots.contains_key(&root) {
+            probes.workers.insert(key.clone());
+        }
         let runtime =
             render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs)
                 .map_err(RustProjectError::Runtime)?;
@@ -1186,6 +1240,85 @@ fn integration_choice() {
                     && entry.reason == "outside explicit source roots"),
             "{scope:?}"
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A Rust Worker's library is instrumented as worker-build compiles it
+    /// -- for wasm, a release, with its default features -- whatever target
+    /// the command builds the rest for, and its crate is known as a Worker's.
+    #[test]
+    fn a_workers_library_is_instrumented_as_its_worker_build_compiles_it() {
+        let root = fixture();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"worker\", \"host\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        for directory in ["worker/src", "host/src"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        fs::write(
+            root.join("worker/Cargo.toml"),
+            "[package]\nname = \"worker\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[features]\ndefault = [\"audit\"]\naudit = []\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("worker/wrangler.toml"),
+            "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
+        )
+        .unwrap();
+        let worker = "#[cfg(target_arch = \"wasm32\")]\npub fn runtime() -> u8 {\n    1\n}\n\n#[cfg(not(target_arch = \"wasm32\"))]\npub fn runtime() -> u8 {\n    2\n}\n\n#[cfg(feature = \"audit\")]\npub fn audit() -> u8 {\n    3\n}\n\n#[cfg(debug_assertions)]\npub fn debug() -> u8 {\n    4\n}\n\n#[cfg(custom)]\npub fn custom() -> u8 {\n    5\n}\n";
+        fs::write(root.join("worker/src/lib.rs"), worker).unwrap();
+        fs::write(
+            root.join("host/Cargo.toml"),
+            "[package]\nname = \"host\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("host/src/lib.rs"),
+            "#[cfg(target_arch = \"wasm32\")]\npub fn wasm() -> u8 {\n    6\n}\n\npub fn host() -> u8 {\n    7\n}\n",
+        )
+        .unwrap();
+        let native =
+            crate::rust_instrumenter::TargetCfg::new(&["target_arch=\"x86_64\"".parse().unwrap()]);
+        let prepared = prepare_rust_project_for(&root, None, Some(&native)).unwrap();
+        let functions = |file: &str| {
+            prepared
+                .manifest
+                .points
+                .iter()
+                .filter(|point| {
+                    point.file == file
+                        && point.kind == crate::coverage_analysis::PointKind::Function
+                })
+                .map(|point| (point.label.clone().unwrap_or_default(), point.line))
+                .collect::<BTreeMap<_, _>>()
+        };
+        // wasm's `runtime` (the first) and the default feature's `audit` are
+        // the Worker's; the native `runtime` and the debug build's `debug`
+        // are not, and a custom cfg is left for its build to answer.
+        let worker = functions("worker/src/lib.rs");
+        assert_eq!(
+            worker.keys().collect::<Vec<_>>(),
+            ["audit", "custom", "runtime"]
+        );
+        assert!(worker["runtime"] < 6, "{worker:?}");
+        assert_eq!(
+            prepared
+                .probes
+                .cfgs
+                .iter()
+                .map(|gate| (gate.file.as_str(), gate.predicate.as_str()))
+                .collect::<Vec<_>>(),
+            [("worker/src/lib.rs", "custom")]
+        );
+        assert_eq!(
+            functions("host/src/lib.rs").keys().collect::<Vec<_>>(),
+            ["host"]
+        );
+        let workers = prepared.probes.workers.iter().collect::<Vec<_>>();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(prepared.probes.crates[workers[0]], ["worker/src/lib.rs"]);
         fs::remove_dir_all(root).ok();
     }
 
