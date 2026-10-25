@@ -281,7 +281,7 @@ try {
   const reset = lines(id, 'resets_the_count', 'plane/src/lib.rs');
   const next = at('plane/src/lib.rs', PLANE, 'let next = count + self.step;');
   const zero = at('plane/src/lib.rs', PLANE, 'return Response::ok("0");');
-  const step = at('plane/src/lib.rs', PLANE, '.var("STEP")');
+  const step = at('plane/src/lib.rs', PLANE, 'let step = env');
   assert.ok(counted.includes(next) && counted.includes(step), `the counting test: ${counted.join(' ')}`);
   assert.ok(!counted.includes(zero), `the counting test: ${counted.join(' ')}`);
   assert.ok(reset.includes(zero) && !reset.includes(next), `the resetting test: ${reset.join(' ')}`);
