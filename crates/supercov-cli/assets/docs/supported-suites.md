@@ -242,10 +242,11 @@ run. Requests made before the first test, such as the readiness check
 The build runs with `--cap-lints=warn`, so a crate that denies warnings still
 builds with the probes in it.
 
-### A Rust Worker that `cargo test` starts
+### A Cloudflare Worker in Rust that `cargo test` starts
 
-Integration tests that start `wrangler dev` themselves -- to test a Worker in
-Cloudflare's own runtime -- measure the Worker too:
+Integration tests that start `wrangler dev` themselves -- to test a Cloudflare
+Worker written in Rust in workerd, Cloudflare's own runtime -- measure the
+Worker too, Durable Objects included:
 
 ```sh
 npx supercov -- cargo test
@@ -270,6 +271,26 @@ opens no inspector into it there, so nothing can read what it ran. A test
 that starts it that way runs as usual; the Worker's files then say they ran
 remotely and could not be read. Start the Worker with `wrangler dev` to
 measure it.
+
+Code in a Durable Object (`#[durable_object]` and its `impl DurableObject`)
+is measured like the rest of the Worker and credited to the test whose
+requests reached it. A workspace with several Worker crates counts each crate
+once, and runs of different tests merge with `supercov merge` under one
+denominator. Tests that run a Worker only when its `build/` exists, as a test
+kit that will not start an unbuilt Worker does, run it: a `build/` you made
+beforehand and keep out of git is in the copy, and `wrangler dev` builds the
+crate with probes over it there.
+
+What a project needs:
+
+- `wrangler` on `PATH` in the job that runs Supercov, before the run starts,
+  such as `node_modules/.bin` of a project that installs it.
+- The `wasm32-unknown-unknown` target and `worker-build`, which the Worker's
+  `[build]` command runs.
+- The Worker crates inside the source Supercov measures, as workspace members
+  or under the project root.
+
+The project needs no `cfg` flag or build step of its own for Supercov.
 
 The Worker built with probes stays in the copy: its `build/` output is never
 returned to the project, and neither is the copy's configuration, which

@@ -238,6 +238,9 @@ jobs:
       - run: node scripts/rust-worker-cargo-test.mjs
         env:
           SUPERCOV_REQUIRE_RUST_WORKER: "1"
+      - run: node scripts/rust-worker-durable-objects.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WORKER: "1"
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure

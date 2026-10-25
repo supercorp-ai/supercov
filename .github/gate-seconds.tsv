@@ -1,6 +1,7 @@
 # Each end-to-end gate's seconds in a self-coverage slice on Linux, from the
 # gate harness's SUPERCOV_GATE_TIMINGS. Slices are balanced by these; a gate
 # not listed counts as a minute. Refresh from a run's gate-timings.tsv files.
+rust_worker_durable_objects	240
 rust_fixture_matrix	234
 rust_worker_cargo_test	172
 docker_servers	172

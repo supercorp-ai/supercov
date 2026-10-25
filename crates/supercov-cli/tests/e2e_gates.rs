@@ -138,6 +138,7 @@ gates! {
     rust_region_container => "rust-region-container.mjs",
     rust_worker_playwright => "rust-worker-playwright.mjs",
     rust_worker_cargo_test => "rust-worker-cargo-test.mjs",
+    rust_worker_durable_objects => "rust-worker-durable-objects.mjs",
     rust_wasm_hosts => "rust-wasm-hosts.mjs",
     rust_wasm_js => "rust-wasm-js.mjs",
     react_native => "react-native-compatibility.mjs",
