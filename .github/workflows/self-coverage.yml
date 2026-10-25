@@ -63,6 +63,24 @@ jobs:
       # The release build's dependencies kept between runs.
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
+      # The system packages the slices' browsers need, fetched once here and
+      # kept before any slice starts: ten slices fetching them at once from
+      # a slow mirror held some for half an hour, the cache being saved only
+      # as a job ends.
+      - uses: actions/cache@v4
+        if: runner.os == 'Linux'
+        with:
+          path: ~/apt-archives
+          key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
+      - name: Fetch the browsers' system packages
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p ~/apt-archives/partial
+          printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
+            | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+          versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
+          npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
+          sudo chown -R "$USER" ~/apt-archives
       - run: cargo build --release -p supercov
       - uses: actions/upload-artifact@v4
         with:
