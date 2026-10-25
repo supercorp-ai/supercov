@@ -194,7 +194,7 @@ fn file_catalog(snapshot: &Snapshot, path: &str) -> Result<Value, String> {
     Ok(json!({
         "view": "file", "instrument": instrument(&snapshot.manifest), "snapshot": snapshot.id,
         "path": path, "health": file["health"], "bytes": file["bytes"],
-        "status": file["status"], "checks": checks,
+        "status": file["status"], "unchecked_lines": file["unchecked_lines"], "checks": checks,
     }))
 }
 
@@ -596,6 +596,11 @@ fn render_file_catalog(view: &Value) -> String {
                 line["text"].as_str().unwrap_or("").trim()
             ));
         }
+    }
+    if let Some(lines) = view["unchecked_lines"].as_u64().filter(|lines| *lines > 0) {
+        out.push_str(&format!(
+            "\n{lines} line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of.\n"
+        ));
     }
     out.push_str("\nEach line is a model judgment you can check against the file.\n");
     out

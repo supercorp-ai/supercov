@@ -712,6 +712,7 @@ fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
         // lets the folded row say which source it describes.
         sha256: "0".repeat(64),
         windows: 1,
+        unchecked_lines: 0,
         note: Some("windowed".into()),
         values: Some(checks.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()),
         cached: true,
@@ -2524,6 +2525,7 @@ fn a_security_answer_is_never_scored_and_sorts_by_what_fired() {
         sha256: "test-source".into(),
         bytes: 10,
         windows: 1,
+        unchecked_lines: 0,
         note: None,
         values: Some(values(&[
             ("injection_sink", 0.9),
@@ -2738,6 +2740,7 @@ fn security_totals_include_a_check_only_the_line_pass_found() {
         bytes: 10,
         sha256: "source".into(),
         windows: 1,
+        unchecked_lines: 0,
         lines: vec![ConfirmedLine {
             line: 5,
             check: "sensitive_data_exposure".into(),
@@ -3228,4 +3231,149 @@ fn one_file_read_and_a_few_callers_not_asked_are_told_in_full() {
         2
     );
     assert!(!security.contains("... and"), "{security}");
+}
+
+/// A function of forty-one lines that run past the 100 characters a source
+/// choice shows, dense as base64 so each byte is estimated a token, and the
+/// four nodes of 160 characters a line round shows at most.
+fn dense_function() -> (String, Vec<candidates::Node>) {
+    let dense = |n: usize| "Ab0+".repeat(n / 4 + 1)[..n].to_owned();
+    let mut source = String::from("function handler() {\n");
+    for _ in 0..40 {
+        source.push_str(&format!("  run(\"{}\");\n", dense(200)));
+    }
+    source.push_str("}\n");
+    let nodes = (38..=41)
+        .map(|line| candidates::Node {
+            line,
+            text: dense(160),
+        })
+        .collect();
+    (source, nodes)
+}
+
+fn request_tokens(request: &Value) -> usize {
+    estimated_tokens(&serde_json::to_vec(request).unwrap())
+}
+
+/// The room kept for the line rounds holds the largest request either
+/// makes beside the text it asks about.
+#[test]
+fn the_room_kept_for_the_line_rounds_holds_their_largest_requests() {
+    let (source, nodes) = dense_function();
+    let path = "src/handler.js";
+    let structure = candidates::structure(Path::new(path), &source);
+    let bare = request_tokens(&json!({
+        "model": model(),
+        "state": { "file": { "path": path, "source": source } },
+        "questions": {},
+    }));
+    let every = catalog::security::checks()
+        .iter()
+        .map(|check| check.id.clone())
+        .collect::<Vec<_>>();
+    let classify = request_tokens(&catalog::security::classify_request(
+        path, &source, &nodes, 0, &every,
+    ));
+    let confirm = every
+        .iter()
+        .map(|check| {
+            request_tokens(&catalog::security::confirm_request(
+                path,
+                &source,
+                &[candidates::Candidate {
+                    line: 41,
+                    check: check.clone(),
+                    text: nodes[0].text.clone(),
+                }],
+                &structure,
+            ))
+        })
+        .max()
+        .unwrap();
+    assert!(classify - bare <= LINE_ROUNDS_ROOM, "{}", classify - bare);
+    assert!(confirm - bare <= LINE_ROUNDS_ROOM, "{}", confirm - bare);
+}
+
+/// A file is one view only while each line round's smallest request fits
+/// beside it; nearer the budget than that it is windowed, so no line goes
+/// unasked for want of room.
+#[test]
+fn a_file_too_near_the_budget_for_its_line_questions_is_windowed() {
+    let (function, nodes) = dense_function();
+    let path = "src/handler.js";
+    // Plain comment lines after the function, as many as leave `room`
+    // tokens of the budget beside the file question.
+    let with_room = |room: usize| {
+        let file = |lines: usize| {
+            let mut source = function.clone();
+            for i in 0..lines {
+                source.push_str(&format!(
+                    "// a plain note about nothing in particular, line {i}\n"
+                ));
+            }
+            source
+        };
+        let left = |lines: usize| {
+            MAX_REQUEST_TOKENS as i64
+                - request_tokens(&catalog::security::file_request(path, &file(lines))) as i64
+        };
+        let (mut low, mut high) = (0_usize, 20_000_usize);
+        while low < high {
+            let middle = (low + high).div_ceil(2);
+            if left(middle) >= room as i64 {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        file(low)
+    };
+    let fits = |source: &str| {
+        whole_view_fits(
+            path,
+            source,
+            &nodes,
+            &candidates::structure(Path::new(path), source),
+        )
+    };
+    // What each round's smallest request adds to the file question.
+    let base = with_room(LINE_ROUNDS_ROOM + 500);
+    let file_tokens = request_tokens(&catalog::security::file_request(path, &base));
+    let every = catalog::security::checks()
+        .iter()
+        .map(|check| check.id.clone())
+        .collect::<Vec<_>>();
+    // Four lines classified ask less than the file question does: where it
+    // fits, they do.
+    let classify = request_tokens(&catalog::security::classify_request(
+        path, &base, &nodes, 0, &every,
+    ));
+    assert!(classify < file_tokens, "{classify} {file_tokens}");
+    let structure = candidates::structure(Path::new(path), &base);
+    let confirm = nodes
+        .iter()
+        .map(|node| {
+            request_tokens(&catalog::security::confirm_request(
+                path,
+                &base,
+                &[candidates::Candidate {
+                    line: node.line,
+                    check: "weak_authentication".into(),
+                    text: node.text.clone(),
+                }],
+                &structure,
+            ))
+        })
+        .max()
+        .unwrap()
+        - file_tokens;
+    assert!(fits(&base), "far under the budget: one view");
+    // Near the budget, with room for a line confirmed: one view still.
+    assert!(confirm + 100 < LINE_ROUNDS_ROOM, "{confirm}");
+    assert!(fits(&with_room(confirm + 100)));
+    // Without it: windowed.
+    assert!(!fits(&with_room(confirm / 2)));
+    // A file question over the budget.
+    assert!(!fits(&with_room(0).repeat(2)));
 }

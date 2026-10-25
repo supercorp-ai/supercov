@@ -687,6 +687,54 @@ fn within_budget(request: &Value) -> Option<Vec<u8>> {
     (estimated_tokens(&bytes) <= MAX_REQUEST_TOKENS).then_some(bytes)
 }
 
+/// How many tokens the smallest request of each line round adds, at most,
+/// to the text it asks about: four lines classified, each line text cut to
+/// 160 characters, or one line confirmed with its choice of where its value
+/// enters, forty-one lines of 100 characters. Pinned by a test that builds
+/// both at their largest.
+const LINE_ROUNDS_ROOM: usize = 8_000;
+
+/// Whether `source` can be asked about whole, line by line: its file question
+/// fits, and so does the largest request the confirming round makes of one
+/// line of it. Four lines classified always fit where the file question
+/// does, its questions being the larger (a test holds this). Far enough under
+/// the budget the confirming round's do too; nearer it, each line's is built
+/// and measured. A file that fit its file question with no room left for
+/// these had lines go unasked, and said nothing of it; it is windowed
+/// instead, as a file over the budget is.
+fn whole_view_fits(
+    path: &str,
+    source: &str,
+    nodes: &[candidates::Node],
+    structure: &candidates::Structure,
+) -> bool {
+    let Some(bytes) = within_budget(&catalog::security::file_request(path, source)) else {
+        return false;
+    };
+    // The confirming round asks every check but authorisation, which stays
+    // at the file; its question is largest for the check described longest.
+    let confirmed_as = catalog::security::checks()
+        .iter()
+        .map(|check| check.id.as_str())
+        .filter(|check| *check != "missing_authorization")
+        .max_by_key(|check| catalog::security::short(check).len())
+        .expect("the catalog has checks a line can confirm");
+    estimated_tokens(&bytes) + LINE_ROUNDS_ROOM <= MAX_REQUEST_TOKENS
+        || nodes.iter().all(|node| {
+            within_budget(&catalog::security::confirm_request(
+                path,
+                source,
+                &[candidates::Candidate {
+                    line: node.line,
+                    check: confirmed_as.to_owned(),
+                    text: node.text.clone(),
+                }],
+                structure,
+            ))
+            .is_some()
+        })
+}
+
 /// Byte offset of every line start, so a window can be sliced without
 /// rewriting a single byte. Line endings stay exactly as the file has them.
 fn line_starts(source: &str) -> Vec<usize> {
@@ -1643,6 +1691,9 @@ struct Answers {
     /// How many requests this row came from. More than one means the file was
     /// windowed, which the report says.
     windows: usize,
+    /// Lines the line pass could not ask about: their question did not fit
+    /// in a request beside the text it is asked of. Said, never dropped.
+    unchecked_lines: usize,
     note: Option<String>,
     values: Option<BTreeMap<String, f64>>,
     cached: bool,
@@ -1804,6 +1855,7 @@ fn ask_smells(
             bytes: subject.bytes,
             sha256: subject.sha256.clone(),
             windows: 1,
+            unchecked_lines: 0,
             note: subject.note.clone(),
             values: None,
             cached: false,
@@ -1936,7 +1988,7 @@ struct View {
 
 fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View> {
     let structure = candidates::structure(Path::new(path), source);
-    if within_budget(&catalog::security::file_request(path, source)).is_some() {
+    if whole_view_fits(path, source, nodes, &structure) {
         return vec![View {
             text: source.to_string(),
             offset: 0,
@@ -2064,6 +2116,7 @@ fn ask_lines(
     // Each pending request names its job: which file and which view.
     let mut jobs: Vec<(usize, usize)> = Vec::new();
     let mut pending = Vec::new();
+    let mut unchecked: BTreeMap<usize, usize> = BTreeMap::new();
     for (index, answer) in answers.iter().enumerate() {
         if answer.values.is_none() {
             continue;
@@ -2108,7 +2161,13 @@ fn ask_lines(
                                 offset,
                                 &fired,
                             );
-                            if let Some(bytes) = within_budget(&request) {
+                            // Four lines classified fit wherever the view's
+                            // file question does; a test makes them not.
+                            if let Some(bytes) = supercov_engine::fault::or(
+                                "classify-over-budget",
+                                || None,
+                                || within_budget(&request),
+                            ) {
                                 jobs.push((index, v));
                                 pending.push(((index, Some(jobs.len() - 1)), request, bytes));
                                 took = take;
@@ -2116,6 +2175,7 @@ fn ask_lines(
                             }
                         }
                         if took == 0 {
+                            *unchecked.entry(index).or_default() += left;
                             break;
                         }
                         offset += took;
@@ -2127,11 +2187,22 @@ fn ask_lines(
             None => {
                 let found = candidates::candidates(&source);
                 if !found.is_empty() {
+                    // Its candidates are planned for as a parser's nodes are.
+                    let lines = found
+                        .iter()
+                        .map(|candidate| candidates::Node {
+                            line: candidate.line,
+                            text: candidate.text.clone(),
+                        })
+                        .collect::<Vec<_>>();
                     pairs.insert(index, found);
-                    views_by_index.insert(index, line_views(&answer.path, &source, &[]));
+                    views_by_index.insert(index, line_views(&answer.path, &source, &lines));
                 }
             }
         }
+    }
+    for (index, lines) in std::mem::take(&mut unchecked) {
+        answers[index].unchecked_lines += lines;
     }
     if !pending.is_empty() {
         let answered = answer_all(
@@ -2233,11 +2304,15 @@ fn ask_lines(
                     }
                 }
                 if took == 0 {
+                    *unchecked.entry(*index).or_default() += 1;
                     took = 1;
                 }
                 offset += took;
             }
         }
+    }
+    for (index, lines) in unchecked {
+        answers[index].unchecked_lines += lines;
     }
     if pending.is_empty() {
         return (0, usage, reused);
@@ -2796,6 +2871,7 @@ fn scored(answers: &Answers, instrument: Instrument) -> Value {
             "present": present,
             "checks": values,
             "windows": answers.windows,
+            "unchecked_lines": answers.unchecked_lines,
             "basis": answers.note.clone().unwrap_or_else(|| "both versions".into()),
             "warning": answers.error,
         }),
@@ -3625,6 +3701,11 @@ fn human_security(report: &Value) -> String {
     }
     for file in &shown {
         out.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
+        if let Some(lines) = file["unchecked_lines"].as_u64().filter(|lines| *lines > 0) {
+            out.push_str(&format!(
+                "    {lines} line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of\n"
+            ));
+        }
         for finding in file["present"].as_array().unwrap_or(&empty) {
             out.push_str(&format!(
                 "    {:.2}  {}{}\n",

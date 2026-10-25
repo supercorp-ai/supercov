@@ -4958,3 +4958,69 @@ fn an_assessment_whose_store_cannot_be_written_reports_and_says_what_was_not_sav
         report["snapshot_warning"]
     );
 }
+
+/// A declaration too large to cut, near the budget, whose last line's
+/// question of where its value enters does not fit beside it: the report
+/// says that line was not checked one by one, where it once said nothing.
+#[test]
+fn a_line_whose_question_does_not_fit_is_said_to_be_unchecked() {
+    let project = Project::empty("unchecked-line");
+    project.write("package.json", r#"{"name":"big","type":"module"}"#);
+    let mut source = String::from("export function run(a) {\n");
+    for i in 0..150 {
+        source.push_str(&format!(
+            "  const note{i} = \"{}\";\n",
+            "a plain word ".repeat(42)
+        ));
+    }
+    source.push_str("  return eval(a);\n}\n");
+    project.write("src/big.js", &source);
+    let (base, _) = gateway(MODEL, common::answer_findings);
+    let report = project
+        .supercov_with(&["security", "src/big.js"], &through(&base))
+        .succeeds();
+    assert!(
+        report.contains("line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of"),
+        "{report}"
+    );
+    let json = project
+        .supercov(&["security", "file", "src/big.js", "--json"])
+        .json();
+    assert_eq!(json["unchecked_lines"], 1, "{json}");
+    let file = project
+        .supercov(&["security", "file", "src/big.js"])
+        .succeeds();
+    assert!(file.contains("1 line(s) not checked one by one"), "{file}");
+
+    // Lines that could not be classified at all are counted the same way.
+    let small = Project::empty("unclassified-lines");
+    small.write("package.json", r#"{"name":"small","type":"module"}"#);
+    small.write(
+        "src/run.js",
+        "export function run(a) {\n  return eval(a);\n}\n",
+    );
+    let unclassified = small.supercov_with(
+        &["security", "src/run.js"],
+        &[
+            through(&base)[0],
+            through(&base)[1],
+            through(&base)[2],
+            ("SUPERCOV_TEST_FAULT", "classify-over-budget"),
+        ],
+    );
+    assert_eq!(unclassified.code(), 0, "{}", unclassified.stderr());
+    assert!(
+        unclassified
+            .stderr()
+            .contains("test fault at classify-over-budget"),
+        "{}",
+        unclassified.stderr()
+    );
+    assert!(
+        unclassified
+            .stdout()
+            .contains("1 line(s) not checked one by one"),
+        "{}",
+        unclassified.stdout()
+    );
+}
