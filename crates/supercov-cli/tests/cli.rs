@@ -11882,6 +11882,31 @@ fn a_rust_run_that_cannot_publish_says_so_and_clears_its_work() {
     );
 }
 
+/// A trash too large to empty within the command's patience is left to the
+/// sweep it started, which empties it after the command has gone.
+#[test]
+fn a_sweep_that_outlasts_the_command_empties_the_trash_after_it() {
+    let project = Project::cart("sweep-outlasts");
+    let big = project.root.join(".supercov/.trash/big");
+    std::fs::create_dir_all(&big).unwrap();
+    for i in 0..20_000 {
+        std::fs::write(big.join(i.to_string()), b"x").unwrap();
+    }
+    let measured = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "sweep-impatient")],
+    );
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    let started = std::time::Instant::now();
+    while big.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(120),
+            "the sweep the command left never emptied the trash"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn the_parent_death_watchdog_kills_its_parents_group_when_its_input_ends() {

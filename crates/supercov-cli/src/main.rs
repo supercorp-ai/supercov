@@ -3578,7 +3578,12 @@ const TRASH_PATIENCE_AT_START: Duration = Duration::from_millis(100);
 const TRASH_PATIENCE_AT_END: Duration = Duration::from_secs(10);
 
 fn spawn_trash_sweeper(root: &Path) {
-    let still_sweeping = sweep_trash_within(root, TRASH_PATIENCE_AT_START);
+    let patience = supercov_engine::fault::or(
+        "sweep-impatient",
+        || Duration::ZERO,
+        || TRASH_PATIENCE_AT_START,
+    );
+    let still_sweeping = sweep_trash_within(root, patience);
     *START_SWEEP
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = still_sweeping;
@@ -3591,8 +3596,13 @@ static START_SWEEP: std::sync::Mutex<Option<std::process::Child>> = std::sync::M
 
 /// Empty the trash before the command's own process ends.
 fn finish_trash_sweep(root: &Path) {
-    let deadline = Instant::now() + TRASH_PATIENCE_AT_END;
-    supercov_engine::lifecycle::finish_background_sweep(TRASH_PATIENCE_AT_END);
+    let patience = supercov_engine::fault::or(
+        "sweep-impatient",
+        || Duration::ZERO,
+        || TRASH_PATIENCE_AT_END,
+    );
+    let deadline = Instant::now() + patience;
+    supercov_engine::lifecycle::finish_background_sweep(patience);
     let start = START_SWEEP
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

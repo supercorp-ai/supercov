@@ -648,11 +648,17 @@ fn take_lock(
         .truncate(false)
         .open(path)
         .map_err(|source| io_error(path, source))?;
-    let taken = if shared {
-        file.try_lock_shared()
-    } else {
-        file.try_lock()
-    };
+    let taken = crate::fault::or(
+        "lock-unsupported",
+        || Err(fs::TryLockError::Error(io::ErrorKind::Unsupported.into())),
+        || {
+            if shared {
+                file.try_lock_shared()
+            } else {
+                file.try_lock()
+            }
+        },
+    );
     match taken {
         Ok(()) => Ok(Some(Held(file))),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
@@ -1580,6 +1586,32 @@ mod tests {
         let path = root.join("evidence.gz");
         let metadata = write_archive(entries, &path).unwrap();
         (path, metadata.compressed_bytes)
+    }
+
+    /// Where the file system keeps no locks, the owners written beside them
+    /// decide: a run goes ahead, and cleaning, which wants the store alone,
+    /// is refused while another process owns a copy.
+    #[cfg(unix)]
+    #[test]
+    fn without_file_locks_the_owners_beside_them_decide() {
+        let root = project();
+        crate::fault::during("lock-unsupported", || {
+            drop(ProjectLock::acquire(&root, "run_a", "now").unwrap());
+            drop(ProjectLock::acquire_alone(&root, "run_b", "now").unwrap());
+            // A copy owned by a process that is still there (init's).
+            fs::write(
+                root.join(".supercov/locks/active.json"),
+                serde_json::to_vec(&LockOwner {
+                    run_id: "run_c".into(),
+                    pid: 1,
+                    started_at: "now".into(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(ProjectLock::acquire_alone(&root, "run_d", "now").is_err());
+        });
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// Each store operation whose system call fails: a write retries a name
