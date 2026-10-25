@@ -15,7 +15,9 @@
 // left as the project made it. The suite runs as `cargo test -p host`, which
 // never compiles the Workers' crates itself: they count all the same, as
 // worker-build compiles them -- for wasm, as a release, with their default
-// features.
+// features. One test starts both Workers in a single \`wrangler dev\`
+// (\`-c plane/... -c runners/...\`), reaching the second only through the
+// first's service binding: the second is credited to it too.
 // Without worker-build or the wasm target there is nothing to build, and the
 // gate says so; a job that installed them sets SUPERCOV_REQUIRE_RUST_WORKER=1.
 import assert from 'node:assert/strict';
@@ -46,6 +48,9 @@ const PLANE = `use worker::*;
 async fn fetch(request: Request, env: Env, _ctx: Context) -> Result<Response> {
     if request.path() == "/ready" {
         return Response::ok("ready");
+    }
+    if request.path() == "/runners" {
+        return env.service("RUNNERS")?.fetch(request.url()?.to_string(), None).await;
     }
     if request.path() == "/build" {
         return Response::ok(format!("{} {}", runtime(), build()));
@@ -148,7 +153,7 @@ const files = {
   '.gitignore': 'node_modules/\ntarget/\n.wrangler/\nbuild/\n',
   'Cargo.toml': '[workspace]\nmembers = ["plane", "runners", "host"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
   'plane/Cargo.toml': worker('plane', '\n[features]\ndefault = ["audit"]\naudit = []\n'),
-  'plane/wrangler.toml': 'name = "plane"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\n\n[[durable_objects.bindings]]\nname = "COUNTER"\nclass_name = "Counter"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["Counter"]\n',
+  'plane/wrangler.toml': 'name = "plane"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\n\n[[durable_objects.bindings]]\nname = "COUNTER"\nclass_name = "Counter"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["Counter"]\n\n[[services]]\nbinding = "RUNNERS"\nservice = "runners"\n',
   'plane/src/lib.rs': PLANE,
   'runners/Cargo.toml': worker('runners'),
   'runners/wrangler.toml': 'name = "runners"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\n',
@@ -210,19 +215,36 @@ fn get(port: u16, path: &str) -> Option<String> {
     Some(out)
 }
 
+fn workspace() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
 /// The Worker in \`crate_name\`, or none where it is not built: a test kit
 /// that will not run an unbuilt Worker.
 fn serve(crate_name: &str, vars: &[&str]) -> Option<Dev> {
-    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(crate_name);
-    if !directory.join("build").exists() {
+    let directory = workspace().join(crate_name);
+    directory.join("build").exists().then(|| start(&directory, &[], vars))
+}
+
+/// Several Workers in one \`wrangler dev\`, the first serving and the others
+/// reached through its service bindings; none unless each is built.
+fn serve_together(crates: &[&str]) -> Option<Dev> {
+    if crates.iter().any(|name| !workspace().join(name).join("build").exists()) {
         return None;
     }
+    let configs = crates.iter().flat_map(|name| ["-c".to_owned(), format!("{name}/wrangler.toml")]).collect::<Vec<_>>();
+    Some(start(&workspace(), &configs, &[]))
+}
+
+fn start(directory: &std::path::Path, configs: &[String], vars: &[&str]) -> Dev {
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let storage = std::env::temp_dir().join(format!("planes-storage-{}-{port}", std::process::id()));
     let mut command = Command::new("wrangler");
     command
-        .current_dir(&directory)
-        .args(["dev", "--local", "--ip", "127.0.0.1", "--port", &port.to_string(), "--show-interactive-dev-session=false"])
+        .current_dir(directory)
+        .arg("dev")
+        .args(configs)
+        .args(["--local", "--ip", "127.0.0.1", "--port", &port.to_string(), "--show-interactive-dev-session=false"])
         .args(["--persist-to", &storage.display().to_string()]);
     for var in vars {
         command.args(["--var", var]);
@@ -237,7 +259,7 @@ fn serve(crate_name: &str, vars: &[&str]) -> Option<Dev> {
     let dev = Dev { child, port, storage };
     for _ in 0..1200 {
         if get(port, "/ready").as_deref() == Some("ready") {
-            return Some(dev);
+            return dev;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -265,6 +287,13 @@ fn a_runner_with_two_slots_is_busy() {
     let _one = exclusive();
     let Some(dev) = serve("runners", &[]) else { return };
     assert_eq!(get(dev.port, "/?slots=2").as_deref(), Some("busy"));
+}
+
+#[test]
+fn a_runner_reached_through_the_plane_is_busy() {
+    let _one = exclusive();
+    let Some(dev) = serve_together(&["plane", "runners"]) else { return };
+    assert_eq!(get(dev.port, "/runners?slots=2").as_deref(), Some("busy"));
 }
 
 #[test]
@@ -310,7 +339,7 @@ try {
     return { measured, id: JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id };
   };
   const { measured, id } = measure();
-  assert.match(measured.stderr, /Rust coverage: 4 test\(s\)/u, measured.stderr);
+  assert.match(measured.stderr, /Rust coverage: 5 test\(s\)/u, measured.stderr);
   const lines = (runId, name, file) => [...new Set(run(root, binary, ['runs', runId, 'test', name, '--limit', '0']).stdout.match(new RegExp(`${file.replace(/[/.]/gu, '\\$&')}:\\d+`, 'gu')) ?? [])];
   const at = (file, source, text) => `${file}:${lineOf(source, text)}`;
 
@@ -345,6 +374,12 @@ try {
   const busy = lines(id, 'a_runner_with_two_slots_is_busy', 'runners/src/lib.rs');
   assert.ok(busy.includes(at('runners/src/lib.rs', RUNNERS, '"busy"')), `the runner test: ${busy.join(' ')}`);
   assert.ok(!busy.includes(at('runners/src/lib.rs', RUNNERS, '"full"')), `the runner test: ${busy.join(' ')}`);
+  // A Worker that runs beside another in one \`wrangler dev\`, reached only
+  // through the first's service binding, is read too.
+  const together = lines(id, 'a_runner_reached_through_the_plane_is_busy', 'runners/src/lib.rs');
+  assert.ok(together.includes(at('runners/src/lib.rs', RUNNERS, '"busy"')), `the runner beside the plane: ${together.join(' ')}`);
+  const forwarded = lines(id, 'a_runner_reached_through_the_plane_is_busy', 'plane/src/lib.rs');
+  assert.ok(forwarded.includes(at('plane/src/lib.rs', PLANE, 'env.service("RUNNERS")')), `the plane forwarding: ${forwarded.join(' ')}`);
   assert.deepEqual(lines(id, 'a_test_that_starts_no_worker', 'plane/src/lib.rs'), []);
   const scope = JSON.parse(run(root, binary, ['runs', id, 'scope', '--json', '--limit', '0']).stdout).data.entries;
   for (const file of ['plane/src/lib.rs', 'runners/src/lib.rs']) {

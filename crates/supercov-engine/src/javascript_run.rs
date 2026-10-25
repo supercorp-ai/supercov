@@ -883,7 +883,17 @@ pub fn run_direct_javascript(
         );
     }
     for server in &servers {
-        overrides.extend(server.environment());
+        for (name, value) in server.environment() {
+            // A server's preload joins the suite's own.
+            let value = if name == "NODE_OPTIONS" {
+                overrides
+                    .get(&name)
+                    .map_or_else(|| value.clone(), |options| format!("{options} {value}"))
+            } else {
+                value
+            };
+            overrides.insert(name, value);
+        }
     }
     // `uv run` syncs the environment before it runs, and the copy's is the
     // project's own, linked in: a sync rewrote the project's editable install
