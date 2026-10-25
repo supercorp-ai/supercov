@@ -968,10 +968,11 @@ fn security_follows_outside_data_across_an_import() {
         "export function findOrders(db, customer) {\n  return db.query(\"SELECT * FROM orders WHERE customer = '\" + customer + \"'\");\n}\n",
     );
     // `route` is handed `findOrders` rather than importing it: only a test
-    // that runs both shows the path.
+    // that runs both shows the path. `lookup` would be one too, but no test
+    // runs it.
     project.write(
         "src/router.js",
-        "export async function route(req, deps) {\n  return deps.findOrders(deps.db, req.params.id);\n}\n",
+        "export async function route(req, deps) {\n  return deps.findOrders(deps.db, req.params.id);\n}\n\nexport async function lookup(req, deps) {\n  return deps.findOrders(deps.db, req.query.id);\n}\n",
     );
     project.write(
         "test/router.test.js",
