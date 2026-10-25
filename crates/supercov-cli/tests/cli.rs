@@ -10910,6 +10910,30 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     );
 }
 
+/// A runner's configuration named where it is not named as one -- a
+/// settings file `SUPERCOV_VITEST_CONFIG` points at -- changes the
+/// configuration without any configuration file to blame: no runner can be
+/// ruled out, and every test is affected.
+#[test]
+fn a_configuration_no_file_is_named_for_affects_every_test() {
+    let project = Project::cart("affected-unnamed-configuration");
+    project.write("runner-settings.mjs", "export default {};\n");
+    project.commit("runner settings");
+    let named = [("SUPERCOV_VITEST_CONFIG", "runner-settings.mjs")];
+    let measured = project.supercov_with(&["--", "node", "--test"], &named);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    project.write("runner-settings.mjs", "export default { test: {} };\n");
+    let every = project
+        .supercov_with(&["runs", "latest", "tests", "affected", "--json"], &named)
+        .json()["data"]
+        .clone();
+    assert_eq!(every["summary"]["affected"], 3, "{every}");
+    assert_eq!(
+        every["workingTree"]["runWide"],
+        serde_json::json!(["test/build configuration changed"])
+    );
+}
+
 /// A change to hundreds of files no test ran affects no test and still
 /// lists every one of them: the JSON keeps the first files and counts the
 /// rest, rather than refusing the reply.
