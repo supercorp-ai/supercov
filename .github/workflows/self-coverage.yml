@@ -60,6 +60,8 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+      # The release build's dependencies kept between runs.
+      - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: cargo build --release -p supercov
       - uses: actions/upload-artifact@v4
@@ -83,9 +85,11 @@ jobs:
     steps:
       # The instrumented workspace, its build and the gates' toolchains do not
       # fit a Linux runner's free space as it comes.
+      # In the background: the space is wanted by the build, minutes after
+      # the setup steps this would otherwise hold up by a minute or more.
       - name: Free disk space
         if: runner.os == 'Linux'
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        run: sudo nohup rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL > /dev/null 2>&1 &
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
         with:
@@ -119,7 +123,16 @@ jobs:
       # The versions CI's wasm and worker jobs use.
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0,cargo-nextest@0.9.140,worker-build@0.8.7
+          tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0,cargo-nextest@0.9.140
+      # install-action has no build of worker-build, and compiling it took two
+      # minutes of every slice: compiled once per version and kept.
+      - id: worker-build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ runner.arch }}
+      - if: steps.worker-build.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
       - name: Install wasmtime 49.0.3
         run: |
           case "${{ runner.os }}-${{ runner.arch }}" in
@@ -130,6 +143,14 @@ jobs:
           curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-$build.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/wasmtime-v49.0.3-$build" >> "$GITHUB_PATH"
       - run: npm ci
+      # The browsers of every pinned Playwright, kept while no lockfile
+      # changes; the system libraries they need are installed each time.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
       # Each fixture pins its own Playwright, and each version launches its
       # own browser builds: install them for every version a lockfile names.
       - name: Install every pinned Playwright's browsers
@@ -182,6 +203,8 @@ jobs:
           # them, where locally it says so and passes.
           SUPERCOV_REQUIRE_RUST_WASM: "1"
           SUPERCOV_REQUIRE_RUST_WORKER: "1"
+          # Each gate's time, kept with the slice's run.
+          SUPERCOV_GATE_TIMINGS: ${{ runner.temp }}/out/gate-timings.tsv
         run: |
           chmod +x "$RUNNER_TEMP/self/supercov"
           echo "${{ steps.tests.outputs.command }}"

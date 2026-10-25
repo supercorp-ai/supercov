@@ -28,6 +28,7 @@ fn gate(script: &str, arguments: &[&str]) {
     let turn = File::create(std::env::temp_dir().join("supercov-e2e-gates.lock"))
         .expect("the gate lock file");
     turn.lock().expect("a turn at the gates");
+    let started = std::time::Instant::now();
     let output = Command::new("node")
         .arg(repository().join("scripts").join(script))
         .args(arguments)
@@ -35,6 +36,23 @@ fn gate(script: &str, arguments: &[&str]) {
         .env("SUPERCOV_BINARY", env!("CARGO_BIN_EXE_supercov"))
         .output()
         .expect("node runs");
+    // How long each took, where the caller keeps it: what slices of the
+    // gates are balanced by.
+    if let Some(path) = std::env::var_os("SUPERCOV_GATE_TIMINGS") {
+        use std::io::Write;
+        let mut timings = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("the gate timings file");
+        writeln!(
+            timings,
+            "{script} {}\t{}",
+            arguments.join(" "),
+            started.elapsed().as_secs()
+        )
+        .expect("a gate timing");
+    }
     assert!(
         output.status.success(),
         "{script} {arguments:?} failed ({})\n--- stdout ---\n{}\n--- stderr ---\n{}",

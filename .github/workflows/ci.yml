@@ -38,6 +38,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
+      # Dependencies and the build kept between runs: each job compiled the
+      # workspace and every crate it uses from nothing.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The three Node versions build the same Rust: one cache.
+          shared-key: check
+          save-if: ${{ matrix.node == 24 }}
       - run: npm ci
       - run: npm run check
       # A failure here ends this commit's other runs too: no waiting on them.
@@ -62,6 +69,7 @@ jobs:
         with:
           # The import gate reads an LLVM profile with llvm-profdata and llvm-cov.
           components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
       # The Ruby server gate measures a Puma app; Supercov measures Ruby 3.3
       # and newer, and the runner's own Ruby is older.
       - uses: ruby/setup-ruby@v1
@@ -105,6 +113,7 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
       # The packed-install check holds the binary to the glibc 2.28 floor the
       # release promises; this runner's own glibc is 2.39, so the binary is
       # linked the way native-artifacts.yml links it, with cargo-zigbuild.
@@ -155,7 +164,16 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
-      - run: cargo install worker-build --version 0.8.7 --locked
+      - uses: Swatinem/rust-cache@v2
+      # install-action has no build of worker-build: compiled once per
+      # version and kept, rather than compiled in every run.
+      - id: worker-build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ runner.arch }}
+      - if: steps.worker-build.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
       # The cargo-test gate runs its Worker under `cargo nextest run` too.
       - uses: taiki-e/install-action@v2
         with:
@@ -187,7 +205,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
-      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - uses: Swatinem/rust-cache@v2
+      # Published builds, where `cargo install` compiled them in every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: cargo build -p supercov
@@ -213,8 +235,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown, wasm32-wasip1
           components: clippy, rustfmt
-      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
-      - run: cargo install wasm-pack --version 0.15.0 --locked
+      - uses: Swatinem/rust-cache@v2
+      # Published builds, where `cargo install` compiled them in every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0
       - name: Install wasmtime 49.0.3
         run: |
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
