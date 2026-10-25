@@ -5,6 +5,9 @@
 //! site does not make its call; it returns what the call returns when it
 //! fails. Only debug builds read the variable: a release build has no such
 //! switch. The engine's own tests set faults for one thread with [`during`].
+//! Every part of it is compiled into every debug build alike: a part only
+//! the engine's test build had would make that build's coverage count lines
+//! the others' do not, and runs of the two could not be merged.
 
 use std::io;
 
@@ -16,7 +19,7 @@ struct Fault {
     remaining: Option<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
     std::sync::LazyLock::new(|| parse(&std::env::var("SUPERCOV_TEST_FAULT").unwrap_or_default()));
 
@@ -39,7 +42,7 @@ fn parse(text: &str) -> Vec<Fault> {
 /// Read the switch now. A child forked to exec a command may not allocate,
 /// so the sites it reaches are read before the fork.
 pub fn prepare() {
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     std::sync::LazyLock::force(&FAULTS);
 }
 
@@ -48,14 +51,14 @@ pub fn injected(site: &str) -> bool {
     failing(site).is_some()
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 thread_local! {
     static DURING: std::cell::RefCell<Vec<Fault>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Run `body` with the faults `faults` names (as `SUPERCOV_TEST_FAULT` does)
 /// on this thread.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 pub fn during<R>(faults: &str, body: impl FnOnce() -> R) -> R {
     let earlier = DURING.with(|during| during.replace(parse(faults)));
     let result = body();
@@ -66,15 +69,15 @@ pub fn during<R>(faults: &str, body: impl FnOnce() -> R) -> R {
 /// When the call at `site` fails this time, the errno the test chose for
 /// it, if any.
 fn failing(site: &str) -> Option<Option<i32>> {
-    #[cfg(test)]
-    if let Some(failing) = DURING.with(|during| take(&during.borrow(), site)) {
-        return failing;
-    }
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     {
-        take(&FAULTS, site).flatten()
+        // This thread's faults first, the variable's where they name nothing.
+        DURING
+            .with(|during| take(&during.borrow(), site))
+            .or_else(|| take(&FAULTS, site))
+            .flatten()
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(test, debug_assertions)))]
     {
         let _ = site;
         None
