@@ -626,11 +626,10 @@ fn session_with_patience(
 }
 
 /// A preload for wrangler's Node process: once the runtime is up, it notes
-/// where workerd's own inspector listens, with wrangler's arguments and
-/// directory, in a file of the directory `SUPERCOV_WRANGLER_INSPECTORS`
-/// names. wrangler's inspector shows the first Worker of a `wrangler dev`
-/// alone; workerd's shows every Worker it runs, so the others of a session
-/// started with several `-c` are read there.
+/// where workerd's own inspector listens in a file of the directory
+/// `SUPERCOV_WRANGLER_INSPECTORS` names. wrangler's inspector shows one
+/// Worker of a `wrangler dev`; workerd's shows every Worker it runs, so a
+/// session started with several `-c` is read there whole.
 const INSPECTOR_HOOK: &str = r#"'use strict';
 // Supercov: where workerd's inspector listens, for the poller of a measured
 // `wrangler dev`. Inert in any process that never loads miniflare.
@@ -650,8 +649,7 @@ if (directory) {
         const url = await inspectorURL.apply(this, arguments);
         try {
           const file = path.join(directory, process.pid + '.inspector');
-          const note = { url: String(url), argv: process.argv.slice(2), cwd: process.cwd() };
-          fs.writeFileSync(file + '.tmp', JSON.stringify(note));
+          fs.writeFileSync(file + '.tmp', JSON.stringify({ url: String(url) }));
           fs.renameSync(file + '.tmp', file);
         } catch {}
         return url;
@@ -687,52 +685,6 @@ fn hooked_node_options(inherited: Option<&str>, hook: &Path) -> String {
         .map_or_else(|| require.clone(), |options| format!("{options} {require}"))
 }
 
-/// The names the first Worker of a `wrangler dev` may run under in workerd,
-/// read from its arguments as wrangler reads them: `--name`, or the name in
-/// the first configuration it is given (`-c`), or else the one in `cwd`, and
-/// that name with `-<env>` for an `--env`. wrangler's inspector holds that
-/// Worker already; the others are Supercov's to read.
-fn first_worker_names(arguments: &[String], cwd: &Path) -> BTreeSet<String> {
-    let value = |names: &[&str]| -> Option<String> {
-        let mut words = arguments.iter();
-        while let Some(word) = words.next() {
-            for name in names {
-                if word == name {
-                    return words.next().cloned();
-                }
-                if let Some(value) = word.strip_prefix(&format!("{name}=")) {
-                    return Some(value.to_owned());
-                }
-            }
-        }
-        None
-    };
-    let directory = value(&["--cwd"]).map_or_else(|| cwd.to_owned(), |relative| cwd.join(relative));
-    let environment = value(&["-e", "--env"]);
-    let configured = value(&["-c", "--config"])
-        .map(|config| vec![directory.join(config)])
-        .unwrap_or_else(|| {
-            ["wrangler.json", "wrangler.jsonc", "wrangler.toml"]
-                .map(|name| directory.join(name))
-                .to_vec()
-        })
-        .iter()
-        .find_map(|config| read_config(config))
-        .and_then(|(_, document)| {
-            let named = environment
-                .as_ref()
-                .and_then(|environment| document["env"][environment]["name"].as_str())
-                .or_else(|| document["name"].as_str());
-            named.map(str::to_owned)
-        });
-    let Some(name) = value(&["--name"]).or(configured) else {
-        return BTreeSet::new();
-    };
-    let mut names = BTreeSet::from([name.clone()]);
-    names.extend(environment.map(|environment| format!("{name}-{environment}")));
-    names
-}
-
 /// The user Workers workerd's inspector on `port` shows, by their target id
 /// (`core:user:<name>`): its `/json` list.
 fn inspector_targets(port: u16) -> Vec<String> {
@@ -766,9 +718,11 @@ fn inspector_port(url: &str) -> Option<u16> {
     url.trim_end_matches('/').rsplit(':').next()?.parse().ok()
 }
 
-/// Reads every Worker but the first of each `wrangler dev` whose notes land
-/// in a directory, through workerd's inspector, each into a windows file of
-/// its own, until told to stop.
+/// Reads every Worker of each `wrangler dev` whose notes land in a
+/// directory, through workerd's inspector, each into a windows file of its
+/// own, until told to stop. The one wrangler's inspector shows is read there
+/// too: each take clears what it read, so every hit is in one file or the
+/// other, credited alike.
 struct OtherWorkers {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<Vec<PathBuf>>>,
@@ -832,19 +786,9 @@ fn watch_other_workers(
             let Some(port) = note["url"].as_str().and_then(inspector_port) else {
                 continue;
             };
-            let arguments = note["argv"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            let first =
-                first_worker_names(&arguments, Path::new(note["cwd"].as_str().unwrap_or("")));
             for target in inspector_targets(port) {
-                let name = target.trim_start_matches("core:user:");
                 let key = (port, target.clone());
-                if first.contains(name) || pollers.contains_key(&key) {
+                if pollers.contains_key(&key) {
                     continue;
                 }
                 let file = windows(written.len());
@@ -930,7 +874,7 @@ fn window_from(value: &Value) -> Option<Window> {
 pub struct RustWorkerServer {
     project: PreparedRustProject,
     pollers: Vec<Poller>,
-    /// The other Workers of a `wrangler dev` started with several `-c`.
+    /// Every Worker of a `wrangler dev`, read through workerd's inspector.
     others: Option<OtherWorkers>,
     hook: PathBuf,
     notes: PathBuf,
@@ -1065,7 +1009,7 @@ impl RustWorkerServer {
     /// probes' parentheses, the one lint they raise, are allowed by name.
     ///
     /// And wrangler's Node process loads the hook that says where workerd's
-    /// inspector is, for the other Workers of a session started with several
+    /// inspector is, for every Worker of a session, one started with several
     /// `-c`; the suite's own `NODE_OPTIONS` come first.
     pub fn environment(&self) -> BTreeMap<String, String> {
         BTreeMap::from([
@@ -1337,7 +1281,7 @@ struct Watched {
 /// The arguments the real `wrangler` gets. Under a test, whose `evidence`
 /// directory is named, `wrangler dev` gets an inspector port and a poller
 /// writing into that directory, and loads `hook`, which tells the poller
-/// where the session's other Workers are; a remote one, a note of why it has
+/// where each of the session's Workers is; a remote one, a note of why it has
 /// none.
 fn watched_arguments(
     mut arguments: Vec<std::ffi::OsString>,
@@ -1489,7 +1433,7 @@ pub fn poll_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
     let windows = PathBuf::from(windows);
     let part = partial(&windows);
     let poller = Poller::start(port, part.clone());
-    // The session's other Workers, each into `worker-<pid>-<n>.windows`.
+    // Each Worker of the session, into `worker-<pid>-<n>.windows`.
     let stem = windows.with_extension("");
     let others = notes.map(|notes| {
         OtherWorkers::start(notes, move |number| {
@@ -1684,9 +1628,7 @@ mod tests {
         fs::create_dir(&notes).unwrap();
         fs::write(
             notes.join("1.inspector"),
-            format!(
-                r#"{{"url":"ws://127.0.0.1:{workerd}","argv":["dev","--name","main"],"cwd":"/"}}"#
-            ),
+            format!(r#"{{"url":"ws://127.0.0.1:{workerd}"}}"#),
         )
         .unwrap();
         // Reaped as it ends, as wrangler's parent reaps it: a child left a
@@ -1780,77 +1722,22 @@ mod tests {
         assert_eq!(inspector_port("ws://127.0.0.1"), None);
     }
 
-    /// The first Worker of a `wrangler dev` is named as wrangler names it:
-    /// `--name`, the first configuration's name, or the one in its directory,
-    /// with and without an environment's suffix.
+    /// Each Worker every wrangler noted is read, each into a file of its
+    /// own, once.
     #[test]
-    fn the_first_worker_of_a_session_is_named_as_wrangler_names_it() {
-        let root = temporary("first-worker");
-        fs::create_dir_all(root.join("plane")).unwrap();
-        fs::create_dir_all(root.join("json")).unwrap();
-        fs::write(
-            root.join("plane/wrangler.toml"),
-            "name = \"plane\"\n\n[env.staging]\nname = \"plane-stg\"\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("json/wrangler.jsonc"),
-            "{ // the name\n\"name\": \"j\" }\n",
-        )
-        .unwrap();
-        let names = |arguments: &str, cwd: &Path| {
-            first_worker_names(
-                &arguments.split(' ').map(str::to_owned).collect::<Vec<_>>(),
-                cwd,
-            )
-            .into_iter()
-            .collect::<Vec<_>>()
-        };
-        assert_eq!(names("dev --name given", &root), ["given"]);
-        assert_eq!(
-            names("dev --name=given -c plane/wrangler.toml", &root),
-            ["given"]
-        );
-        assert_eq!(
-            names("dev -c plane/wrangler.toml -c runners/wrangler.toml", &root),
-            ["plane"]
-        );
-        assert_eq!(
-            names("dev --config=plane/wrangler.toml --env other", &root),
-            ["plane", "plane-other"]
-        );
-        assert_eq!(
-            names("dev -c plane/wrangler.toml -e staging", &root),
-            ["plane-stg", "plane-stg-staging"]
-        );
-        assert_eq!(names("--cwd json dev", &root), ["j"]);
-        assert_eq!(names("dev", &root.join("plane")), ["plane"]);
-        assert!(names("dev", &root).is_empty());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// The other Workers each wrangler noted are read, each into a file of
-    /// its own, once; the first, which wrangler's inspector holds, is not.
-    #[test]
-    fn the_other_workers_of_a_session_are_read_through_workerd() {
+    fn the_workers_of_a_session_are_read_through_workerd() {
         let (port, paths, stop) = fake_workerd(
             r#"[{"id":"core:user:plane"},{"id":"core:user:runners"},{"id":"core:user:jobs"}]"#,
         );
         let notes = temporary("other-workers");
         fs::write(
             notes.join("1.inspector"),
-            format!(
-                r#"{{"url":"ws://127.0.0.1:{port}","argv":["dev","--name","plane"],"cwd":"/"}}"#
-            ),
+            format!(r#"{{"url":"ws://127.0.0.1:{port}"}}"#),
         )
         .unwrap();
         // A note cut short, one without a port, and a file that is no note.
         fs::write(notes.join("2.inspector"), "{").unwrap();
-        fs::write(
-            notes.join("3.inspector"),
-            r#"{"url":"ws://127.0.0.1","argv":[]}"#,
-        )
-        .unwrap();
+        fs::write(notes.join("3.inspector"), r#"{"url":"ws://127.0.0.1"}"#).unwrap();
         fs::write(notes.join("4.inspector.tmp"), "{}").unwrap();
         let files = notes.clone();
         let others = OtherWorkers::start(notes.clone(), move |number| {
@@ -1859,8 +1746,9 @@ mod tests {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(10) {
             let seen = paths.lock().unwrap().clone();
-            if seen.contains(&"/core:user:runners".to_owned())
-                && seen.contains(&"/core:user:jobs".to_owned())
+            if ["plane", "runners", "jobs"]
+                .iter()
+                .all(|name| seen.contains(&format!("/core:user:{name}")))
             {
                 break;
             }
@@ -1870,10 +1758,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let written = others.finish();
         stop.store(true, Ordering::Release);
-        assert_eq!(written, [notes.join("w0"), notes.join("w1")]);
-        let seen = paths.lock().unwrap().clone();
-        assert!(!seen.contains(&"/core:user:plane".to_owned()), "{seen:?}");
-        assert!(seen.contains(&"/core:user:runners".to_owned()), "{seen:?}");
+        assert_eq!(
+            written,
+            [notes.join("w0"), notes.join("w1"), notes.join("w2")]
+        );
         fs::remove_dir_all(notes).unwrap();
     }
 

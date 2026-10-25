@@ -236,9 +236,9 @@ Supercov reads what the Worker ran through that inspector every 5 ms, and
 each read is credited to the browser test that was running then, if only one
 was, as for a [Go server](#a-go-server-under-browser-tests). Several Workers
 in one `wrangler dev` (`-c a/wrangler.toml -c b/wrangler.toml`) are each
-measured: wrangler's inspector shows only the first, so Supercov reads the
-others through workerd's own inspector, whose address a small preload in
-wrangler's Node process reports. The Worker's
+measured: wrangler's inspector shows one of them, so Supercov reads each
+through workerd's own inspector, whose address a small preload in wrangler's
+Node process reports. The Worker's
 coverage is a Rust run of its own, published as the run or beside the browser
 run. Requests made before the first test, such as the readiness check
 `webServer` waits on, are the run's and no test's.
@@ -287,8 +287,8 @@ Code in a Durable Object (`#[durable_object]` and its `impl DurableObject`)
 is measured like the rest of the Worker and credited to the test whose
 requests reached it. So is a Worker that runs beside another in one
 `wrangler dev` (`-c plane/wrangler.toml -c runners/wrangler.toml`), reached
-only through the first's service bindings: wrangler's inspector shows the
-first alone, and Supercov reads the others through workerd's own, whose
+only through the first's service bindings: wrangler's inspector shows one
+Worker of a session, and Supercov reads each through workerd's own, whose
 address a small preload in wrangler's Node process reports. A test that
 sets its own `NODE_OPTIONS` keeps them; the preload is added after. A workspace with several Worker crates counts each crate
 once, and runs of different tests -- each starting different Workers, or
