@@ -303,6 +303,65 @@ fn in_global_allocator_impl(node: &ra_ap_syntax::SyntaxNode) -> bool {
     })
 }
 
+/// Whether a `for` loop over `iterable` runs its body at least once, by its
+/// text alone: a non-empty array literal, or a range between integer
+/// literals that holds a value, read through references, parentheses and
+/// the adapters that keep every item. Such a loop has no zero-iterations
+/// outcome to observe, as a match's last arm has no skipped one; the
+/// JavaScript instrumenter reads array literals the same way.
+fn never_empty(iterable: &ast::Expr) -> bool {
+    use ast::RangeItem;
+    // A decimal integer literal's value, its `_`s and type suffix dropped.
+    let integer = |bound: Option<ast::Expr>| match bound {
+        Some(ast::Expr::Literal(literal)) => {
+            let text = literal.syntax().text().to_string();
+            let digits = text
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '_')
+                .filter(|c| *c != '_')
+                .collect::<String>();
+            let suffix = &text[text.len().min(digits.len() + text.matches('_').count())..];
+            (suffix.is_empty() || suffix.starts_with(['u', 'i']))
+                .then(|| digits.parse::<u128>().ok())
+                .flatten()
+        }
+        _ => None,
+    };
+    match iterable {
+        // `[x; n]` may be `[x; 0]`.
+        ast::Expr::ArrayExpr(array) => {
+            array.semicolon_token().is_none() && array.exprs().next().is_some()
+        }
+        ast::Expr::RangeExpr(range) => match (integer(range.start()), integer(range.end())) {
+            (Some(start), Some(end)) => match range.op_kind() {
+                Some(ast::RangeOp::Inclusive) => start <= end,
+                _ => start < end,
+            },
+            _ => false,
+        },
+        ast::Expr::ParenExpr(inner) => inner.expr().is_some_and(|inner| never_empty(&inner)),
+        ast::Expr::RefExpr(inner) => inner.expr().is_some_and(|inner| never_empty(&inner)),
+        ast::Expr::MethodCallExpr(call) => {
+            call.name_ref().is_some_and(|name| {
+                matches!(
+                    name.text(),
+                    "iter"
+                        | "into_iter"
+                        | "iter_mut"
+                        | "enumerate"
+                        | "copied"
+                        | "cloned"
+                        | "map"
+                        | "rev"
+                )
+            }) && call
+                .receiver()
+                .is_some_and(|receiver| never_empty(&receiver))
+        }
+        _ => false,
+    }
+}
+
 /// Report whether a probe placed at this node could not run correctly.
 fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
     in_const_context(node) || in_global_allocator(node)
@@ -1038,11 +1097,19 @@ impl<'a> RustObligationCollector<'a> {
         }
 
         for expression in root.descendants().filter_map(ast::ForExpr::cast) {
-            self.branch(
-                expression.syntax().text_range(),
-                "for-loop",
-                [("zero", "zero iterations"), ("entered", "entered")],
-            );
+            let range = expression.syntax().text_range();
+            if expression
+                .iterable()
+                .is_some_and(|iterable| never_empty(&iterable))
+            {
+                self.branch(range, "for-loop", [("entered", "entered")]);
+            } else {
+                self.branch(
+                    range,
+                    "for-loop",
+                    [("zero", "zero iterations"), ("entered", "entered")],
+                );
+            }
         }
         for expression in root.descendants().filter_map(ast::MatchExpr::cast) {
             let Some(list) = expression.match_arm_list() else {
@@ -2712,6 +2779,15 @@ fn numbered_file(
             continue;
         };
         let id = stable_id(file, "branch", expression.syntax().text_range(), "for-loop");
+        // A loop that cannot be empty has no zero-iterations outcome: the
+        // adapter is given its entry ordinal for both, and the first is
+        // never reported.
+        let entered = hit_ordinal(&format!("{id}:entered"));
+        let zero = if never_empty(&iterable) {
+            entered
+        } else {
+            hit_ordinal(&format!("{id}:zero"))
+        };
         // Scope is the wrapped range itself: any wrapper that also starts
         // here and reaches further -- a decision, a match arm -- must stay
         // outside this one.
@@ -2721,11 +2797,7 @@ fn numbered_file(
             iterable.syntax().text_range(),
             0,
             format!("{runtime_path}::for_loop(("),
-            format!(
-                "), {}, {})",
-                hit_ordinal(&format!("{id}:zero")),
-                hit_ordinal(&format!("{id}:entered"))
-            ),
+            format!("), {zero}, {entered})"),
         );
     }
 
@@ -4665,6 +4737,58 @@ fn main() {
         assert_eq!(instrumented.status, original.status);
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stderr, original.stderr);
+    }
+
+    /// A loop that cannot be empty -- over a non-empty array literal, or a
+    /// range between integer literals that holds a value, through the
+    /// adapters that keep every item -- has only its entry to observe; one
+    /// that may be empty keeps both outcomes.
+    #[test]
+    fn a_loop_that_cannot_be_empty_records_only_its_entry() {
+        for (iterable, never_empty) in [
+            ("[1, 2]", true),
+            ("&[1, 2]", true),
+            ("([1])", true),
+            ("[1, 2].iter().enumerate()", true),
+            ("[1].into_iter().map(|v| v * 2).rev()", true),
+            ("0..3", true),
+            ("1_000u32..1_001", true),
+            ("0..=0", true),
+            ("0..0", false),
+            ("3..1", false),
+            ("[0; 3]", false),
+            ("[]", false),
+            ("0x0..0x3", false),
+            ("0..n", false),
+            ("..3", false),
+            ("values", false),
+            ("values.iter()", false),
+            ("[1].iter().skip(1)", false),
+        ] {
+            let source = format!("fn f(values: &[i32], n: usize) {{ for _ in {iterable} {{}} }}");
+            let transformed =
+                instrument_rust_source("src/lib.rs", &source, "crate::__supercov_runtime_v1")
+                    .unwrap();
+            let branch = transformed
+                .manifest
+                .branches
+                .iter()
+                .find(|branch| branch.kind == "for-loop")
+                .unwrap();
+            let labels = branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.label.as_str())
+                .collect::<Vec<_>>();
+            let expected: &[&str] = if never_empty {
+                &["entered"]
+            } else {
+                &["zero iterations", "entered"]
+            };
+            assert_eq!(labels, expected, "{iterable}");
+            // The adapter is given an ordinal for each outcome it may report.
+            assert!(transformed.code.contains("::for_loop(("), "{iterable}");
+        }
     }
 
     #[test]
