@@ -1820,6 +1820,82 @@ mod tests {
 mod replacement_tests {
     use super::*;
 
+    /// Each shape a value is inferred through: parentheses, `?`, a call of a
+    /// constructor or a crate function, a method of a crate type, `Self`,
+    /// a block, a `match` or an `if`, a literal, a record and a closure.
+    /// Every one is given a replacement, and none is the value itself.
+    #[test]
+    fn values_of_every_inferred_shape_are_replaced_by_others() {
+        let source = r#"pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+pub enum Mode {
+    On,
+    Off,
+}
+impl Point {
+    pub fn new(x: i32) -> Self {
+        let made = Self { x, y: 0 };
+        made
+    }
+    pub fn flipped(&self) -> Point {
+        Point { x: self.y, y: self.x }
+    }
+    pub fn mode(&self) -> Mode {
+        if self.x > 0 { Mode::On } else { Mode::Off }
+    }
+}
+fn parse(text: &str) -> Result<u32, String> {
+    text.parse().map_err(|_| String::new())
+}
+pub fn shapes(p: &Point, n: u32, text: &str) -> Option<u32> {
+    let a = (n);
+    let b = parse(text).ok()?;
+    let c = Some(n);
+    let d = Box::new(n);
+    let e = p.flipped();
+    let f = { n + 1 };
+    let g = match n { 0 => 1u32, _ => 2 };
+    let h = if n > 1 { 3u32 } else { 4 };
+    let i = true;
+    let j = "";
+    let k = String::new();
+    let l = Point { x: 1, y: 2 };
+    let m = |v: u32| v + 1;
+    let o = 1.5f64;
+    let q = std::cmp::Ordering::Less;
+    let r = vec![1u8];
+    let t = p.mode();
+    let u = Point::new(3);
+    let w = parse(text);
+    Some(a + b)
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let lines = source.lines().collect::<Vec<_>>();
+        let mut replaced = 0;
+        for (number, line) in lines.iter().enumerate() {
+            let Some((_, value)) = line
+                .trim()
+                .strip_prefix("let ")
+                .and_then(|rest| rest.split_once(" = "))
+            else {
+                continue;
+            };
+            let value = value.trim_end_matches(';');
+            let changes = r
+                .get(&(number + 1))
+                .unwrap_or_else(|| panic!("no replacement for {line}"));
+            for (_, replacement) in changes {
+                assert_ne!(replacement, value, "{line}");
+            }
+            replaced += 1;
+        }
+        assert!(replaced >= 20, "{replaced}");
+    }
+
     #[test]
     fn a_value_is_replaced_by_a_different_one_of_its_type() {
         assert_eq!(replacement("false", Some("bool")), "true");
