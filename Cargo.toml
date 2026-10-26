@@ -51,7 +51,8 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 tree-sitter = "0.25"
 tree-sitter-go = "0.25.0"
 tree-sitter-java = "0.23.5"
-tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-language = "0.1.8"
+cc = "1.4"
 toml = "1.1.4"
 toml_edit = { version = "0.24.0", features = ["serde"] }
 tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
