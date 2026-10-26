@@ -1,0 +1,40 @@
+name: Cross-platform watch
+
+# A draft gets CI only, on Linux: the per-OS matrix waits for the pull
+# request to be marked ready. A long draft then meets Windows and macOS all
+# at once, one failure per forty-minute round (4.20.0's took nine). A few
+# times a week each open draft's head runs the legs where platform failures
+# show up first -- filesystems and Ruby, on Windows and macOS -- so they
+# surface while the branch is still being written.
+on:
+  schedule:
+    - cron: "0 5 * * 1,3,5"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start the Windows and macOS legs on each open draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branches=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --draft --limit 50 \
+            --json headRefName,headRepositoryOwner \
+            --jq ".[] | select(.headRepositoryOwner.login == \"${GITHUB_REPOSITORY_OWNER}\") | .headRefName")
+          if [ -z "$branches" ]; then
+            echo "No open drafts."
+            exit 0
+          fi
+          for branch in $branches; do
+            echo "Starting the Windows and macOS legs on $branch"
+            gh workflow run compatibility.yml --repo "$GITHUB_REPOSITORY" --ref "$branch" \
+              -f only=filesystems,ruby \
+              -f os='["windows-latest","macos-latest"]'
+          done

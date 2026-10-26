@@ -31,6 +31,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Each test step has a limit of its own, about twice its slowest run:
+  # a hang fails there, in minutes, with the step named, instead of
+  # running to its job's limit and saying only that it was cancelled.
   node:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',node,')) }}
     name: Node ${{ matrix.node }}
@@ -49,6 +52,7 @@ jobs:
       - run: npm ci
       # `npm run check` runs on every Node in CI's check job.
       - run: npm run build
+        timeout-minutes: 10
       - run: node ../../../bin/supercov.js -- npm test
         working-directory: tests/fixtures/no-build-node
       # A failure here ends this commit's other runs too: no waiting on them.
@@ -100,6 +104,7 @@ jobs:
       # The fixture matrix drives Chromium, Firefox and WebKit.
       - run: npx playwright install --with-deps
       - run: npm run test:fixture
+        timeout-minutes: 10
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -122,6 +127,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: npm run build
+        timeout-minutes: 10
       - run: node ../../../bin/supercov.js -- npm test
         working-directory: tests/fixtures/generic-playwright
         env:
@@ -151,10 +157,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # One Rust cache per platform, saved by the job that builds the whole
+      # workspace and restored by the rest: every job compiled from nothing.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: true
       - run: npm ci
       # The only clippy pass that sees Windows- and macOS-only code.
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: npm run test:platform
+      # `npm run test:platform` under nextest: the test binaries side by side,
+      # where `cargo test` ran them one after another.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      - run: cargo nextest run --workspace --no-fail-fast && cargo test --workspace --doc && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs
+        timeout-minutes: 30
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -185,10 +203,15 @@ jobs:
           python-version: ${{ matrix.python }}
           architecture: ${{ matrix.os == 'windows-11-arm' && (matrix.python == '3.9' || matrix.python == '3.10') && 'x64' || '' }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       # Every interpreter measures itself: the gate refuses to fall back to
       # another Python on the runner, and asserts the version it measured.
       - run: npm run test:python
+        timeout-minutes: 15
         env:
           SUPERCOV_PYTHON: python
       # Slots are shared pages: close must take them back and a fork must
@@ -201,6 +224,7 @@ jobs:
       # budget, on one host.
       - if: matrix.os == 'ubuntu-latest'
         run: npm run benchmark:python
+        timeout-minutes: 5
         env:
           SUPERCOV_PYTHON: python
       - if: matrix.os == 'ubuntu-latest'
@@ -232,6 +256,10 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       # Before Ruby, and that order is the whole point. `ruby/setup-ruby`
       # installs an MSYS2 toolchain on arm64 Windows and puts its clang on
@@ -244,6 +272,7 @@ jobs:
         with:
           ruby-version: ${{ matrix.ruby }}
       - run: npm run test:ruby-coverage
+        timeout-minutes: 10
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -267,6 +296,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: ${{ matrix.os == 'ubuntu-latest' }}
       # One of the nextest releases the gate runs under; it fetches the other,
       # 0.9.148, itself. Any release from 0.9.138 is accepted.
       - uses: taiki-e/install-action@v2
@@ -274,6 +307,7 @@ jobs:
           tool: cargo-nextest@0.9.140
       - run: npm ci
       - run: npm run test:rust-public-cargo
+        timeout-minutes: 15
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -309,8 +343,13 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       - run: npm run test:go
+        timeout-minutes: 15
         env:
           # Without this a job whose toolchain setup failed would skip every
           # test and report success, and Go would look verified on a machine
@@ -327,6 +366,7 @@ jobs:
       # tests are what caught it building a download URL from a version no
       # release was ever published under. They ran nowhere until here.
       - run: npm run test:launcher
+        timeout-minutes: 5
         env:
           SUPERCOV_REQUIRE_GO: "1"
       # A failure here ends this commit's other runs too: no waiting on them.
@@ -382,8 +422,13 @@ jobs:
             https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
           echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       - run: npm run test:jvm
+        timeout-minutes: 28
         env:
           SUPERCOV_REQUIRE_JVM: "1"
       # A failure here ends this commit's other runs too: no waiting on them.
