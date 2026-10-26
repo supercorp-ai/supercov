@@ -12521,3 +12521,35 @@ fn a_patch_whose_git_call_fails_says_so() {
         assert!(nth > 2, "{query:?} ran no git");
     }
 }
+
+/// A Maven project with one class and its test.
+fn small_maven_project(project: &Project) {
+    project.write("pom.xml", "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>example</groupId>\n  <artifactId>w</artifactId>\n  <version>1.0</version>\n  <properties>\n    <maven.compiler.source>17</maven.compiler.source>\n    <maven.compiler.target>17</maven.compiler.target>\n    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n  </properties>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n      <scope>test</scope>\n    </dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin>\n        <groupId>org.apache.maven.plugins</groupId>\n        <artifactId>maven-surefire-plugin</artifactId>\n        <version>3.2.5</version>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n");
+    project.write(
+        "src/main/java/w/W.java",
+        "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n == 0 ? 0 : n * 2;\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n}\n",
+    );
+    project.write(".gitignore", "target/\n");
+}
+
+#[test]
+fn a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
+    let maven = std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !maven {
+        eprintln!("skipping: no Maven found");
+        return;
+    }
+    let reached = fail_each_place_of_a_run(
+        "run-faults-mvn",
+        small_maven_project,
+        &["--", "mvn", "-q", "test"],
+    );
+    assert!(reached > 50, "{reached}");
+}
