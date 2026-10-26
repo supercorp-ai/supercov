@@ -11,6 +11,13 @@
 - A container time from the Docker daemon with anything but digits after its seconds made the Docker relay panic while reading it; it is read as no time.
 - A test command that could not start says whether there is no such program or it may not be run, before the system's own words, and exits `127` or `126` by that on every platform rather than by the message's wording; a step of Supercov's own that the system refused no longer reads as a file that may not be run.
 
+## 4.20.2
+
+**Changed**
+
+- A Rust Worker no test of a run started, or whose tests loaded no build of its measured source, is not measured, instead of counting every line as one the tests missed: its files leave the run's totals, the file view gives the reason at the top, the run names them after the tests' output, and `runs check` refuses to judge a floor over such a run.
+- A build made before the run is named in that reason: Supercov builds nothing itself, so a Worker the tests load from an earlier `build/` is built in the measured command or the tests.
+
 ## 4.20.1
 
 **Changed**

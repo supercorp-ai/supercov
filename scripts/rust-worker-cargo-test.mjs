@@ -38,15 +38,19 @@ const files = {
   'package.json': `{ "name": "grades", "private": true, "devDependencies": { "wrangler": "${WRANGLER}" } }\n`,
   '.gitignore': 'node_modules/\ntarget/\n.wrangler/\n',
   // Its own workspace: the fixture sits inside Supercov's checkout.
-  'Cargo.toml': '[workspace]\nmembers = ["worker", "host"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
-  'worker/Cargo.toml': '[package]\nname = "grades-worker"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nworker = "0.8"\n',
+  'Cargo.toml': '[workspace]\nmembers = ["worker", "host", "rules"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
+  'worker/Cargo.toml': '[package]\nname = "grades-worker"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nworker = "0.8"\nrules = { path = "../rules" }\n',
+  // A crate the Worker is built with and the native tests call too: one
+  // file, credited to the test that reached it either way.
+  'rules/Cargo.toml': '[package]\nname = "rules"\nversion = "0.1.0"\nedition = "2021"\n',
+  'rules/src/lib.rs': 'pub fn passing(score: u32) -> bool {\n    score >= 50\n}\n\npub fn bonus(score: u32) -> u32 {\n    score + 5\n}\n',
   'worker/wrangler.toml': 'name = "grades-worker"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "worker-build --release"\n',
   'worker/src/lib.rs': `use worker::*;
 
 pub fn grade(score: u32, curved: bool) -> &'static str {
     if score >= 90 || (curved && score >= 85) {
         "A"
-    } else if score >= 50 {
+    } else if rules::passing(score) {
         "pass"
     } else {
         "fail"
@@ -68,7 +72,8 @@ async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Response> {
     Response::ok(grade(score, curved))
 }
 `,
-  'host/Cargo.toml': '[package]\nname = "host"\nversion = "0.1.0"\nedition = "2021"\n',
+  'host/Cargo.toml': '[package]\nname = "host"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nrules = { path = "../rules" }\n',
+  'host/tests/rules.rs': '#[test]\nfn a_bonus_adds_five() {\n    assert_eq!(rules::bonus(1), 6);\n}\n',
   'host/src/lib.rs': '//! The suite that starts the Worker.\n',
   'host/tests/worker.rs': `use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -224,13 +229,14 @@ try {
     const label = command.join(' ');
     const measured = run(root, binary, ['--', ...command], { PATH: path });
     assert.equal(measured.status, 0, `${label}\n${measured.stdout}${measured.stderr}`);
-    assert.match(measured.stderr, /Rust coverage: 4 test\(s\)/u, `${label}\n${measured.stderr}`);
+    assert.match(measured.stderr, /Rust coverage: 5 test\(s\)/u, `${label}\n${measured.stderr}`);
+    assert.doesNotMatch(measured.stderr, /not measured: [^\n]*Rust Worker/u, `${label}\n${measured.stderr}`);
     assert.doesNotMatch(measured.stderr, /did not compile[^\n]*worker\/src\/lib\.rs/u, `${label}\n${measured.stderr}`);
 
     const id = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
     const summary = run(root, binary, ['runs', id]);
     assert.doesNotMatch(summary.stdout + summary.stderr, /stale/iu, `${label}\n${summary.stdout}${summary.stderr}`);
-    const lines = (name) => [...new Set(run(root, binary, ['runs', id, 'test', name, '--limit', '0']).stdout.match(/worker\/src\/lib\.rs:\d+/gu) ?? [])].sort();
+    const lines = (name) => [...new Set(run(root, binary, ['runs', id, 'test', name, '--limit', '0']).stdout.match(/(?:worker|rules)\/src\/lib\.rs:\d+/gu) ?? [])].sort();
     const curved = lines('a_curved_score_is_an_a');
     const low = lines('a_low_score_fails');
     // Each test is credited its own path through `grade`, exactly.
@@ -239,6 +245,13 @@ try {
     assert.ok(low.includes('worker/src/lib.rs:9'), `${label}: ${low.join(' ')}`);
     assert.ok(!low.includes('worker/src/lib.rs:5'), `${label}: ${low.join(' ')}`);
     assert.deepEqual(lines('a_test_that_starts_no_worker'), [], label);
+    // The shared crate ran as wasm inside the Worker for one test and
+    // natively for another: one file, each test credited what it reached.
+    assert.ok(low.includes('rules/src/lib.rs:2') && !low.includes('rules/src/lib.rs:6'), `${label}: ${low.join(' ')}`);
+    const bonus = lines('a_bonus_adds_five');
+    assert.ok(bonus.includes('rules/src/lib.rs:6') && !bonus.includes('rules/src/lib.rs:2'), `${label}: ${bonus.join(' ')}`);
+    const rules = run(root, binary, ['runs', id, 'file', 'rules/src/lib.rs']).stdout;
+    assert.match(rules, /Lines not executed +0\b/u, `${label}\n${rules}`);
     const pass = run(root, binary, ['runs', id, 'line', 'worker/src/lib.rs:7']).stdout;
     assert.match(pass, /NOT COVERED/u, `${label}\n${pass}`);
     const decision = run(root, binary, ['runs', id, 'decision', 'worker/src/lib.rs:4']).stdout;
@@ -249,14 +262,23 @@ try {
   }
 
   // A run whose tests start no Worker compiles the Worker crate and never
-  // runs it as one: its file says why it is not covered, and how to cover it.
+  // runs it as one: its file is not measured -- out of the totals, not a gap
+  // -- and says why at the top; the run says so after the tests' output, and
+  // a floor on the run is refused rather than judged.
   const unrun = run(root, binary, ['--', 'cargo', 'test', '--workspace', '--', 'a_test_that_starts_no_worker'], { PATH: path });
   assert.equal(unrun.status, 0, `${unrun.stdout}${unrun.stderr}`);
+  assert.match(unrun.stderr, /\[supercov\] not measured: 1 Rust Worker file\(s\), worker\/src\/lib\.rs\. A Rust Worker: its code runs/u, unrun.stderr);
   const unrunId = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
   const workerFile = run(root, binary, ['runs', unrunId, 'file', 'worker/src/lib.rs']).stdout;
-  assert.match(workerFile, /A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`/u, workerFile);
+  assert.match(workerFile, /^worker\/src\/lib\.rs\n\nNot measured: A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`/u, workerFile);
+  assert.doesNotMatch(workerFile, /NOT COVERED/u, workerFile);
   const gaps = run(root, binary, ['runs', unrunId, 'gaps']).stdout;
-  assert.match(gaps, /worker\/src\/lib\.rs/u, gaps);
+  assert.doesNotMatch(gaps, /worker\/src\/lib\.rs/u, gaps);
+  const unrunScope = JSON.parse(run(root, binary, ['runs', unrunId, 'scope', '--json', '--limit', '0']).stdout).data.entries;
+  assert.equal(unrunScope.find((entry) => entry.file === 'worker/src/lib.rs')?.status, 'excluded', JSON.stringify(unrunScope));
+  const floor = run(root, binary, ['runs', unrunId, 'check', '--min-lines', '1']);
+  assert.equal(floor.status, 2, `${floor.stdout}${floor.stderr}`);
+  assert.match(floor.stdout + floor.stderr, /unmeasured/u, `${floor.stdout}${floor.stderr}`);
 
   // A test that starts the Worker with \`wrangler dev --remote\`: it runs on
   // Cloudflare's edge, where wrangler opens no inspector, and the file says
@@ -265,7 +287,7 @@ try {
   assert.equal(remote.status, 0, `${remote.stdout}${remote.stderr}`);
   const remoteId = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
   const remoteFile = run(root, binary, ['runs', remoteId, 'file', 'worker/src/lib.rs']).stdout;
-  assert.match(remoteFile, /started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector/u, remoteFile);
+  assert.match(remoteFile, /Not measured: A Rust Worker started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector/u, remoteFile);
 
   // The project is as it was: the copy alone was pointed at Supercov's
   // entry, and the Worker built with probes stayed there.

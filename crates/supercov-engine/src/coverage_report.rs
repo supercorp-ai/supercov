@@ -1854,6 +1854,99 @@ pub fn create_coverage_view(
     )
 }
 
+/// A file a frontend could not measure at all carries one limitation that
+/// says so (`"wholeFile": true`): a Rust Worker no test's `wrangler dev`
+/// ran. Its obligations leave the covered/uncovered denominator, as declined
+/// ones do, and its scope entry is left out with the limitation's reason, so
+/// the file reads as not measured rather than as code the tests missed. The
+/// manifest keeps the note alone: runs that measured the file and runs that
+/// could not have one denominator, and merge.
+fn whole_files_unmeasured(manifest: &CoverageManifest) -> Option<CoverageManifest> {
+    let reasons = manifest
+        .limitations
+        .iter()
+        .filter(|limitation| limitation.get("wholeFile").and_then(Value::as_bool) == Some(true))
+        .filter_map(|limitation| {
+            Some((
+                limitation.get("file")?.as_str()?.to_owned(),
+                limitation.get("reason")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if reasons.is_empty() {
+        return None;
+    }
+    let mut manifest = manifest.clone();
+    let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
+    unmeasured.extend(
+        manifest
+            .points
+            .iter()
+            .filter(|point| reasons.contains_key(&point.file))
+            .map(|point| point.id.clone())
+            .chain(
+                manifest
+                    .decisions
+                    .iter()
+                    .filter(|decision| reasons.contains_key(&decision.file))
+                    // With the outcome branch the report makes for a decision
+                    // declared without one.
+                    .flat_map(|decision| {
+                        let outcome = format!("{}:outcome", decision.id);
+                        [
+                            decision.id.clone(),
+                            format!("{outcome}:true"),
+                            format!("{outcome}:false"),
+                            outcome,
+                        ]
+                    }),
+            )
+            .chain(
+                manifest
+                    .branches
+                    .iter()
+                    .filter(|branch| reasons.contains_key(&branch.file))
+                    .flat_map(|branch| {
+                        std::iter::once(branch.id.clone()).chain(
+                            branch
+                                .alternatives
+                                .iter()
+                                .map(|alternative| alternative.id.clone()),
+                        )
+                    }),
+            ),
+    );
+    manifest.unmeasured = unmeasured.into_iter().collect();
+    manifest.limitations.retain(|limitation| {
+        limitation
+            .get("file")
+            .and_then(Value::as_str)
+            .is_none_or(|file| !reasons.contains_key(file))
+    });
+    if let Some(entries) = manifest
+        .scope
+        .as_mut()
+        .and_then(|scope| scope.get_mut("entries"))
+        .and_then(Value::as_array_mut)
+    {
+        let mut unlisted = reasons.clone();
+        for entry in entries.iter_mut().filter_map(Value::as_object_mut) {
+            let reason = entry
+                .get("file")
+                .and_then(Value::as_str)
+                .and_then(|file| unlisted.remove(file));
+            if let Some(reason) = reason {
+                entry.insert("status".into(), "excluded".into());
+                entry.insert("reason".into(), reason.into());
+            }
+        }
+        entries.extend(unlisted.into_iter().map(
+            |(file, reason)| serde_json::json!({"file": file, "status": "excluded", "reason": reason}),
+        ));
+    }
+    Some(manifest)
+}
+
 fn create_coverage_view_with_model(
     manifest: &CoverageManifest,
     raw_results: &[&RawTestResult],
@@ -1861,6 +1954,14 @@ fn create_coverage_view_with_model(
     coverage_model: &CoverageModelDeclaration,
     ids: &mut Interner,
 ) -> Result<CoverageView, ReportError> {
+    let settled;
+    let manifest = match whole_files_unmeasured(manifest) {
+        Some(applied) => {
+            settled = applied;
+            &settled
+        }
+        None => manifest,
+    };
     let mut decision_metadata = manifest.decisions.clone();
     let decision_indexes = decision_metadata
         .iter()
@@ -3860,6 +3961,99 @@ mod tests {
             ["late"],
             "served markers are not coverage"
         );
+    }
+
+    /// A file noted as not measured at all leaves the totals whole -- its
+    /// statements, decisions and branch outcomes -- and its scope entry says
+    /// why, listed or not; the files beside it are as they were.
+    #[test]
+    fn a_file_noted_as_unmeasured_leaves_the_totals_and_says_why() {
+        let point = |id: &str, file: &str| PointMeta {
+            id: id.into(),
+            kind: PointKind::Statement,
+            file: file.into(),
+            line: 2,
+            column: 0,
+            source: "work();".into(),
+            label: None,
+        };
+        let note = |file: &str| {
+            serde_json::json!({
+                "id": format!("rust-worker-not-run#{file}"), "kind": "source-scope",
+                "file": file, "line": 1, "column": 0, "source": "",
+                "reason": "no test started it", "blocking": false, "wholeFile": true
+            })
+        };
+        let manifest = |scope: Value| CoverageManifest {
+            decisions: vec![DecisionMeta {
+                id: "w-decision".into(),
+                file: "w.rs".into(),
+                line: 3,
+                column: 1,
+                source: "a && b".into(),
+                conditions: vec!["a".into(), "b".into()],
+                kind: "if".into(),
+            }],
+            points: vec![point("a-run", "a.rs"), point("w-run", "w.rs")],
+            branches: vec![BranchMeta {
+                id: "w-branch".into(),
+                kind: "if".into(),
+                file: "w.rs".into(),
+                line: 3,
+                column: 1,
+                source: "if a".into(),
+                alternatives: vec![BranchAlternativeMeta {
+                    id: "w-branch:then".into(),
+                    label: "then".into(),
+                }],
+            }],
+            limitations: vec![
+                note("w.rs"),
+                serde_json::json!({
+                    "id": "macro", "kind": "semantic-safety", "file": "w.rs", "line": 4,
+                    "column": 0, "source": "m!()", "reason": "a macro", "blocking": false
+                }),
+            ],
+            unmeasured: Vec::new(),
+            scope: Some(scope),
+            assertion_sites: Vec::new(),
+        };
+        for scope in [
+            serde_json::json!({"entries": [
+                {"file": "a.rs", "status": "included", "reason": "source"},
+                {"file": "w.rs", "status": "included", "reason": "source"}
+            ]}),
+            serde_json::json!({"entries": [{"file": "a.rs", "status": "included", "reason": "source"}]}),
+        ] {
+            let view =
+                create_coverage_view(&manifest(scope), &[raw("test", 0, "passed", &[])], "time")
+                    .unwrap();
+            assert_eq!(view.summary.statements.total, 1);
+            assert_eq!(view.summary.decisions, 0);
+            assert_eq!(view.summary.branches.total, 0);
+            assert!(view.summary.unmeasured_obligations.unwrap() >= 3);
+            assert!(view.limitations.is_empty(), "{:?}", view.limitations);
+            let entries = view.scope.unwrap()["entries"].clone();
+            let entry = |file: &str| {
+                entries
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["file"] == file)
+                    .unwrap()
+                    .clone()
+            };
+            assert_eq!(entry("a.rs")["status"], "included");
+            assert_eq!(entry("w.rs")["status"], "excluded");
+            assert_eq!(entry("w.rs")["reason"], "no test started it");
+        }
+        // A run with no scope still leaves the file's obligations out.
+        let mut unscoped = manifest(serde_json::json!({}));
+        unscoped.scope = None;
+        let view =
+            create_coverage_view(&unscoped, &[raw("test", 0, "passed", &[])], "time").unwrap();
+        assert_eq!(view.summary.statements.total, 1);
+        assert!(view.scope.is_none());
     }
 
     #[test]

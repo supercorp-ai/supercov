@@ -1923,6 +1923,10 @@ pub struct CoverageFileDetailData {
     pub total_gap_lines: usize,
     pub gap_lines: Vec<CoverageFileGapLine>,
     pub total_limitations: usize,
+    /// Why nothing in the file was measured, when the run's scope left it
+    /// out: none of its lines is then a gap the tests missed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_measured: Option<String>,
     /// The run's saved assertion assessment for this place, attached by the
     /// CLI when the run has one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2185,6 +2189,22 @@ pub struct FileDetailSource {
     decisions: Vec<crate::coverage_report::DecisionResult>,
     decisions_by_file: HashMap<String, Vec<usize>>,
     limitations: BTreeMap<String, Vec<crate::coverage_index::IndexedLimitation>>,
+    /// Why the scope left a file out, by file.
+    not_measured: BTreeMap<String, String>,
+}
+
+/// The files the run's scope left out of `view`, each with why.
+fn not_measured_files(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+    file: Option<&str>,
+) -> Result<BTreeMap<String, String>, QueryError> {
+    Ok(index
+        .scope_entries(view)?
+        .into_iter()
+        .filter(|entry| entry.status == "excluded" && file.is_none_or(|file| entry.file == file))
+        .map(|entry| (entry.file, entry.reason))
+        .collect())
 }
 
 impl FileDetailSource {
@@ -2205,6 +2225,7 @@ impl FileDetailSource {
         let points = index.hit_metadata_in_file(view, file)?;
         let decisions = index.decision_details_in_file(view, file)?;
         let limitations = index.limitations_in_file(view, file)?;
+        let not_measured = not_measured_files(index, view, Some(file))?;
         let mut source = Self {
             view,
             tests: Vec::new(),
@@ -2215,6 +2236,7 @@ impl FileDetailSource {
             points_by_file: HashMap::new(),
             decisions_by_file: HashMap::new(),
             limitations: BTreeMap::new(),
+            not_measured,
             lines,
             points,
             decisions,
@@ -2317,6 +2339,7 @@ impl FileDetailSource {
             decisions,
             decisions_by_file,
             limitations,
+            not_measured: not_measured_files(index, view, None)?,
         })
     }
 
@@ -2648,6 +2671,7 @@ pub fn coverage_file_detail_from(
         .take(options.limit)
         .collect::<Vec<_>>();
     let returned = selected_gap_lines.len();
+    let not_measured = read.not_measured.get(&file).cloned();
     Ok((
         CoverageFileDetailData {
             run: options.run.into(),
@@ -2667,6 +2691,7 @@ pub fn coverage_file_detail_from(
             total_tests,
             total_obligations,
             total_gap_lines,
+            not_measured,
             gap_lines: selected_gap_lines,
             total_limitations,
             assertions: None,
