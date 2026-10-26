@@ -6514,6 +6514,20 @@ fn a_workspace_package_runs_with_its_own_node_modules_and_tools() {
     );
 }
 
+/// `from` and everything under it, copied to `to`.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 /// Homebrew's Go is not on a non-login shell's PATH on macOS.
 fn go() -> Option<&'static str> {
     ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"]
@@ -8622,8 +8636,15 @@ fn both_streams_into_one_file_name_the_project() {
     let written = std::fs::read_to_string(&log).unwrap();
     assert!(status.success(), "{written}");
     let root = project.root.display().to_string();
-    assert!(written.contains(&format!("out {root}\n")), "{written}");
-    assert!(written.contains(&format!("err {root}\n")), "{written}");
+    // Line by line: on Windows a line may end in `\r\n`.
+    assert!(
+        written.lines().any(|line| line == format!("out {root}")),
+        "{written}"
+    );
+    assert!(
+        written.lines().any(|line| line == format!("err {root}")),
+        "{written}"
+    );
     // Supercov's own lines name the copy; the command's do not.
     assert!(
         written
@@ -10397,13 +10418,7 @@ fn filters_selectors_and_stray_entries_on_the_run_commands() {
         "run_35c35ceeaf4b843Z",
         "abcdefghijklmnopqrst",
     ] {
-        let copied = std::process::Command::new("cp")
-            .arg("-R")
-            .arg(runs.join(&run))
-            .arg(runs.join(name))
-            .status()
-            .unwrap();
-        assert!(copied.success());
+        copy_tree(&runs.join(&run), &runs.join(name));
     }
     contains_all(
         &project.supercov(&["runs"]).succeeds(),

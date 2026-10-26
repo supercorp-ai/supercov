@@ -2127,7 +2127,10 @@ fn could_not_measure(error: &str) -> ExitCode {
         // Interrupted, nothing published: exit as the command did, as a
         // shell reports a signal.
         process_exit_code(signal.exit_code())
-    } else if error.contains("could not spawn") && error.contains("(os error 2)") {
+    } else if error.contains("could not spawn")
+        // Windows looks the program up itself and says so in its own words.
+        && (error.contains("(os error 2)") || error.contains("program not found"))
+    {
         ExitCode::from(127)
     } else if error.contains("could not spawn") && error.contains("(os error 13)") {
         ExitCode::from(126)
