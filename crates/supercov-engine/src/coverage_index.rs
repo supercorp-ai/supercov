@@ -4554,6 +4554,23 @@ mod tests {
     }
 
     /// The test report with a source-discovery scope of one included file.
+    /// The test report with two phases, the second caused by the first and
+    /// each saying all a phase can.
+    fn phased_report() -> CoverageReport {
+        let phase = |id: &str, caused_by: Option<&str>| crate::coverage_report::CoveragePhase {
+            id: id.into(),
+            kind: "assertion".into(),
+            operation: "equal".into(),
+            source: Some("assert.equal(a, b)".into()),
+            caused_by_phase_id: caused_by.map(Into::into),
+            started_at_ms: 100,
+            ended_at_ms: Some(120),
+            status: Some("failed".into()),
+            error: Some("expected 1".into()),
+        };
+        report_with_phases(vec![phase("first", None), phase("second", Some("first"))])
+    }
+
     fn scoped_report() -> CoverageReport {
         let mut report = report();
         let scope = serde_json::json!({
@@ -5410,7 +5427,7 @@ mod tests {
     /// check those readers make.
     #[test]
     fn no_single_byte_of_a_signed_index_makes_a_reader_panic() {
-        for report in [report(), scoped_report()] {
+        for report in [report(), scoped_report(), phased_report()] {
             let sections = coverage_index_sections(&report).unwrap();
             {
                 let (_root, container) = index_of(&report, &|_| {});
