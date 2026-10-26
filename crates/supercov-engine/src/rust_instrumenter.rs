@@ -304,12 +304,19 @@ fn in_global_allocator_impl(node: &ra_ap_syntax::SyntaxNode) -> bool {
 }
 
 /// Whether a `for` loop over `iterable` runs its body at least once, by its
-/// text alone: a non-empty array literal, or a range between integer
-/// literals that holds a value, read through references, parentheses and
-/// the adapters that keep every item. Such a loop has no zero-iterations
-/// outcome to observe, as a match's last arm has no skipped one; the
-/// JavaScript instrumenter reads array literals the same way.
+/// text alone: a non-empty array literal, a constant of the file that is
+/// one, a range between integer literals that holds a value, or a `split`,
+/// which yields a piece even of nothing, read through references,
+/// parentheses and the adapters that keep every item. Such a loop has no
+/// zero-iterations outcome to observe, as a match's last arm has no skipped
+/// one; the JavaScript instrumenter reads array literals the same way.
 fn never_empty(iterable: &ast::Expr) -> bool {
+    never_empty_naming(iterable, true)
+}
+
+/// [`never_empty`], following a constant's name when `constants` is set: a
+/// constant's own value is read without, so a cycle ends.
+fn never_empty_naming(iterable: &ast::Expr, constants: bool) -> bool {
     use ast::RangeItem;
     // A decimal integer literal's value, its `_`s and type suffix dropped.
     let integer = |bound: Option<ast::Expr>| match bound {
@@ -339,8 +346,61 @@ fn never_empty(iterable: &ast::Expr) -> bool {
             },
             _ => false,
         },
-        ast::Expr::ParenExpr(inner) => inner.expr().is_some_and(|inner| never_empty(&inner)),
-        ast::Expr::RefExpr(inner) => inner.expr().is_some_and(|inner| never_empty(&inner)),
+        ast::Expr::ParenExpr(inner) => inner
+            .expr()
+            .is_some_and(|inner| never_empty_naming(&inner, constants)),
+        ast::Expr::RefExpr(inner) => inner
+            .expr()
+            .is_some_and(|inner| never_empty_naming(&inner, constants)),
+        // A `const` or `static` of this file, by its bare name.
+        ast::Expr::PathExpr(path) if constants => {
+            let Some(name) = path
+                .path()
+                .filter(|path| path.qualifier().is_none())
+                .and_then(|path| path.segment())
+                .and_then(|segment| segment.name_ref())
+            else {
+                return false;
+            };
+            let Some(file) = iterable.syntax().ancestors().last() else {
+                return false;
+            };
+            let named =
+                |item: Option<ast::Name>| item.is_some_and(|item| item.text() == name.text());
+            file.descendants().any(|node| {
+                if let Some(constant) = ast::Const::cast(node.clone()) {
+                    named(constant.name())
+                        && constant
+                            .body()
+                            .is_some_and(|body| never_empty_naming(&body, false))
+                } else if let Some(item) = ast::Static::cast(node) {
+                    named(item.name())
+                        && item
+                            .body()
+                            .is_some_and(|body| never_empty_naming(&body, false))
+                } else {
+                    false
+                }
+            })
+        }
+        ast::Expr::MethodCallExpr(call)
+            if call
+                .name_ref()
+                .is_some_and(|name| name.text() == "split" || name.text() == "rsplit") =>
+        {
+            true
+        }
+        // `splitn(0, ..)` yields nothing; any other count, its first piece.
+        ast::Expr::MethodCallExpr(call)
+            if call
+                .name_ref()
+                .is_some_and(|name| name.text() == "splitn" || name.text() == "rsplitn") =>
+        {
+            ast::HasArgList::arg_list(call)
+                .and_then(|arguments| arguments.args().next())
+                .and_then(|count| integer(Some(count)))
+                .is_some_and(|count| count > 0)
+        }
         ast::Expr::MethodCallExpr(call) => {
             call.name_ref().is_some_and(|name| {
                 matches!(
@@ -356,7 +416,7 @@ fn never_empty(iterable: &ast::Expr) -> bool {
                 )
             }) && call
                 .receiver()
-                .is_some_and(|receiver| never_empty(&receiver))
+                .is_some_and(|receiver| never_empty_naming(&receiver, constants))
         }
         _ => false,
     }
@@ -4787,8 +4847,26 @@ fn main() {
             ("values", false),
             ("values.iter()", false),
             ("[1].iter().skip(1)", false),
+            ("text.split(',')", true),
+            ("text.rsplit(',').enumerate()", true),
+            ("values.split(|v| *v == 0)", true),
+            ("text.splitn(2, ',')", true),
+            ("text.rsplitn(1, ',')", true),
+            ("text.splitn(0, ',')", false),
+            ("text.splitn(n, ',')", false),
+            ("text.lines()", false),
+            ("text.split_whitespace()", false),
+            ("KINDS", true),
+            ("KINDS.iter()", true),
+            ("ORDER", true),
+            ("NONE", false),
+            ("COPY", false),
+            ("ALIAS", false),
+            ("self::KINDS", false),
         ] {
-            let source = format!("fn f(values: &[i32], n: usize) {{ for _ in {iterable} {{}} }}");
+            let source = format!(
+                "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
+            );
             let transformed =
                 instrument_rust_source("src/lib.rs", &source, "crate::__supercov_runtime_v1")
                     .unwrap();

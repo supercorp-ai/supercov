@@ -4,7 +4,7 @@
 
 **Changed**
 
-- A Rust `for` loop over a non-empty array literal or a range between integer literals (`for x in [a, b]`, `for i in 0..8`, through `iter`, `enumerate`, `map` and the like) counts only its entry, not a zero-iterations outcome it can never take, as a JavaScript loop over an array literal already does.
+- A Rust `for` loop over a non-empty array literal, a constant of the file that is one, a range between integer literals, or a `split` (`for x in [a, b]`, `for k in KINDS`, `for i in 0..8`, `for part in text.split(',')`, through `iter`, `enumerate`, `map` and the like) counts only its entry, not a zero-iterations outcome it can never take, as a JavaScript loop over an array literal already does.
 
 **Fixed**
 
