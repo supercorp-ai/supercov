@@ -1356,14 +1356,14 @@ fn scope_entry_records(
     strings: &mut StringTable,
 ) -> Result<Vec<[u8; SCOPE_ENTRY_RECORD_SIZE]>, CoverageIndexError> {
     // The view's projection record, written first, refused a scope with no
-    // mode (`scope_projection`): this one has one.
+    // mode or entries (`scope_projection`): this one has both.
     let Some(scope) = &view.scope else {
         return Ok(Vec::new());
     };
     let entries = scope
         .get("entries")
         .and_then(serde_json::Value::as_array)
-        .ok_or(CoverageIndexError::InvalidRecord("source-scope entries"))?;
+        .expect("the projection record refused a scope with no entries");
     let mut limitations = BTreeMap::<&str, (usize, u32)>::new();
     // As the file table reads them: a kind of a language's own -- Go's
     // `loop-without-condition`, a file that does not parse -- is one more
@@ -4543,6 +4543,51 @@ mod tests {
             coverage_index_sections(&report),
             Err(CoverageIndexError::InvalidRecord("source-scope mode"))
         ));
+    }
+
+    /// A scope a frontend wrote wrong is refused, naming what is wrong in it.
+    #[test]
+    fn each_malformed_scope_is_refused_by_what_it_lacks() {
+        let entry = serde_json::json!({"file": "src/a.js", "status": "included", "reason": "r"});
+        let scope = |roots: serde_json::Value, entries: serde_json::Value| serde_json::json!({"version": 1, "mode": "automatic", "roots": roots, "entries": entries});
+        let without = |field: &str| {
+            let mut entry = entry.clone();
+            entry.as_object_mut().unwrap().remove(field);
+            scope(serde_json::json!(["."]), serde_json::json!([entry]))
+        };
+        let mut odd_root = entry.clone();
+        odd_root["packageRoot"] = serde_json::json!(1);
+        for (written, refused) in [
+            (serde_json::json!("automatic"), "coverage scope"),
+            (
+                serde_json::json!({"mode": "automatic", "entries": []}),
+                "source-scope roots",
+            ),
+            (
+                scope(serde_json::json!([1]), serde_json::json!([])),
+                "source-scope root",
+            ),
+            (
+                serde_json::json!({"mode": "automatic", "roots": ["."]}),
+                "source-scope entries",
+            ),
+            (without("file"), "source-scope file"),
+            (without("status"), "source-scope status"),
+            (without("reason"), "source-scope reason"),
+            (
+                scope(serde_json::json!(["."]), serde_json::json!([odd_root])),
+                "source-scope package root",
+            ),
+        ] {
+            let mut report = report();
+            report.view.scope = Some(written.clone());
+            match coverage_index_sections(&report) {
+                Err(CoverageIndexError::InvalidRecord(reason)) => {
+                    assert_eq!(reason, refused, "{written}");
+                }
+                other => panic!("{written} was not refused: {:?}", other.map(|_| ())),
+            }
+        }
     }
 
     /// A real index with one section's bytes changed, written with digests
