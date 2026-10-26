@@ -1628,4 +1628,47 @@ mod tests {
             Err(PythonFrontendError::InvalidContext(_))
         ));
     }
+
+    #[test]
+    fn each_python_frontend_error_says_what_failed() {
+        use super::PythonFrontendError as E;
+        let messages = [
+            E::Json("eof".into()),
+            E::UnsupportedSchema(9),
+            E::InvalidProducer,
+            E::UnsupportedCollectorCore("pytracer".into()),
+            E::BranchMeasurementRequired,
+            E::InvalidRoot,
+            E::InvalidRunner,
+            E::InvalidPath("../a.py".into()),
+            E::DuplicateFile("a.py".into()),
+            E::InvalidFile("a.py".into()),
+            E::InvalidContext("empty".into()),
+            E::InvalidOutcome("odd".into()),
+            E::RunMismatch("other".into()),
+            E::UnattributedExecutedLine("a.py".into(), 3),
+            E::UnattributedExecutedBranch("a.py".into(), 3, -1),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "invalid Python coverage export: eof",
+                "unsupported Python coverage export schema: 9",
+                "Python coverage producer must be coverage.py",
+                "coverage.py collector core \"pytracer\" cannot claim exact contexts",
+                "coverage.py branch mode is required",
+                "Python coverage export root must be '.'",
+                "Python Tier-A import currently requires pytest",
+                "invalid Python source path: ../a.py",
+                "duplicate Python source file: a.py",
+                "inconsistent Python coverage facts: a.py",
+                "invalid Python coverage context: empty",
+                "invalid pytest outcome: odd",
+                "Python evidence belongs to run other",
+                "executed Python line has no context: a.py:3",
+                "executed Python branch has no context: a.py:3->-1",
+            ]
+        );
+    }
 }

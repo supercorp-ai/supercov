@@ -2824,4 +2824,33 @@ mod tests {
             "changed bytes"
         );
     }
+
+    #[test]
+    fn each_javascript_frontend_error_says_what_failed() {
+        use super::JavascriptFrontendError as E;
+        let messages = [
+            E::Io {
+                path: std::path::PathBuf::from("src/a.js"),
+                source: std::io::Error::other("disk full"),
+            },
+            E::Instrument {
+                file: "src/a.js".into(),
+                source: crate::js_instrumenter::CandidateError::Internal("boom".into()),
+            },
+            E::MissingRuntimeMarker,
+            E::Serialize(serde_json::from_str::<u8>("x").unwrap_err()),
+            E::UnsafeSourcePath("../a.js".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "src/a.js: disk full",
+                "failed to instrument src/a.js: an internal error: boom",
+                "generated Supercov runtime is missing its instance marker",
+                "failed to serialize manifest: expected value at line 1 column 1",
+                "unsafe source path: ../a.js",
+            ]
+        );
+    }
 }

@@ -2115,4 +2115,26 @@ mod tests {
             validate_integrity(&with_git).unwrap();
         }
     }
+
+    #[test]
+    fn each_run_store_error_says_what_failed() {
+        let messages = [
+            RunStoreError::from(io::Error::other("disk full")),
+            RunStoreError::UnsafeStore(PathBuf::from(".supercov/runs")),
+            RunStoreError::NoRuns,
+            RunStoreError::RunNotFound("latest".into()),
+            RunStoreError::InvalidRun("run metadata JSON"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "disk full",
+                "unsafe run-store path: .supercov/runs",
+                "no local coverage runs",
+                "coverage run not found: latest",
+                "invalid coverage run: run metadata JSON",
+            ]
+        );
+    }
 }

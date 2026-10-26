@@ -2986,4 +2986,50 @@ mod tests {
         );
         assert!(locked > 2 && removed > 2, "{locked} {removed}");
     }
+
+    #[test]
+    fn each_lifecycle_error_says_what_failed() {
+        let path = PathBuf::from(".supercov/runs");
+        let messages = [
+            LifecycleError::Io {
+                path: path.clone(),
+                source: io::Error::other("disk full"),
+            },
+            LifecycleError::InvalidRunId("../x".into()),
+            LifecycleError::UnsafePath(path.clone()),
+            LifecycleError::InvalidState("missing".into()),
+            LifecycleError::ActiveRun {
+                run_id: "run".into(),
+                pid: 7,
+            },
+            LifecycleError::StartingRun,
+            LifecycleError::Cleaning,
+            LifecycleError::LockUnavailable,
+            LifecycleError::PublicationExists("run".into()),
+            LifecycleError::Metadata(serde_json::from_str::<u8>("x").unwrap_err()),
+            LifecycleError::EvidenceLength {
+                expected: 2,
+                actual: 3,
+            },
+            LifecycleError::EvidenceChanged,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                ".supercov/runs: disk full",
+                "invalid coverage run ID: ../x",
+                "unsafe Supercov storage path: .supercov/runs",
+                "invalid run state: missing",
+                "coverage run run is active in this project (pid 7). Its storage can be cleaned when no run is active.",
+                "a coverage run is active in this project, starting. Its storage can be cleaned when no run is active.",
+                "this project's Supercov storage is being cleaned. No test ran: start the run again when the cleaning has finished.",
+                "could not acquire the Supercov project lock",
+                "coverage run already exists: run",
+                "invalid run metadata: expected value at line 1 column 1",
+                "evidence length changed before publication: expected 2, got 3",
+                "evidence changed during publication",
+            ]
+        );
+    }
 }

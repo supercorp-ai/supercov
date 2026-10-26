@@ -1131,6 +1131,47 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[test]
+    fn each_rust_project_error_says_what_failed() {
+        use super::RustProjectError as E;
+        let messages = [
+            E::Io {
+                path: std::path::PathBuf::from("Cargo.toml"),
+                reason: "gone".into(),
+            },
+            E::MetadataLaunch("no cargo".into()),
+            E::MetadataFailed("exit 101".into()),
+            E::MetadataJson("eof".into()),
+            E::UnsafePath("../x".into()),
+            E::NoWorkspacePackages,
+            E::NoSourceFiles,
+            E::Instrument {
+                file: "src/lib.rs".into(),
+                reason: "parse".into(),
+            },
+            E::DuplicateObligation("o1".into()),
+            E::Runtime("template".into()),
+            E::SourceRoots("no roots".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Cargo.toml: gone",
+                "could not launch cargo metadata: no cargo",
+                "cargo metadata failed: exit 101",
+                "invalid cargo metadata: eof",
+                "Cargo reported an unsafe workspace path: ../x",
+                "Cargo metadata reported no workspace packages",
+                "Cargo workspace contains no owned Rust source files",
+                "could not instrument src/lib.rs: parse",
+                "duplicate Rust obligation ID: o1",
+                "could not generate Rust runtime: template",
+                "no roots",
+            ]
+        );
+    }
+
     use super::*;
 
     fn fixture() -> PathBuf {

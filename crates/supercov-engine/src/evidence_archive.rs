@@ -1268,4 +1268,50 @@ mod tests {
         sync_directory(Path::new("/proc/self/no-such-directory"));
         sync_directory(Path::new("/proc/self"));
     }
+
+    #[test]
+    fn each_archive_error_says_what_failed() {
+        let messages = [
+            EvidenceArchiveError::from(io::Error::other("disk full")),
+            EvidenceArchiveError::from(serde_json::from_str::<u8>("x").unwrap_err()),
+            EvidenceArchiveError::InvalidMagic,
+            EvidenceArchiveError::InvalidHeader("version"),
+            EvidenceArchiveError::InvalidPath("../x".into()),
+            EvidenceArchiveError::DuplicatePath("a".into()),
+            EvidenceArchiveError::UnsortedPath {
+                previous: "b".into(),
+                current: "a".into(),
+            },
+            EvidenceArchiveError::MissingManifest,
+            EvidenceArchiveError::MissingFrontend,
+            EvidenceArchiveError::MissingCoverageModel,
+            EvidenceArchiveError::Truncated("header"),
+            EvidenceArchiveError::TrailingCompressedData,
+            EvidenceArchiveError::UnsupportedSource(PathBuf::from("raw/link")),
+            EvidenceArchiveError::PathOutsideSource {
+                source: PathBuf::from("raw"),
+                path: PathBuf::from("other/file"),
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "disk full",
+                "expected value at line 1 column 1",
+                "unsupported Supercov evidence archive",
+                "invalid Supercov evidence archive header: version",
+                "invalid Supercov evidence archive path: \"../x\"",
+                "duplicate Supercov evidence archive path: a",
+                "unsorted Supercov evidence archive paths: b before a",
+                "Supercov evidence archive is missing manifest.json",
+                "Supercov evidence archive is missing frontend.json",
+                "Supercov evidence archive is missing coverage-model.json",
+                "truncated Supercov evidence archive header",
+                "Supercov evidence archive contains trailing compressed data",
+                "unsupported raw evidence entry: raw/link",
+                "evidence path other/file is outside source raw",
+            ]
+        );
+    }
 }

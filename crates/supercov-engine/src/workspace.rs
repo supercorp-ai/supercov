@@ -4427,4 +4427,32 @@ mod tests {
         );
         assert!(operations > 5, "{operations}");
     }
+
+    #[test]
+    fn each_workspace_error_says_what_failed() {
+        let path = PathBuf::from("project/src");
+        let messages = [
+            WorkspaceError::Io {
+                path: path.clone(),
+                source: io::Error::other("disk full"),
+            },
+            WorkspaceError::UnsafePath(path.clone()),
+            WorkspaceError::UnsupportedEntry(path.clone()),
+            WorkspaceError::MissingLock,
+            WorkspaceError::from(LifecycleError::LockUnavailable),
+            WorkspaceError::UnsupportedPlatform("no links"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "project/src: disk full",
+                "unsafe workspace path: project/src",
+                "unsupported filesystem entry in isolated project: project/src",
+                "isolated workspace preparation requires the active project lock",
+                "could not acquire the Supercov project lock",
+                "unsupported workspace platform: no links",
+            ]
+        );
+    }
 }

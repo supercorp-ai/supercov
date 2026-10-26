@@ -1154,4 +1154,39 @@ mod tests {
         assert!(error.message.contains("5,000-state safety budget"));
         assert_eq!(error.details.as_ref().unwrap()["exploredStates"], 5_001);
     }
+
+    #[test]
+    fn each_indexed_query_error_says_what_failed() {
+        use super::IndexedQueryError as E;
+        let size = crate::agent_json::ResponseTooLarge {
+            actual_bytes: 20,
+            max_bytes: 10,
+        };
+        let messages = [
+            E::InvalidFilter("[".into()),
+            E::UnsupportedCommand("fly".into()),
+            E::MissingArgument("--file"),
+            E::MissingNewerRun,
+            E::MissingReport,
+            E::from(size.clone()),
+            E::PageTooLarge {
+                size,
+                asked: 5,
+                fits: 2,
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "invalid coverage filter: [",
+                "unsupported indexed query: fly",
+                "indexed query requires --file",
+                "indexed diff requires a newer run",
+                "coverage minimization requires reconstructed per-test evidence",
+                "response is 20 bytes and exceeds the 10-byte limit",
+                "response is 20 bytes and exceeds the 10-byte limit",
+            ]
+        );
+    }
 }

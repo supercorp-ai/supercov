@@ -462,6 +462,27 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[test]
+    fn each_probe_read_error_says_what_failed() {
+        use super::RustProbeReadError as E;
+        let messages = [
+            E::Io("gone".into()),
+            E::UnsafeEntry("../p".into()),
+            E::InvalidHeader,
+            E::InvalidRecord(4),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Rust probe I/O failed: gone",
+                "unsafe Rust probe entry: ../p",
+                "invalid Rust probe header",
+                "invalid Rust probe record at line 4",
+            ]
+        );
+    }
+
     use super::*;
     use crate::rust_instrumenter::{RustProbeLayout, instrument_rust_source};
     use std::collections::BTreeMap;

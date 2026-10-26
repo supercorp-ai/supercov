@@ -745,4 +745,58 @@ mod tests {
             assert!(said.starts_with(expected), "{expected}: {said}");
         }
     }
+
+    #[test]
+    fn each_protocol_error_says_what_failed() {
+        use super::FrontendProtocolError as E;
+        let messages = [
+            E::from(supercov_contracts::FrontendDeclarationError::NoRunners),
+            E::InvalidManifestLimitation,
+            E::DuplicateManifestLimitation("l".into()),
+            E::StructuralLimitationMismatch {
+                declared: vec!["a".into()],
+                manifest: vec![],
+            },
+            E::UndeclaredRunner("jest".into()),
+            E::UnobservedRunner("jest".into()),
+            E::MissingExactIdentity {
+                runner: "jest".into(),
+                axis: "test",
+            },
+            E::ScopeRunMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            E::RetryMismatch {
+                runner: "jest".into(),
+                result: 1,
+                scope: 2,
+            },
+            E::InvalidUnstartedResult("time".into()),
+            E::InvalidPhaseKind("odd".into()),
+            E::DuplicatePhase("p".into()),
+            E::UnknownPhaseReference("p".into()),
+            E::CyclicPhaseReference("p".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "frontend declaration has no runners",
+                "frontend manifest contains a limitation without an ID",
+                "duplicate frontend manifest limitation: l",
+                "frontend structural limitation references differ: declared=[\"a\"] manifest=[]",
+                "frontend evidence uses undeclared runner: jest",
+                "frontend declares an unobserved runner: jest",
+                "frontend runner jest is missing exact test identity",
+                "frontend evidence run identity differs: expected=a actual=b",
+                "frontend runner jest retry identity differs: result=1 scope=2",
+                "invalid selected-but-unstarted test record: time",
+                "unsupported frontend phase kind: odd",
+                "duplicate frontend phase ID: p",
+                "unknown frontend phase reference: p",
+                "cyclic frontend phase causality at: p",
+            ]
+        );
+    }
 }

@@ -1564,4 +1564,49 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn each_declaration_error_says_what_failed() {
+        use super::{FrontendDeclarationError as E, FrontendLimitationScope};
+        let messages = [
+            E::UnsupportedProtocolVersion(9),
+            E::InvalidToken("name"),
+            E::NoRunners,
+            E::DuplicateRunner("jest".into()),
+            E::RunIdentityNotExact,
+            E::DuplicateLimitation("l".into()),
+            E::DuplicateLimitationScope("l".into()),
+            E::EmptyLimitationScopes("l".into()),
+            E::InvalidLimitationReason("l".into()),
+            E::DuplicateStructuralLimitation("l".into()),
+            E::MissingDowngradeLimitation(FrontendLimitationScope::Test),
+            E::ExactRetryRequiresExactTest,
+            E::ExactPhaseRequiresExactTest,
+            E::ExactAssertionRequiresExactTestAndPhase,
+            E::ExactActionRequiresExactTestAndPhase,
+            E::ParallelUnattributedCannotClaimExactCausality,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "unsupported language-frontend protocol version: 9",
+                "invalid frontend name",
+                "frontend declaration has no runners",
+                "duplicate frontend runner: jest",
+                "frontend run identity must be exact",
+                "duplicate frontend limitation: l",
+                "frontend limitation has duplicate scopes: l",
+                "frontend limitation has no scopes: l",
+                "frontend limitation has an invalid reason: l",
+                "duplicate structural limitation reference: l",
+                "non-exact Test attribution has no matching limitation",
+                "exact retry attribution requires exact test identity",
+                "exact phase attribution requires exact test identity",
+                "exact assertion attribution requires exact test and phase identity",
+                "exact action attribution requires exact test and phase identity",
+                "parallel-unattributed execution cannot claim exact test, retry, phase, action, or assertion causality",
+            ]
+        );
+    }
 }

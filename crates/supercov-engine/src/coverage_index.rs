@@ -5442,4 +5442,25 @@ mod tests {
             assert!(refused > 0);
         }
     }
+
+    #[test]
+    fn each_coverage_index_error_says_what_failed() {
+        use super::CoverageIndexError as E;
+        let messages = [
+            E::from(crate::query_index::QueryIndexError::SizeOverflow),
+            E::InvalidRecord("file id"),
+            E::InvalidUtf8,
+            E::SizeOverflow,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "query index exceeds its format limits",
+                "invalid coverage index: file id",
+                "invalid UTF-8 in coverage index",
+                "coverage index exceeds format limits",
+            ]
+        );
+    }
 }

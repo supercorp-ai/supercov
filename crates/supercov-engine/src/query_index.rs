@@ -933,4 +933,45 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn each_query_index_error_says_what_failed() {
+        let messages = [
+            QueryIndexError::from(io::Error::other("disk full")),
+            QueryIndexError::NotRegularFile(PathBuf::from("index")),
+            QueryIndexError::InvalidHeader("magic"),
+            QueryIndexError::IdentityMismatch("evidence digest"),
+            QueryIndexError::TooManySections(99),
+            QueryIndexError::InvalidSection {
+                kind: 3,
+                reason: "record size",
+            },
+            QueryIndexError::DuplicateSection(3),
+            QueryIndexError::MissingSection(4),
+            QueryIndexError::OutOfBounds {
+                kind: 5,
+                offset: 8,
+                length: 16,
+            },
+            QueryIndexError::CorruptPage { kind: 6, page: 2 },
+            QueryIndexError::SizeOverflow,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "disk full",
+                "query index is not a regular file: index",
+                "invalid query-index header: magic",
+                "stale query-index evidence digest",
+                "query index has 99 sections",
+                "invalid query-index section 3: record size",
+                "duplicate query-index section 3",
+                "missing query-index section 4",
+                "query-index section 5 range 8+16 is out of bounds",
+                "query-index section 6 page 2 is corrupt",
+                "query index exceeds its format limits",
+            ]
+        );
+    }
 }
