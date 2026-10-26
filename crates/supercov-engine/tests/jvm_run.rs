@@ -703,6 +703,18 @@ fn kotlin_fixture(root: &Path) {
     write(root, "build.gradle", KOTLIN_BUILD_GRADLE);
     write(root, "src/main/kotlin/app/Calculator.kt", KOTLIN_SOURCE);
     write(root, "src/test/kotlin/app/CalculatorTest.kt", KOTLIN_SUITE);
+    // Class bodies written on one line, which the grammar once read as an
+    // error, leaving the file unmeasured.
+    write(
+        root,
+        "src/main/kotlin/app/Labels.kt",
+        "package app\n\nclass Labels { fun label(loud: Boolean) = if (loud) \"LOUD\" else \"quiet\" }\nobject Names { val name = \"labels\" }\n",
+    );
+    write(
+        root,
+        "src/test/kotlin/app/LabelsTest.kt",
+        "package app\n\nimport kotlin.test.Test\nimport kotlin.test.assertEquals\n\nclass LabelsTest {\n    @Test\n    fun loudIsUpperCase() {\n        assertEquals(\"LOUD\", Labels().label(true))\n    }\n}\n",
+    );
 }
 
 #[test]
@@ -753,8 +765,8 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
         ),
     };
     assert_eq!(result.exit_code, 0);
-    assert_eq!(result.tests, 2);
-    assert_eq!(result.source_files, 1);
+    assert_eq!(result.tests, 3);
+    assert_eq!(result.source_files, 2);
 
     // The decision the Kotlin source declares is in the published manifest,
     // which is what the numbers are measured against.
@@ -771,6 +783,8 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
     )
     .expect("utf-8");
     assert!(manifest.contains("Calculator.kt"), "{manifest}");
+    assert!(manifest.contains("Labels.kt"), "{manifest}");
+    assert!(!manifest.contains("does not parse"), "{manifest}");
     assert_eq!(manifest.matches("\"conditions\"").count(), 1, "{manifest}");
     std::fs::remove_dir_all(root).ok();
 }

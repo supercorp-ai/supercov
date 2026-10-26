@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Kotlin file with a class body on one line (`class C { val x = 1 }`), two members on one line, or a line starting with an identifier that begins with a keyword (`set_value = ...`) was read as not parsing and left unmeasured; Supercov now builds the Kotlin grammar itself with upstream's unreleased fixes for these. A file ending inside an annotation could stop the run for good; it now ends.
+
 ## 4.20.3
 
 **Fixed**

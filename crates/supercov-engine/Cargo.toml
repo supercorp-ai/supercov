@@ -52,7 +52,7 @@ toml.workspace = true
 tree-sitter.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-java.workspace = true
-tree-sitter-kotlin-ng.workspace = true
+tree-sitter-language.workspace = true
 toml_edit.workspace = true
 tungstenite.workspace = true
 which.workspace = true
@@ -83,4 +83,5 @@ windows-sys = { workspace = true, features = [
 sha2 = { workspace = true, features = ["asm"] }
 
 [build-dependencies]
+cc.workspace = true
 sha2.workspace = true

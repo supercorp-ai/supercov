@@ -39,7 +39,7 @@ pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
 fn recovered(source: &str, language: JvmLanguage) -> Option<Tree> {
     let mut parser = Parser::new();
     let grammar = match language {
-        JvmLanguage::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        JvmLanguage::Kotlin => crate::kotlin_grammar::LANGUAGE.into(),
         JvmLanguage::Java => tree_sitter_java::LANGUAGE.into(),
     };
     parser.set_language(&grammar).ok()?;
