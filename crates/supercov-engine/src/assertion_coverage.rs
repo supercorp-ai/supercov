@@ -389,15 +389,6 @@ pub fn assessment_input(report: &CoverageReport) -> AssessmentInput {
     }
 }
 
-pub fn population(
-    root: &Path,
-    report: &CoverageReport,
-    sources: &BTreeMap<String, String>,
-    language: Language,
-) -> Result<Population, String> {
-    population_from(root, &assessment_input(report), sources, language)
-}
-
 pub fn population_from(
     root: &Path,
     input: &AssessmentInput,
@@ -2616,6 +2607,66 @@ mod tests {
         (0..population.statements.len())
             .map(|s| population.questions(s))
             .collect()
+    }
+
+    /// Each runner a question can name is described, each language read
+    /// from its manifest name with its "nothing", and each runner's titles
+    /// split where it writes them.
+    #[test]
+    fn each_runner_and_language_is_named_as_questions_name_it() {
+        for (runner, first) in [
+            ("node:test", "node:test"),
+            ("jest", "Jest"),
+            ("ava", "AVA"),
+            ("tap", "node-tap"),
+            ("mocha", "Mocha"),
+            ("pytest", "pytest"),
+            ("rspec", "RSpec"),
+            ("minitest", "Minitest"),
+            ("test-unit", "test-unit"),
+            ("cucumber", "Cucumber"),
+            ("go-test", "go test"),
+            ("rust-libtest", "Rust tests"),
+            ("rustdoc", "Rust doctests"),
+            ("junit-platform", "JUnit"),
+            ("testng", "TestNG"),
+            ("unittest", "unittest"),
+        ] {
+            assert!(
+                runtime(runner).starts_with(first),
+                "{runner}: {}",
+                runtime(runner)
+            );
+        }
+        assert!(!runtime("no-such-runner").is_empty());
+        let languages = ["javascript", "python", "ruby", "go", "rust", "jvm"]
+            .map(|name| Language::from_manifest(name).unwrap());
+        assert_eq!(Language::from_manifest("cobol"), None);
+        assert_eq!(
+            languages.map(Language::nothing),
+            [
+                "undefined",
+                "None",
+                "nil",
+                "the zero value",
+                "`Default::default()`",
+                "the default value (null, or 0 or false for a primitive)",
+            ]
+        );
+        let [javascript, python, ruby, go, rust, jvm] = languages;
+        assert_eq!(
+            [
+                separator(javascript, "jest"),
+                separator(python, "pytest"),
+                separator(ruby, "rspec"),
+                separator(ruby, "minitest"),
+                separator(jvm, "junit-platform"),
+                separator(go, "go-test"),
+                separator(rust, "rustdoc"),
+                separator(rust, "rust-libtest"),
+            ],
+            [" > ", "::", ":", "#", "#", "/", " - ", "::"]
+        );
     }
 
     /// Go, the JVM languages and Rust are asked in their own terms: a zero
