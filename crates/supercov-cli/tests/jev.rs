@@ -5095,3 +5095,50 @@ fn a_line_whose_question_does_not_fit_is_said_to_be_unchecked() {
         unclassified.stdout()
     );
 }
+
+/// A suite whose tests reach no statement: there is nothing to assess, so
+/// nothing is asked, and what is read back says so.
+#[test]
+fn a_run_with_no_statement_to_assess_asks_nothing() {
+    let project = Project::empty("nothing-to-assess");
+    project.write(
+        "package.json",
+        r#"{ "name": "empty", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/unused.js",
+        "export const unused = (v) => (v ? 1 : 2);\n",
+    );
+    project.write(
+        "test/constant.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\ntest(\"constant\", () => assert.equal(1, 1));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("nothing");
+    let run = project.measure(&[]);
+    let estimate = project
+        .supercov(&["runs", &run, "assertions", "assess", "--dry-run", "--json"])
+        .json();
+    assert_eq!(estimate["data"]["atMost"]["requests"], 0, "{estimate}");
+    let (base, seen) = gateway(MODEL, answer_no);
+    let assessed = project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    contains_all(
+        &assessed,
+        &[
+            "nothing asserted (0 of 0 executed statements)",
+            "0 requests",
+        ],
+    );
+    assert!(seen.lock().unwrap().is_empty(), "{assessed}");
+    let read = project.supercov(&["runs", &run, "assertions"]).succeeds();
+    assert!(
+        read.contains("nothing asserted (0 of 0 executed statements)"),
+        "{read}"
+    );
+    let json = project
+        .supercov(&["runs", &run, "assertions", "--json"])
+        .json();
+    assert_eq!(json["ok"], true, "{json}");
+}
