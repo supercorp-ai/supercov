@@ -4397,6 +4397,57 @@ mod tests {
         );
     }
 
+    /// Each language's wording for a value made absent and a literal
+    /// flipped.
+    #[test]
+    fn each_change_is_worded_as_its_language_reads_it() {
+        assert_eq!(
+            questions_of(
+                "a.rb",
+                "def f(v)\n  x = v.compute\n  x\nend\n",
+                &[(2, "x = v.compute")],
+                Language::Ruby
+            ),
+            [
+                [
+                    "a.rb:2: `x = v.compute`: the value after `x =` becomes nil (it is not evaluated)."
+                ]
+            ]
+        );
+        assert_eq!(
+            questions_of(
+                "f.py",
+                "def f(v):\n    y = v()\n    v.n += 1\n    return y\n",
+                &[(2, "y = v()"), (3, "v.n += 1")],
+                Language::Python
+            ),
+            [
+                ["f.py:2: `y = v()` becomes `y = None` (the value is not evaluated)."],
+                ["f.py:3: `v.n += 1` is deleted (it never runs)."],
+            ]
+        );
+        let javascript = questions_of(
+            "a.js",
+            "export function f(v) {\n  const x = v();\n  if (!v || v(')')) throw new TypeError('no');\n  return true;\n}\n",
+            &[
+                (2, "const x = v();"),
+                (3, "if (!v || v(')')) throw new TypeError('no');"),
+                (4, "return true;"),
+            ],
+            Language::JavaScript,
+        );
+        assert_eq!(
+            javascript[0],
+            [
+                "a.js:2: `const x = v();` becomes `const x = undefined` (the initializer is not evaluated)."
+            ]
+        );
+        assert_eq!(
+            javascript[2],
+            ["a.js:4: `return true;` becomes `return false;`."]
+        );
+    }
+
     /// The readers' rarer shapes: a helper too long for what is left of the
     /// budget, JVM lines that call rather than declare, a test call with an
     /// underscore in its modifier, and a `}` before an `if` that is no

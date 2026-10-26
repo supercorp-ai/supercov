@@ -286,11 +286,8 @@ impl std::ops::Deref for RunInputs {
     }
 }
 /// The run's manifest with the current checkout's sources, which must be the
-/// run's own byte for byte.
-pub fn load_inputs(root: &Path, run: &StoredRun) -> Result<RunInputs, String> {
-    load_inputs_for(root, run, |_| true)
-}
-/// [`load_inputs`] checking only the files `needed` names against the run.
+/// run's own byte for byte: the files `needed` names are checked against the
+/// run.
 pub fn load_inputs_for(
     root: &Path,
     run: &StoredRun,
