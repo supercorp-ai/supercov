@@ -1242,4 +1242,117 @@ mod tests {
         assert!(!root.join("src/new.js").exists());
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
+
+    /// The workspace above with more of what a view lays out: a nested
+    /// directory, a link to a directory, a link to a file and a second
+    /// rewritten file.
+    fn deeper_workspace() -> (PathBuf, PathBuf, PathBuf) {
+        let (workspace, view, dependencies) = workspace();
+        std::fs::create_dir_all(workspace.join("lib/nested")).unwrap();
+        std::fs::write(workspace.join("lib/nested/b.js"), "probe(); const b = 2;\n").unwrap();
+        std::fs::create_dir_all(workspace.join(".supercov/node_modules/.authored/lib/nested"))
+            .unwrap();
+        std::fs::write(
+            workspace.join(".supercov/node_modules/.authored/lib/nested/b.js"),
+            "const b = 2;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".supercov/node_modules/authored-sources.json"),
+            "[\"src/a.js\",\"lib/nested/b.js\"]",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("src", workspace.join("source")).unwrap();
+        std::os::unix::fs::symlink("README.md", workspace.join("READ.md")).unwrap();
+        (workspace, view, dependencies)
+    }
+
+    fn remove_workspace((workspace, _, _): (PathBuf, PathBuf, PathBuf)) {
+        std::fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+    }
+
+    /// Laying out a view, a tool writing in it and bringing that back: each
+    /// file operation failing in turn ends in an error, never a panic.
+    #[test]
+    fn a_view_survives_any_file_operation_failing() {
+        let operations = crate::fault::fail_each_call(
+            "fs",
+            deeper_workspace,
+            |(workspace, view, dependencies)| {
+                let state = refresh(workspace, view, dependencies)?;
+                // What a tool does in the view, written past the faults.
+                let _ = std::fs::write(view.join("src/a.js"), "const a = 9\n");
+                let _ = std::fs::create_dir_all(view.join("reports/deep"));
+                let _ = std::fs::write(view.join("reports/deep/out.json"), "[]");
+                let _ = std::fs::remove_file(view.join("README.md"));
+                let _ = std::fs::create_dir(view.join("README.md"));
+                reconcile(workspace, view, &state).map(drop)
+            },
+            remove_workspace,
+        );
+        // Again over a view the run laid out before.
+        let again = crate::fault::fail_each_call(
+            "fs",
+            || {
+                let paths = deeper_workspace();
+                refresh(&paths.0, &paths.1, &paths.2).unwrap();
+                std::fs::write(paths.1.join("left-behind.txt"), "x").unwrap();
+                paths
+            },
+            |(workspace, view, dependencies)| refresh(workspace, view, dependencies).map(drop),
+            remove_workspace,
+        );
+        assert!(operations > 10 && again > 10, "{operations} {again}");
+    }
+
+    #[test]
+    fn launchers_and_applied_changes_survive_any_file_operation_failing() {
+        let launchers = crate::fault::fail_each_call(
+            "fs",
+            || {
+                let paths = workspace();
+                std::fs::create_dir_all(paths.0.join("tools/.bin")).unwrap();
+                for tool in ["biome", "cspell", "knip"] {
+                    let path = paths.0.join("node_modules/.bin").join(tool);
+                    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+                    std::fs::set_permissions(
+                        &path,
+                        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                    )
+                    .unwrap();
+                }
+                paths
+            },
+            |(workspace, _, _)| {
+                place_launchers(
+                    &workspace.join("node_modules/.bin"),
+                    &workspace.join("tools/.bin"),
+                )
+            },
+            remove_workspace,
+        );
+        let applied = crate::fault::fail_each_call(
+            "fs",
+            || {
+                let paths = deeper_workspace();
+                let root = paths.2.parent().unwrap().to_path_buf();
+                for (file, project, written) in [
+                    ("src/a.js", "const a = 1;\n", "const a = 1\n"),
+                    ("lib/nested/b.js", "const b = 2;\n", "const b = 2\n"),
+                ] {
+                    std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+                    std::fs::write(root.join(file), project).unwrap();
+                    let changed = changed_path(&paths.0, Path::new(file));
+                    std::fs::create_dir_all(changed.parent().unwrap()).unwrap();
+                    std::fs::write(changed, written).unwrap();
+                }
+                paths
+            },
+            |(workspace, _, dependencies)| {
+                apply_source_changes(dependencies.parent().unwrap(), workspace).map(drop)
+            },
+            remove_workspace,
+        );
+        assert!(launchers > 3 && applied > 3, "{launchers} {applied}");
+    }
 }

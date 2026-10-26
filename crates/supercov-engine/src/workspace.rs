@@ -2034,14 +2034,16 @@ pub fn mirror_git_repository(root: &Path, workspace: &Path) -> Result<(), String
     }
     let target = workspace.join(".git");
     let git = |directory: &Path, arguments: &[&str]| -> Result<String, String> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(directory)
-            .args(arguments)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| format!("git {}: {error}", arguments.join(" ")))?;
+        let output = crate::fault::io("git", io::ErrorKind::NotFound, || {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(arguments)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(std::process::Stdio::null())
+                .output()
+        })
+        .map_err(|error| format!("git {}: {error}", arguments.join(" ")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
@@ -2118,15 +2120,17 @@ pub fn hide_rewritten_files(workspace: &Path, files: &[String]) {
         return;
     }
     let run = |arguments: &[&str], input: &str| {
-        let mut child = std::process::Command::new("git")
-            .arg("-C")
-            .arg(workspace)
-            .args(arguments)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
+        let mut child = crate::fault::io("git", io::ErrorKind::NotFound, || {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(workspace)
+                .args(arguments)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        })
+        .ok()?;
         child.stdin.take()?.write_all(input.as_bytes()).ok()?;
         let output = child.wait_with_output().ok()?;
         output
@@ -4498,5 +4502,160 @@ mod tests {
                 "unsupported workspace platform: no links",
             ]
         );
+    }
+
+    /// A package of a repository, beside what a suite reaches as `../`, with
+    /// a nested dependency tree and tools, links inside and leaving it: what
+    /// the copy of a monorepo package does that a lone project does not.
+    fn package_of_a_repository() -> (PathBuf, ProjectLock) {
+        let base = project();
+        fs::create_dir_all(base.join(".git")).unwrap();
+        fs::write(base.join("tsconfig.base.json"), "{}").unwrap();
+        fs::create_dir_all(base.join("cmd/server")).unwrap();
+        fs::write(base.join("cmd/server/main.go"), "package main").unwrap();
+        let root = base.join("packages/app");
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(root.join("src/lib/index.js"), "export {}").unwrap();
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("web/node_modules/.bin")).unwrap();
+        fs::create_dir_all(root.join("web/node_modules/dep")).unwrap();
+        fs::write(root.join("web/node_modules/dep/index.js"), "dep").unwrap();
+        fs::write(root.join("web/node_modules/.bin/dep"), "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("lib", root.join("src/alias")).unwrap();
+            std::os::unix::fs::symlink(
+                "../../../../../../../../../../../../../../../../../../../../etc",
+                root.join("src/escaping"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(base.join("cmd"), root.join("cmd")).unwrap();
+        }
+        let lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        (root, lock)
+    }
+
+    fn release_package(fixture: (PathBuf, ProjectLock)) {
+        let (root, mut lock) = fixture;
+        lock.release().unwrap();
+        fs::remove_dir_all(root.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn copying_a_package_of_a_repository_survives_any_file_operation_failing() {
+        let cached = fail_each_file_operation(
+            package_of_a_repository,
+            |(root, lock)| prepare_cached_workspace(root, lock, &[]).map(drop),
+            release_package,
+        );
+        let isolated = fail_each_file_operation(
+            package_of_a_repository,
+            |(root, lock)| prepare_isolated_workspace(root, "run", lock).map(drop),
+            release_package,
+        );
+        assert!(cached > 20 && isolated > 20, "{cached} {isolated}");
+    }
+
+    /// A refresh interrupted at any point leaves staging and earlier copies
+    /// behind; recovery restores the newest earlier copy where the copy is
+    /// gone and removes the rest, whichever file operation fails.
+    #[test]
+    fn recovering_from_an_interrupted_refresh_survives_any_file_operation_failing() {
+        let interrupted = || {
+            let (root, lock) = varied_project();
+            let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            let previous = transaction_path(&root, &lock, "previous").unwrap();
+            fs::rename(&workspace, &previous).unwrap();
+            fs::create_dir_all(transaction_path(&root, &lock, "previous").unwrap()).unwrap();
+            fs::write(
+                transaction_path(&root, &lock, "previous").unwrap(),
+                "not a copy",
+            )
+            .unwrap();
+            fs::create_dir_all(
+                transaction_path(&root, &lock, "staging")
+                    .unwrap()
+                    .join("src"),
+            )
+            .unwrap();
+            (root, lock)
+        };
+        {
+            let (root, lock) = interrupted();
+            let recovered = recover_cached_workspace(&root, &lock).unwrap();
+            assert!(recovered.restored_previous);
+            assert_eq!(
+                (recovered.removed_staging, recovered.removed_previous),
+                (1, 2)
+            );
+            release((root, lock));
+        }
+        let operations = fail_each_file_operation(
+            interrupted,
+            |(root, lock)| recover_cached_workspace(root, lock).map(drop),
+            release,
+        );
+        assert!(operations > 3, "{operations}");
+    }
+
+    /// A project repository on a branch and one with a detached HEAD, each
+    /// with a remote.
+    fn repository(detached: bool) -> (PathBuf, PathBuf) {
+        let base = project();
+        let root = base.join("project");
+        let workspace = base.join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(root.join("a.js"), "a").unwrap();
+        let git = |arguments: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(arguments)
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success(), "git {arguments:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+        git(&["remote", "add", "origin", "https://example.invalid/a.git"]);
+        if detached {
+            git(&["checkout", "-q", "--detach"]);
+        }
+        (root, workspace)
+    }
+
+    #[test]
+    fn mirroring_the_repository_survives_any_step_failing() {
+        for detached in [false, true] {
+            for site in ["git", "fs"] {
+                let steps = crate::fault::fail_each_call(
+                    site,
+                    || repository(detached),
+                    |(root, workspace)| mirror_git_repository(root, workspace),
+                    |(root, _)| fs::remove_dir_all(root.parent().unwrap()).unwrap(),
+                );
+                assert!(steps > 3, "{site} {detached}: {steps}");
+            }
+        }
+        // Hiding rewritten files is best effort: no failing step stops it.
+        let steps = crate::fault::fail_each_call(
+            "git",
+            || {
+                let (root, workspace) = repository(false);
+                mirror_git_repository(&root, &workspace).unwrap();
+                fs::write(workspace.join("a.js"), "rewritten").unwrap();
+                (root, workspace)
+            },
+            |(_, workspace)| {
+                hide_rewritten_files(workspace, &["a.js".to_owned(), "new.js".to_owned()]);
+                Ok::<(), String>(())
+            },
+            |(root, _)| fs::remove_dir_all(root.parent().unwrap()).unwrap(),
+        );
+        assert!(steps >= 2, "{steps}");
     }
 }
