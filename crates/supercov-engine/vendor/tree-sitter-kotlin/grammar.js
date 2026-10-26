@@ -59,6 +59,10 @@ module.exports = grammar({
     [$.platform_modifier, $._reserved_identifier],
     [$.property_modifier, $._reserved_identifier],
     [$.context_parameters, $._reserved_identifier],
+    [$.type, $._receiver_type, $._reserved_identifier],
+    [$.type, $._reserved_identifier],
+    [$._receiver_type, $._reserved_identifier],
+    [$.inheritance_modifier, $._reserved_identifier],
     [$.modifiers, $.function_type],
     [$.type_modifiers, $._reserved_identifier],
     [$.function_modifier, $.type_modifiers, $._reserved_identifier],
@@ -92,6 +96,8 @@ module.exports = grammar({
     'set',
     // used to check if we can parse a comment
     '$',
+    // between a property's accessors when an annotation starts the second
+    $._accessor_semi,
   ],
 
   inline: $ => [
@@ -193,8 +199,10 @@ module.exports = grammar({
       )),
       optional(';'),
       optional(choice(
-        seq($.getter, optional($.setter)),
-        seq($.setter, optional($.getter)),
+        // An annotation that starts the second accessor would otherwise read as the start of a
+        // trailing lambda after an expression-bodied first one (`get() = x` then `@A set(v)`).
+        seq($.getter, optional(seq(optional($._accessor_semi), $.setter))),
+        seq($.setter, optional(seq(optional($._accessor_semi), $.getter))),
       )),
     )),
 
@@ -1091,10 +1099,12 @@ module.exports = grammar({
         'constructor',
         'const',
         'context',
+        'dynamic',
         'data',
         'enum',
         'expect',
         'inner',
+        'open',
         'get',
         'set',
         'operator',

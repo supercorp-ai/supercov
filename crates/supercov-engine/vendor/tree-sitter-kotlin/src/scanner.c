@@ -15,6 +15,7 @@ enum TokenType {
     GET,
     SET,
     DOLLAR,
+    ACCESSOR_SEMI,
 };
 
 #define MAX_WORD_SIZE 16
@@ -75,6 +76,19 @@ static bool set_paren_is_call(TSLexer *lexer) {
           lexer->lookahead == '`' || lexer->lookahead == '@')) {
         return true;
     }
+    if (lexer->lookahead != '@') {
+        // A setter takes one name, optionally typed: `set(a, b)` and `set(f(x))` are calls.
+        while (iswalnum(lexer->lookahead) || lexer->lookahead > 127 || lexer->lookahead == '_' ||
+               lexer->lookahead == '`') {
+            skip(lexer);
+        }
+        while (iswspace(lexer->lookahead)) {
+            skip(lexer);
+        }
+        if (lexer->lookahead != ':' && lexer->lookahead != ')') {
+            return true;
+        }
+    }
     // skip until the closing parenthesis
     while (lexer->lookahead != ')' && !lexer->eof(lexer)) {
         skip(lexer);
@@ -88,6 +102,15 @@ static bool set_paren_is_call(TSLexer *lexer) {
         skip(lexer);
     }
     return false;
+}
+
+// Before an annotated accessor, the semi that may come between a property's accessors.
+static bool accessor_semi(TSLexer *lexer, bool after_annotation, const bool *valid_symbols) {
+    if (!after_annotation || !valid_symbols[ACCESSOR_SEMI]) {
+        return false;
+    }
+    lexer->result_symbol = ACCESSOR_SEMI;
+    return true;
 }
 
 void *tree_sitter_kotlin_external_scanner_create() { return NULL; }
@@ -251,6 +274,10 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
         }
 
         char scanned_word[16] = {0};
+        // An annotation came first: an accessor after it starts with a semi when one may come
+        // between a property's accessors (`get() = x` then `@A set(v)`), or the getter's
+        // expression would read the annotation as the start of a trailing lambda.
+        bool after_annotation = false;
     _switch:
         switch (lexer->lookahead) {
             case ',':
@@ -380,16 +407,17 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                         while (iswspace(lexer->lookahead)) {
                             skip(lexer);
                         }
-                        return lexer->lookahead != ')';
+                        return lexer->lookahead != ')' || accessor_semi(lexer, after_annotation, valid_symbols);
                     }
                     return !(lexer->lookahead == '\n' || lexer->lookahead == '\r' || lexer->lookahead == ';' ||
-                             lexer->lookahead == '}' || lexer->lookahead == '/' || lexer->eof(lexer));
+                             lexer->lookahead == '}' || lexer->lookahead == '/' || lexer->eof(lexer)) ||
+                           accessor_semi(lexer, after_annotation, valid_symbols);
                 }
                 // If `set` was found and the keyword is not valid, return a semi since it's being used as an identifier
                 else if (index == 4 && (!valid_symbols[SET] || lexer->lookahead == '[' || lexer->lookahead == '(' ||
                                         lexer->lookahead == '.')) {
                     if (lexer->lookahead == '(' && valid_symbols[SET]) {
-                        return set_paren_is_call(lexer);
+                        return set_paren_is_call(lexer) || accessor_semi(lexer, after_annotation, valid_symbols);
                     }
                     return true;
                 }
@@ -399,11 +427,12 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                         skip(lexer);
                     }
                     if (lexer->lookahead == '(') {
-                        return set_paren_is_call(lexer);
+                        return set_paren_is_call(lexer) || accessor_semi(lexer, after_annotation, valid_symbols);
                     }
                     return !(lexer->lookahead == '\n' || lexer->lookahead == '\r' ||
                              lexer->lookahead == ';' || lexer->lookahead == '}' || lexer->lookahead == '/' ||
-                             lexer->eof(lexer));
+                             lexer->eof(lexer)) ||
+                           accessor_semi(lexer, after_annotation, valid_symbols);
                 }
                 // If `in` was found and this specific external keyword is valid,
                 // return a semi since it's being used in a range test
@@ -449,9 +478,21 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                     while (iswspace(lexer->lookahead)) {
                         skip(lexer);
                     }
-                    if (lexer->lookahead == '/') {
-                        return true;
+                    while (lexer->lookahead == '/') {
+                        // Line comments after the annotation (`@Suppress("X") // why`) are skipped
+                        // with it; any other `/` ends the statement.
+                        skip(lexer);
+                        if (lexer->lookahead != '/') {
+                            return true;
+                        }
+                        while (!lexer->eof(lexer) && lexer->lookahead != '\n') {
+                            skip(lexer);
+                        }
+                        while (iswspace(lexer->lookahead)) {
+                            skip(lexer);
+                        }
                     }
+                    after_annotation = true;
                     goto _switch;
                 }
                 return true;
