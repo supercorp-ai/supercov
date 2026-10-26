@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `runs <run> files` and `gaps` listed a file the run left out, such as a Worker no test ran or a module no build compiled, as covered; they say it is not measured, and why.
+- `scope` and the run's summary called a run complete whose Worker no test ran; that Worker leaves the run's measurement incomplete, as `runs check` already judged it.
+
 ## 4.20.2
 
 **Changed**

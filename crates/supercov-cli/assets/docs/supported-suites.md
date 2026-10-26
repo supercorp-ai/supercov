@@ -276,9 +276,10 @@ of that build is not counted, and wasm-only code is, whatever target
 a test started its Worker, so every run of the workspace has one
 denominator. Where no test of a run started a Worker, its files are not
 measured, rather than read as code the tests missed: they leave the run's
-totals, the file view says why at the top, `scope` lists them as left out,
-the run names them after the tests' output, and `runs check` refuses to judge
-a floor over a run that left them unmeasured.
+totals, the file view, `files` and `gaps` say why, `scope` lists them as left
+out, the run's measurement reads incomplete, the run names them after the
+tests' output, and `runs check` refuses to judge a floor over a run that left
+them unmeasured.
 
 `wrangler dev --remote` runs the Worker on Cloudflare's edge, and wrangler
 opens no inspector into it there, so nothing can read what it ran. A test

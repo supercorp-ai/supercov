@@ -273,7 +273,15 @@ try {
   assert.match(workerFile, /^worker\/src\/lib\.rs\n\nNot measured: A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`/u, workerFile);
   assert.doesNotMatch(workerFile, /NOT COVERED/u, workerFile);
   const gaps = run(root, binary, ['runs', unrunId, 'gaps']).stdout;
-  assert.doesNotMatch(gaps, /worker\/src\/lib\.rs/u, gaps);
+  assert.match(gaps, /worker\/src\/lib\.rs\n  not measured: A Rust Worker: its code runs/u, gaps);
+  // Every view says so: the file listing, the scope's heading and the
+  // summary's, whose measurement the Worker left incomplete.
+  const listed = run(root, binary, ['runs', unrunId, 'files']).stdout;
+  assert.match(listed, /worker\/src\/lib\.rs\n  not measured: A Rust Worker: its code runs/u, listed);
+  const scopeText = run(root, binary, ['runs', unrunId, 'scope']).stdout;
+  assert.match(scopeText, /^measurement 1 blocking limitation\(s\)$/mu, scopeText);
+  const unrunSummary = run(root, binary, ['runs', unrunId]).stdout;
+  assert.match(unrunSummary, /Incomplete — 1 blocking limitation\(s\) in 1 file\(s\)/u, unrunSummary);
   const unrunScope = JSON.parse(run(root, binary, ['runs', unrunId, 'scope', '--json', '--limit', '0']).stdout).data.entries;
   assert.equal(unrunScope.find((entry) => entry.file === 'worker/src/lib.rs')?.status, 'excluded', JSON.stringify(unrunScope));
   const floor = run(root, binary, ['runs', unrunId, 'check', '--min-lines', '1']);
