@@ -15,7 +15,7 @@
 //! last records of its process. Rust joins those records into the shared
 //! frontend protocol; the runtime never computes a verdict.
 
-use crate::fault_fs::{self as fs, File};
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -562,7 +562,7 @@ fn shared_slot_bytes(name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceError
         };
     }
     // SAFETY: shm_open returned a fresh descriptor this function owns.
-    let file = unsafe { File::from_raw_fd(descriptor) };
+    let file = unsafe { fs::File::from_raw_fd(descriptor) };
     let length = file
         .metadata()
         .map_err(|error| PythonEvidenceError::Io(error.to_string()))?
