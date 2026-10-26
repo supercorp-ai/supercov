@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use supercov_contracts::AgentPagination;
 use supercov_engine::{
     coverage_analysis::{CoverageSummary, McdcVector},
@@ -415,6 +417,7 @@ fn render_areas(
 
 fn render_files(
     rows: &[IndexedFileGap],
+    not_measured: &BTreeMap<String, String>,
     request: &IndexedQueryRequest,
     page: &AgentPagination,
     child: &str,
@@ -429,7 +432,9 @@ fn render_files(
                 + gap.uncovered_functions
                 + gap.missing_branches
                 + gap.missing_mcdc_conditions;
-            let status = if missing == 0 {
+            let status = if let Some(reason) = not_measured.get(&gap.file) {
+                format!("not measured: {}", reason.trim_end_matches('.'))
+            } else if missing == 0 {
                 "covered in this projection".into()
             } else {
                 format!(
@@ -1308,6 +1313,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
         }
         IndexedQueryData::Files(data) => render_files(
             &data.files,
+            &data.not_measured,
             request,
             page.expect("files are paginated"),
             "files",
@@ -1315,6 +1321,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
         ),
         IndexedQueryData::Gaps(data) => render_files(
             &data.gaps,
+            &data.not_measured,
             request,
             page.expect("gaps are paginated"),
             "gaps",
@@ -2486,7 +2493,14 @@ mod tests {
             has_more: false,
             next_offset: None,
         };
-        let text = render_files(&[], &request(), &page, "gaps", "run_00b780f05c9ae324");
+        let text = render_files(
+            &[],
+            &BTreeMap::new(),
+            &request(),
+            &page,
+            "gaps",
+            "run_00b780f05c9ae324",
+        );
         assert!(
             text.contains("\n\nNo gaps: every included file is fully covered and measured.\n\n"),
             "{text}"
@@ -2907,7 +2921,7 @@ mod tests {
             has_more: false,
             next_offset: None,
         };
-        let text = render_files(&[], &request(), &page, "files", "run_1");
+        let text = render_files(&[], &BTreeMap::new(), &request(), &page, "files", "run_1");
         assert!(
             text.starts_with("Coverage files — every included source file"),
             "{text}"

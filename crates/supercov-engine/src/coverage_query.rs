@@ -253,6 +253,10 @@ pub struct CoverageFilesData {
     pub filters: CoverageQueryFilters,
     pub metric: MinimizeMetric,
     pub files: Vec<IndexedFileGap>,
+    /// Of this page's files, those the run's scope left out, each with why:
+    /// none of such a file is covered or uncovered.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub not_measured: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -262,6 +266,9 @@ pub struct CoverageGapsData {
     pub filters: CoverageQueryFilters,
     pub metric: MinimizeMetric,
     pub gaps: Vec<IndexedFileGap>,
+    /// As [`CoverageFilesData::not_measured`].
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub not_measured: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -4130,12 +4137,15 @@ pub fn coverage_file_query(
         kind: kind.map(str::to_owned),
         runner: runner.map(str::to_owned),
     };
+    let mut not_measured = not_measured_files(index, view, None)?;
+    not_measured.retain(|file, _| page.iter().any(|gap| gap.file == *file));
     let data = if gaps_only {
         CoverageFileQueryData::Gaps(CoverageGapsData {
             run: run.into(),
             filters,
             metric,
             gaps: page,
+            not_measured,
         })
     } else {
         CoverageFileQueryData::Files(CoverageFilesData {
@@ -4143,6 +4153,7 @@ pub fn coverage_file_query(
             filters,
             metric,
             files: page,
+            not_measured,
         })
     };
     Ok(CoverageFileQueryResult {
