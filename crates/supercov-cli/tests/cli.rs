@@ -12464,22 +12464,35 @@ fn a_go_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     assert!(reached > 50, "{reached}");
 }
 
+/// A crate with a unit test and a doctest.
+fn small_crate(project: &Project) {
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "/// ```\n/// assert_eq!(w::double(1), 2);\n/// ```\npub fn double(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    project.write(".gitignore", "target/\n");
+}
+
 #[test]
 fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
-    let reached = fail_each_place_of_a_run(
-        "run-faults-rs",
-        |project| {
-            project.write(
-                "Cargo.toml",
-                "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
-            );
-            project.write(
-                "src/lib.rs",
-                "pub fn double(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
-            );
-            project.write(".gitignore", "target/\n");
-        },
-        &["--", "cargo", "test", "-q"],
-    );
+    let reached =
+        fail_each_place_of_a_run("run-faults-rs", small_crate, &["--", "cargo", "test", "-q"]);
     assert!(reached > 50, "{reached}");
+    // And through nextest, where it is installed.
+    let nextest = std::process::Command::new("cargo")
+        .args(["nextest", "--version"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if nextest {
+        let reached = fail_each_place_of_a_run(
+            "run-faults-nextest",
+            small_crate,
+            &["--", "cargo", "nextest", "run"],
+        );
+        assert!(reached > 50, "{reached}");
+    }
 }
