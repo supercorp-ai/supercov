@@ -1786,14 +1786,19 @@ fn integration_choice() {
     /// Depinfo names every source of every rule, a space escaped; only
     /// workspace `.rs` files count, and a directory with no depinfo says
     /// nothing at all.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn depinfo_names_the_workspace_sources_each_rule_read() {
-        let workspace = Path::new("/w");
+        use crate::test_directory::native;
+        let root = native("/w");
+        let workspace = Path::new(&root);
         let mut compiled = BTreeSet::new();
         collect_depinfo_sources(
-            "/w/target/debug/deps/a.d: src/lib.rs src/my\\ mod.rs /w/src/abs.rs /home/.cargo/registry/dep.rs build.toml\nsrc/lib.rs:\nnot a rule\n",
+            &format!(
+                "{}: src/lib.rs src/my\\ mod.rs {} {} build.toml\nsrc/lib.rs:\nnot a rule\n",
+                native("/w/target/debug/deps/a.d"),
+                native("/w/src/abs.rs"),
+                native("/home/.cargo/registry/dep.rs"),
+            ),
             workspace,
             &mut compiled,
         );
@@ -1854,8 +1859,6 @@ fn integration_choice() {
     /// literal `include!`s and the modules they declare, both arms of a
     /// `cfg_if!`; not a computed include, a path out of the workspace or a
     /// module whose file is missing. What only tests reach is test code.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn the_module_tree_is_resolved_the_way_rustc_resolves_it() {
         let base = std::env::temp_dir().join(format!(
@@ -1914,7 +1917,7 @@ fn integration_choice() {
                     p.strip_prefix(&workspace)
                         .unwrap()
                         .to_string_lossy()
-                        .into_owned()
+                        .replace('\\', "/")
                 })
                 .collect::<Vec<_>>()
         };

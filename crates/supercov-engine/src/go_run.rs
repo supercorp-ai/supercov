@@ -1443,6 +1443,7 @@ mod tests {
     }
 
     /// Evidence of `probes` probes, the first reached, and no test.
+    #[cfg(unix)]
     fn evidence_reaching_the_first_of(probes: usize) -> Vec<u8> {
         let mut bytes = (probes as u64).to_le_bytes().to_vec();
         for index in 0..probes {
@@ -1453,8 +1454,8 @@ mod tests {
         bytes
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
+    // Driven by a shell command.
+    #[cfg(unix)]
     #[test]
     fn code_reached_with_no_test_to_name_is_still_a_run() {
         // Every test called t.Parallel(): nothing could be credited, and what

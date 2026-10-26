@@ -4069,19 +4069,19 @@ pub(crate) mod tests {
     /// empty, a cut-short layout and an unsized slot are passed over, and
     /// anything else -- a directory, an unknown name, a bad shared-memory
     /// marker -- is refused by name.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn evidence_entries_and_paths_are_read_or_refused_by_name() {
-        let root = Path::new("/project");
+        use crate::test_directory::native;
+        let project = native("/project");
+        let root = Path::new(&project);
         assert_eq!(
-            relative(root, "/project/src/a.py").as_deref(),
+            relative(root, &native("/project/src/a.py")).as_deref(),
             Some("src/a.py")
         );
         assert_eq!(relative(root, "./src/a.py").as_deref(), Some("src/a.py"));
-        assert_eq!(relative(root, "/elsewhere/a.py"), None);
+        assert_eq!(relative(root, &native("/elsewhere/a.py")), None);
         assert_eq!(relative(root, "../a.py"), None);
-        assert_eq!(relative(root, "/project"), None);
+        assert_eq!(relative(root, &project), None);
         let base = std::env::temp_dir().join(format!(
             "supercov-python-entries-{}-{}",
             std::process::id(),
