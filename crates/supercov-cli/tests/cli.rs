@@ -10700,6 +10700,8 @@ fn tests_without_evidence_are_explained_by_what_they_load() {
     assert!(dynamic.get("importsMeasured").is_none(), "{dynamic}");
 }
 
+// Its package-manager stand-in is a shell script.
+#[cfg(unix)]
 #[test]
 fn line_queries_and_commands_at_their_edges() {
     // A command that only mentions another language's runner, and runs node.
