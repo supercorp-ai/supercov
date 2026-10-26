@@ -855,7 +855,7 @@ fn window_from(value: &Value) -> Option<Window> {
                 .decode(segment.get(1)?.as_str()?)
                 .ok()?;
             bytes
-                .get_mut(offset..offset + data.len())?
+                .get_mut(offset..offset.checked_add(data.len())?)?
                 .copy_from_slice(&data);
         }
         regions.push((crate_key, bytes));
@@ -2362,6 +2362,30 @@ mod tests {
         // A segment past the region is a malformed window, not a panic.
         let bad = json!({"start": 0, "end": 1, "regions": [["a", 4, [[2, encode(&[1, 2, 3])]]]]});
         assert!(window_from(&bad).is_none());
+        // Each part written wrong, an offset that would run past the end of
+        // memory among them, is no window either.
+        let data = encode(&[1]);
+        for wrong in [
+            json!({"start": 0, "end": 1}),
+            json!({"start": 0, "end": 1, "regions": "none"}),
+            json!({"start": 0, "end": 1, "regions": [[7, 4, []]]}),
+            json!({"start": 0, "end": 1, "regions": [["a"]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", -1, []]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, "pages"]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [["0", data]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[0]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[0, 5]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[0, "!!"]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[u64::MAX, data]]]]}),
+            json!({"end": 1, "regions": []}),
+            json!({"start": "0", "end": 1, "regions": []}),
+            json!({"start": 0, "regions": []}),
+            json!({"start": 0, "end": "1", "regions": []}),
+        ] {
+            assert!(window_from(&wrong).is_none(), "{wrong}");
+        }
     }
 
     #[test]
