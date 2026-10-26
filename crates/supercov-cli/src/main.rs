@@ -1,11 +1,11 @@
 use std::{
     ffi::OsStr,
-    fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, Instant},
 };
+use supercov_engine::fault_fs as fs;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -486,7 +486,7 @@ impl<'r> CurrentLines<'r> {
     fn get(&mut self, file: &str) -> &[String] {
         let root = self.root;
         self.files.entry(file.to_owned()).or_insert_with(|| {
-            std::fs::read_to_string(root.join(file))
+            supercov_engine::fault_fs::read_to_string(root.join(file))
                 .unwrap_or_default()
                 .lines()
                 .map(|l| l.trim().to_owned())
@@ -675,7 +675,7 @@ fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
         .iter()
         .filter(|(file, _)| supercov_engine::run_currency::configuration_file(file))
         .filter(|(file, was)| {
-            std::fs::read_to_string(root.join(file))
+            supercov_engine::fault_fs::read_to_string(root.join(file))
                 .ok()
                 .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
                 != Some(was.sha256.clone())

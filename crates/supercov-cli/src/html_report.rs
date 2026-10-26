@@ -1,10 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
     io::{Write, stdout},
     path::{Component, Path, PathBuf},
     process::{Command, ExitCode, Stdio},
 };
+use supercov_engine::fault_fs::{self as fs, OpenOptions};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::GzEncoder};
@@ -921,11 +921,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
             std::process::id(),
             attempt
         ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        match fs::open_with(OpenOptions::new().write(true).create_new(true), &candidate) {
             Ok(file) => {
                 temporary = Some((candidate, file));
                 break;

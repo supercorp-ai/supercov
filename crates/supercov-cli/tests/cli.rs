@@ -12278,3 +12278,39 @@ fn ctrl_c_during_a_go_python_ruby_or_jvm_run_exits_as_the_signal_and_publishes_n
         interrupt(&project, &["--", "mvn", "test"], "waiting now");
     }
 }
+
+/// Each query, run once for every file operation it makes with that one
+/// failing (`SUPERCOV_TEST_FAULT=fs@N`): it may refuse, but says why and never
+/// panics, and the run its fault no longer reaches answers as usual.
+#[test]
+fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
+    let project = Project::cart("query-faults");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    for query in [
+        &["runs"][..],
+        &["runs", "latest"],
+        &["runs", "latest", "gaps"],
+        &["runs", "latest", "files"],
+        &["runs", "latest", "file", "src/cart.js"],
+        &["runs", "latest", "tests", "affected"],
+        &["report", "--no-open", "--output", "faults.html"],
+    ] {
+        let mut nth = 0;
+        loop {
+            nth += 1;
+            let fault = format!("fs@{nth}");
+            let ran = project.supercov_with(query, &[("SUPERCOV_TEST_FAULT", &fault)]);
+            let said = ran.stderr();
+            assert!(
+                !said.contains("panicked at") && ran.code() != 101,
+                "{query:?} with {fault} panicked:\n{said}"
+            );
+            if !said.contains("[supercov] test fault at fs") {
+                ran.succeeds();
+                break;
+            }
+            assert!(nth < 2_000, "{query:?} kept reaching faults");
+        }
+        assert!(nth > 1, "{query:?} made no file operation");
+    }
+}

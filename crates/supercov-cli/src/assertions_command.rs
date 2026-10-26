@@ -386,7 +386,7 @@ impl Cache {
             .join(".supercov")
             .join("assertions")
             .join("answers.json");
-        let answers = std::fs::read(&path)
+        let answers = supercov_engine::fault_fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(|v| v["version"] == CACHE_VERSION)
@@ -399,12 +399,12 @@ impl Cache {
             .path
             .parent()
             .expect("answers.json sits in .supercov/assertions");
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        supercov_engine::fault_fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec(&json!({"version": CACHE_VERSION, "answers": self.answers}))
             .map_err(|e| e.to_string())?;
         let temp = self.path.with_extension("json.tmp");
-        std::fs::write(&temp, bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(&temp, &self.path).map_err(|e| e.to_string())
+        supercov_engine::fault_fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+        supercov_engine::fault_fs::rename(&temp, &self.path).map_err(|e| e.to_string())
     }
 }
 
@@ -818,7 +818,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         result["filterArgs"] = json!(filter_args(&options.filter));
         filtered_result_file(&options.filter)
     };
-    let _ = std::fs::write(
+    let _ = supercov_engine::fault_fs::write(
         run.directory.join(saved_as),
         serde_json::to_vec(&result).unwrap_or_default(),
     );
@@ -973,7 +973,7 @@ fn assess_changed(
         "inputTokens": tokens, "costUsd": tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS,
         "statements": statements,
     });
-    let _ = std::fs::write(
+    let _ = supercov_engine::fault_fs::write(
         run.directory.join(IMPACT_FILE),
         serde_json::to_vec(&result).unwrap_or_default(),
     );
@@ -982,7 +982,7 @@ fn assess_changed(
 
 /// `assess --changed`'s saved answers for a run, if any.
 pub(crate) fn impact(run: &StoredRun) -> Option<Value> {
-    std::fs::read(run.directory.join(IMPACT_FILE))
+    supercov_engine::fault_fs::read(run.directory.join(IMPACT_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
 }
@@ -1310,7 +1310,7 @@ fn narrow_result(
 }
 
 pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
-    std::fs::read(run.directory.join(RESULT_FILE))
+    supercov_engine::fault_fs::read(run.directory.join(RESULT_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
 }
@@ -1403,9 +1403,11 @@ fn read(run: &StoredRun, runs: &[StoredRun], options: &Options) -> Result<Value,
         // An assessment of exactly these tests, else the whole one read for
         // them; the filter is checked against the run either way.
         let picked = crate::picked_tests(run, &options.filter)?;
-        let own = std::fs::read(run.directory.join(filtered_result_file(&options.filter)))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let own = supercov_engine::fault_fs::read(
+            run.directory.join(filtered_result_file(&options.filter)),
+        )
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
         let result = match own {
             Some(result) => Some(result),
             None => saved(run)

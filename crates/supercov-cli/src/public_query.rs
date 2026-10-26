@@ -575,7 +575,7 @@ fn coverage_invocation(
             // what a query costs.
             let mut selectors = options.positional.clone();
             if let Some(path) = &options.from_file {
-                let text = std::fs::read_to_string(path).map_err(|error| {
+                let text = supercov_engine::fault_fs::read_to_string(path).map_err(|error| {
                     PublicQueryError::invalid(
                         Some(&agent_command),
                         json_output,

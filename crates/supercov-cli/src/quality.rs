@@ -9,12 +9,12 @@
 //! of its constructs more than real fixes did.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Read,
     path::{Path, PathBuf},
     process::ExitCode,
     time::{Duration, Instant},
 };
+use supercov_engine::fault_fs as fs;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1182,7 +1182,7 @@ fn discover_for(
 }
 
 fn read_text(path: &Path) -> Result<String, String> {
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let file = fs::open(path).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     file.take(MAX_SOURCE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)

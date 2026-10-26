@@ -124,7 +124,7 @@ pub fn command(arguments: &[String]) -> ExitCode {
     }
     match output {
         Some(path) => {
-            if let Err(error) = std::fs::write(&path, &lines) {
+            if let Err(error) = supercov_engine::fault_fs::write(&path, &lines) {
                 eprintln!("[supercov] {}: {error}", path.display());
                 return ExitCode::from(2);
             }
