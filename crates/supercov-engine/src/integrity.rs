@@ -667,6 +667,14 @@ pub fn globally_tracked(path: &str) -> bool {
     tracked_manifest(name) || configuration_file(Path::new(name))
 }
 
+/// The configuration files below `root` as the fingerprint walks for them,
+/// without the ones a project names elsewhere.
+pub(crate) fn walked_configuration_files(root: &Path) -> Result<Vec<PathBuf>, IntegrityError> {
+    let mut files = Vec::new();
+    walk_files(root, &configuration_file, &mut files)?;
+    Ok(files)
+}
+
 fn configuration_files(
     root: &Path,
     project: &CoverageProject,
@@ -1210,6 +1218,113 @@ mod tests {
         ] {
             assert!(!globally_tracked(own), "{own}");
         }
+    }
+
+    #[test]
+    fn names_that_only_resemble_configuration_or_manifests_are_neither() {
+        assert!(!configuration_file(Path::new("tsconfig.txt")));
+        assert!(!tracked_manifest("requirements.in"));
+        assert!(!globally_tracked("docs/requirements.md"));
+    }
+
+    /// A repository whose status cannot be read (its index is damaged) is
+    /// not claimed clean.
+    #[test]
+    fn a_repository_whose_status_cannot_be_read_is_not_called_clean() {
+        let root = directory("git-damaged");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=report-test"]);
+        git(&[
+            "-c",
+            "user.name=Report Test",
+            "-c",
+            "user.email=report@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+        fs::write(root.join(".git/index"), "not an index").unwrap();
+        let damaged = git_integrity(&root).unwrap();
+        assert!(damaged.dirty);
+        assert!(damaged.revision.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The configuration walk refuses a root that is a file, fails on one
+    /// below a file, and finds nothing where there is nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_configuration_root_that_is_no_directory_is_refused() {
+        let root = directory("walk");
+        write(&root, "notes.txt", "x");
+        assert!(matches!(
+            walked_configuration_files(&root.join("notes.txt")),
+            Err(IntegrityError::UnsafeFile(_))
+        ));
+        assert!(matches!(
+            walked_configuration_files(&root.join("notes.txt/below")),
+            Err(IntegrityError::Io { .. })
+        ));
+        assert!(
+            walked_configuration_files(&root.join("missing"))
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An engine digest must be 64 lowercase hex digits, for either kind
+    /// of run, before anything is read.
+    #[test]
+    fn an_engine_digest_that_is_not_lowercase_sha256_is_refused() {
+        let (root, shim) = fixture();
+        let project = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        let inputs = ExplicitIntegrityInputs {
+            source_files: Vec::new(),
+            test_files: Vec::new(),
+            dependency_files: Vec::new(),
+            configuration_files: Vec::new(),
+            execution_configuration: Vec::new(),
+        };
+        let good = "0123456789abcdef".repeat(4);
+        assert!(valid_sha256(&good));
+        for (instrumenter, execution, said) in [
+            ("abc".to_owned(), good.clone(), "instrumenter engine"),
+            ("A".repeat(64), good.clone(), "instrumenter engine"),
+            (good.clone(), "g".repeat(64), "execution engine"),
+        ] {
+            let mut frontend = frontend(&shim);
+            frontend.engine_instrumenter_sha256 = instrumenter;
+            frontend.engine_execution_sha256 = execution;
+            assert!(
+                matches!(
+                    create_run_integrity(&root, &project, &frontend),
+                    Err(IntegrityError::InvalidEngineDigest(which)) if which == said
+                ),
+                "{said}"
+            );
+            assert!(
+                matches!(
+                    create_explicit_run_integrity(&root, &inputs, &frontend),
+                    Err(IntegrityError::InvalidEngineDigest(which)) if which == said
+                ),
+                "{said}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
     }
 
     fn write(root: &Path, path: &str, contents: &str) {

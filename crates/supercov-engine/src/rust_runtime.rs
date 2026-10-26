@@ -60,6 +60,25 @@ impl std::fmt::Display for RustProbeReadError {
 impl std::error::Error for RustProbeReadError {}
 
 const REGION_TEMPLATE: &str = include_str!("../runtime-assets/rust-region-runtime.rs");
+
+/// Where a test's instrumented code writes its evidence.
+pub const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
+/// The instrumentation the tests a runner starts belong to: a runner of
+/// Supercov's (nextest's target runner, the doctest wrappers) runs in a
+/// process of its own and reads it from here.
+pub const PROBE_TOKEN_ENV: &str = "SUPERCOV_RUST_PROBE_TOKEN";
+
+/// A test's evidence directory, said twice: by the variable every
+/// instrumentation reads, and by one only `token`'s reads first. A Supercov
+/// that a test starts -- Supercov measuring itself -- sets the first for its
+/// own tests; this instrumentation's code below them still writes into this
+/// test's evidence, where it is read.
+pub fn evidence_environment(token: &str, directory: &Path) -> [(String, std::path::PathBuf); 2] {
+    [
+        (EVIDENCE_DIR_ENV.to_owned(), directory.to_owned()),
+        (format!("{EVIDENCE_DIR_ENV}_{token}"), directory.to_owned()),
+    ]
+}
 const REGION_MAGIC: &[u8; 8] = b"SCVRGN01";
 const REGION_VERSION: u32 = 1;
 
@@ -236,9 +255,17 @@ pub fn parse_rust_region(
             })
             .collect()
     };
+    // A slot past the end of the file holds nothing, so only the slots the
+    // file has are read: a damaged header naming billions of entries per
+    // decision reads as what is there instead of looping through them.
+    let slots = bytes.len().saturating_sub(decisions_at) / ENTRY;
     for (ordinal, id) in layout.decisions.iter().enumerate() {
-        for entry in 0..entries_per_decision {
-            let at = decisions_at + (ordinal * entries_per_decision + entry) * ENTRY;
+        let first_slot = ordinal.saturating_mul(entries_per_decision);
+        if first_slot >= slots {
+            break;
+        }
+        for entry in 0..entries_per_decision.min(slots - first_slot) {
+            let at = decisions_at + (first_slot + entry) * ENTRY;
             if !touched(at) || bytes.get(at) != Some(&2) {
                 continue;
             }
@@ -780,6 +807,49 @@ fn main() {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A Supercov a test starts -- Supercov measuring itself -- names the
+    /// shared evidence directory anew for its own tests. Code of the outer
+    /// instrumentation running below them still writes where its own run
+    /// reads: the directory named for its token.
+    #[test]
+    fn code_below_a_nested_run_writes_into_its_own_run_s_evidence() {
+        let source = r#"fn main() {
+    if std::env::args().count() > 99 { println!("many"); } else { println!("few"); }
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let runtime = region_runtime(&transformed.probes);
+        let directory = temporary_directory("nested");
+        let input = directory.join("main.rs");
+        let binary = directory.join("program");
+        let ours = directory.join("ours");
+        let nested = directory.join("nested");
+        fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
+        let compile = Command::new("rustc")
+            .arg("--edition=2024")
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = Command::new(&binary)
+            .envs(evidence_environment(TOKEN, &ours))
+            .env(EVIDENCE_DIR_ENV, &nested)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"few\n");
+        assert_eq!(read_regions(&ours, &transformed.probes).len(), 1);
+        assert!(!nested.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn the_runtime_records_which_gated_code_the_compiler_built() {
         let source = r#"#[cfg(feature = "on")]
@@ -1287,6 +1357,7 @@ fn main() {
             decisions: decisions.iter().map(|id| (*id).to_owned()).collect(),
             cfgs: Vec::new(),
             crates: Default::default(),
+            workers: Default::default(),
         }
     }
 
@@ -1344,6 +1415,101 @@ fn main() {
                 .unwrap()
                 .is_empty()
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A region header for `probes`, its body at the end of the header.
+    fn empty_region(probes: &RustProbeLayout) -> Vec<u8> {
+        let mut bytes = vec![0u8; 4096];
+        bytes[..8].copy_from_slice(b"SCVRGN01");
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&128u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&(probes.hits.len() as u32).to_le_bytes());
+        bytes[24..28].copy_from_slice(&(probes.decisions.len() as u32).to_le_bytes());
+        bytes[32..36].copy_from_slice(&128u32.to_le_bytes());
+        bytes[56..56 + TOKEN.len()].copy_from_slice(TOKEN.as_bytes());
+        bytes[72..76].copy_from_slice(&(probes.cfgs.len() as u32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn an_overflow_record_of_another_kind_is_refused() {
+        let probes = layout(&["rs:point:a"], &[]);
+        assert_eq!(
+            parse_rust_region(
+                &empty_region(&probes),
+                Some(b"X\t1\t1\t0\t1\t1\n"),
+                TOKEN,
+                &probes
+            ),
+            Err(RustProbeReadError::InvalidRecord(1))
+        );
+    }
+
+    /// A run's regions are found at any depth; anything else under the root,
+    /// a link among it, is passed over; and a root that is a file is an
+    /// error, as an absent one is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_cfg_settlement_reads_every_region_of_the_run_below_its_root() {
+        let mut probes = layout(&[], &[]);
+        let root = temporary_directory("cfgs");
+        // No gate: nothing to read, wherever the root is.
+        assert_eq!(
+            read_rust_cfg_settlement(&root.join("absent"), TOKEN, &probes),
+            Ok(Vec::new())
+        );
+        probes.cfgs.push(crate::rust_instrumenter::RustCfgGate {
+            file: "src/lib.rs".into(),
+            predicate: "feature = \"x\"".into(),
+            line: 1,
+            end_line: 2,
+            obligations: vec!["rs:point:a".into()],
+        });
+        assert_eq!(
+            read_rust_cfg_settlement(&root.join("absent"), TOKEN, &probes),
+            Ok(vec![0])
+        );
+        let mut region = empty_region(&probes);
+        region[128] = 2;
+        fs::create_dir(root.join("test-1")).unwrap();
+        fs::write(root.join(format!("test-1/{TOKEN}-1.region")), &region).unwrap();
+        region[128] = 1;
+        fs::write(root.join(format!("{TOKEN}-2.overflow")), &region).unwrap();
+        std::os::unix::fs::symlink(
+            root.join(format!("test-1/{TOKEN}-1.region")),
+            root.join(format!("{TOKEN}-3.region")),
+        )
+        .unwrap();
+        assert_eq!(read_rust_cfg_settlement(&root, TOKEN, &probes), Ok(vec![2]));
+        let file = root.join(format!("{TOKEN}-2.overflow"));
+        assert!(matches!(
+            read_rust_cfg_settlement(&file, TOKEN, &probes),
+            Err(RustProbeReadError::Io(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_region_directory_that_cannot_be_read_is_an_error() {
+        let probes = layout(&["rs:point:a"], &[]);
+        let directory = temporary_directory("unreadable");
+        fs::write(directory.join("file"), b"").unwrap();
+        assert!(matches!(
+            read_rust_region_directory(&directory.join("file"), TOKEN, &probes),
+            Err(RustProbeReadError::Io(_))
+        ));
+        // An overflow that is no file.
+        fs::write(
+            directory.join(format!("{TOKEN}-1.region")),
+            empty_region(&probes),
+        )
+        .unwrap();
+        fs::create_dir(directory.join(format!("{TOKEN}-1.overflow"))).unwrap();
+        assert!(matches!(
+            read_rust_region_directory(&directory, TOKEN, &probes),
+            Err(RustProbeReadError::Io(_))
+        ));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1431,5 +1597,93 @@ fn main() {
             assert!(read_rust_region_directory(&evidence, TOKEN, &transformed.probes).is_ok());
         }
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_runtime_names_and_the_region_header_are_checked_field_by_field() {
+        let source = "fn f(a: bool, b: bool) -> bool {\n    a && b\n}\n";
+        let probes = instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1")
+            .unwrap()
+            .probes;
+        let render = |module: &str, token: &str, key: &str, cfgs: &[usize]| {
+            render_rust_region_runtime(module, token, key, &probes, cfgs).err()
+        };
+        assert_eq!(render("__supercov_runtime_v1", TOKEN, "abcdef", &[]), None);
+        for module in ["", "1runtime", "run-time"] {
+            assert_eq!(
+                render(module, TOKEN, "abcdef", &[]).as_deref(),
+                Some("invalid Rust runtime module name"),
+                "{module:?}"
+            );
+        }
+        for token in ["", "0123456789abcdef0", "xyz"] {
+            assert_eq!(
+                render("rt", token, "abcdef", &[]).as_deref(),
+                Some("invalid Rust region token"),
+                "{token:?}"
+            );
+        }
+        for key in ["", "key"] {
+            assert_eq!(
+                render("rt", TOKEN, key, &[]).as_deref(),
+                Some("invalid Rust runtime crate key"),
+                "{key:?}"
+            );
+        }
+        assert_eq!(
+            render("rt", TOKEN, "abcdef", &[99]).as_deref(),
+            Some("a crate names a cfg gate the layout lacks")
+        );
+        // A header as the runtime writes it, then each field wrong in turn.
+        let mut header = vec![0u8; 128];
+        header[..8].copy_from_slice(REGION_MAGIC);
+        let put = |bytes: &mut Vec<u8>, at: usize, value: usize| {
+            bytes[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        };
+        put(&mut header, 8, REGION_VERSION as usize);
+        put(&mut header, 12, 128);
+        put(&mut header, 16, probes.hits.len());
+        put(&mut header, 20, probes.assertions.len());
+        put(&mut header, 24, probes.decisions.len());
+        put(&mut header, 72, probes.cfgs.len());
+        header[56..56 + TOKEN.len()].copy_from_slice(TOKEN.as_bytes());
+        assert!(region_header(&header, TOKEN, &probes).is_ok());
+        let broken = |at: usize, value: usize| {
+            let mut bytes = header.clone();
+            put(&mut bytes, at, value);
+            bytes
+        };
+        let mut wrong_magic = header.clone();
+        wrong_magic[0] ^= 1;
+        let mut wrong_token = header.clone();
+        wrong_token[56] = b'z';
+        // A header that names billions of entries per decision is read as
+        // the slots the file has, at once.
+        let mut huge = header.clone();
+        put(&mut huge, 28, u32::MAX as usize);
+        put(&mut huge, 32, 128);
+        let started = std::time::Instant::now();
+        assert!(
+            parse_rust_region(&huge, None, TOKEN, &probes)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        for bytes in [
+            wrong_magic,
+            broken(8, 999),
+            broken(12, 64),
+            broken(16, probes.hits.len() + 1),
+            broken(20, probes.assertions.len() + 1),
+            broken(24, probes.decisions.len() + 1),
+            broken(72, probes.cfgs.len() + 1),
+            wrong_token,
+            header[..40].to_vec(),
+        ] {
+            assert!(matches!(
+                region_header(&bytes, TOKEN, &probes),
+                Err(RustProbeReadError::InvalidHeader)
+            ));
+        }
     }
 }

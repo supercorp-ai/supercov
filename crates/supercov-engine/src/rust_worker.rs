@@ -12,7 +12,7 @@
 //! what no single test's window holds is the run's background.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
@@ -105,6 +105,9 @@ const TAKE: &str = r#"(() => {
 /// How often the poller takes the regions. A window shorter than the gap
 /// between two tests is what lets each be credited its own.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// How long a take may go unanswered before it is given up.
+const TAKE_PATIENCE: Duration = Duration::from_secs(5);
 
 /// A wrangler configuration Supercov can point at its entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +359,79 @@ pub(crate) fn wasm_target_cfg(
         .current_dir(crate_directory)
         .output()
         .ok()?;
+    target_cfg_of(&output)
+}
+
+/// How the Rust Worker in `package` -- a wrangler configuration beside its
+/// Cargo.toml whose build runs worker-build -- compiles its crate: for wasm,
+/// never as a test, as a release build unless the command asks for `--dev`,
+/// with the features the command and the package's own defaults enable.
+/// None for a package that is no Worker, or where rustc cannot say what
+/// wasm is.
+pub(crate) fn worker_build_cfg(
+    package: &Path,
+    features: &BTreeMap<String, Vec<String>>,
+) -> Option<crate::rust_instrumenter::TargetCfg> {
+    let command = ["wrangler.toml", "wrangler.json", "wrangler.jsonc"]
+        .iter()
+        .filter_map(|name| read_config(&package.join(name)))
+        .filter_map(|(_, document)| build_command(&document))
+        .find(|command| command.contains("worker-build"))?;
+    let target = wasm_target_cfg(package)?;
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    Some(target.for_build(
+        false,
+        words.contains(&"--dev"),
+        enabled_features(&words, features),
+    ))
+}
+
+/// The features a build command enables in a package with `features`:
+/// those it names, the package's defaults unless it says not to, and what
+/// each of those enables in turn.
+fn enabled_features(words: &[&str], features: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
+    if words.contains(&"--all-features") {
+        return features.keys().cloned().collect();
+    }
+    let mut pending = Vec::new();
+    if !words.contains(&"--no-default-features") {
+        pending.push("default".to_owned());
+    }
+    for (index, word) in words.iter().enumerate() {
+        let named = match word.split_once('=') {
+            Some(("--features", list)) => Some(list),
+            _ if matches!(*word, "--features" | "-F") => words.get(index + 1).copied(),
+            _ => None,
+        };
+        pending.extend(
+            named
+                .into_iter()
+                .flat_map(|list| list.split(','))
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    let mut enabled = BTreeSet::new();
+    while let Some(feature) = pending.pop() {
+        // `dep:name` turns on a dependency, not a feature; `name/feature` a
+        // dependency's feature, and `name` with it unless written `name?/`.
+        let feature = match feature.split_once('/') {
+            Some((name, _)) if !name.ends_with('?') => name.to_owned(),
+            Some(_) => continue,
+            None => feature,
+        };
+        if feature.starts_with("dep:") || !features.contains_key(&feature) {
+            continue;
+        }
+        if enabled.insert(feature.clone()) {
+            pending.extend(features[&feature].iter().cloned());
+        }
+    }
+    enabled
+}
+
+/// The cfg values `rustc --print cfg` answered with, if it answered.
+fn target_cfg_of(output: &std::process::Output) -> Option<crate::rust_instrumenter::TargetCfg> {
     if !output.status.success() {
         return None;
     }
@@ -381,12 +457,20 @@ struct Poller {
 }
 
 impl Poller {
+    /// Through wrangler's inspector, which shows the Worker it was started
+    /// for.
     fn start(port: u16, windows: PathBuf) -> Self {
+        Self::start_at(port, "/ws".to_owned(), windows)
+    }
+
+    /// Through the inspector at `path` on `port`: workerd's own shows each
+    /// Worker at `/core:user:<name>`.
+    fn start_at(port: u16, path: String, windows: PathBuf) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
             .name("supercov-worker-poller".into())
-            .spawn(move || poll(port, &windows, &flag))
+            .spawn(move || poll(port, &path, &windows, &flag))
             .ok();
         Self { stop, thread }
     }
@@ -406,7 +490,7 @@ impl Drop for Poller {
     }
 }
 
-fn poll(port: u16, windows: &Path, stop: &AtomicBool) {
+fn poll(port: u16, path: &str, windows: &Path, stop: &AtomicBool) {
     let Ok(mut file) = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -425,7 +509,7 @@ fn poll(port: u16, windows: &Path, stop: &AtomicBool) {
         let _ = stream.set_nodelay(true);
         let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
         let Ok((mut socket, _)) =
-            tungstenite::client::client(format!("ws://127.0.0.1:{port}/ws"), stream)
+            tungstenite::client::client(format!("ws://127.0.0.1:{port}{path}"), stream)
         else {
             std::thread::sleep(Duration::from_millis(100));
             continue;
@@ -439,6 +523,16 @@ fn poll(port: u16, windows: &Path, stop: &AtomicBool) {
 /// execution context, and take its regions on the clock. Returns when the
 /// connection ends, or after the last take once the run is over.
 fn session(socket: &mut tungstenite::WebSocket<TcpStream>, file: &mut fs::File, stop: &AtomicBool) {
+    session_with_patience(socket, file, stop, TAKE_PATIENCE);
+}
+
+/// `session`, giving up on a take unanswered for `patience`.
+fn session_with_patience(
+    socket: &mut tungstenite::WebSocket<TcpStream>,
+    file: &mut fs::File,
+    stop: &AtomicBool,
+    patience: Duration,
+) {
     use tungstenite::{Error, Message};
     let send = |socket: &mut tungstenite::WebSocket<TcpStream>, message: Value| {
         socket
@@ -525,10 +619,192 @@ fn session(socket: &mut tungstenite::WebSocket<TcpStream>, file: &mut fs::File, 
         }
         // A take the Worker never answered (it was replaced mid-evaluation)
         // is given up; the next one covers the same span.
-        if awaiting.is_some_and(|(_, sent)| sent.elapsed() > Duration::from_secs(5)) {
+        if awaiting.is_some_and(|(_, sent)| sent.elapsed() > patience) {
             awaiting = None;
         }
     }
+}
+
+/// A preload for wrangler's Node process: once the runtime is up, it notes
+/// where workerd's own inspector listens in a file of the directory
+/// `SUPERCOV_WRANGLER_INSPECTORS` names. wrangler's inspector shows one
+/// Worker of a `wrangler dev`; workerd's shows every Worker it runs, so a
+/// session started with several `-c` is read there whole.
+const INSPECTOR_HOOK: &str = r#"'use strict';
+// Supercov: where workerd's inspector listens, for the poller of a measured
+// `wrangler dev`. Inert in any process that never loads miniflare.
+const directory = process.env.SUPERCOV_WRANGLER_INSPECTORS;
+if (directory) {
+  const Module = require('module');
+  const fs = require('fs');
+  const path = require('path');
+  const load = Module._load;
+  Module._load = function (request) {
+    const exports = load.apply(this, arguments);
+    const Miniflare = request === 'miniflare' && exports && exports.Miniflare;
+    if (Miniflare && !Object.hasOwn(Miniflare.prototype, '__supercov')) {
+      Object.defineProperty(Miniflare.prototype, '__supercov', { value: true });
+      const inspectorURL = Miniflare.prototype.getInspectorURL;
+      Miniflare.prototype.getInspectorURL = async function () {
+        const url = await inspectorURL.apply(this, arguments);
+        try {
+          const file = path.join(directory, process.pid + '.inspector');
+          fs.writeFileSync(file + '.tmp', JSON.stringify({ url: String(url) }));
+          fs.renameSync(file + '.tmp', file);
+        } catch {}
+        return url;
+      };
+    }
+    return exports;
+  };
+}
+"#;
+
+/// Where the hook's notes go.
+pub const INSPECTORS_ENV: &str = "SUPERCOV_WRANGLER_INSPECTORS";
+const HOOK_FILE: &str = "supercov-wrangler-hook.cjs";
+
+/// Writes the hook into `directory`, and says where it is.
+fn write_hook(directory: &Path) -> Result<PathBuf, String> {
+    let hook = directory.join(HOOK_FILE);
+    fs::write(&hook, INSPECTOR_HOOK).map_err(|error| format!("{}: {error}", hook.display()))?;
+    Ok(hook)
+}
+
+/// `NODE_OPTIONS` that load `hook` after what `inherited` already asks.
+fn hooked_node_options(inherited: Option<&str>, hook: &Path) -> String {
+    let hook = hook.display().to_string();
+    // Node splits NODE_OPTIONS at spaces, except inside double quotes.
+    let require = if hook.contains(' ') {
+        format!("--require=\"{hook}\"")
+    } else {
+        format!("--require={hook}")
+    };
+    inherited
+        .filter(|options| !options.trim().is_empty())
+        .map_or_else(|| require.clone(), |options| format!("{options} {require}"))
+}
+
+/// The user Workers workerd's inspector on `port` shows, by their target id
+/// (`core:user:<name>`): its `/json` list.
+fn inspector_targets(port: u16) -> Vec<String> {
+    use std::io::Read;
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
+        return Vec::new();
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut response = Vec::new();
+    // A request that cannot be written gets no answer to read.
+    let _ = stream.write_all(b"GET /json HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let _ = stream.read_to_end(&mut response);
+    let response = String::from_utf8_lossy(&response);
+    // The list whole, whatever framing carries it.
+    let list = response
+        .find('[')
+        .zip(response.rfind(']'))
+        .and_then(|(start, end)| response.get(start..=end))
+        .and_then(|list| serde_json::from_str::<Vec<Value>>(list).ok())
+        .unwrap_or_default();
+    list.iter()
+        .filter_map(|target| target["id"].as_str())
+        .filter(|id| id.starts_with("core:user:"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The port of an inspector URL the hook noted: `ws://127.0.0.1:<port>`.
+fn inspector_port(url: &str) -> Option<u16> {
+    url.trim_end_matches('/').rsplit(':').next()?.parse().ok()
+}
+
+/// Reads every Worker of each `wrangler dev` whose notes land in a
+/// directory, through workerd's inspector, each into a windows file of its
+/// own, until told to stop. The one wrangler's inspector shows is read there
+/// too: each take clears what it read, so every hit is in one file or the
+/// other, credited alike.
+struct OtherWorkers {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<Vec<PathBuf>>>,
+}
+
+impl OtherWorkers {
+    /// `windows` names the file of the nth Worker read.
+    fn start(notes: PathBuf, windows: impl Fn(usize) -> PathBuf + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("supercov-worker-others".into())
+            .spawn(move || watch_other_workers(&notes, &windows, &flag))
+            .ok();
+        Self { stop, thread }
+    }
+
+    /// Stop, and say which files were written.
+    fn finish(mut self) -> Vec<PathBuf> {
+        self.stop.store(true, Ordering::Release);
+        self.thread
+            .take()
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for OtherWorkers {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+fn watch_other_workers(
+    notes: &Path,
+    windows: &dyn Fn(usize) -> PathBuf,
+    stop: &AtomicBool,
+) -> Vec<PathBuf> {
+    let mut pollers = BTreeMap::<(u16, String), Poller>::new();
+    let mut written = Vec::new();
+    while !stop.load(Ordering::Acquire) {
+        let noted = fs::read_dir(notes)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "inspector")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for note in noted {
+            let Some(note) = fs::read_to_string(&note)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            else {
+                continue;
+            };
+            let Some(port) = note["url"].as_str().and_then(inspector_port) else {
+                continue;
+            };
+            for target in inspector_targets(port) {
+                let key = (port, target.clone());
+                if pollers.contains_key(&key) {
+                    continue;
+                }
+                let file = windows(written.len());
+                pollers.insert(
+                    key,
+                    Poller::start_at(port, format!("/{target}"), file.clone()),
+                );
+                written.push(file);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for poller in pollers.into_values() {
+        poller.finish();
+    }
+    written
 }
 
 /// One take as the poller appended it.
@@ -598,6 +874,10 @@ fn window_from(value: &Value) -> Option<Window> {
 pub struct RustWorkerServer {
     project: PreparedRustProject,
     pollers: Vec<Poller>,
+    /// Every Worker of a `wrangler dev`, read through workerd's inspector.
+    others: OtherWorkers,
+    hook: PathBuf,
+    notes: PathBuf,
     integrity: RunIntegrity,
     source_inputs: crate::source_manifest::Inputs,
     source_roots: Option<Vec<String>>,
@@ -673,6 +953,15 @@ impl RustWorkerServer {
                 .join(format!("rust-worker-{index}"));
             let evidence = directory.join("evidence");
             fs::create_dir_all(&evidence).map_err(|error| error.to_string())?;
+            let hook = write_hook(&directory)?;
+            let notes = directory.join("inspectors");
+            fs::create_dir_all(&notes).map_err(|error| error.to_string())?;
+            let others = {
+                let evidence = evidence.clone();
+                OtherWorkers::start(notes.clone(), move |number| {
+                    evidence.join(format!("other-{number:04}.windows"))
+                })
+            };
             let mut pollers = Vec::new();
             for (number, config) in configs.iter().enumerate() {
                 let port = match config.inspector_port {
@@ -688,6 +977,9 @@ impl RustWorkerServer {
             servers.push(Self {
                 project,
                 pollers,
+                others,
+                hook,
+                notes,
                 integrity,
                 source_inputs,
                 source_roots,
@@ -715,13 +1007,19 @@ impl RustWorkerServer {
     /// type" warnings, and wasm32 drops `dylib` and `proc-macro`, so with
     /// every lint allowed it cannot read the answer and stops the build. The
     /// probes' parentheses, the one lint they raise, are allowed by name.
+    ///
+    /// And wrangler's Node process loads the hook that says where workerd's
+    /// inspector is, for every Worker of a session, one started with several
+    /// `-c`; the suite's own `NODE_OPTIONS` come first.
     pub fn environment(&self) -> BTreeMap<String, String> {
-        let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-        if !rustflags.is_empty() {
-            rustflags.push(' ');
-        }
-        rustflags.push_str("--cap-lints=warn -A unused_parens");
-        BTreeMap::from([("RUSTFLAGS".into(), rustflags)])
+        BTreeMap::from([
+            (
+                "RUSTFLAGS".into(),
+                worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default()),
+            ),
+            (INSPECTORS_ENV.into(), self.notes.display().to_string()),
+            ("NODE_OPTIONS".into(), hooked_node_options(None, &self.hook)),
+        ])
     }
 
     /// Publish what the Workers ran as a Rust run of its own: each window
@@ -739,6 +1037,7 @@ impl RustWorkerServer {
         for poller in std::mem::take(&mut self.pollers) {
             poller.finish();
         }
+        self.others.finish();
         let evidence_directory = self.directory.join("evidence");
         let result = read_windows(&evidence_directory).and_then(|windows| {
             crate::rust_wasm_evidence::publish(
@@ -785,6 +1084,8 @@ impl RustWorkerServer {
 /// The program Supercov's `wrangler` stands in for, named in the test
 /// processes' environment.
 pub const REAL_WRANGLER: &str = "SUPERCOV_WRANGLER";
+/// The hook the stand-in has wrangler's Node process load.
+pub const HOOK_ENV: &str = "SUPERCOV_WRANGLER_HOOK";
 /// The hidden commands the stand-in and its poller run as.
 pub const WRANGLER_COMMAND: &str = "__wrangler";
 pub const WRANGLER_POLL_COMMAND: &str = "__wrangler-poll";
@@ -826,6 +1127,7 @@ impl CargoTestWorkers {
         let supercov = std::env::current_exe().map_err(|error| error.to_string())?;
         fs::create_dir_all(tools).map_err(|error| format!("{}: {error}", tools.display()))?;
         write_stand_in(tools, &supercov)?;
+        let hook = write_hook(tools)?;
         let mut directories = vec![tools.to_owned()];
         directories.extend(std::env::split_paths(&path));
         let joined = std::env::join_paths(directories).map_err(|error| error.to_string())?;
@@ -833,6 +1135,7 @@ impl CargoTestWorkers {
             environment: vec![
                 ("PATH".into(), joined),
                 (REAL_WRANGLER.into(), real.into_os_string()),
+                (HOOK_ENV.into(), hook.into_os_string()),
             ],
         }))
     }
@@ -848,15 +1151,14 @@ impl CargoTestWorkers {
 /// A program on `path`: a file of that name, or on Windows one with a
 /// PATHEXT extension.
 fn on_path(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
-    let names = if cfg!(windows) {
-        vec![
-            format!("{name}.cmd"),
-            format!("{name}.exe"),
-            name.to_owned(),
-        ]
-    } else {
-        vec![name.to_owned()]
-    };
+    #[cfg(windows)]
+    let names = [
+        format!("{name}.cmd"),
+        format!("{name}.exe"),
+        name.to_owned(),
+    ];
+    #[cfg(not(windows))]
+    let names = [name.to_owned()];
     std::env::split_paths(path).find_map(|directory| {
         names
             .iter()
@@ -959,8 +1261,32 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
         eprintln!("[supercov] {WRANGLER_COMMAND} runs only as the wrangler of a measured test");
         return 127;
     };
-    let mut arguments = arguments;
-    let evidence = std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR").map(PathBuf::from);
+    let watched = watched_arguments(
+        arguments,
+        std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR").map(PathBuf::from),
+        std::env::var_os(HOOK_ENV).map(PathBuf::from),
+    );
+    exec_wrangler(&real, &watched.arguments, &watched.environment)
+}
+
+/// How the real `wrangler` is started.
+#[derive(Debug, PartialEq)]
+struct Watched {
+    arguments: Vec<std::ffi::OsString>,
+    environment: Vec<(String, std::ffi::OsString)>,
+}
+
+/// The arguments the real `wrangler` gets. Under a test, whose `evidence`
+/// directory is named, `wrangler dev` gets an inspector port and a poller
+/// writing into that directory, and loads `hook`, which tells the poller
+/// where each of the session's Workers is; a remote one, a note of why it has
+/// none.
+fn watched_arguments(
+    mut arguments: Vec<std::ffi::OsString>,
+    evidence: Option<PathBuf>,
+    hook: Option<PathBuf>,
+) -> Watched {
+    let mut environment = Vec::new();
     if starts_dev(&arguments)
         && let Some(evidence) = evidence
     {
@@ -971,37 +1297,78 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
                 evidence.join(format!("{REMOTE_NOTE}{}", std::process::id())),
                 "",
             );
-            return exec_wrangler(&real, &arguments);
+            return Watched {
+                arguments,
+                environment,
+            };
         }
         let port = match named_inspector_port(&arguments) {
             Some(port) => Some(port),
-            None => free_port().ok().inspect(|port| {
+            None => crate::fault::or(
+                "inspector-port",
+                || Err("injected fault at inspector-port".to_owned()),
+                free_port,
+            )
+            .ok()
+            .inspect(|port| {
                 arguments.push("--inspector-port".into());
                 arguments.push(port.to_string().into());
             }),
         };
-        if let (Some(port), Ok(supercov)) = (port, std::env::current_exe()) {
+        // Neither fails short of the system running out of ports or losing
+        // track of this program's own file.
+        if let (Some(port), Ok(supercov)) = (
+            port,
+            crate::fault::io(
+                "poller-executable",
+                std::io::ErrorKind::NotFound,
+                std::env::current_exe,
+            ),
+        ) {
             let windows = evidence.join(format!("worker-{}.windows", std::process::id()));
-            let _ = std::process::Command::new(supercov)
+            let mut poller = std::process::Command::new(supercov);
+            poller
                 .arg(WRANGLER_POLL_COMMAND)
                 .arg(std::process::id().to_string())
                 .arg(port.to_string())
-                .arg(&windows)
+                .arg(&windows);
+            if let Some(hook) = hook {
+                let notes = evidence.join(format!("worker-{}.inspectors", std::process::id()));
+                let _ = fs::create_dir_all(&notes);
+                poller.arg(&notes);
+                let inherited = std::env::var("NODE_OPTIONS").ok();
+                environment.push((INSPECTORS_ENV.to_owned(), notes.into_os_string()));
+                environment.push((
+                    "NODE_OPTIONS".to_owned(),
+                    hooked_node_options(inherited.as_deref(), &hook).into(),
+                ));
+            }
+            let _ = poller
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
         }
     }
-    exec_wrangler(&real, &arguments)
+    Watched {
+        arguments,
+        environment,
+    }
 }
 
 /// Becomes the real `wrangler`, so the test keeps the process and the
 /// signals it expects; where it cannot (Windows), runs it to its end.
-fn exec_wrangler(real: &std::ffi::OsStr, arguments: &[std::ffi::OsString]) -> i32 {
+fn exec_wrangler(
+    real: &std::ffi::OsStr,
+    arguments: &[std::ffi::OsString],
+    environment: &[(String, std::ffi::OsString)],
+) -> i32 {
     let rustflags = worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default());
     let mut command = std::process::Command::new(real);
-    command.args(arguments).env("RUSTFLAGS", rustflags);
+    command
+        .args(arguments)
+        .env("RUSTFLAGS", rustflags)
+        .envs(environment.iter().map(|(name, value)| (name, value)));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1050,8 +1417,10 @@ fn worker_rustflags(inherited: &str) -> String {
 /// while process `pid` -- that wrangler -- lives, appending to a `.part`
 /// file it renames to `windows` when done, so the run knows it is whole.
 pub fn poll_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
-    let [pid, port, windows] = arguments.as_slice() else {
-        return 2;
+    let (pid, port, windows, notes) = match arguments.as_slice() {
+        [pid, port, windows] => (pid, port, windows, None),
+        [pid, port, windows, notes] => (pid, port, windows, Some(PathBuf::from(notes))),
+        _ => return 2,
     };
     let (Ok(pid), Ok(port)) = (
         pid.to_string_lossy().parse::<u32>(),
@@ -1062,12 +1431,26 @@ pub fn poll_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
     let windows = PathBuf::from(windows);
     let part = partial(&windows);
     let poller = Poller::start(port, part.clone());
+    // Each Worker of the session, into `worker-<pid>-<n>.windows`.
+    let stem = windows.with_extension("");
+    let others = notes.map(|notes| {
+        OtherWorkers::start(notes, move |number| {
+            partial(&PathBuf::from(format!(
+                "{}-{number}.windows",
+                stem.display()
+            )))
+        })
+    });
     while process_alive(pid) {
         std::thread::sleep(Duration::from_millis(20));
     }
     poller.finish();
-    if fs::symlink_metadata(&part).is_ok() {
-        let _ = fs::rename(&part, &windows);
+    let parts = others.map(OtherWorkers::finish).unwrap_or_default();
+    for part in std::iter::once(part).chain(parts) {
+        if fs::symlink_metadata(&part).is_ok() {
+            let whole = part.with_extension("");
+            let _ = fs::rename(&part, &whole);
+        }
     }
     0
 }
@@ -1174,16 +1557,6 @@ pub(crate) fn region_token(bytes: &[u8]) -> Option<&str> {
 }
 
 /// The root of the Cargo workspace `directory`'s crate belongs to.
-/// The directories, relative to `workspace` and `/`-separated, of the Rust
-/// Workers in it: each wrangler configuration that builds with worker-build.
-pub(crate) fn worker_crate_directories(workspace: &Path) -> Vec<String> {
-    worker_configs(workspace)
-        .iter()
-        .filter_map(|config| config.parent()?.strip_prefix(workspace).ok())
-        .map(|directory| directory.to_string_lossy().replace('\\', "/"))
-        .collect()
-}
-
 pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
@@ -1201,6 +1574,218 @@ pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The poller takes only a pid and a port; once that process is gone it
+    /// stops, and what it wrote is renamed to say the run is whole.
+    #[cfg(unix)]
+    #[test]
+    fn the_wrangler_poller_stops_with_its_process_and_names_its_file_whole() {
+        assert_eq!(poll_wrangler(Vec::new()), 2);
+        assert_eq!(poll_wrangler(vec!["x".into(), "1".into(), "w".into()]), 2);
+        assert_eq!(
+            poll_wrangler(vec!["1".into(), "port".into(), "w".into()]),
+            2
+        );
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        assert!(!process_alive(dead));
+        assert!(process_alive(std::process::id()));
+        // Another user's process answers that it exists.
+        assert!(process_alive(1));
+        assert!(!process_alive(u32::MAX));
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-wrangler-poller-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let windows = directory.join("windows");
+        assert_eq!(partial(&windows), directory.join("windows.part"));
+        assert_eq!(
+            poll_wrangler(vec![
+                dead.to_string().into(),
+                port.to_string().into(),
+                windows.clone().into_os_string(),
+            ]),
+            0
+        );
+        assert!(windows.is_file());
+        assert!(!partial(&windows).exists());
+        // With a directory of notes, each other Worker's file is named whole
+        // too once wrangler is gone.
+        let (workerd, _, stop) = fake_workerd(r#"[{"id":"core:user:aux"}]"#);
+        let notes = directory.join("notes");
+        fs::create_dir(&notes).unwrap();
+        fs::write(
+            notes.join("1.inspector"),
+            format!(r#"{{"url":"ws://127.0.0.1:{workerd}"}}"#),
+        )
+        .unwrap();
+        // Reaped as it ends, as wrangler's parent reaps it: a child left a
+        // zombie still answers that it exists.
+        let mut wrangler = std::process::Command::new("sleep")
+            .arg("1")
+            .spawn()
+            .unwrap();
+        let pid = wrangler.id();
+        let reaper = std::thread::spawn(move || wrangler.wait());
+        let windows = directory.join("worker-7.windows");
+        assert_eq!(
+            poll_wrangler(vec![
+                pid.to_string().into(),
+                port.to_string().into(),
+                windows.clone().into_os_string(),
+                notes.into_os_string(),
+            ]),
+            0
+        );
+        reaper.join().unwrap().unwrap();
+        stop.store(true, Ordering::Release);
+        assert!(directory.join("worker-7-0.windows").is_file());
+        assert!(!directory.join("worker-7-0.windows.part").exists());
+        fs::remove_dir_all(directory).ok();
+    }
+
+    /// A stand-in for workerd's inspector: lists `targets` at `/json`, and
+    /// records the path of every other request, which it closes.
+    fn fake_workerd(
+        targets: &'static str,
+    ) -> (u16, Arc<std::sync::Mutex<Vec<String>>>, Arc<AtomicBool>) {
+        use std::io::Read;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (recorded, stopped) = (Arc::clone(&paths), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                let path = request.split(' ').nth(1).unwrap_or("").to_owned();
+                if path == "/json" {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{targets}",
+                        targets.len()
+                    );
+                } else {
+                    recorded.lock().unwrap().push(path);
+                }
+            }
+        });
+        (port, paths, stop)
+    }
+
+    /// workerd lists its user Workers at `/json`; nothing listening, or a
+    /// list that is not one, is no Worker.
+    #[test]
+    fn workerd_lists_its_user_workers() {
+        let (port, _, stop) = fake_workerd(
+            r#"[{"id":"core:user:plane"},{"id":"core:entry"},{"type":"node"},{"id":"core:user:runners"}]"#,
+        );
+        assert_eq!(
+            inspector_targets(port),
+            ["core:user:plane", "core:user:runners"]
+        );
+        stop.store(true, Ordering::Release);
+        let (port, _, stop) = fake_workerd("no list");
+        assert!(inspector_targets(port).is_empty());
+        stop.store(true, Ordering::Release);
+        let closed = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(inspector_targets(closed).is_empty());
+        assert_eq!(inspector_port("ws://127.0.0.1:9229"), Some(9229));
+        assert_eq!(inspector_port("ws://127.0.0.1:9229/"), Some(9229));
+        assert_eq!(inspector_port("ws://127.0.0.1"), None);
+    }
+
+    /// Each Worker every wrangler noted is read, each into a file of its
+    /// own, once.
+    #[test]
+    fn the_workers_of_a_session_are_read_through_workerd() {
+        let (port, paths, stop) = fake_workerd(
+            r#"[{"id":"core:user:plane"},{"id":"core:user:runners"},{"id":"core:user:jobs"}]"#,
+        );
+        let notes = temporary("other-workers");
+        fs::write(
+            notes.join("1.inspector"),
+            format!(r#"{{"url":"ws://127.0.0.1:{port}"}}"#),
+        )
+        .unwrap();
+        // A note cut short, one without a port, and a file that is no note.
+        fs::write(notes.join("2.inspector"), "{").unwrap();
+        fs::write(notes.join("3.inspector"), r#"{"url":"ws://127.0.0.1"}"#).unwrap();
+        fs::write(notes.join("4.inspector.tmp"), "{}").unwrap();
+        let files = notes.clone();
+        let others = OtherWorkers::start(notes.clone(), move |number| {
+            files.join(format!("w{number}"))
+        });
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            let seen = paths.lock().unwrap().clone();
+            if ["plane", "runners", "jobs"]
+                .iter()
+                .all(|name| seen.contains(&format!("/core:user:{name}")))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Listed again on later passes, and read once all the same.
+        std::thread::sleep(Duration::from_millis(300));
+        let written = others.finish();
+        stop.store(true, Ordering::Release);
+        assert_eq!(
+            written,
+            [notes.join("w0"), notes.join("w1"), notes.join("w2")]
+        );
+        fs::remove_dir_all(notes).unwrap();
+    }
+
+    /// NODE_OPTIONS keep what they had and load the hook after it, quoted
+    /// where its path has a space.
+    #[test]
+    fn the_hook_joins_the_node_options_a_process_already_has() {
+        let directory = temporary("hook");
+        let hook = write_hook(&directory).unwrap();
+        assert!(fs::read_to_string(&hook).unwrap().contains(INSPECTORS_ENV));
+        assert_eq!(
+            hooked_node_options(None, Path::new("/a/hook.cjs")),
+            "--require=/a/hook.cjs"
+        );
+        assert_eq!(
+            hooked_node_options(Some(" "), Path::new("/a/hook.cjs")),
+            "--require=/a/hook.cjs"
+        );
+        assert_eq!(
+            hooked_node_options(Some("--inspect"), Path::new("/my dir/hook.cjs")),
+            "--inspect --require=\"/my dir/hook.cjs\""
+        );
+        assert!(write_hook(&directory.join("missing")).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn jsonc_comments_and_trailing_commas_are_dropped_and_strings_kept() {
         let text = r#"{
@@ -1217,6 +1802,17 @@ mod tests {
         assert_eq!(value["build"]["command"], "worker-build --release");
         assert_eq!(value["list"], json!([1, 2]));
         assert_eq!(value["quote"], "say \"hi\", ]");
+    }
+
+    #[test]
+    fn jsonc_edges_a_cut_string_a_lone_slash_and_a_star_inside_a_comment() {
+        // Cut off inside a string, right after an escape or plainly.
+        assert_eq!(strip_jsonc("\"abc\\"), "\"abc\\");
+        assert_eq!(strip_jsonc("\"open"), "\"open");
+        // A slash that starts no comment is kept.
+        assert_eq!(strip_jsonc("{\"n\": 1 / 2}"), "{\"n\": 1 / 2}");
+        // A star inside a block comment does not end it.
+        assert_eq!(strip_jsonc("/* a * b **/{}"), "{}");
     }
 
     #[test]
@@ -1472,6 +2068,36 @@ mod tests {
     }
 
     #[test]
+    fn an_inspector_port_joins_whatever_dev_settings_are_there() {
+        let root = temporary("dev-settings");
+        let write = |name: &str, text: &str| {
+            let path = root.join(name);
+            fs::write(&path, text).unwrap();
+            let config = parse_config(&path).unwrap();
+            rewrite_config(&config, ENTRY_FILE, Some(9444)).unwrap();
+            read_config(&path).unwrap().1
+        };
+        // A TOML [dev] table that sets something else keeps it.
+        let toml = write(
+            "wrangler.toml",
+            "main = \"build/worker/shim.mjs\"\n\n[dev]\nport = 8787\n",
+        );
+        assert_eq!(toml["dev"]["port"], 8787);
+        assert_eq!(toml["dev"]["inspector_port"], 9444);
+        // JSON with no dev, a dev that is not an object, and one that is.
+        let none = write("a.json", "{\"main\": \"shim.mjs\"}");
+        assert_eq!(none["dev"], json!({"inspector_port": 9444}));
+        let odd = write("b.json", "{\"main\": \"shim.mjs\", \"dev\": true}");
+        assert_eq!(odd["dev"], json!({"inspector_port": 9444}));
+        let kept = write(
+            "c.json",
+            "{\"main\": \"shim.mjs\", \"dev\": {\"port\": 8787}}",
+        );
+        assert_eq!(kept["dev"], json!({"port": 8787, "inspector_port": 9444}));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_window_is_rebuilt_from_its_header_and_touched_pages() {
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let value = json!({
@@ -1489,5 +2115,503 @@ mod tests {
         // A segment past the region is a malformed window, not a panic.
         let bad = json!({"start": 0, "end": 1, "regions": [["a", 4, [[2, encode(&[1, 2, 3])]]]]});
         assert!(window_from(&bad).is_none());
+    }
+
+    #[test]
+    fn a_line_that_is_no_window_is_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-worker-windows-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("worker-1.windows"),
+            "{\"start\": 1}\n{\"start\": 2, \"end\": 3, \"regions\": []}\n{\"start\": 4, \"end\"\n",
+        )
+        .unwrap();
+        let windows = read_windows(&root).unwrap();
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.start, window.end))
+                .collect::<Vec<_>>(),
+            [(2, 3)]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_directory_outside_any_cargo_project_has_no_workspace_root() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-no-cargo-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(cargo_workspace_root(&root), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_poller_that_cannot_write_its_windows_leaves_none() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-worker-poll-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let windows = root.join("missing/worker-1.windows");
+        // No process has this id, so the poller stops at once.
+        let code = poll_wrangler(vec![
+            u32::MAX.to_string().into(),
+            free_port().unwrap().to_string().into(),
+            windows.clone().into(),
+        ]);
+        assert_eq!(code, 0);
+        assert!(!windows.exists());
+        assert!(!partial(&windows).exists());
+    }
+
+    /// An inspector standing in for wrangler's: it plays `script` against
+    /// one connection, each step receiving the message the session sent
+    /// (or none) and answering with messages of its own. The script holds
+    /// the session's end of the connection too, to break it.
+    fn inspect_with(
+        stop: Arc<AtomicBool>,
+        patience: Duration,
+        script: impl FnOnce(&mut tungstenite::WebSocket<TcpStream>, &AtomicBool, &TcpStream)
+        + Send
+        + 'static,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_stop = Arc::clone(&stop);
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let client = stream.try_clone().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            script(&mut socket, &server_stop, &client);
+        });
+        stream
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let (mut socket, _) =
+            tungstenite::client::client(format!("ws://127.0.0.1:{port}/ws"), stream).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "supercov-inspector-{}-{}-{port}.windows",
+            std::process::id(),
+            now_ms()
+        ));
+        let mut file = fs::File::create(&path).unwrap();
+        session_with_patience(&mut socket, &mut file, &stop, patience);
+        // As the poller does once a session ends.
+        let _ = socket.close(None);
+        drop(socket);
+        server.join().unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        written
+    }
+
+    fn receive(socket: &mut tungstenite::WebSocket<TcpStream>) -> Value {
+        loop {
+            match socket.read() {
+                Ok(tungstenite::Message::Text(text)) => {
+                    return serde_json::from_str(text.as_str()).unwrap();
+                }
+                Ok(_) => {}
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+
+    fn answer(socket: &mut tungstenite::WebSocket<TcpStream>, message: Value) {
+        socket
+            .send(tungstenite::Message::text(message.to_string()))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_session_takes_the_last_context_and_once_more_when_told_to_stop() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let regions = json!([["key", 4, [[0, encode(&[1, 2])]]]]);
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            TAKE_PATIENCE,
+            move |socket, stop, _| {
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                // Notices without the id they are about change nothing.
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {}}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 8}}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextDestroyed", "params": {}}),
+                );
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextDestroyed", "params": {"executionContextId": 8}}),
+                );
+                let take = receive(socket);
+                assert_eq!(take["method"], "Runtime.evaluate");
+                assert_eq!(take["params"]["contextId"], 7);
+                // The run ends while this take is unanswered: the session waits
+                // for it, then takes once more.
+                stop.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(100));
+                answer(
+                    socket,
+                    json!({"id": take["id"], "result": {"result": {"value": regions}}}),
+                );
+                let last = receive(socket);
+                assert_eq!(last["method"], "Runtime.evaluate");
+                answer(
+                    socket,
+                    json!({"id": last["id"], "result": {"result": {"value": []}}}),
+                );
+                // Nothing more is asked before the connection closes.
+                while let Ok(message) = socket.read() {
+                    assert!(message.is_close(), "{message}");
+                }
+            },
+        );
+        let lines = written.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "{written}");
+        let window = window_from(&serde_json::from_str(lines[0]).unwrap()).unwrap();
+        assert_eq!(window.regions, [("key".to_owned(), vec![1, 2, 0, 0])]);
+    }
+
+    #[test]
+    fn a_session_with_no_worker_left_ends_without_a_take() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let written = inspect_with(Arc::clone(&stop), TAKE_PATIENCE, |socket, stop, _| {
+            assert_eq!(receive(socket)["method"], "Runtime.enable");
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextsCleared"}),
+            );
+            stop.store(true, Ordering::Release);
+            while let Ok(message) = socket.read() {
+                assert!(
+                    !message.to_text().unwrap_or_default().contains("evaluate"),
+                    "{message}"
+                );
+            }
+        });
+        assert_eq!(written, "");
+    }
+
+    /// A take the Worker never answers is given up, and the next one asked.
+    #[test]
+    fn a_take_left_unanswered_is_given_up_for_the_next() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let regions = json!([["key", 4, [[0, encode(&[3])]]]]);
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(50),
+            move |socket, stop, _| {
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+                );
+                let ignored = receive(socket);
+                let next = receive(socket);
+                assert!(next["id"].as_u64() > ignored["id"].as_u64(), "{next}");
+                answer(
+                    socket,
+                    json!({"id": next["id"], "result": {"result": {"value": regions}}}),
+                );
+                stop.store(true, Ordering::Release);
+                let last = receive(socket);
+                answer(
+                    socket,
+                    json!({"id": last["id"], "result": {"result": {"value": []}}}),
+                );
+                while socket.read().is_ok() {}
+            },
+        );
+        assert_eq!(written.lines().count(), 1, "{written}");
+    }
+
+    /// A connection that can no longer be written to ends the session: no
+    /// take can be asked.
+    #[test]
+    fn a_session_ends_when_its_connection_cannot_be_written() {
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            TAKE_PATIENCE,
+            |socket, _, client| {
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                client.shutdown(std::net::Shutdown::Write).unwrap();
+                answer(
+                    socket,
+                    json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+                );
+                while socket.read().is_ok() {}
+            },
+        );
+        assert_eq!(written, "");
+        // Nor can the runtime be enabled.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            while socket.read().is_ok() {}
+        });
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (mut socket, _) = tungstenite::client::client(
+            format!("ws://127.0.0.1:{port}/ws"),
+            stream.try_clone().unwrap(),
+        )
+        .unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "supercov-inspector-unwritable-{}-{port}.windows",
+            std::process::id()
+        ));
+        let mut file = fs::File::create(&path).unwrap();
+        session(&mut socket, &mut file, &AtomicBool::new(false));
+        drop(socket);
+        drop(stream);
+        server.join().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        fs::remove_file(path).unwrap();
+    }
+
+    /// A connection the inspector resets, as a Worker's runtime killed
+    /// mid-run leaves it, ends the session: only a read that timed out is
+    /// waited past.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_ends_when_its_connection_is_reset() {
+        let written = inspect_with(
+            Arc::new(AtomicBool::new(false)),
+            TAKE_PATIENCE,
+            |socket, _, _| {
+                use std::os::fd::AsRawFd;
+                assert_eq!(receive(socket)["method"], "Runtime.enable");
+                // No lingering: closed, the connection is reset, not ended.
+                let linger = libc::linger {
+                    l_onoff: 1,
+                    l_linger: 0,
+                };
+                let set = unsafe {
+                    libc::setsockopt(
+                        socket.get_ref().as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_LINGER,
+                        (&raw const linger).cast(),
+                        std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                    )
+                };
+                assert_eq!(set, 0);
+            },
+        );
+        assert_eq!(written, "");
+    }
+
+    /// A build command enables what it names and the package's defaults,
+    /// unless it says otherwise, and what each of those enables in turn.
+    #[test]
+    fn a_worker_builds_the_features_its_command_and_defaults_enable() {
+        let features = [
+            (
+                "default",
+                &["audit", "dep:serde", "tracing/log", "metrics?/fast", "nope"][..],
+            ),
+            ("audit", &[]),
+            ("tracing", &[]),
+            ("metrics", &[]),
+            ("extra", &["audit"]),
+            ("unused", &[]),
+        ]
+        .into_iter()
+        .map(|(name, enables)| {
+            (
+                name.to_owned(),
+                enables.iter().map(|&feature| feature.to_owned()).collect(),
+            )
+        })
+        .collect::<BTreeMap<String, Vec<String>>>();
+        let enabled = |command: &str| {
+            enabled_features(&command.split_whitespace().collect::<Vec<_>>(), &features)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            enabled("worker-build --release"),
+            ["audit", "default", "tracing"]
+        );
+        assert_eq!(
+            enabled("worker-build --no-default-features --features extra,audit"),
+            ["audit", "extra"]
+        );
+        assert_eq!(
+            enabled("worker-build --no-default-features --features=unused, -F tracing --features"),
+            ["tracing", "unused"]
+        );
+        assert_eq!(enabled("worker-build --all-features").len(), features.len());
+    }
+
+    /// Only a package whose wrangler configuration builds with worker-build
+    /// is a Worker's, and its build is a release unless it asks for `--dev`.
+    #[test]
+    fn a_package_is_a_workers_when_its_configuration_runs_worker_build() {
+        let package = temporary("worker-build-cfg");
+        let features = BTreeMap::from([("audit".to_owned(), Vec::new())]);
+        assert!(worker_build_cfg(&package, &features).is_none());
+        fs::write(
+            package.join("wrangler.toml"),
+            "[build]\ncommand = \"npm run build\"\n",
+        )
+        .unwrap();
+        assert!(worker_build_cfg(&package, &features).is_none());
+        fs::write(
+            package.join("wrangler.toml"),
+            "[build]\ncommand = \"worker-build --dev --features audit\"\n",
+        )
+        .unwrap();
+        let cfg = worker_build_cfg(&package, &features).unwrap();
+        for (predicate, value) in [
+            ("target_arch = \"wasm32\"", true),
+            ("test", false),
+            ("debug_assertions", true),
+            ("feature = \"audit\"", true),
+        ] {
+            assert_eq!(
+                cfg.evaluate(&predicate.parse().unwrap()),
+                Some(value),
+                "{predicate}"
+            );
+        }
+        fs::remove_dir_all(package).unwrap();
+    }
+
+    /// A poller whose thread never started has nothing to wait for.
+    #[test]
+    fn a_poller_without_its_thread_finishes_at_once() {
+        let stop = Arc::new(AtomicBool::new(false));
+        Poller {
+            stop: Arc::clone(&stop),
+            thread: None,
+        }
+        .finish();
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_target_rustc_cannot_print_has_no_cfg() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |code: i32, stdout: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        };
+        assert!(target_cfg_of(&output(1, "")).is_none());
+        let cfg = target_cfg_of(&output(0, "target_arch=\"wasm32\"\nnot a cfg ==\n")).unwrap();
+        assert_eq!(
+            cfg,
+            crate::rust_instrumenter::TargetCfg::new(&["target_arch=\"wasm32\"".parse().unwrap()])
+        );
+    }
+
+    /// Only `wrangler dev` under a test is watched; a remote one is noted
+    /// instead, its arguments as they were.
+    #[test]
+    fn only_a_measured_tests_wrangler_dev_is_watched() {
+        let words = |text: &str| {
+            text.split(' ')
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        let unwatched = |text: &str| Watched {
+            arguments: words(text),
+            environment: Vec::new(),
+        };
+        let hook = Some(PathBuf::from("/tools/hook.cjs"));
+        assert_eq!(
+            watched_arguments(words("dev"), None, hook.clone()),
+            unwatched("dev")
+        );
+        let evidence = std::env::temp_dir().join(format!(
+            "supercov-wrangler-remote-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        assert_eq!(
+            watched_arguments(words("deploy"), Some(evidence.clone()), hook.clone()),
+            unwatched("deploy")
+        );
+        assert!(!evidence.exists());
+        assert_eq!(
+            watched_arguments(words("dev --remote"), Some(evidence.clone()), hook.clone()),
+            unwatched("dev --remote")
+        );
+        assert!(
+            evidence
+                .join(format!("{REMOTE_NOTE}{}", std::process::id()))
+                .exists()
+        );
+        // A local one with no port to give the inspector, or no way to name
+        // this program to poll it: started as it was asked, unwatched.
+        assert_eq!(
+            crate::fault::during("inspector-port", || {
+                watched_arguments(words("dev"), Some(evidence.clone()), hook.clone())
+            }),
+            unwatched("dev")
+        );
+        assert_eq!(
+            crate::fault::during("poller-executable", || {
+                watched_arguments(
+                    words("dev --inspector-port 9229"),
+                    Some(evidence.clone()),
+                    hook.clone(),
+                )
+            }),
+            unwatched("dev --inspector-port 9229")
+        );
+        // Watched, it loads the hook, whose notes go to the test's evidence;
+        // without a hook it is watched through wrangler's inspector alone.
+        let notes = evidence.join(format!("worker-{}.inspectors", std::process::id()));
+        let watched = watched_arguments(
+            words("dev --inspector-port 1"),
+            Some(evidence.clone()),
+            hook.clone(),
+        );
+        assert_eq!(watched.arguments, words("dev --inspector-port 1"));
+        assert_eq!(
+            watched.environment[0],
+            (INSPECTORS_ENV.to_owned(), notes.clone().into())
+        );
+        assert_eq!(watched.environment[1].0, "NODE_OPTIONS");
+        assert!(
+            watched.environment[1]
+                .1
+                .to_string_lossy()
+                .ends_with("--require=/tools/hook.cjs")
+        );
+        assert!(notes.is_dir());
+        assert_eq!(
+            watched_arguments(
+                words("dev --inspector-port 1"),
+                Some(evidence.clone()),
+                None
+            ),
+            unwatched("dev --inspector-port 1")
+        );
+        fs::remove_dir_all(evidence).unwrap();
     }
 }

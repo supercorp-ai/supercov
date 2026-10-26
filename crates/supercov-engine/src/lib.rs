@@ -5,6 +5,7 @@
 pub mod agent_json;
 pub mod assertion_coverage;
 pub mod child_signal_guard;
+pub mod contained;
 pub mod coverage_analysis;
 pub mod coverage_export;
 pub mod coverage_html;
@@ -15,6 +16,7 @@ pub mod decision_shape;
 #[cfg(unix)]
 pub mod docker_proxy;
 pub mod evidence_archive;
+pub mod fault;
 pub mod frontend_detection;
 pub mod frontend_protocol;
 pub mod go_instrumenter;

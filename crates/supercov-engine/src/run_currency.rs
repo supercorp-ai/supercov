@@ -204,6 +204,17 @@ pub fn configuration_file(file: &str) -> bool {
     crate::integrity::configuration_file(Path::new(file))
 }
 
+/// The configuration files in the checkout now, relative to `root`, found as
+/// the fingerprint finds them; none when the checkout cannot be walked.
+pub fn configuration_files_in(root: &Path) -> Vec<String> {
+    crate::integrity::walked_configuration_files(root)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|file| file.strip_prefix(root).ok())
+        .map(|file| file.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
 /// A file that sits with the tests by its path, as the fingerprint's test
 /// domain finds them: in a `test`, `tests` or `__tests__` directory, or named
 /// for tests.
@@ -535,7 +546,95 @@ pub fn checkout_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_sits_with_the_tests_by_its_directory_or_its_name() {
+        for (file, beside) in [
+            ("test/helpers.js", true),
+            ("Tests/fixture.json", true),
+            ("__tests__/setup.ts", true),
+            ("src/cart.test.js", true),
+            ("src/cart_spec.rb", true),
+            ("spec-helpers/run.js", true),
+            ("src/testing/latest.js", false),
+            ("src/contest.js", false),
+            ("lib/inspect.js", false),
+        ] {
+            assert_eq!(beside_the_tests(file), beside, "{file}");
+        }
+        assert!(dependency_file("packages/a/package.json"));
+        assert!(dependency_file("yarn.lock"));
+        assert!(!dependency_file("src/package.ts"));
+    }
     use serde_json::json;
+
+    /// What a run's archive says it ran, read from its own entries or, in a
+    /// merge, each shard's: a support record of another shape, a declaration
+    /// that names no runners and an entry that is not JSON say nothing.
+    #[test]
+    fn what_a_run_ran_is_read_from_its_entries_or_its_shards() {
+        let entry = |path: &str, contents: Value| EvidenceArchiveEntry {
+            path: path.into(),
+            contents: serde_json::to_vec(&contents).unwrap(),
+        };
+        let entries = [
+            entry(
+                "shards/0/frontend.json",
+                json!({"runners": [{"runner": "vitest"}, {"runner": "background"}]}),
+            ),
+            entry("shards/1/frontend.json", json!({"language": "javascript"})),
+            entry("shards/1/support-reach.json", json!(["not", "a", "reach"])),
+            entry(
+                "shards/1/manifest.json",
+                json!({"scope": {"entries": [
+                    {"file": "src/a.js", "status": "included"},
+                    {"file": "test/a.js", "status": "excluded"}
+                ]}}),
+            ),
+            EvidenceArchiveEntry {
+                path: "shards/2/playwright-configuration.json".into(),
+                contents: b"not json".to_vec(),
+            },
+        ];
+        let merged = Ran::from_entries(&entries, true);
+        assert_eq!(merged.runners, Some(BTreeSet::from(["vitest".to_owned()])));
+        assert_eq!(
+            merged.measured,
+            Some(BTreeSet::from(["src/a.js".to_owned()]))
+        );
+        assert!(merged.support.is_none());
+        assert!(merged.playwright.is_none());
+        // Read as one run's, a shard's entries are none of its own.
+        let single = Ran::from_entries(&entries, false);
+        assert!(single.runners.is_none() && single.measured.is_none());
+    }
+
+    /// A run whose tests include a file Supercov reads no imports from, or
+    /// that names no test file, has no answer to what its tests load.
+    #[test]
+    fn what_tests_load_is_unknown_past_a_file_whose_imports_are_not_read() {
+        let tests = BTreeSet::new();
+        let checkout = Checkout::new(Path::new("/nonexistent"), &tests);
+        let own = |files: &[&str]| files.iter().map(|file| (*file).to_owned()).collect();
+        assert!(checkout.loads(&own(&[]), None, &[]).is_none());
+        assert!(
+            checkout
+                .loads(&own(&["test/a.test.js", "test/data.json"]), None, &[])
+                .is_none()
+        );
+        assert!(
+            checkout
+                .loads(&own(&["test/a.test.js"]), None, &[])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn an_unnamed_playwright_project_that_is_gone_is_said_to_be_removed() {
+        let then = json!({"projects": [{"use": {"baseURL": "http://127.0.0.1:3000"}}]});
+        let now = json!({"projects": [{"name": "chromium", "use": {}}]});
+        assert_eq!(playwright_differences(&then, &now), ["removed"]);
+    }
 
     #[test]
     fn scheduling_settings_do_not_change_what_a_test_reaches() {
@@ -571,5 +670,555 @@ mod tests {
         );
         longer["use"]["locale"] = json!("de-DE");
         assert_eq!(playwright_differences(&single, &longer), ["use"]);
+    }
+
+    /// Each kind of file that differs, alone, against a checkout where one
+    /// test file is the run's own and another is another run's.
+    #[test]
+    fn each_file_that_differs_is_judged_by_what_it_is() {
+        use crate::source_manifest::FileFingerprint;
+        static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-run-currency-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let helpers = "export function help() {\n  return 1;\n}\n";
+        for (file, text) in [
+            (
+                "test/own.test.js",
+                "import { help } from \"./helpers.js\";\nhelp();\n",
+            ),
+            (
+                "test/other.test.js",
+                "import { util } from \"./util.js\";\nutil();\n",
+            ),
+            ("test/helpers.js", helpers),
+            ("test/util.js", "export function util() {}\n"),
+            (
+                "test/open.test.js",
+                "const helper = await import(process.env.HELPER);\nhelper();\n",
+            ),
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let tests = [
+            "test/own.test.js",
+            "test/other.test.js",
+            "test/open.test.js",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let checkout = Checkout::new(&root, &tests);
+        let own = ["test/own.test.js".to_owned()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let manifest = |files: &[(&str, &str)]| {
+            files
+                .iter()
+                .map(|(file, text)| (file.to_string(), FileFingerprint::read(file, text)))
+                .collect::<FileManifest>()
+        };
+        let measured_nothing = Ran {
+            measured: Some(BTreeSet::new()),
+            ..Ran::default()
+        };
+        let judge_one = |then: &[(&str, &str)],
+                         now: &[(&str, &str)],
+                         own: Option<&BTreeSet<String>>,
+                         ran: &Ran,
+                         reference: Option<&Value>,
+                         allow: bool| {
+            let now_texts = now
+                .iter()
+                .map(|(file, text)| (file.to_string(), text.to_string()))
+                .collect::<BTreeMap<_, _>>();
+            judge(
+                &checkout,
+                "run",
+                &manifest(then),
+                &manifest(now),
+                &|file| now_texts.get(file).cloned(),
+                own,
+                ran,
+                reference,
+                allow,
+            )
+        };
+        let then_pw = serde_json::json!({"use": {"baseURL": "http://127.0.0.1:3000"}});
+        let other_pw = serde_json::json!({"use": {"baseURL": "http://127.0.0.1:4000"}});
+        let playwright = Ran {
+            runners: Some(["playwright".to_owned()].into_iter().collect()),
+            playwright: Some(then_pw.clone()),
+            ..Ran::default()
+        };
+        let served = |tests: &[&str]| Ran {
+            measured: Some(BTreeSet::new()),
+            support: Some(crate::support_reach::SupportReach {
+                files: [(
+                    "mocks/server.js".to_owned(),
+                    tests.iter().map(|test| test.to_string()).collect(),
+                )]
+                .into_iter()
+                .collect(),
+                names: BTreeMap::new(),
+            }),
+            ..Ran::default()
+        };
+        let unit = Ran {
+            runners: Some(["node:test".to_owned()].into_iter().collect()),
+            ..Ran::default()
+        };
+        let open = ["test/open.test.js".to_owned()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let served_helpers = Ran {
+            measured: Some(BTreeSet::new()),
+            support: Some(crate::support_reach::SupportReach {
+                files: [("test/helpers.js".to_owned(), ["t1".to_owned()].into())]
+                    .into_iter()
+                    .collect(),
+                names: BTreeMap::new(),
+            }),
+            ..Ran::default()
+        };
+        let cases: Vec<(&str, Judgment)> = vec![
+            (
+                "own changed",
+                judge_one(
+                    &[("test/own.test.js", "a")],
+                    &[("test/own.test.js", "b")],
+                    Some(&own),
+                    &Ran::default(),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "own gone",
+                judge_one(
+                    &[("test/own.test.js", "a")],
+                    &[],
+                    Some(&own),
+                    &Ran::default(),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "other test",
+                judge_one(
+                    &[("test/other.test.js", "a")],
+                    &[("test/other.test.js", "b")],
+                    Some(&own),
+                    &Ran::default(),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "other test, no own",
+                judge_one(
+                    &[("test/other.test.js", "a")],
+                    &[("test/other.test.js", "b")],
+                    None,
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "dependency",
+                judge_one(
+                    &[("package.json", "{}")],
+                    &[("package.json", "{\"a\":1}")],
+                    Some(&own),
+                    &Ran::default(),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "new configuration",
+                judge_one(
+                    &[],
+                    &[("vitest.config.js", "export default {}")],
+                    Some(&own),
+                    &unit,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "playwright same",
+                judge_one(
+                    &[("playwright.config.ts", "a")],
+                    &[("playwright.config.ts", "b")],
+                    Some(&own),
+                    &playwright,
+                    Some(&then_pw),
+                    false,
+                ),
+            ),
+            (
+                "playwright differs",
+                judge_one(
+                    &[("playwright.config.ts", "a")],
+                    &[("playwright.config.ts", "b")],
+                    Some(&own),
+                    &playwright,
+                    Some(&other_pw),
+                    false,
+                ),
+            ),
+            (
+                "playwright differs, accepted",
+                judge_one(
+                    &[("playwright.config.ts", "a")],
+                    &[("playwright.config.ts", "b")],
+                    Some(&own),
+                    &playwright,
+                    Some(&other_pw),
+                    true,
+                ),
+            ),
+            (
+                "playwright, no reference",
+                judge_one(
+                    &[("playwright.config.ts", "a")],
+                    &[("playwright.config.ts", "b")],
+                    Some(&own),
+                    &playwright,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "jest, runners unknown",
+                judge_one(
+                    &[("jest.config.js", "a")],
+                    &[("jest.config.js", "b")],
+                    Some(&own),
+                    &Ran::default(),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "measured gone",
+                judge_one(
+                    &[("src/cart.js", "a")],
+                    &[],
+                    Some(&own),
+                    &Ran {
+                        measured: Some(["src/cart.js".to_owned()].into_iter().collect()),
+                        ..Ran::default()
+                    },
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "source, scope unknown",
+                judge_one(
+                    &[("src/cart.js", "a")],
+                    &[("src/cart.js", "b")],
+                    Some(&own),
+                    &Ran::default(),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "served no test",
+                judge_one(
+                    &[("mocks/server.js", "a")],
+                    &[("mocks/server.js", "b")],
+                    Some(&own),
+                    &served(&[]),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "served a test",
+                judge_one(
+                    &[("mocks/server.js", "a")],
+                    &[("mocks/server.js", "b")],
+                    Some(&own),
+                    &served(&["t1"]),
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "helper not loaded",
+                judge_one(
+                    &[("test/util.js", "a")],
+                    &[("test/util.js", "b")],
+                    Some(&own),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "helper, own empty",
+                judge_one(
+                    &[("test/util.js", "a")],
+                    &[("test/util.js", "b")],
+                    Some(&BTreeSet::new()),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "helper gone",
+                judge_one(
+                    &[("test/helpers.js", helpers)],
+                    &[],
+                    Some(&own),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "helper added to",
+                judge_one(
+                    &[("test/helpers.js", helpers)],
+                    &[(
+                        "test/helpers.js",
+                        &format!("{helpers}export function more() {{}}\n"),
+                    )],
+                    Some(&own),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "helper body",
+                judge_one(
+                    &[("test/helpers.js", helpers)],
+                    &[("test/helpers.js", &helpers.replace("1", "2"))],
+                    Some(&own),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "helper, own imports cannot all be followed",
+                judge_one(
+                    &[("test/util.js", "a")],
+                    &[("test/util.js", "b")],
+                    Some(&open),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "source no test places",
+                judge_one(
+                    &[("lib/unused.js", "a")],
+                    &[("lib/unused.js", "b")],
+                    Some(&own),
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "served and loaded",
+                judge_one(
+                    &[("test/helpers.js", helpers)],
+                    &[("test/helpers.js", &helpers.replace("1", "2"))],
+                    Some(&own),
+                    &served_helpers,
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "file without code",
+                judge_one(
+                    &[("test/fixture.json", "{}")],
+                    &[("test/fixture.json", "[]")],
+                    None,
+                    &measured_nothing,
+                    None,
+                    false,
+                ),
+            ),
+        ];
+        // (outdated, across, reached, own tests, settled)
+        type Verdict<'a> = (&'a [&'a str], &'a [&'a str], &'a [&'a str], bool, bool);
+        let expected: Vec<Verdict> = vec![
+            (
+                &["test/own.test.js, a file of its own tests, has changed"],
+                &[],
+                &[],
+                true,
+                true,
+            ),
+            (
+                &["test/own.test.js, a file of its own tests, is gone"],
+                &[],
+                &[],
+                true,
+                true,
+            ),
+            (&[], &[], &[], false, false),
+            (
+                &["test/other.test.js changed: top level"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (&["package.json has changed"], &[], &[], false, false),
+            (
+                &[],
+                &["vitest.config.js (vitest settings; `run` ran under node:test)"],
+                &[],
+                false,
+                false,
+            ),
+            (
+                &[],
+                &["playwright.config.ts (only settings that schedule tests)"],
+                &[],
+                false,
+                false,
+            ),
+            (
+                &["playwright.config.ts: use changed"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (&[], &["playwright.config.ts (accepted)"], &[], false, false),
+            (
+                &["playwright.config.ts has changed"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (&["jest.config.js has changed"], &[], &[], false, false),
+            (
+                &["src/cart.js, which it measured, is gone"],
+                &[],
+                &[],
+                false,
+                true,
+            ),
+            (
+                &["src/cart.js, which it measured, has changed"],
+                &[],
+                &[],
+                false,
+                true,
+            ),
+            (
+                &[],
+                &["mocks/server.js (no test of `run` was served by what loaded it)"],
+                &[],
+                false,
+                false,
+            ),
+            (&[], &[], &["mocks/server.js"], false, false),
+            (
+                &[],
+                &["test/util.js (`run` does not load it)"],
+                &[],
+                false,
+                false,
+            ),
+            (&["test/util.js changed: top level"], &[], &[], false, false),
+            (&["test/helpers.js is gone"], &[], &[], false, false),
+            (
+                &[],
+                &["test/helpers.js (only added more)"],
+                &[],
+                false,
+                false,
+            ),
+            (
+                &["test/helpers.js changed: help (line 1)"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (&["test/util.js changed: top level"], &[], &[], false, false),
+            (
+                &["lib/unused.js changed: top level"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (
+                &["test/helpers.js changed: help (line 1)"],
+                &[],
+                &[],
+                false,
+                false,
+            ),
+            (&["test/fixture.json has changed"], &[], &[], false, false),
+        ];
+        assert_eq!(cases.len(), expected.len());
+        for ((name, judgment), (outdated, across, reached, own_tests, settled)) in
+            cases.iter().zip(&expected)
+        {
+            assert_eq!(judgment.outdated, *outdated, "{name}");
+            assert_eq!(judgment.across, *across, "{name}");
+            assert_eq!(
+                judgment
+                    .reached
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                *reached,
+                "{name}"
+            );
+            assert_eq!(
+                (judgment.own_tests, judgment.settled),
+                (*own_tests, *settled),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            cases[14].1.reached["mocks/server.js"],
+            ["t1".to_owned()].into()
+        );
+    }
+
+    #[test]
+    fn what_several_judgments_let_through_is_one_entry_per_file() {
+        assert_eq!(
+            across([
+                "b.js (accepted)".to_owned(),
+                "a.js".to_owned(),
+                "b.js (only added more)".to_owned(),
+                "b.js (accepted)".to_owned(),
+                "a.js ()".to_owned(),
+            ]),
+            ["a.js", "b.js (accepted; only added more)"]
+        );
     }
 }

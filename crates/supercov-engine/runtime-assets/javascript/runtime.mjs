@@ -979,22 +979,21 @@ function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
-    const statement = record.statementId ? { statementId: record.statementId } : {};
     if (record.type === "decision") {
-      recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
+      recordBrowserEvent(__spreadProps(__spreadValues({
         type: "decision",
         id: record.meta.id,
         vector: record.vector,
         timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), statement), {
+      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
         environment: "server"
       }));
     } else {
-      recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
+      recordBrowserEvent(__spreadProps(__spreadValues({
         type: "hit",
         id: record.id,
         timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), statement), {
+      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
         environment: "server"
       }));
     }

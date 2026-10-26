@@ -92,8 +92,10 @@ fn parameter_type(node: Node, source: &str) -> Option<String> {
 fn parameter_name(node: Node, source: &str) -> Option<String> {
     let name = first_parameter(node)?.child_by_field_name("name")?;
     let text = source[name.byte_range()].trim();
-    // `func TestX(*testing.T)` is legal and names nothing there is to read.
-    (text != "_" && !text.is_empty()).then(|| text.to_owned())
+    // `func TestX(*testing.T)` is legal and names nothing there is to read:
+    // it has no name, as `_` names nothing. A name the parser read is never
+    // empty: a file it could only recover from is not instrumented.
+    (text != "_").then(|| text.to_owned())
 }
 
 /// Instrument one `_test.go` file so every test announces itself.
@@ -161,13 +163,13 @@ pub fn instrument_test_file(
                 // all, so the only honest status for it is that it ran: `go
                 // test` fails the run when an Example's output does not match,
                 // and the run's own exit code carries that.
+                // Of these, only a Fuzz target takes a parameter at all, and
+                // only a `*testing.F` makes it one.
                 let record = match parameter_name(child, source) {
-                    Some(parameter)
-                        if parameter_type(child, source).as_deref() == Some("*testing.F") =>
-                    {
+                    Some(parameter) => {
                         format!("defer {HARNESS_UNATTRIBUTED_FUZZ}({parameter}, \"{name}\")();")
                     }
-                    _ => format!(
+                    None => format!(
                         "defer func() {{ {alias}.Ran(\"{name}\", \"unknown\"); {alias}.Checkpoint() }}();"
                     ),
                 };
@@ -307,18 +309,21 @@ fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
             },
             _ => continue,
         };
-        if call
-            .child_by_field_name("function")
-            .is_some_and(|function| {
-                source[function.byte_range()]
-                    .trim_end()
-                    .ends_with(".Parallel")
-            })
-        {
+        if callee(call, source).is_some_and(|function| function.ends_with(".Parallel")) {
             return Some(statement.end_byte());
         }
     }
     None
+}
+
+/// What a call expression calls, as written; nothing for any other node.
+/// The grammar gives every call its function, even in a tree it recovered.
+fn callee<'s>(node: Node, source: &'s str) -> Option<&'s str> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let function = node.child_by_field_name("function")?;
+    Some(source[function.byte_range()].trim_end())
 }
 
 /// Whether a test hands itself to Go's parallel scheduler.
@@ -327,12 +332,7 @@ fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
 /// `t.Parallel()` returns the test has already been descheduled and anything
 /// observed afterwards may belong to another one.
 fn calls_parallel(node: Node, source: &str) -> bool {
-    if node.kind() == "call_expression"
-        && let Some(function) = node.child_by_field_name("function")
-        && source[function.byte_range()]
-            .trim_end()
-            .ends_with(".Parallel")
-    {
+    if callee(node, source).is_some_and(|function| function.ends_with(".Parallel")) {
         return true;
     }
     let mut cursor = node.walk();
@@ -348,10 +348,7 @@ fn wrap_run_calls(
     evidence: &str,
     edits: &mut Vec<GoEdit>,
 ) -> bool {
-    if node.kind() == "call_expression"
-        && let Some(function) = node.child_by_field_name("function")
-        && source[function.byte_range()].trim_end().ends_with(".Run")
-    {
+    if callee(node, source).is_some_and(|function| function.ends_with(".Run")) {
         edits.push(GoEdit {
             at: node.start_byte(),
             rank: 50,
@@ -966,5 +963,41 @@ mod tests {
             "{out}"
         );
         assert!(out.contains(".Finish(m.Run()"), "{out}");
+    }
+
+    /// A Fuzz-named function that takes a `*testing.T` is a helper; a Fuzz
+    /// target whose `*testing.F` is `_` is recorded as having run, as an
+    /// Example is; and a test whose `*testing.T` is `_` is still announced.
+    #[test]
+    fn a_parameter_named_nothing_is_not_read() {
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc FuzzHelper(t *testing.T) {}\nfunc FuzzBlank(_ *testing.F) {}\nfunc TestBlank(_ *testing.T) {}\n",
+        );
+        assert_eq!(file.unattributed, ["FuzzBlank"]);
+        assert_eq!(file.tests, ["TestBlank"]);
+        assert!(
+            out.contains("__supercov.Ran(\"FuzzBlank\", \"unknown\")"),
+            "{out}"
+        );
+        assert!(!out.contains("FuzzHelper\", \"unknown\""), "{out}");
+    }
+
+    /// The runtime's import goes after the package clause; a file with none
+    /// gets none, rather than one in the wrong place.
+    #[test]
+    fn a_file_with_no_package_clause_gets_no_import() {
+        let file = instrument_test_file(
+            "func TestMain(m *testing.M) { m.Run() }\n",
+            "__supercov",
+            "evidence.bin",
+            false,
+        )
+        .unwrap();
+        assert!(file.declares_test_main);
+        assert!(
+            !file.edits.iter().any(|edit| edit.text.contains("import")),
+            "{:?}",
+            file.edits
+        );
     }
 }

@@ -541,8 +541,8 @@ Neither input run is changed. Under the totals it lists what was lost, marked
 `-`, and then what was gained, marked `+`:
 
 ```
-gained: 1 lines, 1 branches, 0 MC/DC conditions
-lost: 1 lines, 1 branches, 0 MC/DC conditions
+gained: 1 line, 1 branch, 0 MC/DC conditions
+lost: 1 line, 1 branch, 0 MC/DC conditions
 - line src/fee.js:5
 - branch src/fee.js:2 false
 + line src/fee.js:3
@@ -555,8 +555,8 @@ as one row and not as forty:
 
 ```
 in 2 files, most lost first:
-  src/panel.js: lost 6 lines, 1 branches
-  src/fee.js: lost 1 lines, 1 branches; gained 1 lines, 1 branches
+  src/panel.js: lost 6 lines, 1 branch
+  src/fee.js: lost 1 line, 1 branch; gained 1 line, 1 branch
 ```
 
 The counts are of the whole difference, whatever page of it is shown. In
@@ -625,7 +625,9 @@ npx supercov runs latest minimize --metric branches --target 90
 ```
 
 `minimize` finds a small set of tests that preserves the selected coverage
-target. It does not edit, delete, or skip tests for you. Treat the result as an
+target. Without `--target` it keeps everything the tests together cover, so
+it works on a run that is not fully covered; `--target 90` asks for 90% of
+each selected metric instead. It does not edit, delete, or skip tests for you. Treat the result as an
 analysis aid, not permission to remove tests that protect behavior outside the
 selected metric.
 
@@ -937,6 +939,7 @@ SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 | --- | --- |
 | `0` | The command or query succeeded |
 | Wrapped command's code | The test command failed and Supercov preserved its status |
+| `127`, `126` | The test command could not start: no such program, or one that may not be run, as a shell reports it |
 | `1` | A valid measurement failed a policy you set, such as a coverage floor |
 | `2` | Supercov could not complete the request, or the evidence cannot answer it |
 

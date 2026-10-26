@@ -24,10 +24,11 @@ fn repository() -> PathBuf {
         .expect("the repository root")
 }
 
-fn gate(script: &str, arguments: &[&str]) {
+fn gate(name: &str, script: &str, arguments: &[&str]) {
     let turn = File::create(std::env::temp_dir().join("supercov-e2e-gates.lock"))
         .expect("the gate lock file");
     turn.lock().expect("a turn at the gates");
+    let started = std::time::Instant::now();
     let output = Command::new("node")
         .arg(repository().join("scripts").join(script))
         .args(arguments)
@@ -35,6 +36,17 @@ fn gate(script: &str, arguments: &[&str]) {
         .env("SUPERCOV_BINARY", env!("CARGO_BIN_EXE_supercov"))
         .output()
         .expect("node runs");
+    // How long each took, where the caller keeps it: what slices of the
+    // gates are balanced by.
+    if let Some(path) = std::env::var_os("SUPERCOV_GATE_TIMINGS") {
+        use std::io::Write;
+        let mut timings = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("the gate timings file");
+        writeln!(timings, "{name}\t{}", started.elapsed().as_secs()).expect("a gate timing");
+    }
     assert!(
         output.status.success(),
         "{script} {arguments:?} failed ({})\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -50,7 +62,7 @@ macro_rules! gates {
             #[test]
             #[ignore = "an end-to-end gate: needs its toolchains and takes minutes"]
             fn $name() {
-                gate($script, &[$($($argument),*)?]);
+                gate(stringify!($name), $script, &[$($($argument),*)?]);
             }
         )*
     };
@@ -123,6 +135,15 @@ gates! {
     jvm_servers => "jvm-server-playwright.mjs",
     docker_servers => "docker-server-playwright.mjs",
     docker_clients => "docker-clients-playwright.mjs",
+    rust_region_container => "rust-region-container.mjs",
+    rust_worker_playwright => "rust-worker-playwright.mjs",
+    rust_worker_cargo_test => "rust-worker-cargo-test.mjs",
+    rust_worker_durable_objects => "rust-worker-durable-objects.mjs",
+    rust_wasm_hosts => "rust-wasm-hosts.mjs",
+    rust_wasm_js => "rust-wasm-js.mjs",
+    react_native => "react-native-compatibility.mjs",
+    exec_handover => "exec-handover.mjs",
+    import_line_evidence => "import-line-evidence.mjs",
     failure_output_node => "failure-output.mjs" ["node", "ava", "tap"],
     failure_output_python => "failure-output.mjs" ["python"],
     failure_output_ruby => "failure-output.mjs" ["ruby"],

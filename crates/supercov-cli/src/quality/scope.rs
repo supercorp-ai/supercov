@@ -124,10 +124,15 @@ impl Scope {
     /// What a reader should be told when the scope is not confident.
     pub fn limitation(&self) -> Option<String> {
         let ambiguous = self.ambiguous();
+        let (files, sit, were, them, it) = if ambiguous == 1 {
+            ("file", "sits", "was", "it", "it is")
+        } else {
+            ("files", "sit", "were", "them", "they are")
+        };
         (ambiguous > 0).then(|| format!(
-            "{ambiguous} source files sit under no recognised source root and were not assessed. \
-             Read them with `supercov quality scope`, and declare your roots with \
-             SUPERCOV_SOURCE_ROOTS=src,app if they are first-party code."
+            "{ambiguous} source {files} {sit} under no recognised source root and {were} not assessed. \
+             Read {them} with `supercov quality scope`, and declare your roots with \
+             SUPERCOV_SOURCE_ROOTS=src,app if {it} first-party code."
         ))
     }
 }
@@ -163,7 +168,7 @@ fn declared_entry_points(directory: &Path) -> Vec<PathBuf> {
         for line in text.lines() {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("path")
-                && let Some(value) = rest.split('"').nth(1)
+                && let Some(value) = toml_strings(rest).next()
             {
                 targets.push(value.to_owned());
             }
@@ -231,8 +236,6 @@ fn variable_manifest(directory: &Path) -> Option<bool> {
     project_file.then_some(true)
 }
 
-/// Whether a directory declares a package, and whether that declaration counts
-/// at any depth.
 /// Whether a path names a file that declares a package, for the manifest list a
 /// scope question carries as context.
 pub fn declares_a_package(path: &str) -> bool {
@@ -245,11 +248,34 @@ pub fn declares_a_package(path: &str) -> bool {
         || lower.ends_with(".sln")
 }
 
+/// Every manifest of every package directory, relative to the root and
+/// sorted: the context a scope question carries. Read from the packages
+/// rather than from the source files found, which hold no manifest.
+pub fn manifests(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = package_roots(root)
+        .iter()
+        .filter_map(|directory| std::fs::read_dir(directory).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| relative(root, &entry.path()))
+        .filter(|path| declares_a_package(path))
+        .collect();
+    found.sort();
+    found
+}
+
+/// Whether a directory declares a package, and whether that declaration counts
+/// at any depth.
 fn manifest_in(directory: &Path) -> Option<bool> {
     if MANIFESTS.iter().any(|name| directory.join(name).is_file()) {
         return Some(false);
     }
     variable_manifest(directory)
+}
+
+/// The quoted strings on one line of TOML, basic (`"`) or literal (`'`).
+fn toml_strings(line: &str) -> impl Iterator<Item = &str> {
+    line.split(['"', '\'']).skip(1).step_by(2)
 }
 
 /// Package directories a root manifest declares, so a member that lives
@@ -289,23 +315,26 @@ fn declared_members(root: &Path) -> BTreeSet<PathBuf> {
         }
     }
     // Cargo's members are a TOML array of strings under [workspace]; reading
-    // them by line avoids a TOML dependency for one field.
+    // them by line avoids a TOML dependency for one field. Only `members`:
+    // every quoted string of the table was taken, so a directory `exclude`
+    // names became a package.
     if let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) {
         let mut inside = false;
+        let mut members = false;
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('[') {
                 inside = line == "[workspace]";
+                members = false;
                 continue;
             }
             if inside && line.starts_with("members") {
-                inside = true;
+                members = true;
             }
-            if inside && let Some(start) = line.find('"') {
-                let rest = &line[start + 1..];
-                if let Some(end) = rest.find('"') {
-                    add(&rest[..end]);
-                }
+            if members {
+                toml_strings(line).for_each(&mut add);
+                // The array closes on the line that holds its `]`.
+                members = !line.contains(']');
             }
         }
     }
@@ -396,6 +425,12 @@ fn beside_the_product(file: &str) -> Option<&'static str> {
     // and `tsup.config.ts` without touching a file merely named `configure.ts`.
     let parts: Vec<&str> = name.split('.').collect();
     if parts.len() > 2 && parts.contains(&"config") {
+        return Some("build or tool configuration");
+    }
+    // A Gradle build script in Kotlin is a `.kts` file, so it is found as
+    // source: `build.gradle.kts`, `settings.gradle.kts`, or one named for its
+    // module as JUnit names `junit-jupiter-api.gradle.kts`.
+    if name.ends_with(".gradle.kts") {
         return Some("build or tool configuration");
     }
     // The older dotfile spelling, `.eslintrc.js` and its kind. Splitting a name
@@ -749,4 +784,190 @@ pub fn configured_roots() -> Option<Vec<String>> {
         .filter(|part| !part.is_empty())
         .collect();
     (!roots.is_empty()).then_some(roots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn directory(files: &[(&str, &str)]) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-scope-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for (file, text) in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        root
+    }
+
+    /// A manifest's declared locations become roots: a file in a directory
+    /// of its own names the directory, one at the package root only itself;
+    /// build output, absolute, parent and missing paths name nothing.
+    #[test]
+    fn declared_entry_points_name_their_directories() {
+        let root = directory(&[
+            (
+                "package.json",
+                r#"{"main":"lib/index.js","bin":{"x":"bin/x.js"},"browser":"./dist/b.js","module":"/abs.js","exports":{"./runtime/*":"./runtime/*.mjs","./up":"../up.js","./all":"*","./gone":"./gone.js","deep":{"a":{"b":{"c":{"d":"too/deep.js"}}}}}}"#,
+            ),
+            ("lib/index.js", ""),
+            ("bin/x.js", ""),
+            ("runtime/a.mjs", ""),
+            ("too/deep.js", ""),
+            ("dist/b.js", ""),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"x\"\npathological = true\n[[bin]]\npath = \"src/main.rs\"\n",
+            ),
+            ("src/main.rs", ""),
+            ("build.rs", ""),
+        ]);
+        let mut found = declared_entry_points(&root)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, ["bin", "build.rs", "lib", "runtime", "src"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Manifests named after their project, and which files declare a package.
+    #[test]
+    fn variable_manifests_and_package_files_are_told_by_name() {
+        for (file, expected) in [
+            ("api.gradle.kts", Some(false)),
+            ("api.gradle", Some(false)),
+            ("App.fsproj", Some(true)),
+            ("App.vbproj", Some(true)),
+            ("notes.txt", None),
+        ] {
+            let root = directory(&[(file, "")]);
+            assert_eq!(variable_manifest(&root), expected, "{file}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        for (path, declares) in [
+            ("a/Cargo.toml", true),
+            ("a/junit.gradle.kts", true),
+            ("App.CSPROJ", true),
+            ("All.sln", true),
+            ("notes.txt", false),
+        ] {
+            assert_eq!(declares_a_package(path), declares, "{path}");
+        }
+    }
+
+    /// A root manifest's members: npm's workspaces in either form, Cargo's
+    /// across lines, a trailing `*` read as every directory under it.
+    #[test]
+    fn declared_members_are_read_from_either_ecosystem() {
+        let root = directory(&[
+            (
+                "package.json",
+                r#"{"workspaces":{"packages":["packages/*","tools","missing"]}}"#,
+            ),
+            ("packages/a/index.js", ""),
+            ("packages/b/index.js", ""),
+            ("packages/file.txt", ""),
+            ("tools/index.js", ""),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"x\"\n[workspace]\nmembers = [\n  \"crates/one\",\n  \"crates/*\",\n]\n[dependencies]\nserde = \"1\"\n",
+            ),
+            ("crates/one/Cargo.toml", ""),
+            ("crates/two/Cargo.toml", ""),
+        ]);
+        let mut found = declared_members(&root)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "crates/one",
+                "crates/two",
+                "packages/a",
+                "packages/b",
+                "tools"
+            ]
+        );
+        let flat = directory(&[
+            ("package.json", r#"{"workspaces":["tools"]}"#),
+            ("tools/x.js", ""),
+        ]);
+        assert_eq!(declared_members(&flat).len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(flat).unwrap();
+    }
+
+    /// Tool configuration by its name, and a served file left out as a
+    /// vendored library by its licence banner, its name or its minification.
+    #[test]
+    fn configuration_and_vendored_files_are_told_by_name_and_text() {
+        for (file, configuration) in [
+            ("vite.config.ts", true),
+            ("build.gradle.kts", true),
+            (".eslintrc.js", true),
+            (".babelrc.json", true),
+            (".rc.js", false),
+            (".eslint.js", false),
+            ("configure.ts", false),
+        ] {
+            assert_eq!(
+                beside_the_product(file) == Some("build or tool configuration"),
+                configuration,
+                "{file}"
+            );
+        }
+        let root = directory(&[
+            ("public/js/banner.js", "/*! some library v1 */\nvar a=1;\n"),
+            ("public/js/jquery.min.js", "var j = 1;\n"),
+            ("public/js/myjquery.js", "var j = 1;\n"),
+            ("public/js/app.js", "export const app = 1;\n"),
+            ("public/js/blob.js", &format!("{}\n", "x".repeat(3000))),
+            ("src/jquery.min.js", "var j = 1;\n"),
+        ]);
+        let vendored = |file: &str| third_party(&root.join(file), file);
+        assert_eq!(
+            vendored("public/js/banner.js"),
+            Some("vendored third-party library")
+        );
+        assert_eq!(
+            vendored("public/js/jquery.min.js"),
+            Some("vendored third-party library")
+        );
+        assert_eq!(
+            vendored("public/js/myjquery.js"),
+            None,
+            "a name inside another word"
+        );
+        assert_eq!(vendored("public/js/app.js"), None);
+        assert_eq!(vendored("public/js/blob.js"), Some("minified code"));
+        assert_eq!(
+            vendored("src/jquery.min.js"),
+            None,
+            "not a served directory"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

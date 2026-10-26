@@ -84,8 +84,13 @@ pub struct CoverageProject {
 #[derive(Debug)]
 pub enum ProjectDiscoveryError {
     Source(SourceDiscoveryError),
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     NoSourceFiles,
+    /// Named roots that left nothing: the roots, quoted as written.
+    RootsLeftNothing(String),
 }
 
 impl From<SourceDiscoveryError> for ProjectDiscoveryError {
@@ -103,6 +108,7 @@ impl std::fmt::Display for ProjectDiscoveryError {
                 formatter,
                 "No application source files were discovered. If your sources live somewhere unusual, set SUPERCOV_SOURCE_ROOTS=src,app. Alternatively, Supercov may not support your project layout or test framework yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
             ),
+            Self::RootsLeftNothing(message) => write!(formatter, "{message}"),
         }
     }
 }
@@ -765,9 +771,26 @@ pub fn discover_coverage_project(
 ) -> Result<CoverageProject, ProjectDiscoveryError> {
     let project = discover_coverage_project_of_any_size(root, environment, command)?;
     if project.source_files.is_empty() {
-        return Err(ProjectDiscoveryError::NoSourceFiles);
+        return Err(no_source_error(root, environment));
     }
     Ok(project)
+}
+
+/// Why a project has nothing to measure. Roots that were named and left
+/// nothing are the mistake to show, as the other languages show it: "set
+/// SUPERCOV_SOURCE_ROOTS" read as if it had not been set.
+pub fn no_source_error(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> ProjectDiscoveryError {
+    match crate::source_discovery::ExplicitSourceRoots::from_environment(root, environment) {
+        Ok(Some(explicit)) => match explicit.refuse_if_empty(0, "JavaScript or TypeScript") {
+            Err(message) => ProjectDiscoveryError::RootsLeftNothing(message),
+            Ok(()) => ProjectDiscoveryError::NoSourceFiles,
+        },
+        Ok(None) => ProjectDiscoveryError::NoSourceFiles,
+        Err(error) => ProjectDiscoveryError::Source(error),
+    }
 }
 
 /// `discover_coverage_project` for a suite whose application may hold no
@@ -884,6 +907,121 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    fn fresh_root(label: &str) -> crate::test_directory::TestDirectory {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-{label}-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        crate::test_directory::TestDirectory::adopt(root)
+    }
+
+    /// A Playwright configuration is a source file named `playwright` then
+    /// plain characters then `.config.`, found under the test directories to
+    /// four levels, past hidden directories, `node_modules` and links.
+    #[test]
+    fn nested_playwright_configurations_are_found_by_name_and_depth() {
+        for (name, config) in [
+            ("playwright.config.ts", true),
+            ("playwright-ct.config.mjs", true),
+            ("Playwright.e2e.config.js", true),
+            ("playwright.config.json", false),
+            ("playwright.ts", false),
+            ("jest.config.js", false),
+            ("playwright@x.config.ts", false),
+        ] {
+            assert_eq!(playwright_config_name(name), config, "{name}");
+        }
+        let root = fresh_root("nested-playwright");
+        for file in [
+            "tests/a/playwright.config.ts",
+            "tests/node_modules/playwright.config.ts",
+            "tests/.cache/playwright.config.ts",
+            "tests/1/2/3/4/playwright.config.ts",
+            "tests/1/2/3/4/5/playwright.config.ts",
+            "tests/notes/playwright.config.txt",
+            "e2e/playwright.config.js",
+            "src/playwright.config.ts",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "export default {};\n").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("tests/a"), root.join("tests/linked")).unwrap();
+        let found = nested_playwright_configs(&root)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&*root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            [
+                "e2e/playwright.config.js",
+                "tests/1/2/3/4/playwright.config.ts",
+                "tests/a/playwright.config.ts",
+            ]
+        );
+    }
+
+    /// A package manager's command shows the script it runs after it.
+    #[test]
+    fn a_package_manager_command_is_expanded_with_its_script() {
+        let root = fresh_root("expanded-command");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts": {"test": "vitest run", "e2e": "playwright test"}}"#,
+        )
+        .unwrap();
+        let expanded = |command: &[&str]| {
+            expanded_command(
+                &root,
+                &command
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(expanded(&["npm", "test"]), "npm test vitest run");
+        assert_eq!(
+            expanded(&["pnpm", "run", "e2e"]),
+            "pnpm run e2e playwright test"
+        );
+        assert_eq!(
+            expanded(&["/usr/local/bin/yarn.cmd", "e2e"]),
+            "/usr/local/bin/yarn.cmd e2e playwright test"
+        );
+        assert_eq!(expanded(&["node", "x.js"]), "node x.js");
+        assert_eq!(expanded(&["npm"]), "npm");
+        // `run` names no script of its own, even with none after it.
+        assert_eq!(expanded(&["npm", "run"]), "npm run");
+        assert_eq!(expanded(&["npm", "missing"]), "npm missing ");
+        // A script started from a command string names the script it runs.
+        for (program, script) in [
+            ("npm run start", Some("start")),
+            ("yarn dev", Some("dev")),
+            ("pnpm", None),
+            ("", None),
+            ("node server.js", None),
+        ] {
+            assert_eq!(
+                launched_package_script(program, None).as_deref(),
+                script,
+                "{program}"
+            );
+        }
+    }
 
     /// A script runs with the arguments after its name appended, the package
     /// manager's own `--` left out and each argument kept whole.
@@ -1239,6 +1377,175 @@ mod tests {
             ]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An import scores for a `test` export by name, for `expect` by either
+    /// name, and for a module named like Playwright; the search skips what
+    /// is not the project's own source.
+    #[test]
+    fn test_apis_are_scored_by_what_they_import_and_found_in_project_source() {
+        let candidates = imported_test_apis(
+            Path::new("a.spec.ts"),
+            "import { e2eTest, expect as check } from 'my-playwright-kit'\nimport { helper } from './helper'\n",
+        );
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].module, "my-playwright-kit");
+        assert_eq!(candidates[0].score, 8 + 10 + 5);
+        assert_eq!(candidates[0].test_export, None);
+        let root = project(
+            "apis",
+            &[
+                ("e2e/a.spec.ts", "import { test } from '@acme/kit'"),
+                (
+                    "node_modules/x/a.ts",
+                    "import { test } from '@skip/modules'",
+                ),
+                ("results/a.ts", "import { test } from '@skip/results'"),
+                (".cache/a.ts", "import { test } from '@skip/hidden'"),
+                ("e2e/notes.txt", "import { test } from '@skip/text'"),
+            ],
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("results"), root.join("linked")).unwrap();
+        let mut found = Vec::new();
+        test_api_candidates(&root, &mut found);
+        assert_eq!(
+            found.iter().map(|c| c.module.as_str()).collect::<Vec<_>>(),
+            ["@acme/kit"]
+        );
+        test_api_candidates(&root.join("absent"), &mut found);
+        assert_eq!(found.len(), 1);
+    }
+
+    /// The suite is read past everything that is not a test of its own --
+    /// hidden folders, installed packages, links, files that are not text or
+    /// do not parse, and loads and launches by a name only known at run time
+    /// -- and a Jest started as `jest.cmd` still reads source directly.
+    #[test]
+    fn a_suite_with_nothing_compiled_runs_source_directly_whatever_else_it_holds() {
+        let root = project(
+            "source-direct-oddities",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","test":"node_modules/.bin/jest.cmd"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                ("test/.cache/old.test.js", "require('../dist/index.js')"),
+                (
+                    "test/node_modules/dep/index.js",
+                    "require('../dist/index.js')",
+                ),
+                (
+                    "test/dynamic.test.js",
+                    "const name = './x';\nrequire(name);\nimport(name);\nimport('./fixtures/y.js');\n",
+                ),
+                (
+                    "test/launch.test.js",
+                    "import { spawn } from 'node:child_process';\nconst program = 'npm';\nspawn(program, ['run', 'start']);\nspawn('node', ['dist/index.js']);\n",
+                ),
+                ("test/broken.test.js", "const = ;\n"),
+            ],
+        );
+        fs::write(root.join("test/latin1.test.js"), b"// caf\xe9\n").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.join("test/dynamic.test.js"),
+                root.join("test/linked.test.js"),
+            )
+            .unwrap();
+            let fifo = root.join("test/pipe.test.js");
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert!(discovered.uses_jest);
+        assert!(
+            discovered.unrun_build.is_empty(),
+            "{:?}",
+            discovered.unrun_build
+        );
+    }
+
+    /// Compiled output a test in a nested folder loads is found there, and a
+    /// Windows `.exe` Jest is Jest.
+    #[test]
+    fn compiled_output_a_nested_test_loads_names_the_build() {
+        let root = project(
+            "nested-compiled",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","test":"jest.exe"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                (
+                    "test/unit/deep/a.test.js",
+                    "require('../../../dist/index.js')",
+                ),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert!(discovered.uses_jest);
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
+    }
+
+    /// node:test over TypeScript runs source directly unless the command
+    /// builds it first; a glob like `*.ts*` names TypeScript too.
+    #[test]
+    fn node_test_over_typescript_reads_source_unless_the_command_builds() {
+        let discovered = |test: &str| {
+            let root = project(
+                "node-typescript",
+                &[
+                    (
+                        "package.json",
+                        &format!(r#"{{"scripts":{{"build":"tsc","test":"{test}"}}}}"#),
+                    ),
+                    ("src/index.ts", "export const ready = true"),
+                ],
+            );
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"]))
+                .unwrap()
+                .unrun_build
+        };
+        assert!(discovered("node --test 'tests/**/*.ts*'").is_empty());
+        // The command runs tsc itself: it owns its build, and none is named.
+        assert!(discovered("tsc && node --test tests/a.test.ts").is_empty());
+    }
+
+    #[test]
+    fn a_run_with_no_script_name_and_an_overridden_playwright_module() {
+        let root = project(
+            "no-script",
+            &[
+                ("package.json", r#"{"scripts":{}}"#),
+                ("src/a.js", "export const a = 1;\n"),
+            ],
+        );
+        // `npm run` alone names no script.
+        assert_eq!(script_command(&root, &command(&["npm", "run"])), None);
+        let environment = BTreeMap::from([(
+            "SUPERCOV_PLAYWRIGHT_MODULE".to_owned(),
+            "./fixtures/playwright.js".to_owned(),
+        )]);
+        let discovered = discover_coverage_project(
+            &root,
+            &environment,
+            &command(&["npx", "playwright", "test"]),
+        )
+        .unwrap();
+        assert_eq!(discovered.playwright_module, "./fixtures/playwright.js");
+        // A module of the user's own exports Playwright's `test` by that name.
+        assert_eq!(discovered.playwright_test_export, "test");
     }
 
     #[test]

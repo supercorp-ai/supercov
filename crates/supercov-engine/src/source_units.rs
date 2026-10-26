@@ -229,10 +229,8 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     let source_type =
         crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
     let allocator = oxc_allocator::Allocator::default();
+    // `code` read the same source with the same parser: it parses cleanly.
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return None;
-    }
     // Names a statement binds, where all it does is define functions.
     fn functions(declaration: &Declaration<'_>) -> Option<Vec<String>> {
         match declaration {
@@ -370,7 +368,8 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
         let named = specifiers
             .iter()
             .all(|specifier| matches!(specifier, ImportDeclarationSpecifier::ImportSpecifier(_)));
-        if !named || specifiers.len() < 2 {
+        // Some names unused and some used: there are at least two.
+        if !named {
             return None;
         }
         let first = specifiers[0].span();
@@ -398,10 +397,9 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     cuts.sort_by_key(|(start, _, _)| *start);
     let mut earlier = String::with_capacity(source.len());
     let mut cursor = 0;
+    // Each cut is a whole statement of the top level, so none overlaps the
+    // next.
     for (start, end, replacement) in cuts {
-        if start < cursor {
-            return None;
-        }
         earlier.push_str(&source[cursor..start]);
         earlier.push_str(&replacement);
         cursor = end;
@@ -583,10 +581,9 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
     cuts.sort_by_key(|(start, _, _)| *start);
     let mut earlier = String::with_capacity(source.len());
     let mut cursor = 0;
+    // Each cut is a whole statement of the top level, so none overlaps the
+    // next.
     for (start, end, replacement) in cuts {
-        if start < cursor {
-            return None;
-        }
         earlier.push_str(&source[cursor..start]);
         earlier.push_str(&replacement);
         cursor = end;
@@ -668,15 +665,18 @@ fn erasure(source: &str, start: usize, end: usize) -> (usize, usize, &'static st
             };
             return (line_start, stop, "");
         }
+        // Code stands before the comment on its line, so the walk back stops
+        // at it before the line's start.
         let mut before = start;
-        while before > line_start && blank(bytes[before - 1]) {
+        while blank(bytes[before - 1]) {
             before -= 1;
         }
         return (before, after, "");
     }
     let preceded = start == line_start || blank(bytes[start - 1]);
     let stop = if preceded { after } else { end };
-    let glue = start > 0 && stop < bytes.len() && word(bytes[start - 1]) && word(bytes[stop]);
+    // Not at the line's end: what stops it is a character of the line.
+    let glue = start > 0 && word(bytes[start - 1]) && word(bytes[stop]);
     (start, stop, if glue { " " } else { "" })
 }
 
@@ -890,7 +890,9 @@ fn erase_blank(text: &str, strings: &[(usize, usize)]) -> (String, Vec<usize>) {
     let mut map = vec![0usize; text.len() + 1];
     let mut cursor = 0;
     let mut line_start = 0;
-    while line_start <= bytes.len() {
+    // Each pass ends a line; the last one, which ends at the text's end,
+    // breaks out below, so `line_start` never passes `bytes.len()`.
+    loop {
         let line_end = text[line_start..]
             .find('\n')
             .map_or(bytes.len(), |i| line_start + i);
@@ -1128,10 +1130,10 @@ fn javascript(path: &str, source: &str) -> Option<Outline> {
             if let Some((span, kind, inert)) = bound {
                 let target =
                     &self.source[it.left.span().start as usize..it.left.span().end as usize];
-                if !target.is_empty()
-                    && target
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '#'))
+                // An assignment's target is never empty text.
+                if target
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '#'))
                 {
                     self.record(target.to_owned(), kind, span.start, span.end, inert);
                 }
@@ -1212,6 +1214,9 @@ fn python(source: &str) -> Option<Outline> {
 
     use ruff_python_ast::token::TokenKind;
     let parsed = ruff_python_parser::parse_module(source).ok()?;
+    // In a module that parses, a line break inside a token is inside one of
+    // these: elsewhere it is a `Newline` or `NonLogicalNewline` token of its
+    // own, and a backslash continuation is trivia between tokens.
     let strings = parsed
         .tokens()
         .iter()
@@ -1219,11 +1224,7 @@ fn python(source: &str) -> Option<Outline> {
             matches!(
                 t.kind(),
                 TokenKind::String | TokenKind::FStringMiddle | TokenKind::TStringMiddle
-            ) || (!matches!(
-                t.kind(),
-                TokenKind::Comment | TokenKind::Newline | TokenKind::NonLogicalNewline
-            ) && source[t.range().start().to_usize()..t.range().end().to_usize()]
-                .contains('\n'))
+            )
         })
         .map(|t| (t.range().start().to_usize(), t.range().end().to_usize()))
         .collect();
@@ -1340,11 +1341,13 @@ fn rust(source: &str) -> Option<Outline> {
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::WHITESPACE => {}
             NodeOrToken::Token(token) => {
                 flush(&mut doc_block, &mut comments);
+                // In a file that parses, a line break outside whitespace and
+                // comments is inside a string literal: raw ones are lexed
+                // as these kinds too.
                 if matches!(
                     token.kind(),
                     SyntaxKind::STRING | SyntaxKind::BYTE_STRING | SyntaxKind::C_STRING
-                ) || token.text().contains('\n')
-                {
+                ) {
                     let range = token.text_range();
                     strings.push((
                         u32::from(range.start()) as usize,
@@ -1613,6 +1616,14 @@ fn first_child_of_kind<'t>(
     node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
 
+/// What a Go declaration is named. The grammar requires a name of each kind
+/// this is asked of, and tree-sitter builds a node only with all its required
+/// children, one it had to invent as a zero-width stand-in: the name is
+/// always there, even in a tree with errors.
+fn go_name(node: tree_sitter::Node<'_>, source: &str) -> String {
+    field_text(node, "name", source).unwrap_or_default()
+}
+
 fn go(source: &str) -> Option<Outline> {
     let tree = crate::go_instrumenter::parse(source).ok()?;
     let mut comments = Vec::new();
@@ -1639,17 +1650,13 @@ fn go(source: &str) -> Option<Outline> {
                     comments.push((node.start_byte(), node.end_byte()));
                 }
             }
-            "function_declaration" => {
-                if let Some(name) = field_text(node, "name", source) {
-                    declarations.push(Item {
-                        name,
-                        kind: "function",
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        inert: false,
-                    });
-                }
-            }
+            "function_declaration" => declarations.push(Item {
+                name: go_name(node, source),
+                kind: "function",
+                start: node.start_byte(),
+                end: node.end_byte(),
+                inert: false,
+            }),
             "method_declaration" => {
                 let receiver = node
                     .child_by_field_name("receiver")
@@ -1662,30 +1669,25 @@ fn go(source: &str) -> Option<Outline> {
                             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
                             .collect::<String>()
                     });
-                if let Some(name) = field_text(node, "name", source) {
-                    declarations.push(Item {
-                        name: match receiver {
-                            Some(r) if !r.is_empty() => format!("{r}.{name}"),
-                            _ => name,
-                        },
-                        kind: "method",
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        inert: false,
-                    });
-                }
+                let name = go_name(node, source);
+                declarations.push(Item {
+                    name: match receiver {
+                        Some(r) if !r.is_empty() => format!("{r}.{name}"),
+                        _ => name,
+                    },
+                    kind: "method",
+                    start: node.start_byte(),
+                    end: node.end_byte(),
+                    inert: false,
+                });
             }
-            "type_spec" | "type_alias" => {
-                if let Some(name) = field_text(node, "name", source) {
-                    declarations.push(Item {
-                        name,
-                        kind: "type",
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        inert: false,
-                    });
-                }
-            }
+            "type_spec" | "type_alias" => declarations.push(Item {
+                name: go_name(node, source),
+                kind: "type",
+                start: node.start_byte(),
+                end: node.end_byte(),
+                inert: false,
+            }),
             _ => {}
         }
     }
@@ -2337,6 +2339,62 @@ mod tests {
     }
 
     #[test]
+    fn a_named_class_expression_keeps_its_own_name() {
+        let x = code("c.js", "const A = class B {\n  m() {}\n};\n").unwrap();
+        assert_eq!(paths(&x), [("class", "B"), ("method", "B.m")]);
+    }
+
+    /// `build` takes spans as a parser reports them; nested, repeated or
+    /// overlapping ones are each built once, and inertness is inherited.
+    #[test]
+    fn declarations_are_built_once_and_inherit_inertness() {
+        let item = |name: &str, start: usize, end: usize, inert: bool| Item {
+            name: name.into(),
+            kind: "type",
+            start,
+            end,
+            inert,
+        };
+        let built = |source: &str, declarations: Vec<Item>| {
+            build(
+                source,
+                Outline {
+                    comments: vec![],
+                    strings: vec![],
+                    declarations,
+                    separator: ".",
+                },
+            )
+        };
+        let source = "type A = { b: 1 };\nlet c = 2;\n";
+        // Same start, different ends: two declarations, the shorter inside.
+        let nested = built(
+            source,
+            vec![item("A", 0, 18, false), item("inner", 0, 9, false)],
+        );
+        assert_eq!(nested.units.len(), 3);
+        assert_eq!(nested.units[2].parent, Some(1));
+        // A declaration inside an inert one is inert, and an inert one inside
+        // it is erased with it, once.
+        let outer = built(source, vec![item("A", 0, 18, true)]);
+        let inner = built(
+            source,
+            vec![item("A", 0, 18, true), item("b", 11, 15, false)],
+        );
+        assert!(inner.units[2].inert);
+        assert_eq!(inner.semantic, outer.semantic);
+        // One that starts in the blank the inert one's line ends with leaves
+        // the file's text as it was without it.
+        let source = "type A = 1; \nlet b = 2;\n";
+        let alone = built(source, vec![item("A", 0, 11, true)]);
+        let overlapping = built(
+            source,
+            vec![item("A", 0, 11, true), item("b", 11, 23, false)],
+        );
+        assert_eq!(overlapping.units[0].digest, alone.units[0].digest);
+    }
+
+    #[test]
     fn decorators_belong_to_what_they_decorate() {
         let py = code("d.py", "@app.route('/x')\ndef handler():\n    return 1\n").unwrap();
         assert_eq!(
@@ -2460,6 +2518,14 @@ mod tests {
                 ("function", "New")
             ]
         );
+        // A receiver is named by its type as written, qualified or not; one
+        // that is no named type leaves the method its own name.
+        let x = code(
+            "r.go",
+            "package p\n\nfunc (s *pkg.T) Start() {}\n\nfunc (s []int) Len() int { return 0 }\n",
+        )
+        .unwrap();
+        assert_eq!(paths(&x), [("method", "pkg.T.Start"), ("method", "Len")]);
     }
 
     #[test]
@@ -2532,6 +2598,93 @@ mod tests {
         assert_eq!((f.end_line, f.end_column), (1, 30), "end is exclusive");
     }
 
+    /// A unit holds the positions from its start up to its end; a change is
+    /// narrow only when it touched nothing but the bodies of probed code.
+    #[test]
+    fn a_unit_holds_its_span_and_a_change_is_narrow_only_inside_probed_bodies() {
+        let base = "function a() {\n  return 1;\n}\nclass K {}\n";
+        let before = code("a.js", base).unwrap();
+        let a = before.units.iter().position(|u| u.path == "a").unwrap();
+        let unit = &before.units[a];
+        assert!(unit.contains(unit.line, unit.column));
+        assert!(!unit.contains(unit.line.saturating_sub(1), 0));
+        assert!(!unit.contains(unit.end_line, unit.end_column));
+        let narrow = |after: &str, probed: &[usize]| {
+            let after = code("a.js", after).unwrap();
+            before.diff(&after).narrow(&before, probed)
+        };
+        let body = base.replace("return 1;", "return 2;");
+        assert!(narrow(&body, &[a]));
+        assert!(!narrow(&body, &[]), "a body nothing probed");
+        assert!(
+            !narrow(&format!("{base}function b() {{}}\n"), &[a]),
+            "an addition"
+        );
+        assert!(!narrow("class K {}\n", &[a]), "a removal");
+        let k = before.units.iter().position(|u| u.path == "K").unwrap();
+        assert!(
+            !narrow(&base.replace("class K {}", "class K { x = 1 }"), &[a, k]),
+            "a class is data as well as code"
+        );
+    }
+
+    /// A property is a unit when its value is an anonymous function or
+    /// class and its key has a name; a computed key or a plain value is not;
+    /// a named function expression is a unit by its own name. A Python
+    /// encoding declaration and a Supercov comment are never erased.
+    #[test]
+    fn properties_become_units_by_name_and_python_keeps_its_declarations() {
+        let js = "class C {\n  handle = () => 1;\n  named = function n() { return 2; };\n  [computed] = () => 3;\n  plain = 4;\n}\nconst o = {\n  m() { return 1; },\n  f: () => 2,\n  K: class {},\n  [x]: () => 3,\n  plain: 4,\n};\nconst D = class {};\n";
+        let units = code("a.js", js).unwrap();
+        let shapes = units
+            .units
+            .iter()
+            .map(|unit| (unit.path.as_str(), unit.kind.as_str(), unit.line))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shapes,
+            [
+                ("", "file", 1),
+                ("C", "class", 1),
+                ("C.handle", "function", 2),
+                ("C.n", "function", 3),
+                ("o", "object", 7),
+                ("o.m", "method", 8),
+                ("o.f", "method", 9),
+                ("o.K", "class", 10),
+                ("D", "class", 14),
+            ]
+        );
+        let py = "# -*- coding: utf-8 -*-\n# a note\nimport os\n# supercov: keep\n";
+        assert_eq!(code("a.py", py).unwrap().erased, [2]);
+    }
+
+    /// A comment that owns its line takes the line; one after code takes
+    /// the space before it; one between words leaves a space.
+    #[test]
+    fn a_comment_is_erased_as_if_never_written() {
+        for (source, (start, end), expected) in [
+            ("a /* c */\nb", (2, 9), (1, 9, "")),
+            ("  // c\nb", (2, 6), (0, 7, "")),
+            ("x // c", (2, 6), (1, 6, "")),
+            ("  // c", (2, 6), (0, 6, "")),
+            ("a/*c*/b", (1, 6), (1, 6, " ")),
+            ("a /*c*/ b", (2, 7), (2, 8, "")),
+            ("/*c*/b", (0, 5), (0, 5, "")),
+            ("(/*c*/b", (1, 6), (1, 6, "")),
+        ] {
+            assert_eq!(erasure(source, start, end), expected, "{source:?}");
+        }
+        for (text, position, expected) in [
+            ("a  \nb", 1, 4),
+            ("a\r\n", 1, 3),
+            ("a b", 1, 1),
+            ("a  ", 1, 1),
+        ] {
+            assert_eq!(line_end_after(text, position), expected, "{text:?}");
+        }
+    }
+
     #[test]
     fn functions_added_to_a_helper_are_only_additions() {
         let before = code(
@@ -2572,6 +2725,68 @@ mod tests {
                 "import type { Page } from '@playwright/test';\nimport { a } from './a';\n\nexport async function open(page: Page) {\n  return a(page);\n}\n// a comment\n"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_function_with_a_body_is_no_addition() {
+        let before = code("h.ts", "export function open() {\n  return 1;\n}\n").unwrap();
+        let with = |tail: &str| {
+            only_added(
+                &before,
+                "h.ts",
+                &format!("export function open() {{\n  return 1;\n}}\n{tail}"),
+            )
+        };
+        // Functions, by declaration or bound to a name, are additions.
+        assert_eq!(
+            with("export function two() {\n  return 2;\n}\n"),
+            Some(vec!["two".to_owned()])
+        );
+        assert_eq!(
+            with("const three = function () {\n  return 3;\n};\n"),
+            Some(vec!["three".to_owned()])
+        );
+        for tail in [
+            // ambient: declared, never defined here
+            "export declare function ambient(): void;\n",
+            "declare const typed: number;\n",
+            // a value that is no function runs at load
+            "export const limit = 10;\n",
+            // not parseable as the file's language
+            "export function broken( {\n",
+        ] {
+            assert_eq!(with(tail), None, "{tail}");
+        }
+    }
+
+    /// Declarations with no body, a binding that is not a function, and an
+    /// added class are not additions a test could not have run; functions
+    /// bound together are.
+    #[test]
+    fn only_function_definitions_count_as_additions() {
+        let head = "export function a() {\n  return 1;\n}\n";
+        let before = code("h.ts", head).unwrap();
+        for added in [
+            "declare function b(): void;\nexport function c() {\n  return 2;\n}\n",
+            "declare const b: () => void;\nexport function c() {\n  return 2;\n}\n",
+            "export const x = 1, f = () => 1;\n",
+            "export class K {\n  m() {\n    return 1;\n  }\n}\n",
+            "export function c() {\n  return 2;\n}\nexport class K {\n  m() {\n    return 1;\n  }\n}\n",
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{head}{added}")),
+                None,
+                "{added}"
+            );
+        }
+        assert_eq!(
+            only_added(
+                &before,
+                "h.ts",
+                &format!("{head}export const f = () => 1, g = function () {{\n  return 2;\n}};\n")
+            ),
+            Some(vec!["f".to_owned(), "g".to_owned()])
         );
     }
 
@@ -2689,6 +2904,76 @@ mod tests {
         }
     }
 
+    /// A Python helper is only added to where nothing else moved: a
+    /// removal, an edit outside the file's own lines, no addition at all, a
+    /// name the old code already reads, or one exported by `__all__` is not.
+    #[test]
+    fn a_python_change_beside_an_addition_is_a_change() {
+        let before = code(
+            "t/h.py",
+            "def make(x):\n    return more(x)\n\n\ndef keep(x):\n    return x\n",
+        )
+        .unwrap();
+        let kept = "def make(x):\n    return more(x)\n\n\ndef keep(x):\n    return x\n";
+        for after in [
+            // `keep` removed.
+            "def make(x):\n    return more(x)\n\n\ndef other(x):\n    return x\n".to_owned(),
+            // Nothing added.
+            kept.to_owned(),
+            // `keep` edited too.
+            format!(
+                "{}\n\ndef extra(x):\n    return x\n",
+                kept.replace("return x", "return x + 1")
+            ),
+            // The old code already called `more`: defining it changes `make`.
+            format!("{kept}\n\ndef more(x):\n    return x\n"),
+            // Exported in double quotes.
+            format!("{kept}\n\ndef extra(x):\n    return x\n\n__all__ = [\"extra\"]\n"),
+        ] {
+            assert_eq!(only_added(&before, "t/h.py", &after), None, "{after}");
+        }
+        assert_eq!(
+            only_added(
+                &before,
+                "t/h.py",
+                &format!("{kept}\n\ndef extra(x):\n    return x\n")
+            ),
+            Some(vec!["extra".to_owned()])
+        );
+    }
+
+    /// A diff is narrow only where bodies alone changed, each in a unit with
+    /// a probe of its own.
+    #[test]
+    fn a_diff_is_narrow_only_for_probed_body_edits() {
+        let old = code(
+            "a.js",
+            "function a() { return 1; }\nfunction b() { return 2; }\n",
+        )
+        .unwrap();
+        let a = old.units.iter().position(|unit| unit.path == "a").unwrap();
+        let edited = old.diff(
+            &code(
+                "a.js",
+                "function a() { return 3; }\nfunction b() { return 2; }\n",
+            )
+            .unwrap(),
+        );
+        assert_eq!(edited.changed, [a]);
+        assert!(edited.narrow(&old, &[a]));
+        assert!(!edited.narrow(&old, &[]));
+        let added = old.diff(
+            &code(
+                "a.js",
+                "function a() { return 1; }\nfunction b() { return 2; }\nfunction c() {}\n",
+            )
+            .unwrap(),
+        );
+        assert!(!added.narrow(&old, &[a]));
+        let removed = old.diff(&code("a.js", "function a() { return 1; }\n").unwrap());
+        assert!(!removed.narrow(&old, &[a]));
+    }
+
     #[test]
     fn an_added_function_that_shadows_a_global_is_a_change() {
         let before = code(
@@ -2722,5 +3007,428 @@ mod tests {
         assert_ne!(x.units[0].digest, y.units[0].digest);
         assert_eq!(unit(&x, "f").digest, unit(&y, "f").digest);
         assert_eq!(x.structure, y.structure);
+    }
+}
+
+#[cfg(test)]
+mod edge_unit_tests {
+    use super::*;
+
+    fn units(path: &str, source: &str) -> (Vec<String>, Vec<usize>) {
+        let code = code(path, source).expect("parses");
+        let units = code
+            .units
+            .iter()
+            .skip(1)
+            .map(|u| {
+                format!(
+                    "{}:{}{}",
+                    u.kind,
+                    u.path,
+                    if u.inert { " inert" } else { "" }
+                )
+            })
+            .collect();
+        (units, code.erased)
+    }
+
+    /// Declarations at the edges of each language's reading: ambient and
+    /// overload signatures, anonymous defaults and computed keys (no unit:
+    /// their text belongs to what holds them), magic comments, Rust unions
+    /// and both kinds of macro, and a file that does not parse.
+    #[test]
+    fn each_language_names_its_edge_declarations() {
+        let (ts, _) = units(
+            "a.ts",
+            "declare function ambient(a: string): void;\nfunction over(a: string): void;\nfunction over(a: any) {}\ndeclare const flag: boolean;\nconst arrow = () => 1;\nconst plain = 1;\nexport { a } from './x';\nexport default class {}\nexport default function () {}\nclass K { [key]() {} get g() { return 1 } static s = () => 2; [c] = 3; }\nconst o = { [k]: 1, m() {}, f: function () {}, n: 2 };\n",
+        );
+        assert_eq!(
+            ts,
+            [
+                "function:ambient inert",
+                "function:over inert",
+                "function:over#2",
+                "function:arrow",
+                "class:K",
+                "get:K.g",
+                "function:K.s",
+                "object:o",
+                "method:o.m",
+                "method:o.f",
+            ]
+        );
+        // A coding cookie is read by Python; a modeline or a late shebang is not.
+        let (py, erased) = units(
+            "a.py",
+            "# -*- coding: utf-8 -*-\n# vim: set ft=python :\n#!/usr/bin/env python\n__all__ = [\"f\"]\ndef f():\n    s = f\"x {y} z\"\n    return s\n",
+        );
+        assert_eq!(py, ["function:f"]);
+        assert_eq!(erased, [2, 3]);
+        let (rust, erased) = units(
+            "a.rs",
+            "//! crate docs\n#![allow(dead_code)]\n// supercov: keep\nunion U { a: u8 }\nmacro m() {}\nmacro_rules! r { () => {} }\nfn f() { let s = \"// not\"; let b = b\"x\"; let c = c\"y\"; }\n",
+        );
+        assert_eq!(rust, ["union:U", "macro:m", "macro:r", "function:f"]);
+        assert_eq!(erased, [1], "a Supercov pragma is kept");
+        assert_eq!(code("b.rs", "fn f( {\n"), None);
+    }
+
+    /// A comment taken out leaves a space only where the words on each side
+    /// would otherwise run together: `return/*c*/x` reads as `return x`.
+    #[test]
+    fn an_erased_comment_never_glues_two_words() {
+        for (plain, commented) in [
+            (
+                "function f(x) {\n  return x;\n}\n",
+                "function f(x) {\n  return/*c*/x;\n}\n",
+            ),
+            (
+                "function f(x) {\n  return $x;\n}\n",
+                "function f(x) {\n  return/*c*/$x;\n}\n",
+            ),
+            (
+                "function f(x) {\n  return _x;\n}\n",
+                "function f(x) {\n  return/*c*/_x;\n}\n",
+            ),
+            (
+                "const a = 1; const b = 2;\n",
+                "const a = 1; /* x */ const b = 2;\n",
+            ),
+            ("const a = (1);\n", "const a = (/* x */1);\n"),
+        ] {
+            assert_eq!(
+                code("g.js", plain).unwrap().semantic,
+                code("g.js", commented).unwrap().semantic,
+                "{commented}"
+            );
+        }
+        let (_, erased) = units(
+            "g.js",
+            "function f(x) {\n  if (x) return/*c*/x;\n  return/*c*/(x); // tail\n  /* own line */\n}\n",
+        );
+        assert_eq!(erased, [4]);
+    }
+
+    /// What only adding functions means, at its edges: a rename is a removal,
+    /// an empty change adds nothing, and a method, an ambient declaration, a
+    /// re-export, an anonymous default or a plain value is no added function.
+    #[test]
+    fn only_a_new_function_is_only_an_addition() {
+        let source = "export function a() {\n  return 1;\n}\n";
+        let before = code("h.ts", source).unwrap();
+        let renamed = code("h.ts", &source.replace("function a", "function b")).unwrap();
+        let diff = before.diff(&renamed);
+        assert_eq!(
+            (diff.removed.as_slice(), diff.added.as_slice()),
+            (&[1][..], &[1][..])
+        );
+        assert!(!diff.narrow(&before, &[1]));
+        for (label, tail, expected) in [
+            ("nothing", "", None),
+            ("a method", "export class C {\n  m() {}\n}\n", None),
+            (
+                "an ambient declaration",
+                "declare function d(): void;\n",
+                None,
+            ),
+            (
+                "a re-export",
+                "export { z } from './z';\nexport function e() {}\n",
+                None,
+            ),
+            (
+                "an anonymous default",
+                "export default function () {}\n",
+                None,
+            ),
+            ("a plain value", "export const w = 1;\n", None),
+            (
+                "an arrow function",
+                "export const v = () => 1;\n",
+                Some(vec!["v".to_owned()]),
+            ),
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{source}{tail}")),
+                expected,
+                "{label}"
+            );
+        }
+        assert_eq!(only_added(&before, "h.ts", &source.replace('a', "b")), None);
+        // A Python function `__all__` lists, or one existing code calls, was
+        // named before it existed: a change.
+        let python = "__all__ = [\"a\"]\n\ndef a():\n    return 1\n";
+        let before = code("h.py", python).unwrap();
+        for (label, after, expected) in [
+            (
+                "listed",
+                "__all__ = [\"a\", \"b\"]\n\ndef a():\n    return 1\n\ndef b():\n    return 2\n",
+                None,
+            ),
+            (
+                "called",
+                "__all__ = [\"a\"]\n\ndef a():\n    return b()\n\ndef b():\n    return 2\n",
+                None,
+            ),
+            (
+                "new",
+                "__all__ = [\"a\"]\n\ndef a():\n    return 1\n\ndef c():\n    return 3\n",
+                Some(vec!["c".to_owned()]),
+            ),
+        ] {
+            assert_eq!(only_added(&before, "h.py", after), expected, "{label}");
+        }
+    }
+
+    /// What erasing one comment takes out: its whole line where it owns
+    /// it, the whitespace before it at a line's end, and a space where two
+    /// words would otherwise join.
+    #[test]
+    fn a_comment_is_erased_as_if_it_had_never_been_written() {
+        for (source, (start, end), expected) in [
+            ("x = 1; // c", (7, 11), (6, 11, "")),
+            ("// c\nx", (0, 4), (0, 5, "")),
+            ("// c", (0, 4), (0, 4, "")),
+            ("x\n  // c\ny", (4, 8), (2, 9, "")),
+            ("a/*c*/b", (1, 6), (1, 6, " ")),
+            ("/*c*/b", (0, 5), (0, 5, "")),
+            ("a /*c*/ b", (2, 7), (2, 8, "")),
+            ("a/*c*/", (1, 6), (1, 6, "")),
+            ("(/*c*/b", (1, 6), (1, 6, "")),
+            ("a/*c*/)", (1, 6), (1, 6, "")),
+        ] {
+            assert_eq!(erasure(source, start, end), expected, "{source:?}");
+        }
+    }
+
+    /// Spans a parser reported that do not fit the file -- past its end,
+    /// empty, reversed, repeated -- are left out, as if never reported.
+    #[test]
+    fn spans_that_do_not_fit_the_file_are_left_out() {
+        let source = "let a = 1; // one\nfunction f() { return 'x  y'; }\n";
+        let item = |start: usize, end: usize| Item {
+            name: "f".into(),
+            kind: "function",
+            start,
+            end,
+            inert: false,
+        };
+        let comment = (11, 17);
+        let string = (39, 45);
+        let function = (18, 49);
+        let clean = build(
+            source,
+            Outline {
+                comments: vec![comment],
+                strings: vec![string],
+                declarations: vec![item(function.0, function.1)],
+                separator: ".",
+            },
+        );
+        let noisy = build(
+            source,
+            Outline {
+                comments: vec![comment, (40, 400), (5, 5), (9, 3), (12, 15)],
+                strings: vec![string, (60, 70), (8, 8)],
+                declarations: vec![
+                    item(function.0, function.1),
+                    item(function.0, function.1),
+                    item(20, 900),
+                    item(7, 7),
+                ],
+                separator: ".",
+            },
+        );
+        assert_eq!(noisy, clean);
+        assert_eq!(clean.units.len(), 2);
+    }
+
+    /// An addition is only functions defined: a declared function, an
+    /// overload's signature, a declared or a plain value is not one; a
+    /// const holding a function is.
+    #[test]
+    fn only_typescript_function_definitions_are_additions() {
+        let head = "export function a() {\n  return 1;\n}\n";
+        let before = code("h.ts", head).unwrap();
+        for (added, expected) in [
+            (
+                "export const arrow = () => 1;\n",
+                Some(vec!["arrow".to_owned()]),
+            ),
+            (
+                "export const fn = function () {\n  return 2;\n};\n",
+                Some(vec!["fn".to_owned()]),
+            ),
+            ("export declare function d(): void;\n", None),
+            (
+                "export function o(a: string): void;\nexport function o(a: any) {\n  return a;\n}\n",
+                None,
+            ),
+            ("declare const v: () => void;\n", None),
+            ("export const plain = 1;\n", None),
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{head}{added}")),
+                expected,
+                "{added}"
+            );
+        }
+        assert!(code("a.ts", "export function (").is_none());
+    }
+
+    /// Go methods are named for their receiver's type, however written; a
+    /// comment is no change unless it is a Supercov pragma, a Go directive,
+    /// a Python encoding line or a Ruby magic comment.
+    #[test]
+    fn go_receivers_name_methods_and_only_significant_comments_change_code() {
+        let go = "package p\n\ntype Server struct{}\n\nfunc (s *Server) Start() {}\nfunc (Server) Stop() {}\nfunc (l *List[T]) Push(v T) {}\nfunc plain() {}\n";
+        let parsed = code("a.go", go).unwrap();
+        assert_eq!(
+            parsed
+                .units
+                .iter()
+                .map(|u| u.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "",
+                "Server",
+                "Server.Start",
+                "Server.Stop",
+                "List.Push",
+                "plain"
+            ]
+        );
+        for (file, plain, other, same) in [
+            (
+                "a.go",
+                "package p\n// note\nfunc f() {}\n",
+                "package p\n// other\nfunc f() {}\n",
+                true,
+            ),
+            (
+                "a.go",
+                "package p\n// note\nfunc f() {}\n",
+                "package p\n//go:noinline\nfunc f() {}\n",
+                false,
+            ),
+            (
+                "a.go",
+                "package p\nfunc f() {}\n",
+                "package p\n// supercov:ignore\nfunc f() {}\n",
+                false,
+            ),
+            (
+                "a.py",
+                "x = 1\n",
+                "# -*- coding: latin-1 -*-\nx = 1\n",
+                false,
+            ),
+            ("a.py", "x = 1\n", "# supercov: skip\nx = 1\n", false),
+            ("a.py", "x = 1\n", "#!/usr/bin/env python\nx = 1\n", true),
+            (
+                "a.rs",
+                "fn f() {}\n",
+                "// supercov ignore\nfn f() {}\n",
+                false,
+            ),
+            ("a.rs", "fn f() {}\n", "/// doc\nfn f() {}\n", true),
+            ("a.rb", "x = 1\n", "# supercov: skip\nx = 1\n", false),
+            (
+                "a.rb",
+                "x = 1\n",
+                "# frozen_string_literal: true\nx = 1\n",
+                false,
+            ),
+            ("A.java", "class A {}\n", "// supercov\nclass A {}\n", false),
+            ("A.kt", "class A\n", "/* supercov */\nclass A\n", false),
+            (
+                "a.js",
+                "const a = 1;\n",
+                "// supercov ignore\nconst a = 1;\n",
+                false,
+            ),
+        ] {
+            let (a, b) = (code(file, plain).unwrap(), code(file, other).unwrap());
+            assert_eq!(a.semantic == b.semantic, same, "{file}: {other:?}");
+        }
+    }
+
+    /// A change narrows to the bodies a test ran only when it adds and
+    /// removes nothing.
+    #[test]
+    fn a_change_that_adds_or_removes_a_declaration_is_never_narrow() {
+        let old = code("a.js", "function a() { return 1 }\n").unwrap();
+        let diff = |added: Vec<usize>, removed: Vec<usize>| Diff {
+            changed: Vec::new(),
+            removed,
+            added,
+            structural: false,
+        };
+        assert!(diff(Vec::new(), Vec::new()).narrow(&old, &[]));
+        assert!(!diff(vec![1], Vec::new()).narrow(&old, &[]));
+        assert!(!diff(Vec::new(), vec![1]).narrow(&old, &[]));
+    }
+
+    /// Source a parser reads with errors, or not at all, has no units: it is
+    /// compared by its bytes instead.
+    #[test]
+    fn source_that_does_not_parse_has_no_units() {
+        assert!(code("a.js", "const x = ;\n").is_none());
+        assert!(code("a.rb", "def (\n").is_none());
+        // An error the parser recovers from is an error all the same.
+        assert!(code("a.js", "a ?? b || c;\n").is_none());
+        assert!(code("a.js", "let a = 1;\n").is_some());
+    }
+
+    #[test]
+    fn declarations_are_named_as_each_language_names_them() {
+        let paths = |path: &str, source: &str| {
+            code(path, source)
+                .unwrap_or_else(|| panic!("{path} parses"))
+                .units
+                .into_iter()
+                .map(|unit| unit.path)
+                .collect::<Vec<_>>()
+        };
+        // A function expression with a name of its own is a unit still.
+        assert!(
+            paths("a.js", "export const f = function g() { return 1 }\n").len() > 1,
+            "a named function expression is a declaration"
+        );
+        // A Go method is named by its receiver's type, underscores and all.
+        assert!(
+            paths(
+                "a.go",
+                "package a\n\ntype my_server struct{}\n\nfunc (s *my_server) Run() {}\n"
+            )
+            .contains(&"my_server.Run".to_owned())
+        );
+        // An attribute before an `impl` is not part of its name.
+        assert!(
+            paths(
+                "a.rs",
+                "struct Foo;\n#[allow(dead_code)]\nimpl Foo {\n    fn a() {}\n}\n"
+            )
+            .iter()
+            .any(|path| path.ends_with("a")),
+        );
+    }
+
+    /// A `-*- ... -*-` line is read by editors and, for its coding, by
+    /// Python: it is not erased as a comment, so changing it is a change.
+    #[test]
+    fn an_emacs_mode_line_in_python_is_significant() {
+        let digest = |mode: &str| {
+            code("a.py", &format!("# -*- mode: {mode} -*-\nx = 1\n"))
+                .unwrap()
+                .semantic
+        };
+        assert_ne!(digest("python"), digest("ruby"));
+        let plain = |text: &str| {
+            code("a.py", &format!("# {text}\nx = 1\n"))
+                .unwrap()
+                .semantic
+        };
+        assert_eq!(plain("one"), plain("two"));
     }
 }

@@ -200,15 +200,7 @@ impl RustWasmServer {
     /// the build caps lints at `warn` (Cargo reads wasm32's dropped crate
     /// types from rustc's warnings) and allows the probes' parentheses.
     pub fn environment(&self) -> BTreeMap<String, String> {
-        let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-        if !rustflags.is_empty() {
-            rustflags.push(' ');
-        }
-        rustflags.push_str("--cap-lints=warn -A unused_parens");
-        BTreeMap::from([
-            ("SUPERCOV_WASM_REGIONS".into(), "1".into()),
-            ("RUSTFLAGS".into(), rustflags),
-        ])
+        wasm_environment(std::env::var("RUSTFLAGS").unwrap_or_default())
     }
 
     /// Publish what the tests' wasm ran as a Rust run: each take credited to
@@ -256,6 +248,18 @@ impl RustWasmServer {
         let _ = remove_stored_tree_deferred(root, &self.directory);
         result
     }
+}
+
+/// `RustWasmServer::environment`, after the user's own `rustflags`.
+fn wasm_environment(mut rustflags: String) -> BTreeMap<String, String> {
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str("--cap-lints=warn -A unused_parens");
+    BTreeMap::from([
+        ("SUPERCOV_WASM_REGIONS".into(), "1".into()),
+        ("RUSTFLAGS".into(), rustflags),
+    ])
 }
 
 /// The takes the JavaScript runtime wrote, one JSON line each.
@@ -353,6 +357,11 @@ mod tests {
             "[package]\nname = \"d\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\nwasm-bindgen = \"0.2\"\n",
         );
         write("worker/wrangler.toml", "main = \"x\"\n");
+        // A wasm-bindgen dependency for the wasm target alone counts.
+        write(
+            "targeted/Cargo.toml",
+            "[package]\nname = \"f\"\n[lib]\ncrate-type = [\"cdylib\"]\n[target.'cfg(target_arch = \"wasm32\")'.dependencies]\nwasm-bindgen = \"0.2\"\n",
+        );
         write(
             "node_modules/e/Cargo.toml",
             "[package]\nname = \"e\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\nwasm-bindgen = \"0.2\"\n",
@@ -361,7 +370,54 @@ mod tests {
             .into_iter()
             .map(|path| path.strip_prefix(&root).unwrap().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(found, [PathBuf::from("rust/Cargo.toml")]);
+        assert_eq!(
+            found,
+            [
+                PathBuf::from("rust/Cargo.toml"),
+                PathBuf::from("targeted/Cargo.toml")
+            ]
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_build_caps_lints_after_the_user_s_own_flags() {
+        assert_eq!(
+            wasm_environment(String::new())["RUSTFLAGS"],
+            "--cap-lints=warn -A unused_parens"
+        );
+        assert_eq!(
+            wasm_environment("--cfg x".into())["RUSTFLAGS"],
+            "--cfg x --cap-lints=warn -A unused_parens"
+        );
+    }
+
+    /// A line cut short and a take with no regions are passed over; a take
+    /// at a test's edge is that attempt's, and any other nobody's.
+    #[test]
+    fn records_are_read_from_whole_takes_only() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-rust-wasm-records-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("a.jsonl"),
+            "{\"owner\": \"t1\", \"regions\": []}\n{\"owner\": \"t2\"}\n{\"regions\": [\n",
+        )
+        .unwrap();
+        fs::write(directory.join("b.jsonl"), "{\"regions\": []}\n").unwrap();
+        fs::write(directory.join("notes.txt"), "{\"regions\": []}\n").unwrap();
+        let owners = read_records(&directory)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.owner)
+            .collect::<Vec<_>>();
+        assert_eq!(owners, [Owner::Attempt("t1".into()), Owner::Nobody]);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

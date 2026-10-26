@@ -366,6 +366,68 @@ fn judged_against_latest(
     }))
 }
 
+/// A Rust Worker no test of a run started is noted on each of its files, in
+/// that run alone: a run whose test started it measured the same files under
+/// the same denominator. So runs that started different Workers merge, and
+/// the note stands in the merge only where no run started the Worker.
+const UNRUN_WORKER: &str = "rust-worker-not-run#";
+
+/// Each manifest with the unrun-Worker notes no run shares dropped, and the
+/// notes every run shares, which stand.
+fn settle_unrun_workers(manifests: &[Option<&[u8]>]) -> (Vec<Option<Vec<u8>>>, BTreeSet<String>) {
+    let parsed = manifests
+        .iter()
+        .map(|manifest| manifest.and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok()))
+        .collect::<Vec<_>>();
+    let unrun = |manifest: &Value| {
+        manifest["limitations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|limitation| limitation["id"].as_str())
+            .filter(|id| id.starts_with(UNRUN_WORKER))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    };
+    let notes = parsed.iter().flatten().map(unrun).collect::<Vec<_>>();
+    let shared = notes.iter().skip(1).fold(
+        notes.first().cloned().unwrap_or_default(),
+        |shared, next| shared.intersection(next).cloned().collect(),
+    );
+    let raw = manifests
+        .iter()
+        .map(|manifest| manifest.map(<[u8]>::to_vec));
+    if notes.iter().all(|note| *note == shared) {
+        return (raw.collect(), shared);
+    }
+    let settled = raw
+        .zip(parsed)
+        .map(|(raw, parsed)| match parsed {
+            Some(mut manifest) => {
+                if let Some(limitations) = manifest
+                    .get_mut("limitations")
+                    .and_then(Value::as_array_mut)
+                {
+                    limitations.retain(|limitation| {
+                        limitation["id"]
+                            .as_str()
+                            .is_none_or(|id| !id.starts_with(UNRUN_WORKER) || shared.contains(id))
+                    });
+                    // As a run with none writes it: no list at all.
+                    if limitations.is_empty() {
+                        manifest
+                            .as_object_mut()
+                            .map(|fields| fields.remove("limitations"));
+                    }
+                }
+                serde_json::to_vec(&manifest).ok()
+            }
+            None => raw,
+        })
+        .collect();
+    (settled, shared)
+}
+
 /// The language a run measured, from its frontend declaration.
 fn measured_language(run: &StoredRun) -> Option<String> {
     let entries = read_archive(&run.evidence_path).ok()?;
@@ -479,11 +541,18 @@ pub fn merge_coverage_runs(
         // Tests and their configuration may differ; what that takes is
         // looked at file by file.
         // So may the source, where what changed is outside what is measured.
+        // A different number of source files is a different source, even
+        // where the digest says otherwise.
+        let mut dimensions = dimensions;
+        if input.metadata.integrity.fingerprint.source_files
+            != first.metadata.integrity.fingerprint.source_files
+            && !dimensions.contains(&"source")
+        {
+            dimensions.push("source files");
+        }
         if dimensions
             .iter()
             .any(|dimension| !matches!(*dimension, "tests" | "configuration" | "source"))
-            || input.metadata.integrity.fingerprint.source_files
-                != first.metadata.integrity.fingerprint.source_files
         {
             return Err(format!(
                 "Cannot merge incompatible run {}: differing domains: {}",
@@ -501,15 +570,18 @@ pub fn merge_coverage_runs(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let grown = judged_against_latest(root, &inputs, &archives, &inventory.runs, allow_changed)?;
-    let manifests = archives
-        .iter()
-        .map(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.path == "manifest.json")
-                .map(|entry| entry.contents.as_slice())
-        })
-        .collect::<Vec<_>>();
+    let (manifests, unrun_workers) = settle_unrun_workers(
+        &archives
+            .iter()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry.path == "manifest.json")
+                    .map(|entry| entry.contents.as_slice())
+            })
+            .collect::<Vec<_>>(),
+    );
+    let manifests = manifests.iter().map(Option::as_deref).collect::<Vec<_>>();
     let Some(mut manifest) = manifests[0] else {
         return Err("Cannot merge runs with different coverage denominators".into());
     };
@@ -558,8 +630,14 @@ pub fn merge_coverage_runs(
                 .iter()
                 .find(|entry| entry.path == "frontend.json")
                 .ok_or_else(|| "Cannot merge runs without a frontend declaration".to_owned())?;
-            serde_json::from_slice::<FrontendRunDeclaration>(&contents.contents)
-                .map_err(|error| format!("Cannot merge invalid frontend declaration: {error}"))
+            let mut declaration = serde_json::from_slice::<FrontendRunDeclaration>(
+                &contents.contents,
+            )
+            .map_err(|error| format!("Cannot merge invalid frontend declaration: {error}"))?;
+            declaration
+                .structural_limitations
+                .retain(|id| !id.starts_with(UNRUN_WORKER) || unrun_workers.contains(id));
+            Ok::<_, String>(declaration)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut merged_declaration = declarations[0].clone();
@@ -850,6 +928,567 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Rewrites one entry of a stored run's evidence (None removes it) and
+    /// keeps its metadata in step with the archive.
+    fn rewrite_entry(root: &Path, id: &str, path: &str, contents: Option<Vec<u8>>) {
+        let directory = root.join(".supercov/runs").join(id);
+        let mut entries = read_archive(&directory.join("evidence.raw.gz")).unwrap();
+        entries.retain(|entry| entry.path != path);
+        if let Some(contents) = contents {
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: path.into(),
+                contents,
+            });
+        }
+        let archive =
+            crate::evidence_archive::write_archive(entries, &directory.join("evidence.raw.gz"))
+                .unwrap();
+        edit_metadata(root, id, |metadata| {
+            metadata.raw_evidence.files = archive.files;
+            metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+            metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        });
+    }
+
+    fn edit_metadata(root: &Path, id: &str, edit: impl FnOnce(&mut RunMetadata)) {
+        let path = root.join(".supercov/runs").join(id).join("run.json");
+        let mut metadata: RunMetadata = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        edit(&mut metadata);
+        fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    }
+
+    /// Gives a stored run a record of the files it was measured with.
+    fn record_files(root: &Path, id: &str, files: &[(&str, &str)]) {
+        let manifest = crate::source_manifest::InputManifest {
+            schema_version: crate::source_manifest::MANIFEST_SCHEMA,
+            language: "javascript".into(),
+            files: files
+                .iter()
+                .map(|(file, text)| {
+                    (
+                        file.to_string(),
+                        crate::source_manifest::FileFingerprint::of(text),
+                    )
+                })
+                .collect(),
+        };
+        rewrite_entry(
+            root,
+            id,
+            crate::source_capture::ARCHIVE_PATH,
+            Some(serde_json::to_vec(&manifest).unwrap()),
+        );
+    }
+
+    /// Run-a recorded a file run-b did not, which the checkout holds as
+    /// run-a recorded it: run-b is the run the merge grows into.
+    fn grown_from_a_recorded_file(root: &Path) {
+        record_files(root, "run-a", &[("test/data.json", "same")]);
+        record_files(root, "run-b", &[]);
+        fs::create_dir_all(root.join("test")).unwrap();
+        fs::write(root.join("test/data.json"), "same").unwrap();
+    }
+
+    fn declaration_with(edit: impl FnOnce(&mut Value)) -> Option<Vec<u8>> {
+        let root = temporary();
+        create_analyzable_test_run(&root, "source");
+        let entries = read_archive(&root.join(".supercov/runs/source/evidence.raw.gz")).unwrap();
+        let mut value: Value = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|entry| entry.path == "frontend.json")
+                .unwrap()
+                .contents,
+        )
+        .unwrap();
+        edit(&mut value);
+        Some(serde_json::to_vec(&value).unwrap())
+    }
+
+    /// Gives a stored run's manifest and frontend declaration these
+    /// limitations, by id; an empty id is a limitation with none.
+    fn limit(root: &Path, id: &str, limitations: &[&str]) {
+        let entries =
+            read_archive(&root.join(".supercov/runs").join(id).join("evidence.raw.gz")).unwrap();
+        let read = |path: &str| -> Value {
+            serde_json::from_slice(
+                &entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .unwrap()
+                    .contents,
+            )
+            .unwrap()
+        };
+        let mut manifest = read("manifest.json");
+        manifest["limitations"] = limitations
+            .iter()
+            .map(|limitation| match *limitation {
+                "" => serde_json::json!({"kind": "source-scope"}),
+                limitation => serde_json::json!({"id": limitation, "kind": "source-scope"}),
+            })
+            .collect();
+        let mut declaration = read("frontend.json");
+        declaration["structuralLimitations"] = limitations
+            .iter()
+            .filter(|limitation| !limitation.is_empty())
+            .map(|limitation| Value::from(*limitation))
+            .collect();
+        rewrite_entry(
+            root,
+            id,
+            "manifest.json",
+            Some(serde_json::to_vec(&manifest).unwrap()),
+        );
+        rewrite_entry(
+            root,
+            id,
+            "frontend.json",
+            Some(serde_json::to_vec(&declaration).unwrap()),
+        );
+    }
+
+    /// Runs whose tests started different Rust Workers measured the same
+    /// files: they merge, and a Worker stays noted as unrun only where no run
+    /// started it.
+    #[test]
+    fn runs_that_started_different_workers_merge() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        let unrun = |file: &str| format!("{UNRUN_WORKER}{file}");
+        let (plane, runners, shared) = (unrun("plane.rs"), unrun("runners.rs"), unrun("shared.rs"));
+        limit(&root, "run-a", &[&runners, &shared, "boundary", ""]);
+        limit(&root, "run-b", &[&plane, &shared, "boundary", ""]);
+        merge_coverage_runs(
+            &root,
+            &["run-a".into(), "run-b".into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+        .unwrap();
+        let archive = read_archive(&root.join(".supercov/runs/merged/evidence.raw.gz")).unwrap();
+        let read = |path: &str| -> Value {
+            serde_json::from_slice(
+                &archive
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .unwrap()
+                    .contents,
+            )
+            .unwrap()
+        };
+        let ids = read("manifest.json")["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|limitation| limitation["id"].as_str().unwrap_or("").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [shared.as_str(), "boundary", ""]);
+        assert_eq!(
+            read("frontend.json")["structuralLimitations"],
+            serde_json::json!([shared, "boundary"])
+        );
+
+        // Any other difference in what is measured still refuses.
+        limit(&root, "run-b", &[&plane, &shared, ""]);
+        assert_eq!(
+            merge_coverage_runs(
+                &root,
+                &["run-a".into(), "run-b".into()],
+                "refused",
+                "2026-01-01T00:00:00.000Z",
+                false,
+            )
+            .unwrap_err(),
+            "Cannot merge runs with different coverage denominators"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A manifest that cannot be read, or has no limitations, is left for the
+    /// comparison to judge; notes all runs share are kept as they were.
+    #[test]
+    fn unrun_worker_notes_settle_around_unreadable_manifests() {
+        let noted = format!(r#"{{"limitations":[{{"id":"{UNRUN_WORKER}a.rs"}}]}}"#);
+        let (settled, shared) = settle_unrun_workers(&[
+            Some(noted.as_bytes()),
+            Some(br#"{"points":[]}"#),
+            None,
+            Some(b"not json"),
+        ]);
+        assert!(shared.is_empty());
+        assert_eq!(
+            settled,
+            [
+                Some(b"{}".to_vec()),
+                Some(br#"{"points":[]}"#.to_vec()),
+                None,
+                Some(b"not json".to_vec()),
+            ]
+        );
+        let (settled, shared) = settle_unrun_workers(&[Some(noted.as_bytes()); 2]);
+        assert_eq!(shared, BTreeSet::from([format!("{UNRUN_WORKER}a.rs")]));
+        assert_eq!(
+            settled,
+            [Some(noted.clone().into_bytes()), Some(noted.into_bytes())]
+        );
+    }
+
+    /// Every way two runs can fail to merge is said by name, and a second
+    /// runner, unlike a changed one, is simply added.
+    #[test]
+    fn each_refusal_to_merge_says_why() {
+        type Setup = Box<dyn Fn(&Path)>;
+        let version = env!("CARGO_PKG_VERSION");
+        let cases: Vec<(&str, Setup, String)> = vec![
+            (
+                "another instrumenter, release unknown",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.instrumenter_version = "x".into())
+                }),
+                format!(
+                    "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0, which instruments differently from Supercov {version}. Measure it again to merge it."
+                ),
+            ),
+            (
+                "another build of this release",
+                Box::new(move |root| {
+                    for id in ["run-a", "run-b"] {
+                        edit_metadata(root, id, |m| m.recorded_by = Some(version.into()));
+                    }
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.instrumenter = "9".repeat(64)
+                    });
+                }),
+                format!(
+                    "Cannot merge run run-b: it was recorded by another build of Supercov {version}, which instruments differently from this one. Measure it again to merge it."
+                ),
+            ),
+            (
+                "another release",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.recorded_by = Some("0.0.1".into());
+                        m.integrity.fingerprint.instrumenter = "9".repeat(64);
+                    })
+                }),
+                "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0".into(),
+            ),
+            (
+                "another language",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.instrumenter_version = "x".into());
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["language"] = "python".into()),
+                    );
+                }),
+                "Cannot merge run run-b: it measured python, and run run-a measured javascript; runs of different languages are not merged".into(),
+            ),
+            (
+                "another instrumenter, the first run's language unread",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.instrumenter_version = "x".into());
+                    rewrite_entry(root, "run-a", "frontend.json", Some(b"[]".to_vec()));
+                }),
+                "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0".into(),
+            ),
+            (
+                "the same domains run another way",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.combined = "4".repeat(64)
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: integrity fingerprint"
+                    .into(),
+            ),
+            (
+                "dependencies",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.dependencies = "9".repeat(64)
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: dependencies".into(),
+            ),
+            (
+                "source file count",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| m.integrity.fingerprint.source_files = 2)
+                }),
+                "Cannot merge incompatible run run-b: differing domains: source files".into(),
+            ),
+            (
+                "denominator",
+                Box::new(|root| {
+                    rewrite_entry(root, "run-b", "manifest.json", Some(b"{}".to_vec()))
+                }),
+                "Cannot merge runs with different coverage denominators".into(),
+            ),
+            (
+                "configuration, the files unrecorded",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.configuration = "9".repeat(64)
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: configuration".into(),
+            ),
+            (
+                "source and its file count, the files unrecorded",
+                Box::new(|root| {
+                    edit_metadata(root, "run-b", |m| {
+                        m.integrity.fingerprint.source = "9".repeat(64);
+                        m.integrity.fingerprint.source_files = 2;
+                    })
+                }),
+                "Cannot merge incompatible run run-b: differing domains: source".into(),
+            ),
+            (
+                "a file recorded once and gone from the checkout",
+                Box::new(|root| {
+                    record_files(root, "run-a", &[("mock/data.json", "{}")]);
+                    record_files(root, "run-b", &[]);
+                }),
+                "Cannot merge run run-a with run run-b: mock/data.json, which it measured, is gone. Measure it again.".into(),
+            ),
+            (
+                "two served files, their test not measured again",
+                Box::new(|root| {
+                    record_files(root, "run-a", &[("mocks/a.js", "1"), ("mocks/b.js", "1")]);
+                    record_files(root, "run-b", &[("mocks/a.js", "2"), ("mocks/b.js", "2")]);
+                    rewrite_entry(
+                        root,
+                        "run-a",
+                        crate::support_reach::ARCHIVE_PATH,
+                        Some(
+                            serde_json::to_vec(&serde_json::json!({"files": {
+                                "mocks/a.js": ["t9"],
+                                "mocks/b.js": ["t9"],
+                            }}))
+                            .unwrap(),
+                        ),
+                    );
+                    let entries = read_archive(&root.join(".supercov/runs/run-a/evidence.raw.gz"))
+                        .unwrap();
+                    let mut manifest: Value = serde_json::from_slice(
+                        &entries
+                            .iter()
+                            .find(|entry| entry.path == "manifest.json")
+                            .unwrap()
+                            .contents,
+                    )
+                    .unwrap();
+                    manifest["scope"] = serde_json::json!({"entries": [
+                        {"file": "src/app.js", "status": "included"}
+                    ]});
+                    rewrite_entry(
+                        root,
+                        "run-a",
+                        "manifest.json",
+                        Some(serde_json::to_vec(&manifest).unwrap()),
+                    );
+                }),
+                "Cannot merge run run-a with run run-b: mocks/a.js; mocks/b.js changed, and 1 of its tests reached them through a server that served them and were not measured again: t9.".into(),
+            ),
+            (
+                "grown, the first run's denominator unreadable",
+                Box::new(|root| {
+                    grown_from_a_recorded_file(root);
+                    rewrite_entry(root, "run-a", "manifest.json", Some(b"[]".to_vec()));
+                }),
+                "Cannot merge runs with different coverage denominators".into(),
+            ),
+            (
+                "grown, the later run's denominator another",
+                Box::new(|root| {
+                    grown_from_a_recorded_file(root);
+                    rewrite_entry(root, "run-b", "manifest.json", Some(b"{}".to_vec()));
+                }),
+                "Cannot merge runs with different coverage denominators".into(),
+            ),
+            (
+                "model",
+                Box::new(|root| {
+                    rewrite_entry(root, "run-b", "coverage-model.json", Some(b"{}".to_vec()))
+                }),
+                "Cannot merge runs with different coverage models".into(),
+            ),
+            (
+                "invalid declaration",
+                Box::new(|root| {
+                    rewrite_entry(root, "run-b", "frontend.json", Some(b"[]".to_vec()))
+                }),
+                "Cannot merge invalid frontend declaration".into(),
+            ),
+            (
+                "protocol version",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["protocolVersion"] = 3.into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "frontend id",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["frontendId"] = "other".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "declared language",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["language"] = "typescript".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "structural source",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["structuralSource"] = "mixed".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "structural limitations",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["structuralLimitations"] = serde_json::json!(["x"])),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "coverage schema",
+                Box::new(|root| edit_metadata(root, "run-b", |m| m.integrity.schema_version = 3)),
+                "Cannot merge run run-a: it was recorded by a Supercov older than 4.7.0".into(),
+            ),
+            (
+                "frontend version",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| v["frontendVersion"] = "fixture-v2".into()),
+                    )
+                }),
+                "Cannot merge runs with different frontend declarations".into(),
+            ),
+            (
+                "runner",
+                Box::new(|root| {
+                    rewrite_entry(
+                        root,
+                        "run-b",
+                        "frontend.json",
+                        declaration_with(|v| {
+                            v["runners"][0]["executionModel"] = "process-per-test".into()
+                        }),
+                    )
+                }),
+                "Cannot merge incompatible declarations for runner node:test".into(),
+            ),
+        ];
+        for (label, setup, expected) in cases {
+            let root = temporary();
+            create_analyzable_test_run(&root, "run-a");
+            create_analyzable_test_run(&root, "run-b");
+            setup(&root);
+            let error = merge_coverage_runs(
+                &root,
+                &["run-a".into(), "run-b".into()],
+                "merged",
+                "2026-01-01T00:00:00.000Z",
+                false,
+            )
+            .unwrap_err();
+            assert!(error.starts_with(&expected), "{label}: {error}");
+        }
+
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        let merge = |ids: &[&str]| {
+            merge_coverage_runs(
+                &root,
+                &ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+                "merged",
+                "2026-01-01T00:00:00.000Z",
+                false,
+            )
+        };
+        assert_eq!(
+            merge(&["run-a"]).unwrap_err(),
+            "Usage: supercov merge <run-id> <run-id> [...]"
+        );
+        assert_eq!(
+            merge(&["run-a", "absent"]).unwrap_err(),
+            "Cannot merge coverage run absent: no such local run"
+        );
+        create_analyzable_test_run(&root, "run-b");
+        rewrite_entry(
+            &root,
+            "run-b",
+            "frontend.json",
+            declaration_with(|v| {
+                let mut second = v["runners"][0].clone();
+                second["runner"] = "vitest".into();
+                v["runners"].as_array_mut().unwrap().push(second);
+            }),
+        );
+        // One run whose tests failed makes the merged run's tests fail.
+        edit_metadata(&root, "run-b", |m| m.test_exit_code = Some(1));
+        merge(&["run-a", "run-b"]).unwrap();
+        let merged: RunMetadata =
+            serde_json::from_slice(&fs::read(root.join(".supercov/runs/merged/run.json")).unwrap())
+                .unwrap();
+        assert_eq!(merged.test_exit_code, Some(1));
+        let entries = read_archive(&root.join(".supercov/runs/merged/evidence.raw.gz")).unwrap();
+        let declaration: Value = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|entry| entry.path == "frontend.json")
+                .unwrap()
+                .contents,
+        )
+        .unwrap();
+        let runners = declaration["runners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|runner| runner["runner"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(runners, ["node:test", "vitest"]);
+    }
+
     #[test]
     fn rewrites_nested_scope_run_ids_and_rejects_non_json_records() {
         let rewritten = rewritten_contents(
@@ -883,5 +1522,65 @@ mod tests {
             rewritten_contents(only, "merged", Some(&superseded)).unwrap(),
             None
         );
+    }
+
+    /// A merged entry keeps its records under the merged run's id, drops
+    /// those of tests measured again elsewhere, and is gone when nothing is
+    /// left of it; anything but JSON lines is refused.
+    #[test]
+    fn merged_records_take_the_new_run_and_drop_superseded_tests() {
+        let superseded = ["t2".to_owned()].into_iter().collect::<BTreeSet<_>>();
+        let rewrite = |text: &str, superseded: Option<&BTreeSet<String>>| {
+            rewritten_contents(text.as_bytes(), "merged", superseded)
+                .map(|kept| kept.map(|bytes| String::from_utf8(bytes).unwrap()))
+        };
+        assert_eq!(
+            rewrite(
+                "{\"testId\":\"t1\",\"scope\":{\"runId\":\"a\"}}\n{\"testId\":\"t2\"}\n{\"scope\":{\"testId\":\"t2\"}}\n{\"scope\":\"text\"}\n",
+                Some(&superseded)
+            ),
+            Ok(Some(
+                "{\"testId\":\"t1\",\"scope\":{\"runId\":\"merged\"}}\n{\"scope\":\"text\"}\n"
+                    .to_owned()
+            ))
+        );
+        // Every record superseded: nothing of the entry is left.
+        assert_eq!(
+            rewrite("{\"testId\":\"t2\"}\n", Some(&superseded)),
+            Ok(None)
+        );
+        // An entry with no records stays, empty.
+        assert_eq!(rewrite("", None), Ok(Some(String::new())));
+        // No newline at the end: none added.
+        assert_eq!(
+            rewrite("[{\"scope\":{}}]", None),
+            Ok(Some("[{\"scope\":{\"runId\":\"merged\"}}]".to_owned()))
+        );
+        assert!(
+            rewrite("not json\n", None)
+                .unwrap_err()
+                .contains("malformed")
+        );
+        assert!(
+            rewritten_contents(&[0xff, 0xfe], "merged", None)
+                .unwrap_err()
+                .contains("non-UTF-8")
+        );
+        let entry = |contents: &[u8]| EvidenceArchiveEntry {
+            path: "e.jsonl".into(),
+            contents: contents.to_vec(),
+        };
+        let tests = measured_tests(&[
+            entry(b"{\"testId\":\"t1\",\"test\":\"adds\"}\n{\"testId\":\"t3\"}\nnot \"testId\" json\nplain\n"),
+            entry(&[0xff, 0xfe]),
+        ]);
+        assert_eq!(
+            tests,
+            [("t1".to_owned(), "adds".to_owned())].into_iter().collect()
+        );
+        let items = |n: usize| (1..=n).map(|i| format!("i{i}")).collect::<Vec<_>>();
+        assert_eq!(listed(&items(0)), "");
+        assert_eq!(listed(&items(3)), "i1; i2; i3");
+        assert_eq!(listed(&items(5)), "i1; i2; i3; and 2 more");
     }
 }

@@ -491,15 +491,21 @@ def test_adds_prices():
 def test_discounts_big_carts(big_cart):
     assert total(big_cart) == 108
 `);
-  write("tests/test_format.py", `from src.format import label
+  // A class of tests, one decorated, with a comment inside: the shapes the
+  // excerpt of what a test ran is cut around.
+  write("tests/test_format.py", `import pytest
+
+from src.format import label
 
 
-def test_upper_cases_a_name():
-    assert label("  ab ") == "AB"
+class TestLabel:
+    # Names are trimmed before they are upper-cased.
+    def test_upper_cases_a_name(self):
+        assert label("  ab ") == "AB"
 
-
-def test_names_a_blank_label():
-    assert label("  ") == "unknown"
+    @pytest.mark.filterwarnings("ignore")
+    def test_names_a_blank_label(self):
+        assert label("  ") == "unknown"
 `);
 }
 

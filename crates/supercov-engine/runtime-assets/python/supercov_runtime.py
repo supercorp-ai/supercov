@@ -503,7 +503,6 @@ class Runtime:
                 "run": self.run_id,
                 "pid": pid,
                 "worker": self.worker,
-                "frontend": "probes",
                 "python": sys.version.split()[0],
                 "executable": sys.executable,
                 "argv": sys.argv,

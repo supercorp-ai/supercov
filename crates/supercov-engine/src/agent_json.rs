@@ -195,4 +195,21 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn a_failure_too_large_to_send_is_cut_to_its_first_thousand_characters() {
+        let failed = failure(
+            Some("coverage.file"),
+            &AgentError {
+                code: ErrorCode::SourceNotFound,
+                message: "x".repeat(AGENT_JSON_MAX_BYTES),
+                retryable: false,
+                details: Some(json!({"selector": "missing.ts"})),
+            },
+        );
+        assert!(failed.len() < 2_000, "{}", failed.len());
+        let envelope: Value = serde_json::from_str(&failed).unwrap();
+        assert_eq!(envelope["error"]["message"], "x".repeat(1_000));
+        assert!(envelope["error"].get("details").is_none());
+    }
 }

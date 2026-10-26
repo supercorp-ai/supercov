@@ -195,7 +195,9 @@ fn a_measured_suite_reads_back_through_every_query() {
         "{assertions}"
     );
 
-    let impossible = project.supercov(&["runs", "latest", "minimize"]).exits(2);
+    let impossible = project
+        .supercov(&["runs", "latest", "minimize", "--target", "100"])
+        .exits(2);
     assert!(
         impossible.contains("target 100% is impossible"),
         "{impossible}"
@@ -549,6 +551,39 @@ fn suites_started_together_from_one_command_are_one_run_with_their_kinds() {
     contains_all(&kinds, &["unit", "integration"]);
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(&summary, &["Total       4", "Passed      4"]);
+    // A filter narrows the grouping to the tests it picks.
+    let counted = |args: &[&str], field: &str| -> Vec<(String, u64)> {
+        let mut all = vec!["runs", "latest"];
+        all.extend_from_slice(args);
+        all.push("--json");
+        project.supercov(&all).json()["data"][field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                let name = entry["kind"].as_str().or(entry["runner"].as_str()).unwrap();
+                (name.to_owned(), entry["tests"].as_u64().unwrap())
+            })
+            .collect()
+    };
+    assert_eq!(
+        counted(&["runners", "--kind", "integration"], "runners"),
+        [("node:test".to_owned(), 1)]
+    );
+    assert_eq!(
+        counted(&["runners", "--kind", "unit"], "runners"),
+        [("node:test".to_owned(), 3)]
+    );
+    assert_eq!(
+        counted(&["kinds", "--kind", "unit"], "kinds"),
+        [("unit".to_owned(), 3)]
+    );
+    let mut by_runner = counted(&["kinds", "--runner", "node:test"], "kinds");
+    by_runner.sort();
+    assert_eq!(
+        by_runner,
+        [("integration".to_owned(), 1), ("unit".to_owned(), 3)]
+    );
 }
 
 #[test]
@@ -1635,6 +1670,67 @@ fn the_report_compares_two_runs_and_names_a_mistake() {
         ])
         .exits(2);
     assert!(missing.contains("run_0000000000000009"), "{missing}");
+}
+
+/// A bug in Supercov's instrumenter, made to happen on a file
+/// (`SUPERCOV_TEST_FAULT`), costs that file its measurement and nothing more:
+/// it runs as written, the suite passes, and the run names the file and the
+/// error to report.
+#[test]
+fn an_internal_error_instrumenting_a_file_leaves_it_unmeasured_and_said() {
+    let project = Project::cart("instrumenter-bug");
+    let fault = [("SUPERCOV_TEST_FAULT", "instrument-panic")];
+    let measured = project.supercov_with(&["--", "node", "--test"], &fault);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stdout().contains("pass 3"),
+        "{}",
+        measured.stdout()
+    );
+    assert!(
+        measured.stderr().contains("test fault at instrument-panic"),
+        "{}",
+        measured.stderr()
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:1"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "NOT MEASURED",
+            "Supercov hit an internal error: injected fault at instrument-panic instrumenting this file, a bug to report",
+        ],
+    );
+
+    // The same in Rust: the file compiles as written.
+    let project = Project::empty("instrumenter-bug-rust");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn half(x: i32) -> i32 { x / 2 }\n#[cfg(test)]\nmod tests { #[test] fn h() { assert_eq!(super::half(4), 2); } }\n",
+    );
+    project.git(&["init", "-q"]);
+    let measured = project.supercov_with(&["--", "cargo", "test"], &fault);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stderr().contains("test fault at instrument-panic"),
+        "{}",
+        measured.stderr()
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/lib.rs:1"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "NOT MEASURED",
+            "Supercov hit an internal error: injected fault at instrument-panic instrumenting this file, a bug to report",
+        ],
+    );
 }
 
 #[test]
@@ -4330,7 +4426,7 @@ fn a_comparison_says_which_files_the_difference_is_in() {
     contains_all(
         &text,
         &[
-            "in 2 files, most lost first:\n  src/panel.js: lost 6 lines, 1 branches\n  src/fee.js: lost 1 lines, 1 branches; gained 1 lines, 1 branches\n",
+            "in 2 files, most lost first:\n  src/panel.js: lost 6 lines, 1 branch\n  src/fee.js: lost 1 line, 1 branch; gained 1 line, 1 branch\n",
             "- line src/panel.js:2",
         ],
     );
@@ -4387,8 +4483,8 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
     contains_all(
         &same,
         &[
-            "gained: 1 lines, 1 branches",
-            "lost: 1 lines, 1 branches",
+            "gained: 1 line, 1 branch,",
+            "lost: 1 line, 1 branch,",
             "Both runs measured the same source with the same test files",
             "Run again before acting on a loss.",
         ],
@@ -4415,8 +4511,8 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
     contains_all(
         &only,
         &[
-            "gained: 0 lines, 0 branches",
-            "lost: 1 lines, 1 branches",
+            "gained: 0 lines, 0 branches,",
+            "lost: 1 line, 1 branch,",
             "- line src/fee.js:3",
             "- branch src/fee.js:2 true",
             "showing 1-1 of 1 per category",
@@ -4447,7 +4543,7 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
     );
     let changed = run("large");
     let source = project.supercov(&["diff", &added, &changed]).succeeds();
-    assert!(source.contains("gained: 1 lines"), "{source}");
+    assert!(source.contains("gained: 1 line,"), "{source}");
     assert!(!source.contains("Both runs measured"), "{source}");
     assert_eq!(
         project
@@ -6418,6 +6514,20 @@ fn a_workspace_package_runs_with_its_own_node_modules_and_tools() {
     );
 }
 
+/// `from` and everything under it, copied to `to`.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 /// Homebrew's Go is not on a non-login shell's PATH on macOS.
 fn go() -> Option<&'static str> {
     ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"]
@@ -7030,4 +7140,5104 @@ fn a_limit_of_zero_lists_every_entry_as_the_other_commands_do() {
         .supercov(&["runs", &run, "files", "--limit", "x"])
         .exits(2);
     assert!(refused.contains("0 for all of them"), "{refused}");
+}
+
+#[test]
+fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
+    let project = Project::cart("import-arguments");
+    project.measure(&[]);
+    project.write("lcov.info", "SF:src/cart.js\nDA:1,1\nend_of_record\n");
+
+    contains_all(
+        &project.supercov(&["import", "--help"]).succeeds(),
+        &["Usage: supercov import <tracefile>"],
+    );
+    contains_all(
+        &project.supercov(&["docs", "-h"]).succeeds(),
+        &["Usage: supercov docs [topic]"],
+    );
+    for (arguments, said) in [
+        (
+            &["import", "lcov.info", "--test"][..],
+            "--test needs a value",
+        ),
+        (&["import", "--bogus"][..], "unknown option --bogus"),
+        (
+            &["import", "lcov.info", "other.info", "--test", "x"][..],
+            "unexpected argument other.info",
+        ),
+        (
+            &["import", "lcov.info"][..],
+            "--test <name> or --background",
+        ),
+        (&["import", "--background"][..], "name the evidence file"),
+        (
+            &["import", "lcov.info", "--test=  "][..],
+            "the imported test needs a name",
+        ),
+        (
+            &["import", "lcov.info", "--test=device", "--status=flaky"][..],
+            "--status is passed or failed, not flaky",
+        ),
+    ] {
+        let stderr = project.supercov(arguments).exits(2);
+        assert!(stderr.contains(said), "{arguments:?}: {stderr}");
+    }
+    // Every value given inline, as `--name=value`.
+    project
+        .supercov(&["import", "lcov.info", "--test=device", "--status=passed"])
+        .succeeds();
+}
+
+#[test]
+fn a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query() {
+    let project = Project::cart("filter-matches-nothing");
+    project.measure(&[]);
+    for query in ["summary", "scope", "gaps", "files", "kinds", "runners"] {
+        for (flag, value, said) in [
+            ("--kind", "e2e", "No tests match kind=e2e"),
+            ("--runner", "jest", "No tests match runner=jest"),
+        ] {
+            let stderr = project
+                .supercov(&["runs", "latest", query, flag, value])
+                .exits(2);
+            assert!(stderr.contains(said), "{query} {flag} {value}: {stderr}");
+            assert!(
+                !stderr.contains("invalid coverage index"),
+                "{query}: {stderr}"
+            );
+        }
+    }
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "summary", "--runner", "node:test"])
+            .succeeds(),
+        &["(runner node:test)"],
+    );
+}
+
+#[test]
+fn a_line_that_is_not_in_the_file_is_refused_not_read_as_unmeasured() {
+    let project = Project::cart("line-bounds");
+    project.measure(&[]);
+    let lines = project.read("src/cart.js").lines().count();
+    let past = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:9999"])
+        .exits(2);
+    assert!(
+        past.contains(&format!(
+            "src/cart.js has {lines} lines; there is no line 9999"
+        )),
+        "{past}"
+    );
+    let zero = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:0"])
+        .exits(2);
+    assert!(zero.contains("with lines counted from 1"), "{zero}");
+    // The last line is still a line.
+    project
+        .supercov(&["runs", "latest", "line", &format!("src/cart.js:{lines}")])
+        .succeeds();
+    // Several lines answer what they can, as before.
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:1",
+            "src/cart.js:9999",
+        ])
+        .succeeds();
+}
+
+#[test]
+fn diff_refuses_a_third_run() {
+    let project = Project::cart("diff-extra");
+    project.measure(&[]);
+    let id = project.latest();
+    let said = project.supercov(&["diff", &id, &id, "extra"]).exits(2);
+    assert!(said.contains("unexpected argument extra"), "{said}");
+    project.supercov(&["diff", &id, &id]).succeeds();
+}
+
+#[test]
+fn a_command_that_cannot_start_exits_as_a_shell_would() {
+    let project = Project::cart("cannot-start");
+    let missing = project.supercov(&["--", "no-such-program-xyz"]).exits(127);
+    assert!(
+        missing.contains("could not spawn no-such-program-xyz"),
+        "{missing}"
+    );
+    #[cfg(unix)]
+    {
+        project.write("not-executable.sh", "#!/bin/sh\nexit 0\n");
+        let denied = project.supercov(&["--", "./not-executable.sh"]).exits(126);
+        assert!(denied.contains("could not spawn"), "{denied}");
+    }
+}
+
+#[test]
+fn a_page_past_the_end_says_so() {
+    let project = Project::cart("page-past-end");
+    project.measure(&[]);
+    let gaps = project
+        .supercov(&["runs", "latest", "gaps", "--offset", "999999"])
+        .succeeds();
+    contains_all(
+        &gaps,
+        &["showing none of 1: --offset 999999 is past the end"],
+    );
+    contains_all(
+        &project.supercov(&["runs", "latest", "gaps"]).succeeds(),
+        &["showing 1-1 of 1"],
+    );
+}
+
+#[test]
+fn a_file_the_scope_left_out_says_why_rather_than_not_found() {
+    let project = Project::cart("scope-reason");
+    project.measure(&[]);
+    for args in [
+        &["runs", "latest", "file", "test/cart.test.js"][..],
+        &["runs", "latest", "line", "test/cart.test.js:3"][..],
+    ] {
+        let said = project.supercov(args).exits(2);
+        assert!(
+            said.contains("test/cart.test.js is outside the run's scope: test or fixture source"),
+            "{args:?}: {said}"
+        );
+    }
+    // Among several lines, that location says why and the others answer.
+    let several = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:1",
+            "test/cart.test.js:3",
+        ])
+        .succeeds();
+    assert!(several.contains("outside the run's scope"), "{several}");
+    let missing = project
+        .supercov(&["runs", "latest", "file", "src/none.js"])
+        .exits(2);
+    assert!(
+        missing.contains("Source file not found: src/none.js"),
+        "{missing}"
+    );
+}
+
+#[test]
+fn every_query_flag_is_read_and_a_wrong_one_named() {
+    let project = Project::cart("query-flags");
+    project.measure(&[]);
+    for (args, said) in [
+        (
+            &["runs", "latest", "gaps", "--offset", "nan"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--offset", "1.5"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--offset", "-1"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--offset", "1e20"][..],
+            "--offset must be a non-negative integer",
+        ),
+        (
+            &["runs", "latest", "gaps", "--filter", "bogus"][..],
+            "--filter must be all, passed, or failed",
+        ),
+        (
+            &["runs", "latest", "minimize", "--target", "inf"][..],
+            "--target must be between 0 and 100",
+        ),
+        (
+            &["runs", "latest", "minimize", "--metric", "nope"][..],
+            "--metric must be all, lines",
+        ),
+        (
+            &["runs", "latest", "files", "--sort", "missing"][..],
+            "--sort requires --group decision",
+        ),
+        (
+            &["runs", "latest", "files", "--sort", "bogus"][..],
+            "--sort must be location or missing",
+        ),
+        (
+            &["runs", "latest", "gaps", "--depth", "2"][..],
+            "--depth requires --group dir",
+        ),
+        (
+            &[
+                "runs",
+                "latest",
+                "file",
+                "src/cart.js",
+                "--group",
+                "decision",
+                "--metric",
+                "lines",
+            ][..],
+            "--group decision",
+        ),
+        (
+            &["runs", "latest", "line"][..],
+            "Usage: supercov runs <run-id> line",
+        ),
+        (
+            &["runs", "latest", "test"][..],
+            "Usage: supercov runs <run-id> test",
+        ),
+    ] {
+        let stderr = project.supercov(args).exits(2);
+        assert!(stderr.contains(said), "{args:?}: {stderr}");
+    }
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "gaps", "--filter", "passed"])
+            .succeeds(),
+        &["passed attempts only"],
+    );
+    for (metric, target, said) in [
+        ("statements", "50", "for 50% statements"),
+        ("functions", "50", "for 50% functions"),
+        ("branches", "50", "for 50% branches"),
+        ("mcdc", "10", "for 10% mcdc"),
+    ] {
+        contains_all(
+            &project
+                .supercov(&[
+                    "runs", "latest", "minimize", "--metric", metric, "--target", target,
+                ])
+                .succeeds(),
+            &[said],
+        );
+    }
+    project
+        .supercov(&["runs", "latest", "files", "--sort", "location"])
+        .succeeds();
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--sort",
+            "missing",
+        ])
+        .succeeds();
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--metric",
+            "mcdc",
+        ])
+        .succeeds();
+}
+
+#[test]
+fn a_diff_keeps_only_what_the_tests_a_filter_picks_covered() {
+    let project = Project::cart("diff-filters");
+    project.write(
+        "test/describe.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"describe lists names\", () => {\n  assert.equal(describe([{ name: \"a\" }]), \"a\");\n});\n",
+    );
+    project.commit("an integration test");
+    project
+        .supercov(&[
+            "--",
+            "sh",
+            "-c",
+            "SUPERCOV_TEST_KIND=unit node --test test/cart.test.js",
+        ])
+        .succeeds();
+    let unit_only = project.latest();
+    project
+        .supercov(&[
+            "--",
+            "sh",
+            "-c",
+            "SUPERCOV_TEST_KIND=unit node --test test/cart.test.js && SUPERCOV_TEST_KIND=integration node --test test/describe.test.js",
+        ])
+        .succeeds();
+    let both = project.latest();
+    let gained = |filter: &[&str]| {
+        let mut args = vec!["diff", unit_only.as_str(), both.as_str(), "--json"];
+        args.extend_from_slice(filter);
+        project.supercov(&args).json()["data"]["gained"]["lineCount"]
+            .as_u64()
+            .unwrap()
+    };
+    let everything = gained(&[]);
+    assert!(everything > 0, "the new test covered new lines");
+    // The unit tests are the same in both runs; the integration test is new.
+    assert_eq!(gained(&["--kind", "unit"]), 0);
+    // Run A has no integration test: all its lines are gained.
+    assert!(gained(&["--kind", "integration"]) >= everything);
+    assert_eq!(gained(&["--runner", "node:test"]), everything);
+    // The same unit tests in both runs cover the same share of the code.
+    let unit = project
+        .supercov(&["diff", &unit_only, &both, "--kind", "unit", "--json"])
+        .json();
+    assert_eq!(unit["data"]["delta"]["lines"], 0, "{unit}");
+    // A filtered comparison says so.
+    let human = project
+        .supercov(&["diff", &unit_only, &both, "--kind", "integration"])
+        .succeeds();
+    assert!(
+        human.lines().next().unwrap().contains("integration"),
+        "{human}"
+    );
+    let refused = project
+        .supercov(&["diff", &unit_only, &both, "--runner", "jest"])
+        .exits(2);
+    assert!(refused.contains("No tests match runner=jest"), "{refused}");
+}
+
+#[test]
+fn tests_affected_lists_files_names_and_why_and_says_when_it_cannot_narrow() {
+    let project = Project::cart("affected-forms");
+    project.measure(&[]);
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total adds all prices",
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--files"])
+            .succeeds()
+            .trim(),
+        "test/cart.test.js"
+    );
+    for narrowing in ["--ran-changed", "--asserting"] {
+        let ran = project.supercov(&["runs", "latest", "tests", "affected", narrowing, "--names"]);
+        assert_eq!(ran.code(), 0);
+        assert!(
+            ran.stderr()
+                .contains("no assertion assessment; listing every affected test"),
+            "{narrowing}"
+        );
+        assert_eq!(ran.stdout().lines().count(), 3, "{narrowing}");
+    }
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    let affected = json["data"]["affected"].as_array().unwrap();
+    assert_eq!(affected.len(), 3);
+    let reasons = |name: &str| {
+        affected.iter().find(|test| test["name"] == name).unwrap()["reasons"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    // The shipping test never ran the changed `total`; the other two did.
+    assert_eq!(reasons("shipping is free over fifty"), 1);
+    assert_eq!(reasons("total applies a coupon"), 2);
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "tests", "affected"])
+            .succeeds(),
+        &[
+            "3 of 3 tests affected",
+            "test file changed: top level",
+            "this test ran it",
+        ],
+    );
+}
+
+#[test]
+fn minimize_without_a_target_keeps_what_the_tests_cover() {
+    let project = Project::cart("minimize-default");
+    project.measure(&[]);
+    // The cart's tests cover 76.92% of its lines: no target, no 100% to miss.
+    let said = project.supercov(&["runs", "latest", "minimize"]).succeeds();
+    contains_all(
+        &said,
+        &[
+            "exact minimum 3/3 test(s) keeping the coverage of all 3 tests in every measured metric",
+            "lines 76.92%",
+        ],
+    );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "minimize", "--metric", "lines"])
+            .succeeds(),
+        &["keeping the lines coverage of all 3 tests", "lines 76.92%"],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "minimize", "--json"])
+        .json();
+    assert_eq!(json["data"]["target"], serde_json::Value::Null, "{json}");
+    // An explicit target is still held to.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "minimize", "--target", "100"])
+            .exits(2)
+            .contains("target 100% is impossible")
+    );
+}
+
+#[test]
+fn a_branch_lists_its_unrun_outcomes_in_one_order() {
+    let project = Project::cart("branch-order");
+    project.measure(&[]);
+    // Each call is a new process, with its own hash order.
+    for _ in 0..8 {
+        contains_all(
+            &project
+                .supercov(&["runs", "latest", "line", "src/cart.js:14"])
+                .succeeds(),
+            &["Unobserved: true; false"],
+        );
+    }
+}
+
+#[test]
+fn covered_unmeasured_and_empty_views_say_which_they_are() {
+    let project = Project::cart("empty-views");
+    let first = project.measure(&[]);
+    for at in 0..2 {
+        project.write(
+            &format!("src/part{at}.js"),
+            &format!("export function part{at}(a) {{\n  return a ? {at} : -{at};\n}}\n"),
+        );
+        project.write(
+            &format!("test/part{at}.test.js"),
+            &format!(
+                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ part{at} }} from \"../src/part{at}.js\";\ntest(\"part{at} both\", () => {{\n  assert.equal(part{at}(true), {at});\n  assert.equal(part{at}(false), -{at});\n}});\n"
+            ),
+        );
+    }
+    project.commit("parts");
+    let second = project.measure(&[]);
+    // Every line covered is not "nothing measured".
+    let covered = project
+        .supercov(&["runs", "latest", "file", "src/part1.js"])
+        .succeeds();
+    contains_all(
+        &covered,
+        &["No gap lines: every line is covered and measured."],
+    );
+    assert!(!covered.contains("Nothing measured"), "{covered}");
+    // Everything passed, so no attempt failed.
+    for query in ["kinds", "runners"] {
+        contains_all(
+            &project
+                .supercov(&["runs", "latest", query, "--filter", "failed"])
+                .succeeds(),
+            &[
+                "No tests in this view (failed attempts only)",
+                "showing 0-0 of 0",
+            ],
+        );
+    }
+    // Only gains: no "most lost first" over a list with nothing lost.
+    let gained = project.supercov(&["diff", &first, &second]).succeeds();
+    contains_all(&gained, &["in 2 files:", "src/part0.js: gained"]);
+    assert!(!gained.contains("most lost first"), "{gained}");
+    contains_all(
+        &project.supercov(&["diff", &second, &first]).succeeds(),
+        &["in 2 files, most lost first:", "src/part0.js: lost"],
+    );
+}
+
+#[test]
+fn every_view_names_its_filters_pages_and_notes() {
+    let project = Project::cart("view-notes");
+    let first = project.measure(&[]);
+    for at in 0..12 {
+        project.write(
+            &format!("src/part{at}.js"),
+            &format!("export function part{at}(a) {{\n  return a ? {at} : -{at};\n}}\n"),
+        );
+        project.write(
+            &format!("test/part{at}.test.js"),
+            &format!("import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ part{at} }} from \"../src/part{at}.js\";\ntest(\"part{at} both\", () => {{\n  assert.equal(part{at}(true), {at});\n  assert.equal(part{at}(false), -{at});\n}});\n"),
+        );
+    }
+    project.write(
+        "test/none.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\ntest(\"asserts alone\", () => {\n  assert.equal(1 + 1, 2);\n});\n",
+    );
+    project.commit("parts");
+    let second = project.measure(&[]);
+    let said = |args: &[&str]| project.supercov(args).succeeds();
+    // Gains over more files than are listed.
+    contains_all(
+        &said(&["diff", &first, &second, "--gained"]),
+        &[
+            "in 12 files:",
+            "  ... and 2 more files",
+            "+ line src/part0.js:1",
+        ],
+    );
+    // A page of a filtered comparison carries the filters to the next one.
+    contains_all(
+        &said(&[
+            "diff",
+            &first,
+            &second,
+            "--filter",
+            "passed",
+            "--runner",
+            "node:test",
+            "--limit",
+            "1",
+        ]),
+        &[
+            "(passed attempts only, runner node:test)",
+            "showing 1-1 of 24 per category",
+            "--filter passed --runner 'node:test' --offset 1 --limit 1",
+        ],
+    );
+    contains_all(
+        &said(&["diff", &first, &second, "--kind", "unit", "--limit", "2"]),
+        &["(kind unit)", "--kind 'unit' --offset 2 --limit 2"],
+    );
+    contains_all(
+        &said(&["runs", "latest", "tests", "without-evidence"]),
+        &[
+            "Tests that made assertions and recorded no coverage: 1",
+            "asserts alone",
+            "1 assertion; its file imports no measured source",
+        ],
+    );
+    for (args, next) in [
+        (
+            &["runs", "latest", "minimize", "--limit", "2"][..],
+            "minimize --offset 2 --limit 2",
+        ),
+        (
+            &["runs", "latest", "scope", "--files", "--limit", "3"][..],
+            "scope --files --offset 3 --limit 3",
+        ),
+        (
+            &["runs", "latest", "files", "--limit", "3"][..],
+            "files --offset 3 --limit 3",
+        ),
+    ] {
+        contains_all(&said(args), &[next]);
+    }
+    contains_all(
+        &said(&["runs", "latest", "--test-file", "test/part3.test.js"]),
+        &["(tests in test/part3.test.js)", "Lines      5.41% (2/37)"],
+    );
+    contains_all(
+        &said(&["runs", "latest", "gaps", "--title", "part"]),
+        &[
+            "Projection: title containing \"part\"",
+            "file --title 'part' 'src/cart.js'",
+        ],
+    );
+    contains_all(
+        &said(&["runs", "latest", "line", "src/part3.js:2"]),
+        &[
+            "COVERED",
+            "Test phases",
+            "node:assert/strict.equal (passed)",
+        ],
+    );
+    // A run whose command failed says its coverage cannot gate.
+    project.write(
+        "src/cart.js",
+        &common::CART.replace("return 0;", "return 1;"),
+    );
+    project.supercov(&["--", "node", "--test"]).exits(1);
+    contains_all(
+        &said(&["runs", "latest"]),
+        &[
+            "status: wrapped command exited 1 — coverage below is diagnostic and cannot gate",
+            "Failed      1",
+        ],
+    );
+    contains_all(
+        &said(&["runs", "latest", "decision", "src/cart.js:14"]),
+        &[
+            "C1 MISSING: express (never evaluated)",
+            "confidence unexecuted",
+        ],
+    );
+    contains_all(
+        &said(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:14",
+            "src/cart.js:21",
+            "src/cart.js:2",
+        ]),
+        &["showing 1-3 of 5 per category", "every test and phase:"],
+    );
+}
+
+#[test]
+fn check_patch_and_affected_tests_answer_or_say_what_is_missing() {
+    let project = Project::cart("check-patch-affected");
+    project.measure(&[]);
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "check", "--min-mcdc", "10"])
+            .succeeds(),
+        &[
+            "mcdc          20.00%  1/5  (floor 10%)",
+            "PASS: every floor is met.",
+        ],
+    );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "check", "--min-lines", "99"])
+            .exits(1),
+        &[
+            "FAIL: 1 floor(s) not met.",
+            "(whole run): lines 76.92%  10/13 below 99%",
+        ],
+    );
+    for (args, said) in [
+        (
+            &["runs", "latest", "check", "--min-branches", "abc"][..],
+            "\"abc\" is not a percentage",
+        ),
+        (
+            &["runs", "latest", "check", "--bogus"][..],
+            "unknown option --bogus",
+        ),
+        (
+            &["runs", "latest", "check"][..],
+            "no floor requested; give at least one --min-<metric>",
+        ),
+        (
+            &["runs", "run_0000000000000000"][..],
+            "Coverage run not found: run_0000000000000000",
+        ),
+        (&["runs", "latest", "patch"][..], "patch needs --base <ref>"),
+        (
+            &["runs", "latest", "patch", "--json"][..],
+            "patch needs --base <ref>",
+        ),
+        (
+            &["runs", "latest", "patch", "extra"][..],
+            "unknown option extra",
+        ),
+        (
+            &["report", "--runs", "0"][..],
+            "--runs must be between 1 and 20",
+        ),
+        (&["report", "--bogus"][..], "Unknown report option: --bogus"),
+    ] {
+        contains_all(&project.supercov(args).exits(2), &[said]);
+    }
+    project.write(
+        "src/cart.js",
+        &format!(
+            "{}\nexport function extra() {{ return 1; }}\n",
+            common::CART.replace("sum * 100", "sum * 1000")
+        ),
+    );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "tests", "affected"])
+            .succeeds(),
+        &[
+            "3 of 3 tests affected by changes since the run",
+            "src/cart.js: top level, total (line 1); added extra (line 23) changed",
+            "Changed files:",
+        ],
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--names"])
+            .succeeds(),
+        "shipping is free over fifty\ntotal adds prices\ntotal applies a coupon\n"
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--files"])
+            .succeeds(),
+        "test/cart.test.js\n"
+    );
+}
+
+#[test]
+fn a_changed_helper_reaches_the_tests_that_load_it_and_an_unplaced_one_reaches_all() {
+    let project = Project::cart("affected-helpers");
+    project.write(
+        "test/helpers.js",
+        "export function sample() {\n  return [{ price: 10, quantity: 2 }];\n}\n",
+    );
+    project.write("test/unplaced.js", "export const unused = 1;\n");
+    project.write(
+        "src/extra.js",
+        "export function extra() {\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/helped.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\nimport { sample } from \"./helpers.js\";\n// mentions extra by name\ntest(\"helped\", () => {\n  assert.equal(total(sample()), 20);\n});\n",
+    );
+    project.commit("helpers");
+    project.measure(&[]);
+    project.write(
+        "test/helpers.js",
+        "export function sample() {\n  return [{ price: 10, quantity: 3 }];\n}\n",
+    );
+    project.write("test/unplaced.js", "export const unused = 2;\n");
+    project.write(
+        "src/extra.js",
+        "export function extra() {\n  return 2;\n}\nexport function added() {}\n",
+    );
+    let said = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &said,
+        &[
+            "4 of 4 tests affected by changes since the run",
+            "test/helpers.js changed: sample (line 1) (this test's file loads it)",
+            "test/unplaced.js changed: top level (a file tests may load)",
+        ],
+    );
+    // Only the test that imports the helper is reached through it.
+    assert_eq!(said.matches("test/helpers.js changed").count(), 1, "{said}");
+    assert_eq!(
+        said.matches("test/unplaced.js changed").count(),
+        4,
+        "{said}"
+    );
+}
+
+#[test]
+fn tests_affected_reads_formatting_other_runners_and_dependencies_apart() {
+    let project = Project::cart("affected-shapes");
+    project.write("vitest.config.js", "export default {};\n");
+    project.commit("config");
+    project.measure(&[]);
+    let said = |args: &[&str]| project.supercov(args).succeeds();
+    contains_all(
+        &said(&["runs", "latest", "tests", "affected"]),
+        &[
+            "0 of 3 tests affected",
+            "No captured file has changed.",
+            "Working tree: matches the run.",
+        ],
+    );
+    // Asked for an action it does not have, flag or word: refused.
+    for action in ["-x", "nope"] {
+        contains_all(
+            &project
+                .supercov(&["runs", "latest", "tests", action])
+                .exits(2),
+            &["unknown tests action"],
+        );
+    }
+    contains_all(
+        &said(&["runs", "latest", "tests", "--help"]),
+        &["Usage: supercov runs <run> tests affected"],
+    );
+    // Another runner's settings and a comment in a test change no test.
+    project.write("vitest.config.js", "export default { test: {} };\n");
+    project.write(
+        "test/cart.test.js",
+        &format!("{}\n// touched\n", common::CART_TESTS),
+    );
+    contains_all(
+        &said(&["runs", "latest", "tests", "affected"]),
+        &[
+            "0 of 3 tests affected",
+            "test/cart.test.js  formatting",
+            "vitest.config.js  declarations  top level",
+        ],
+    );
+    assert_eq!(
+        said(&["runs", "latest", "tests", "affected", "--names"]),
+        ""
+    );
+    // A dependency change reaches every test.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" }, "dependencies": {"x": "1"} }"#,
+    );
+    contains_all(
+        &said(&["runs", "latest", "tests", "affected"]),
+        &[
+            "3 of 3 tests affected",
+            "dependencies or lockfile changed (every test)",
+            "package.json  changed",
+        ],
+    );
+    assert_eq!(
+        said(&["runs", "latest", "tests", "affected", "--files"]),
+        "test/cart.test.js\n"
+    );
+}
+
+#[test]
+fn a_patch_counts_changed_and_untracked_lines_against_its_base() {
+    let project = Project::cart("patch-lines");
+    project.write(
+        "src/cart.js",
+        &format!(
+            "{}\nexport function more(x) {{\n  return x ? 1 : 2;\n}}\n",
+            common::CART
+        ),
+    );
+    project.write("src/new.js", "export const fresh = 1;\n");
+    project.measure(&[]);
+    let lines = [
+        "0 of 3 changed executable line(s) covered (0.00%)",
+        "src/cart.js: 23-24",
+        "src/new.js: 1",
+    ];
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", "HEAD"])
+            .succeeds(),
+        &lines,
+    );
+    let json = project
+        .supercov(&["runs", "latest", "patch", "--base", "HEAD", "--json"])
+        .json();
+    assert_eq!(json["data"]["patch"]["eligible"], 3, "{json}");
+    contains_all(
+        &project
+            .supercov(&[
+                "runs",
+                "latest",
+                "patch",
+                "--base",
+                "HEAD",
+                "--min-lines",
+                "90",
+            ])
+            .exits(1),
+        &["FAIL: below 90%"],
+    );
+    let annotated = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "patch",
+            "--base",
+            "HEAD",
+            "--annotate",
+            "github",
+            "--max-annotations",
+            "1",
+        ])
+        .succeeds();
+    assert_eq!(annotated.matches("::warning").count(), 1, "{annotated}");
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", "nope-ref"])
+            .exits(2),
+        &["git merge-base nope-ref HEAD failed"],
+    );
+    // A run of another tree cannot map this one's patch.
+    project.write("src/cart.js", common::CART);
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", "HEAD"])
+            .exits(2),
+        &["the run no longer matches the current checkout"],
+    );
+}
+
+#[test]
+fn runs_that_ran_no_tests_keep_the_command_status_and_say_so() {
+    let project = Project::cart("odd-js-runs");
+    project
+        .supercov(&["--", "node", "-e", "process.exit(3)"])
+        .exits(3);
+    project.supercov(&["--", "node", "-e", ""]).succeeds();
+    project
+        .supercov(&["--", "node", "--test", "test/none.test.js"])
+        .exits(1);
+    let listed = project.supercov(&["runs"]).succeeds();
+    contains_all(
+        &listed,
+        &[
+            "FAILED (exit 3); NO TESTS RAN",
+            "FAILED (exit 1); NO TESTS RAN",
+            "  NO TESTS RAN",
+        ],
+    );
+}
+
+/// Pages past the end, views with no tests, files and decisions that are not
+/// there, and the narrower views of one run each read as what they are.
+#[test]
+fn odd_pages_and_empty_views_read_as_what_they_are() {
+    let project = Project::cart("odd-views");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let past = project
+        .supercov(&["runs", "latest", "files", "--offset", "100"])
+        .succeeds();
+    assert!(
+        past.contains(
+            "every included source file\n\nshowing none of 1: --offset 100 is past the end"
+        ),
+        "{past}"
+    );
+    let past = project
+        .supercov(&["runs", "latest", "gaps", "--offset", "100"])
+        .succeeds();
+    assert!(
+        past.contains("unresolved obligations\n\nshowing none of 1: --offset 100 is past the end"),
+        "{past}"
+    );
+    let runners = project
+        .supercov(&["runs", "latest", "runners", "--offset", "5"])
+        .succeeds();
+    assert!(
+        runners.starts_with("showing none of 1: --offset 5 is past the end"),
+        "{runners}"
+    );
+    let kinds = project
+        .supercov(&["runs", "latest", "kinds", "--filter", "failed"])
+        .succeeds();
+    assert!(
+        kinds.contains("No tests in this view (failed attempts only)"),
+        "{kinds}"
+    );
+    let directories = project
+        .supercov(&["runs", "latest", "files", "--group", "dir"])
+        .succeeds();
+    assert!(
+        directories.contains("src            1     13  76.92%  76.92%"),
+        "{directories}"
+    );
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/cart.js", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "showing 1-1 of 6 gap lines",
+            "file 'src/cart.js' --offset 1 --limit 1",
+            "all 6 at once",
+        ],
+    );
+    let missing = project
+        .supercov(&["runs", "latest", "file", "package.json"])
+        .exits(2);
+    assert!(
+        missing.contains("Source file not found: package.json"),
+        "{missing}"
+    );
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/cart.js:1"])
+        .exits(2);
+    assert!(
+        decision.contains("Decision not found: src/cart.js:1"),
+        "{decision}"
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:1"])
+        .succeeds();
+    assert!(
+        line.contains("Function at column 8 — covered (2 covering tests)"),
+        "{line}"
+    );
+    let scope = project
+        .supercov(&["runs", "latest", "scope", "--files", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &scope,
+        &["INCLUDED  src/cart.js", "showing 1-1 of 2", "all 2 at once"],
+    );
+    let failed = project
+        .supercov(&["runs", "latest", "--filter", "failed"])
+        .succeeds();
+    contains_all(
+        &failed,
+        &[
+            "(failed attempts only)",
+            "No test recorded coverage",
+            "Total       0",
+        ],
+    );
+    let titled = project
+        .supercov(&["runs", "latest", "--title", "nothing-matches"])
+        .exits(2);
+    assert!(
+        titled.contains("No tests match --title nothing-matches"),
+        "{titled}"
+    );
+    let without = project
+        .supercov(&["runs", "latest", "tests", "without-evidence"])
+        .succeeds();
+    assert!(without.contains("recorded no coverage: 0"), "{without}");
+    let source = project
+        .supercov(&["runs", "latest", "source", "src/cart.js", "--limit", "2"])
+        .succeeds();
+    contains_all(
+        &source,
+        &[
+            " 2 │   let sum = 0;",
+            "Showing 1-2 of 21",
+            "--offset 2 --limit 2",
+        ],
+    );
+}
+
+/// The run list pages with its filter and marks a run with no exit status;
+/// a line with no code, one that never ran and one past the end each say
+/// so; a test that asserted without reaching measured source is listed with
+/// why, and counts read in the singular where there is one.
+#[test]
+fn run_lists_lines_and_tests_read_as_what_they_are() {
+    let project = Project::cart("more-views");
+    project.write(
+        "test/none.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\ntest(\"asserts nothing measured\", () => {\n  assert.ok(true);\n});\n",
+    );
+    project.commit("none");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let listed = project
+        .supercov(&["runs", "--filter", "passed", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &listed,
+        &[
+            "showing 1-1 of 2",
+            "runs --filter passed --offset 1 --limit 1",
+            "all 2 at once",
+        ],
+    );
+    let blank = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:11"])
+        .succeeds();
+    contains_all(
+        &blank,
+        &[
+            "NOT MEASURED",
+            "Nothing on this line is code the run measures",
+        ],
+    );
+    let unrun = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:20"])
+        .succeeds();
+    contains_all(
+        &unrun,
+        &[
+            "NOT COVERED",
+            "function not called",
+            "Function at column 20",
+        ],
+    );
+    let beyond = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:40"])
+        .exits(2);
+    assert!(
+        beyond.contains("src/cart.js has 21 lines; there is no line 40"),
+        "{beyond}"
+    );
+    let without = project
+        .supercov(&["runs", "latest", "tests", "without-evidence"])
+        .succeeds();
+    assert!(
+        without.contains("test/none.test.js > asserts nothing measured [")
+            && without.contains("passed, 1 assertion; its file imports no measured source"),
+        "{without}"
+    );
+    let past = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "without-evidence",
+            "--offset",
+            "1",
+        ])
+        .succeeds();
+    assert!(
+        past.contains("recorded no coverage: 1\n\nshowing none of 1: --offset 1 is past the end"),
+        "{past}"
+    );
+    let test = project
+        .supercov(&["runs", "latest", "test", "asserts nothing measured"])
+        .succeeds();
+    contains_all(
+        &test,
+        &[
+            "0 lines, 0 hits, 0 decisions, 1 phase\n",
+            "node:assert/strict.ok at test/none.test.js:5:3",
+        ],
+    );
+    let unknown = project
+        .supercov(&["runs", "latest", "test", "nonexistent"])
+        .exits(2);
+    assert!(unknown.contains("Test not found: nonexistent"), "{unknown}");
+    let minimum = project
+        .supercov(&["runs", "latest", "minimize", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &minimum,
+        &[
+            "exact minimum 3/4 test(s)",
+            "showing 1-1 of 3",
+            "minimize --offset 1 --limit 1",
+        ],
+    );
+    let impossible = project
+        .supercov(&["runs", "latest", "minimize", "--target", "50"])
+        .exits(2);
+    assert!(
+        impossible.contains("target 50% is impossible"),
+        "{impossible}"
+    );
+    let run = project.latest();
+    let path = project
+        .root
+        .join(".supercov/runs")
+        .join(&run)
+        .join("run.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    metadata["testExitCode"] = serde_json::Value::Null;
+    std::fs::write(&path, metadata.to_string()).unwrap();
+    let listed = project.supercov(&["runs"]).succeeds();
+    assert!(
+        listed.contains("INVALID (exit status unavailable)"),
+        "{listed}"
+    );
+}
+
+/// A diff counts in the singular where there is one and says when nothing
+/// differs; a report that fails writes no progress line to a pipe; and the
+/// mistakes `diff`, `merge`, `import` and `report` can be handed are named.
+#[test]
+fn comparisons_and_their_mistakes_read_as_what_they_are() {
+    let project = Project::cart("compare-views");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let first = project.latest();
+    project.edit(
+        "test/cart.test.js",
+        "assert.equal(shipping(60, false), 0);",
+        "assert.equal(shipping(60, false), 0);\n  assert.equal(shipping(10, true), 15);",
+    );
+    project.commit("express");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let second = project.latest();
+    let gained = project.supercov(&["diff", &first, &second]).succeeds();
+    contains_all(
+        &gained,
+        &[
+            "gained: 1 line, 2 branches, 1 MC/DC condition\n",
+            "lost: 0 lines, 0 branches, 0 MC/DC conditions\n",
+            "+ MC/DC src/cart.js:13 C1 express",
+        ],
+    );
+    let ran = project.supercov(&["diff", &first, &first]);
+    assert_eq!(
+        ran.stderr().matches("stale run").count(),
+        1,
+        "{}",
+        ran.stderr()
+    );
+    let same = ran.succeeds();
+    assert!(
+        same.contains("Nothing was gained or lost.\n") && !same.contains("showing"),
+        "{same}"
+    );
+    let half = project.supercov(&["diff", &first]).exits(2);
+    assert!(
+        half.contains("Usage: supercov diff <older-run> <newer-run>"),
+        "{half}"
+    );
+    let unknown = project.supercov(&["diff", &first, "nope"]).exits(2);
+    assert!(
+        unknown.contains("Coverage run not found: nope"),
+        "{unknown}"
+    );
+    let alone = project.supercov(&["merge"]).succeeds();
+    assert!(alone.contains("nothing to merge it with"), "{alone}");
+    let changed = project.supercov(&["merge", &first, &second]).exits(2);
+    assert!(
+        changed.contains("a file of its own tests, has changed"),
+        "{changed}"
+    );
+    let twice = project.supercov(&["merge", &first, &first]).exits(2);
+    assert!(twice.contains("Each merged run must be unique"), "{twice}");
+    let keep = project.supercov(&["runs", "clean", "--keep", "x"]).exits(2);
+    assert!(
+        keep.contains("--keep must be a non-negative integer"),
+        "{keep}"
+    );
+    let report = project.supercov(&["report", "nope"]);
+    assert_eq!(report.code(), 2);
+    assert_eq!(
+        report.stderr(),
+        "[supercov] report failed: coverage run not found: nope\n"
+    );
+    let unread = project
+        .supercov(&["import", "missing.info", "--test", "t"])
+        .exits(2);
+    assert!(unread.contains("Cannot read missing.info"), "{unread}");
+    project.write(
+        "cov.info",
+        "SF:src/cart.js\nDA:20,1\nend_of_record\nSF:/elsewhere/x.js\nDA:1,1\nend_of_record\n",
+    );
+    let unnamed = project.supercov(&["import", "cov.info"]).exits(2);
+    assert!(
+        unnamed.contains("--test <name> or --background"),
+        "{unnamed}"
+    );
+    let status = project
+        .supercov(&[
+            "import", "cov.info", "--test", "outside", "--status", "weird",
+        ])
+        .exits(2);
+    assert!(
+        status.contains("--status is passed or failed, not weird"),
+        "{status}"
+    );
+    let imported = project.supercov(&["import", "cov.info", "--test", "outside"]);
+    assert_eq!(imported.code(), 0, "{}", imported.stderr());
+    contains_all(
+        &format!("{}{}", imported.stdout(), imported.stderr()),
+        &[
+            "imported 1 line(s) that ran",
+            "left out 1 file(s) of the evidence: /elsewhere/x.js (outside the project)",
+        ],
+    );
+}
+
+/// A word or a flag a command does not take is refused by name instead of
+/// being read as a run id or a filter that is not one.
+#[test]
+fn words_and_flags_a_command_does_not_take_are_refused() {
+    let project = Project::cart("refused-words");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    for (args, expected) in [
+        (vec!["runs", "latest", "files", "-q"], "Unknown option: -q"),
+        (
+            vec!["runs", "latest", "files", "src/cart.js"],
+            "Unexpected argument: src/cart.js",
+        ),
+        (
+            vec!["runs", "latest", "gaps", "x"],
+            "Unexpected argument: x",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js", "extra"],
+            "Unexpected argument: extra",
+        ),
+        (
+            vec!["runs", "latest", "decision", "a", "b"],
+            "Unexpected argument: b",
+        ),
+        (
+            vec!["runs", "latest", "decision"],
+            "Usage: supercov runs <run-id> decision",
+        ),
+        (
+            vec!["runs", "abcdefghijklmnopqrst"],
+            "Coverage run not found: abcdefghijklmnopqrst",
+        ),
+        (vec!["report", "--tag"], "--tag needs a value"),
+        (vec!["merge", "--tag", "x"], "Unknown option: --tag"),
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(refused.contains(expected), "{args:?}: {refused}");
+    }
+    // A test name may begin with a dash.
+    let named = project.supercov(&["runs", "latest", "test", "-x"]).exits(2);
+    assert!(named.contains("Test not found: -x"), "{named}");
+}
+
+/// An import of nothing the run measures makes no run; a line past a file's
+/// end, evidence of no project file, a name already imported and both ways
+/// of crediting at once are each refused by what is wrong.
+#[test]
+fn imports_that_cannot_add_anything_are_refused() {
+    let project = Project::cart("import-refusals");
+    project.write("lib/extra.js", "export const x = 1;\nexport const y = 2;\n");
+    project.commit("extra");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.write(
+        "excluded.info",
+        "SF:test/cart.test.js\nDA:1,1\nend_of_record\n",
+    );
+    project.write(
+        "extra.info",
+        "SF:lib/extra.js\nDA:1,1\nDA:2,0\nend_of_record\n",
+    );
+    project.write("beyond.info", "SF:src/cart.js\nDA:99,1\nend_of_record\n");
+    project.write(
+        "nothing.info",
+        "SF:/elsewhere/a.js\nDA:1,1\nend_of_record\n",
+    );
+    let before = project.latest();
+    for (args, expected) in [
+        (
+            vec!["import", "excluded.info", "--test", "t"],
+            "Nothing in excluded.info is a file the run measures: test/cart.test.js (the run leaves it out: test or fixture source)",
+        ),
+        (
+            vec!["import", "beyond.info", "--test", "t"],
+            "records line 99 of src/cart.js, which has 21 lines",
+        ),
+        (
+            vec!["import", "nothing.info", "--test", "t"],
+            "Nothing in nothing.info is a file of this project: /elsewhere/a.js (outside the project)",
+        ),
+        (
+            vec!["import", "extra.info", "--test", "t", "--background"],
+            "--test and --background each name who the lines are credited to",
+        ),
+        (
+            vec!["import", "extra.info", "--test", "t", "--run", "nope"],
+            "coverage run not found: nope",
+        ),
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(refused.contains(expected), "{args:?}: {refused}");
+    }
+    assert_eq!(project.latest(), before, "a refused import makes no run");
+    project
+        .supercov(&["import", "extra.info", "--background"])
+        .succeeds();
+    project
+        .supercov(&["import", "extra.info", "--test", "again"])
+        .succeeds();
+    let twice = project
+        .supercov(&["import", "extra.info", "--test", "again"])
+        .exits(2);
+    assert!(
+        twice.contains("already holds an imported test named again"),
+        "{twice}"
+    );
+    let runners = project.supercov(&["runs", "latest", "runners"]).succeeds();
+    contains_all(
+        &runners,
+        &[
+            "background  0 test(s)",
+            "lines  1 test(s)",
+            "node:test  3 test(s)",
+        ],
+    );
+}
+
+/// Go's flags reach `go test` through GOFLAGS, so a suite started from a
+/// Makefile is measured, and a command that is not `go test` is left as
+/// written instead of being handed `-count=1`.
+#[test]
+fn a_go_suite_behind_make_is_measured_and_other_go_commands_are_left_alone() {
+    // The Makefile runs `go` by name.
+    if go() != Some("go") {
+        eprintln!("skipping: no Go toolchain on PATH");
+        return;
+    }
+    let made = Project::empty("go-make");
+    made.write("go.mod", "module example.com/made\n\ngo 1.21\n");
+    made.write(
+        "x.go",
+        "package x\n\nfunc F(a bool) int {\n\tif a {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+    );
+    made.write(
+        "x_test.go",
+        "package x\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) { F(true) }\n",
+    );
+    made.write("Makefile", "test:\n\tgo test ./...\n");
+    let measured = made.supercov(&["--", "make", "test"]);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stderr().contains("added -count=1"),
+        "{}",
+        measured.stderr()
+    );
+    let summary = made.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["command: make test", "Passed      1"]);
+    let vetted = made.supercov(&["--", "go", "vet", "./..."]);
+    assert!(
+        !vetted.stderr().contains("malformed import path"),
+        "{}",
+        vetted.stderr()
+    );
+}
+
+/// A merged run is answered from the runs it was merged from, and a test
+/// both of them ran is one test, counted once, with its reasons together.
+#[test]
+fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
+    let project = Project::cart("merged-affected");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let first = project.latest();
+    project
+        .supercov(&["--", "node", "--test", "test/cart.test.js"])
+        .succeeds();
+    let second = project.latest();
+    project.supercov(&["merge", &first, &second]).succeeds();
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    let affected = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &affected,
+        &[
+            "1 of 3 tests affected by changes since the run",
+            "test/cart.test.js › shipping is free over fifty",
+            "src/cart.js: shipping (line 12) changed (this test ran it)",
+        ],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    assert_eq!(
+        json["data"]["mergedFrom"],
+        serde_json::json!([first, second])
+    );
+    assert_eq!(json["data"]["summary"]["tests"], 3);
+    assert_eq!(json["data"]["summary"]["unaffected"], 2);
+}
+
+/// Output sent to one file for both streams (`> log 2>&1`) arrives through
+/// one relay and names the project rather than Supercov's copy.
+#[test]
+fn both_streams_into_one_file_name_the_project() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("one-file");
+    project.write("go.mod", "module example.com/onefile\n\ngo 1.21\n");
+    project.write(
+        "x.go",
+        "package x\n\nfunc F(a bool) int {\n\tif a {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+    );
+    project.write(
+        "x_test.go",
+        "package x\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) {\n\tdir, _ := os.Getwd()\n\tfmt.Println(\"out \" + dir)\n\tfmt.Fprintln(os.Stderr, \"err \"+dir)\n\tF(true)\n}\n",
+    );
+    let log = project.root.join("both.log");
+    let file = std::fs::File::create(&log).unwrap();
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args(["--", go, "test", "-v", "./..."])
+        .current_dir(&project.root)
+        .env_remove("SUPERCOV_SOURCE_ROOTS")
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .status()
+        .unwrap();
+    let written = std::fs::read_to_string(&log).unwrap();
+    assert!(status.success(), "{written}");
+    // The project as given, or its long form: Windows runners' TEMP is a
+    // short `RUNNER~1` path, which Go names in full (canonical paths there
+    // carry `\\?\`). Line by line: a Windows line may end in `\r\n`.
+    let canonical = std::fs::canonicalize(&project.root).unwrap();
+    let canonical = canonical.display().to_string();
+    let roots = [
+        project.root.display().to_string(),
+        canonical
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&canonical)
+            .to_owned(),
+    ];
+    for stream in ["out", "err"] {
+        assert!(
+            written
+                .lines()
+                .any(|line| roots.iter().any(|root| line == format!("{stream} {root}"))),
+            "{written}"
+        );
+    }
+    // Supercov's own lines name the copy; the command's do not.
+    assert!(
+        written
+            .lines()
+            .filter(|line| !line.starts_with("[supercov]"))
+            .all(|line| !line.contains("workspaces/workspace/")),
+        "{written}"
+    );
+}
+
+/// A runner named alone narrows every view to its tests and says so; a
+/// runner no test used is refused by name.
+#[test]
+fn a_runner_alone_narrows_every_view_or_is_refused() {
+    let project = Project::cart("runner-filters");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let gaps = project
+        .supercov(&["runs", "latest", "gaps", "--runner", "node:test"])
+        .succeeds();
+    contains_all(
+        &gaps,
+        &[
+            "Projection: runner node:test.",
+            "[covered elsewhere: 0; nowhere: 15]",
+        ],
+    );
+    for args in [
+        vec!["runs", "latest", "gaps", "--runner", "vitest"],
+        vec!["runs", "latest", "files", "--runner", "vitest"],
+        vec!["runs", "latest", "--runner", "vitest"],
+        vec![
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--runner",
+            "vitest",
+        ],
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(
+            refused.contains("No tests match runner=vitest"),
+            "{args:?}: {refused}"
+        );
+    }
+    let summary = project
+        .supercov(&["runs", "latest", "--runner", "node:test"])
+        .succeeds();
+    contains_all(
+        &summary,
+        &["(runner node:test)", "files --runner 'node:test'"],
+    );
+    let kinds = project
+        .supercov(&["runs", "latest", "kinds", "--runner", "node:test"])
+        .succeeds();
+    assert!(kinds.contains("unit  3 test(s)  lines 76.92%"), "{kinds}");
+    let minimum = project
+        .supercov(&["runs", "latest", "minimize", "--runner", "node:test"])
+        .succeeds();
+    assert!(minimum.contains("exact minimum 3/3 test(s)"), "{minimum}");
+    let directories = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "files",
+            "--group",
+            "dir",
+            "--runner",
+            "node:test",
+        ])
+        .succeeds();
+    assert!(
+        directories.contains("Coverage by directory, 1 deep — runner node:test"),
+        "{directories}"
+    );
+    let decision = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "decision",
+            "src/cart.js:13",
+            "--runner",
+            "node:test",
+        ])
+        .succeeds();
+    assert!(decision.contains("FF -> F  tests=1"), "{decision}");
+    let tests = project
+        .supercov(&["runs", "latest", "test", "total"])
+        .succeeds();
+    contains_all(
+        &tests,
+        &[
+            "total adds prices",
+            "total applies a coupon",
+            "showing 1-2 of 2 matching tests",
+        ],
+    );
+}
+
+/// Nothing changed is nothing affected; a changed test file affects each of
+/// its tests and `--files`/`--names` list them alone; a dependency change
+/// affects every test; and a narrowing option without a list to narrow is
+/// refused on standard error, leaving standard output empty for a script.
+#[test]
+fn tests_affected_reads_each_kind_of_change_and_refuses_on_stderr() {
+    let project = Project::cart("affected-shapes");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let clean = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &clean,
+        &[
+            "0 of 3 tests affected",
+            "No captured file has changed.",
+            "Working tree: matches the run.",
+        ],
+    );
+    let refused = project.supercov(&["runs", "latest", "tests", "affected", "--ran-changed"]);
+    assert_eq!(refused.code(), 2);
+    assert_eq!(refused.stdout(), "");
+    assert!(
+        refused.stderr().starts_with(
+            "[supercov] --asserting and --ran-changed narrow --names or --files\n\nUsage:"
+        ),
+        "{}",
+        refused.stderr()
+    );
+    let unassessed = project.supercov(&[
+        "runs",
+        "latest",
+        "tests",
+        "affected",
+        "--files",
+        "--ran-changed",
+    ]);
+    assert_eq!(unassessed.code(), 0);
+    assert!(
+        unassessed
+            .stderr()
+            .contains("this run has no assertion assessment")
+    );
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total adds up prices",
+    );
+    let own = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &own,
+        &["3 of 3 tests affected", "test file changed: top level"],
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--files"])
+            .succeeds(),
+        "test/cart.test.js\n"
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--names"])
+            .succeeds(),
+        "shipping is free over fifty\ntotal adds prices\ntotal applies a coupon\n"
+    );
+    project.edit(
+        "test/cart.test.js",
+        "total adds up prices",
+        "total adds prices",
+    );
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" }, "dependencies": { "x": "1" } }"#,
+    );
+    let dependency = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &dependency,
+        &[
+            "3 of 3 tests affected",
+            "dependencies or lockfile changed (every test)",
+        ],
+    );
+}
+
+/// A wider project: directories page, decisions group and page, a long
+/// decision reads whole, tests without evidence page and filter, and a file
+/// the scope includes with nothing in it says so instead of "not found".
+#[test]
+fn a_wider_project_pages_groups_and_names_an_empty_included_file() {
+    let project = Project::cart("wider-views");
+    project.write(
+        "lib/extra.js",
+        "export const extra = (value) => value + 1;\n",
+    );
+    project.write("src/notes.js", "// Nothing here runs.\n");
+    project.write(
+        "src/long.js",
+        "export function long(first, second, third, fourth) {\n  if ((first > 10 && second < 20) || (third === 'some fairly long string value' && fourth !== null)) {\n    return 1;\n  }\n  return 0;\n}\n",
+    );
+    project.write(
+        "test/more.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { long } from \"../src/long.js\";\nimport { extra } from \"../lib/extra.js\";\n\ntest(\"long\", () => {\n  assert.equal(long(11, 1, '', null), 1);\n  assert.equal(extra(1), 2);\n});\n\ntest(\"twice nothing\", () => {\n  assert.ok(true);\n  assert.ok(1);\n});\n\ntest(\"once nothing\", () => {\n  assert.ok(true);\n});\n",
+    );
+    project.commit("wider");
+    project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_SOURCE_ROOTS", "src,lib")],
+        )
+        .succeeds();
+    let directories = project
+        .supercov(&["runs", "latest", "files", "--group", "dir", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &directories,
+        &["showing 1-1 of 2", "files --group dir --offset 1 --limit 1"],
+    );
+    let none = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "lib/extra.js",
+            "--group",
+            "decision",
+        ])
+        .succeeds();
+    assert!(
+        none.contains("decisions 0, with missing conditions 0"),
+        "{none}"
+    );
+    let paged = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--limit",
+            "1",
+        ])
+        .succeeds();
+    contains_all(
+        &paged,
+        &[
+            "showing 1-1 of 3 decisions",
+            "--group decision --offset 1 --limit 1",
+        ],
+    );
+    let long = project
+        .supercov(&["runs", "latest", "decision", "src/long.js:2"])
+        .succeeds();
+    contains_all(
+        &long,
+        &[
+            "(first > 10 && second < 20) || (third === 'some fairly long string value' && fourth !== null)",
+            "C4 MISSING: fourth !== null (never evaluated)",
+        ],
+    );
+    let without = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "without-evidence",
+            "--limit",
+            "1",
+        ])
+        .succeeds();
+    contains_all(
+        &without,
+        &["showing 1-1 of 2", "without-evidence --offset 1 --limit 1"],
+    );
+    let passed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "without-evidence",
+            "--filter",
+            "passed",
+        ])
+        .succeeds();
+    contains_all(
+        &passed,
+        &["2 — passed attempts only", "passed, 2 assertions"],
+    );
+    let empty = project
+        .supercov(&["runs", "latest", "file", "src/notes.js"])
+        .exits(2);
+    assert!(
+        empty.contains("src/notes.js holds nothing the run measures"),
+        "{empty}"
+    );
+}
+
+/// A merge of two kinds pages its kinds, counts a setup scope beside its
+/// test, and a kind's summary counts and attributes only that kind's tests.
+#[test]
+fn a_merge_of_two_kinds_pages_and_narrows_by_kind() {
+    let project = Project::cart("merged-kinds");
+    project.write(
+        "test/hooked.test.js",
+        "import { test, before } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\n\nlet base;\nbefore(() => { base = total([{ price: 1, quantity: 1 }]); });\n\ntest(\"hooked\", () => {\n  assert.equal(base, 1);\n});\n",
+    );
+    project.commit("hooked");
+    project
+        .supercov(&["--", "node", "--test", "test/cart.test.js"])
+        .succeeds();
+    let first = project.latest();
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/hooked.test.js"],
+            &[("SUPERCOV_TEST_KIND", "integration")],
+        )
+        .succeeds();
+    let second = project.latest();
+    project.supercov(&["merge", &first, &second]).succeeds();
+    let kinds = project
+        .supercov(&["runs", "latest", "kinds", "--limit", "1"])
+        .succeeds();
+    contains_all(
+        &kinds,
+        &[
+            "integration  1 test(s) + 1 setup scope(s)  lines 46.15%",
+            "showing 1-1 of 2",
+            "kinds --offset 1 --limit 1",
+        ],
+    );
+    let integration = project
+        .supercov(&["runs", "latest", "--kind", "integration"])
+        .succeeds();
+    contains_all(
+        &integration,
+        &[
+            "(kind integration)",
+            "Exact for 1 test(s)",
+            "Total       1",
+            "Setup scopes 1",
+        ],
+    );
+}
+
+/// First-party code outside any root it recognises is ambiguous, blocks a
+/// complete measurement, is named four directories at a time in the summary
+/// and in full in `scope`, and both say which roots to name.
+#[test]
+fn code_outside_the_source_roots_is_named_with_the_roots_to_give() {
+    let project = Project::empty("spread-scope");
+    project.write(
+        "package.json",
+        r#"{ "name": "spread", "private": true, "type": "module" }"#,
+    );
+    // Code nothing the tests load reaches: a file a test imports is source.
+    for dir in [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    ] {
+        project.write(
+            &format!("{dir}/index.js"),
+            &format!("export const {dir} = (x) => x ? 1 : 2;\n"),
+        );
+    }
+    project.write(
+        "test/all.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { main } from \"../src/main.js\";\n\ntest(\"main\", () => { assert.equal(main, 1); });\n",
+    );
+    project.write("src/main.js", "export const main = 1;\n");
+    project.git(&["init", "-q"]);
+    project.commit("spread");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let roots = "SUPERCOV_SOURCE_ROOTS=src,alpha,beta,delta,epsilon,eta,gamma,theta,zeta";
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Incomplete — 8 blocking limitation(s) in 8 file(s)",
+            "Unclassified source: alpha 1, beta 1, delta 1, epsilon 1, 4 elsewhere",
+            roots,
+        ],
+    );
+    let scope = project.supercov(&["runs", "latest", "scope"]).succeeds();
+    contains_all(
+        &scope,
+        &[
+            "included 1, excluded 1, ambiguous 8",
+            "1  AMBIGUOUS  zeta       unclassified first-party source",
+            roots,
+        ],
+    );
+}
+
+/// A report written to an absolute path, narrowed to tests only the newest
+/// run has, leaves the older run out of the comparison.
+#[test]
+fn a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for() {
+    let project = Project::cart("report-filter");
+    project
+        .supercov(&["--", "node", "--test", "test/cart.test.js"])
+        .succeeds();
+    project.write(
+        "test/extra.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"describes\", () => {\n  assert.equal(describe([{ name: \"a\" }]), \"a\");\n});\n",
+    );
+    project.commit("extra");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let output = project.root.join("out/report.html");
+    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+    let written = project
+        .supercov(&[
+            "report",
+            "--no-open",
+            "--output",
+            output.to_str().unwrap(),
+            "--test-file",
+            "test/extra.test.js",
+        ])
+        .succeeds();
+    assert!(written.contains(output.to_str().unwrap()), "{written}");
+    let html = std::fs::read_to_string(&output).unwrap();
+    assert!(
+        html.to_ascii_lowercase().starts_with("<!doctype html"),
+        "{}",
+        &html[..80]
+    );
+}
+
+/// On a terminal, a Go test's partial line is passed on after a moment and
+/// the rest joins it, the terminal's size is kept up through a long test,
+/// and the copy's path is named as the project's.
+#[cfg(unix)]
+#[test]
+fn a_go_test_on_a_terminal_passes_partial_lines_on_and_names_the_project() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-terminal");
+    project.write("go.mod", "module example.com/term\n\ngo 1.21\n");
+    project.write(
+        "x.go",
+        "package x\n\nfunc F(a bool) int {\n\tif a {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+    );
+    project.write(
+        "x_test.go",
+        "package x\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestX(t *testing.T) {\n\tfmt.Print(\"prompt> \")\n\ttime.Sleep(600 * time.Millisecond)\n\tdir, _ := os.Getwd()\n\tfmt.Println(\"done in \" + dir)\n\tF(true)\n}\n",
+    );
+    let mut terminal = common::OnTerminal::start(&project, &["--", go, "test", "-v", "./..."]);
+    terminal.wait_for("prompt> ");
+    terminal.wait_for("done in ");
+    let (code, seen) = terminal.finish();
+    assert_eq!(code, 0, "{seen}");
+    let root = project.root.display().to_string();
+    assert!(seen.contains(&format!("prompt> done in {root}")), "{seen}");
+}
+
+/// A unittest run counts each test as it ended: a pass, a failure that
+/// keeps the run diagnostic, an import error, and a test its decorator
+/// skipped, which never enters a phase and is still a test. A suite with no
+/// tests at all is refused.
+#[test]
+fn unittest_outcomes_each_count_and_a_decorator_skip_is_a_test() {
+    let make = |label: &str, test: &str| {
+        let project = Project::empty(label);
+        project.write(
+            "pyproject.toml",
+            "[project]\nname = \"shop\"\nversion = \"0.1.0\"\n",
+        );
+        project.write("src/shop/__init__.py", "");
+        project.write(
+            "src/shop/cart.py",
+            "def total(a):\n    if a:\n        return 1\n    return 2\n",
+        );
+        project.write("tests/__init__.py", "");
+        project.write("tests/test_cart.py", test);
+        project
+    };
+    let head = "import sys, unittest\nsys.path.insert(0, 'src')\nfrom shop.cart import total\n\nclass T(unittest.TestCase):\n";
+    let command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    for (label, test, exit, outcome) in [
+        (
+            "ut-pass",
+            format!("{head}    def test_total(self):\n        self.assertEqual(total(True), 1)\n"),
+            0,
+            "Passed      1",
+        ),
+        (
+            "ut-fail",
+            format!("{head}    def test_total(self):\n        self.assertEqual(total(True), 2)\n"),
+            1,
+            "Failed      1",
+        ),
+        (
+            "ut-error",
+            "import nothing_here\n".to_owned(),
+            1,
+            "Failed      1",
+        ),
+        (
+            "ut-skip",
+            format!("{head}    @unittest.skip('later')\n    def test_total(self):\n        pass\n"),
+            0,
+            "Skipped     1",
+        ),
+    ] {
+        let project = make(label, &test);
+        let ran = project.supercov(&command);
+        assert_eq!(ran.code(), exit, "{label}: {}", ran.stderr());
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        assert!(summary.contains(outcome), "{label}: {summary}");
+    }
+    let empty = make("ut-none", "# no tests\n");
+    let refused = empty.supercov(&command);
+    // unittest's own exit when nothing ran: 5 from Python 3.12, which
+    // Supercov names as the command's; before that, 1 with no outcome.
+    let said = refused.stderr();
+    match refused.code() {
+        5 => assert!(
+            said.contains("the test command exited 5 before any test reported an outcome"),
+            "{said}"
+        ),
+        code => {
+            assert_eq!(code, 1, "{said}");
+            assert!(
+                said.contains("the Python run produced no test outcomes"),
+                "{said}"
+            );
+        }
+    }
+}
+
+/// A query about one file warns that the run is stale only when what it
+/// reads changed: a test file's change says nothing about a source file,
+/// that file's own change names it, and a dependency change names why.
+#[test]
+fn a_file_query_warns_of_staleness_only_for_what_it_reads() {
+    let project = Project::cart("scoped-stale");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let file = |project: &Project| project.supercov(&["runs", "latest", "file", "src/cart.js"]);
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total adds up prices",
+    );
+    let quiet = file(&project);
+    assert_eq!(quiet.code(), 0);
+    assert!(!quiet.stderr().contains("stale run"), "{}", quiet.stderr());
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    let named = file(&project);
+    assert!(
+        named.stderr().contains("src/cart.js changed since the run"),
+        "{}",
+        named.stderr()
+    );
+    project.edit("src/cart.js", "return 1;", "return 0;");
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" }, "dependencies": { "x": "1" } }"#,
+    );
+    let dependency = file(&project);
+    assert!(
+        dependency
+            .stderr()
+            .contains("dependencies or lockfile changed"),
+        "{}",
+        dependency.stderr()
+    );
+}
+
+/// Asked for the failed attempts of a run that failed nothing, each view
+/// reads as that projection: nothing touched, nothing covered, a minimum of
+/// no tests, and a test the run has is named as left out by the filter
+/// rather than missing.
+#[test]
+fn a_failed_projection_of_a_passing_run_reads_as_empty_and_names_what_it_leaves_out() {
+    let project = Project::cart("failed-projection");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let file = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--filter",
+            "failed",
+        ])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "Tests touching this file: 0",
+            "showing 1-13 of 13 gap lines",
+        ],
+    );
+    let line = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:14",
+            "--filter",
+            "failed",
+        ])
+        .succeeds();
+    contains_all(&line, &["NOT COVERED", "Covering tests\n  None"]);
+    let decision = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "decision",
+            "src/cart.js:13",
+            "--filter",
+            "failed",
+        ])
+        .succeeds();
+    contains_all(&decision, &["confidence unexecuted", "vectors:\n  none"]);
+    let minimum = project
+        .supercov(&["runs", "latest", "minimize", "--filter", "failed"])
+        .succeeds();
+    assert!(minimum.contains("exact minimum 0/0 test(s)"), "{minimum}");
+    let left_out = project
+        .supercov(&["runs", "latest", "test", "total", "--filter", "failed"])
+        .exits(2);
+    assert!(
+        left_out.contains("No test matching total is in this view: the run has one"),
+        "{left_out}"
+    );
+    let missing = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "test",
+            "nothing-like-it",
+            "--filter",
+            "failed",
+        ])
+        .exits(2);
+    assert!(
+        missing.contains("Test not found: nothing-like-it"),
+        "{missing}"
+    );
+}
+
+/// `patch` counts the changed executable lines the run covered, fails a
+/// floor it misses, annotates up to the cap, passes an empty change, and
+/// names a base git cannot find; `check` passes and fails floors by count.
+#[test]
+fn patch_and_check_read_a_change_and_a_run_by_count() {
+    let unchanged = Project::cart("patch-empty");
+    unchanged.supercov(&["--", "node", "--test"]).succeeds();
+    let empty = unchanged
+        .supercov(&["runs", "patch", "--base", "HEAD", "--min-lines", "50"])
+        .succeeds();
+    contains_all(
+        &empty,
+        &[
+            "No executable changes.",
+            "PASS: nothing executable changed, so 50% does not apply.",
+        ],
+    );
+    let below = unchanged
+        .supercov(&["runs", "check", "--min-lines", "99"])
+        .exits(1);
+    contains_all(
+        &below,
+        &[
+            "(floor 99%)",
+            "FAIL: 1 floor(s) not met.",
+            "lines 76.92%  10/13 below 99%",
+        ],
+    );
+    let json = unchanged
+        .supercov(&["runs", "check", "--min-lines", "10", "--json"])
+        .json();
+    assert_eq!(json["data"]["outcome"]["result"], "pass", "{json}");
+
+    let changed = Project::cart("patch-changed");
+    changed.write("src/extra.js", "export const extra = (x) => x ? 1 : 2;\n");
+    changed.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    changed.supercov(&["--", "node", "--test"]).succeeds();
+    let patch = changed
+        .supercov(&["runs", "patch", "--base", "HEAD"])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "1 of 2 changed executable line(s) covered (50.00%)",
+            "src/extra.js: 1",
+        ],
+    );
+    let failed = changed
+        .supercov(&["runs", "patch", "--base", "HEAD", "--min-lines", "90"])
+        .exits(1);
+    assert!(failed.contains("FAIL: below 90%"), "{failed}");
+    let annotated = changed
+        .supercov(&[
+            "runs",
+            "patch",
+            "--base",
+            "HEAD",
+            "--annotate",
+            "github",
+            "--max-annotations",
+            "1",
+        ])
+        .succeeds();
+    assert!(
+        annotated.contains("::warning file=src/extra.js,line=1,endLine=1::Changed line 1 not covered by the selected tests."),
+        "{annotated}"
+    );
+    let json = changed
+        .supercov(&["runs", "patch", "--base", "HEAD", "--json"])
+        .json();
+    assert_eq!(
+        (
+            json["data"]["patch"]["covered"].as_u64(),
+            json["data"]["patch"]["eligible"].as_u64()
+        ),
+        (Some(1), Some(2))
+    );
+    let base = changed
+        .supercov(&["runs", "patch", "--base", "nope"])
+        .exits(2);
+    assert!(
+        base.contains("Could not find where this branch left nope"),
+        "{base}"
+    );
+}
+
+/// Many failing tests are named five at a time; a run of one test script
+/// names the others the package defines.
+#[test]
+fn failures_are_named_five_at_a_time_and_other_scripts_are_offered() {
+    let failing = Project::cart("many-failing");
+    let mut tests = String::from(
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\n",
+    );
+    for i in 0..7 {
+        tests.push_str(&format!(
+            "test(\"fails {i}\", () => {{ assert.equal(total([]), {}); }});\n",
+            i + 1
+        ));
+    }
+    failing.write("test/fail.test.js", &tests);
+    failing.commit("failing");
+    let ran = failing.supercov(&["--", "node", "--test", "test/fail.test.js"]);
+    assert_eq!(ran.code(), 1);
+    assert!(
+        ran.stderr()
+            .contains("7 test(s) failed: fails 0, fails 1, fails 2, fails 3, fails 4, and 2 more"),
+        "{}",
+        ran.stderr()
+    );
+    let scripts = Project::cart("other-scripts");
+    scripts.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test", "test:unit": "node --test test/cart.test.js", "test:e2e": "node --test" } }"#,
+    );
+    scripts.commit("scripts");
+    scripts
+        .supercov(&["--", "npm", "run", "test:unit"])
+        .succeeds();
+    let one = scripts.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        one.contains("wrapped `npm run test:unit`. Other test scripts include test:e2e."),
+        "{one}"
+    );
+    scripts
+        .supercov(&["--", "npm", "exec", "--", "node", "--test"])
+        .succeeds();
+    let exec = scripts.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        exec.contains("Other test scripts include test:unit, test:e2e."),
+        "{exec}"
+    );
+}
+
+#[test]
+fn a_test_that_ran_alongside_others_is_undetermined_and_a_new_file_asks_for_the_whole_suite() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-undetermined");
+    project.write("go.mod", "module example.com/u\n\ngo 1.22\n");
+    project.write(
+        "sign.go",
+        "package u\n\nfunc Sign(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"not positive\"\n}\n",
+    );
+    project.write(
+        "sign_test.go",
+        "package u\n\nimport \"testing\"\n\nfunc TestPositive(t *testing.T) {\n\tif Sign(1) != \"positive\" {\n\t\tt.Fatal(\"positive\")\n\t}\n}\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tif Sign(-1) != \"not positive\" {\n\t\tt.Fatal(\"not positive\")\n\t}\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("u");
+    project.supercov(&["--", go, "test", "./..."]).succeeds();
+
+    // The parallel test has no record of its own: a change to code the run
+    // covered could have reached it, so it is neither affected nor not.
+    project.edit("sign.go", "return \"not positive\"", "return \"negative\"");
+    let affected = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &affected,
+        &[
+            "1 of 2 tests affected by changes since the run, 1 undetermined",
+            "  sign_test.go › TestPositive\n    sign.go: Sign (line 3) changed (this test ran it)",
+            "Undetermined — what these ran was not fully recorded",
+            "  sign_test.go › TestParallel\n    sign.go: Sign (line 3) changed (the run covered it)",
+        ],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    assert_eq!(json["data"]["undetermined"][0]["attribution"], "run-wide");
+    // Both are for a runner to run.
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--names"])
+            .succeeds(),
+        "TestParallel\nTestPositive\n"
+    );
+
+    // A file the run never captured: no record can say who loads it.
+    project.edit("sign.go", "return \"negative\"", "return \"not positive\"");
+    project.write("extra.go", "package u\n\nfunc Extra() int { return 3 }\n");
+    let added = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &added,
+        &[
+            "No captured file has changed.",
+            "  A source or test file exists that the run did not capture; no test's record can say whether it loads it. Run the suite in full.",
+        ],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json();
+    assert_eq!(json["data"]["workingTree"]["sourceSetChanged"], true);
+
+    // Mistakes under --json are answered in JSON, as every --json answer is.
+    for (args, command, message) in [
+        (
+            &["tests", "affected", "--frob", "--json"][..],
+            "runs.tests.affected",
+            "Unknown option: --frob",
+        ),
+        (
+            &["tests", "frob", "--json"],
+            "runs.tests",
+            "unknown tests action: frob",
+        ),
+        (
+            &["assertions", "--frob", "--json"],
+            "runs.assertions",
+            "Unknown option: --frob",
+        ),
+    ] {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        let refused = project.supercov(&full);
+        assert_eq!(refused.code(), 2);
+        let json: serde_json::Value = serde_json::from_str(&refused.stdout()).unwrap();
+        assert_eq!(json["command"], command);
+        assert_eq!(json["error"]["message"], message);
+        assert_eq!(refused.stderr(), "");
+    }
+    // Without it, the usage follows the mistake on standard error.
+    let text = project.supercov(&["runs", "latest", "tests", "frob"]);
+    assert_eq!(text.code(), 2);
+    assert!(
+        text.stderr()
+            .starts_with("[supercov] unknown tests action: frob\n\nUsage: ")
+    );
+}
+
+#[test]
+fn tests_whose_coverage_went_to_the_run_are_not_reported_as_missing_evidence() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-all-parallel");
+    project.write("go.mod", "module example.com/p\n\ngo 1.22\n");
+    project.write(
+        "sign.go",
+        "package p\n\nfunc Sign(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"not positive\"\n}\n",
+    );
+    project.write(
+        "sign_test.go",
+        "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tif Sign(-1) != \"not positive\" {\n\t\tt.Fatal(\"not positive\")\n\t}\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", go, "test", "./..."]).succeeds();
+    // The one test ran alongside nothing it could be told from: what it
+    // reached counts run-wide, and no view reads that as evidence lost.
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Lines      75.00% (3/4)",
+            "  unit            1 test(s)  coverage not attributable; counted run-wide",
+            "  Attribution      1 counted run-wide",
+        ],
+    );
+    assert!(
+        !summary.contains("no source-coverage evidence"),
+        "{summary}"
+    );
+    assert!(
+        project
+            .supercov(&["runs", "latest", "kinds"])
+            .succeeds()
+            .contains("unit  1 test(s)  coverage not attributable; counted run-wide")
+    );
+    assert_eq!(
+        project
+            .supercov(&["runs", "latest", "tests", "without-evidence"])
+            .succeeds(),
+        "Tests that made assertions and recorded no coverage: 0\n"
+    );
+}
+
+#[test]
+fn a_long_decision_is_shortened_in_its_file_and_whole_on_its_own() {
+    let project = Project::cart("long-decision");
+    project.write(
+        "src/long.js",
+        "export function check(alpha, beta, gamma) {\n  if (alpha.someLongPropertyName > 10 && beta.anotherLongPropertyName < 20 && gamma.yetAnotherLongPropertyName !== 30) {\n    return 1;\n  }\n  return 0;\n}\n",
+    );
+    project.write(
+        "test/long.test.js",
+        "import test from \"node:test\";\nimport { check } from \"../src/long.js\";\ntest(\"long\", () => { check({ someLongPropertyName: 1 }, {}, {}); });\n",
+    );
+    project.commit("long");
+    project.measure(&[]);
+    let file = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/long.js",
+            "--group",
+            "decision",
+        ])
+        .succeeds();
+    assert!(
+        file.contains("  missing 3/3  alpha.someLongPropertyName > 10 && beta.anotherLongPropertyName < 20 && gamma.yetAnotherLongPro…\n"),
+        "{file}"
+    );
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/long.js:2"])
+        .succeeds();
+    assert!(
+        decision.contains("\nalpha.someLongPropertyName > 10 && beta.anotherLongPropertyName < 20 && gamma.yetAnotherLongPropertyName !== 30\n"),
+        "{decision}"
+    );
+}
+
+#[test]
+fn a_comparison_of_runs_that_measure_different_code_says_why_the_percentages_moved() {
+    let project = Project::cart("diff-moved");
+    let first = project.measure(&[]);
+    project.write("src/added.js", "export const added = 1;\n");
+    let second = project.measure(&[]);
+    let moved = project.supercov(&["diff", &first, &second]);
+    let said = moved.succeeds();
+    contains_all(
+        &said,
+        &[
+            "lines -5.49pp, branches +0pp, MC/DC +0pp",
+            "gained: 0 lines, 0 branches, 0 MC/DC conditions",
+            "Nothing covered in one run is uncovered in the other: the percentages moved because the runs measure different code.",
+        ],
+    );
+    assert!(!said.contains("showing"), "{said}");
+    // Each stale run of the two names what changed since it.
+    project.write("src/added.js", "export const added = 2;\n");
+    let stale = project.supercov(&["diff", &first, &second]).stderr();
+    contains_all(
+        &stale,
+        &[
+            &format!(
+                "[supercov] stale run {first}: instrumented source changed; changed since the run: src/added.js"
+            ),
+            &format!(
+                "[supercov] stale run {second}: instrumented source changed; changed since the run: src/added.js"
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_patch_counts_new_files_and_reads_only_the_tests_a_filter_picks() {
+    let project = Project::cart("patch-filtered");
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0 + 0;");
+    project.write("README.md", "# readme\n");
+    project.write("src/fresh.js", "export const fresh = 1;\n");
+    project.measure(&[]);
+    // A file git does not track yet is part of the change; prose is not
+    // executable and is no part of the count.
+    let patch = project
+        .supercov(&["runs", "latest", "patch", "--base", "HEAD"])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "  1 of 2 changed executable line(s) covered (50.00%)",
+            "  src/fresh.js: 1",
+        ],
+    );
+    assert!(!patch.contains("README"), "{patch}");
+    let filtered = project.supercov(&[
+        "runs",
+        "latest",
+        "patch",
+        "--base",
+        "HEAD",
+        "--title",
+        "coupon",
+        "--min-lines",
+        "90",
+    ]);
+    assert_eq!(filtered.code(), 1);
+    assert!(
+        filtered.stdout().ends_with("FAIL: below 90%\n"),
+        "{}",
+        filtered.stdout()
+    );
+    assert!(
+        filtered
+            .stderr()
+            .contains("reading only the tests --title coupon picks")
+    );
+    let none = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "patch",
+            "--base",
+            "HEAD",
+            "--test-file",
+            "test/none.js",
+        ])
+        .exits(2);
+    assert!(
+        none.contains("no test of the run matches --test-file test/none.js"),
+        "{none}"
+    );
+}
+
+#[test]
+fn query_numbers_and_shapes_are_checked_before_anything_is_read() {
+    let project = Project::cart("query-shapes");
+    project.measure(&[]);
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    for limit in ["1.5", "-1", "99999999999999999999"] {
+        assert!(
+            on_run(&["files", "--limit", limit])
+                .exits(2)
+                .contains("--limit must be a number of entries, or 0 for all of them")
+        );
+    }
+    assert!(
+        on_run(&["files", "--depth", "2"])
+            .exits(2)
+            .contains("--depth requires --group dir")
+    );
+    assert!(
+        on_run(&["files", "--depth", "1", "--group", "dir"])
+            .succeeds()
+            .starts_with("Coverage by directory, 1 deep\n")
+    );
+    assert!(
+        on_run(&["files", "--files"])
+            .exits(2)
+            .contains("--files is only supported by: supercov runs <run-id> scope")
+    );
+    assert!(
+        on_run(&["line", "src/cart.js"])
+            .exits(2)
+            .contains("Expected <source-file>:<line>, with lines counted from 1")
+    );
+    // A line asked of `file` points at `line`.
+    assert!(on_run(&["file", "src/cart.js:3"]).exits(2).contains(
+        "Source file not found: src/cart.js:3; one line is read with `line src/cart.js:3`"
+    ));
+    assert!(
+        on_run(&["gaps", "--metric", "all"])
+            .succeeds()
+            .contains("MC/DC conditions 4")
+    );
+    // The export writes only JSON lines, and names a place it cannot write.
+    assert!(
+        on_run(&["gaps", "--format", "csv"])
+            .exits(2)
+            .contains("gaps --format takes jsonl")
+    );
+    let unwritable = on_run(&[
+        "gaps",
+        "--format",
+        "jsonl",
+        "--output",
+        "missing/dir/x.jsonl",
+    ])
+    .exits(2);
+    assert!(unwritable.contains("missing/dir/x.jsonl: "), "{unwritable}");
+    let picked = on_run(&[
+        "gaps", "--format", "jsonl", "--metric", "mcdc", "--title", "coupon",
+    ])
+    .succeeds();
+    assert!(
+        picked.lines().all(|line| line.contains(r#""kind":"mcdc""#)) && picked.lines().count() > 0,
+        "{picked}"
+    );
+}
+
+#[test]
+fn code_outside_the_roots_counts_when_source_loads_it_and_is_named_by_check_when_not() {
+    let project = Project::cart("loaded-outside");
+    project.write(
+        "shared/round.js",
+        "export function round(value) {\n  if (value < 0) return 0;\n  return Math.round(value);\n}\n",
+    );
+    project.write(
+        "src/price.js",
+        "import { round } from \"../shared/round.js\";\nexport const price = (value) => round(value);\n",
+    );
+    project.write("extra/unused.js", "export const unused = 1;\n");
+    project.write(
+        "test/round.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { price } from \"../src/price.js\";\n\ntest(\"rounds\", () => assert.equal(price(1.4), 1));\n",
+    );
+    project.commit("outside");
+    project.measure(&[]);
+    // Source loads it, so it is source: measured, with its gap.
+    let scope = project
+        .supercov(&["runs", "latest", "scope", "--files"])
+        .succeeds();
+    contains_all(
+        &scope,
+        &[
+            "INCLUDED  shared/round.js  loaded by first-party source",
+            "AMBIGUOUS  extra/unused.js  unclassified first-party source",
+        ],
+    );
+    let file = project
+        .supercov(&["runs", "latest", "file", "shared/round.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "Statements not executed         1",
+            "Tests touching this file: 1",
+        ],
+    );
+    // Nothing loads the other: check passes as the suite does, and says so.
+    let check = project
+        .supercov(&["runs", "latest", "check", "--min-lines", "10"])
+        .succeeds();
+    assert!(
+        check.contains(
+            "PASS: every floor is met.\n1 file outside the source roots that no source imports is not counted: extra/unused.js."
+        ),
+        "{check}"
+    );
+    let json = project
+        .supercov(&["runs", "latest", "check", "--min-lines", "10", "--json"])
+        .json();
+    assert_eq!(json["data"]["view"]["complete"], false);
+    // Any of its lines says why, not that the line holds no code.
+    let line = project
+        .supercov(&["runs", "latest", "line", "extra/unused.js:1"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "  NOT MEASURED\n",
+            "  - source-scope: JavaScript/TypeScript under no source root that no first-party source imports",
+        ],
+    );
+    assert!(!line.contains("Nothing on this line is code"), "{line}");
+}
+
+#[test]
+fn a_cargo_filter_that_matches_no_test_says_so_when_the_run_is_read() {
+    let project = Project::empty("cargo-no-match");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"nomatch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn sign(n: i32) -> bool {\n    n > 0\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn positive() {\n        assert!(super::sign(1));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project
+        .supercov(&["--", "cargo", "test", "--", "nothing_matches"])
+        .succeeds();
+    let read = project.supercov(&["runs", "latest"]).exits(2);
+    assert!(
+        read.contains(
+            "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test."
+        ),
+        "{read}"
+    );
+    // Libtest's own selection, skips included, is the run's.
+    project
+        .supercov(&[
+            "--",
+            "cargo",
+            "test",
+            "--",
+            "--exact",
+            "--skip",
+            "tests::positive",
+        ])
+        .succeeds();
+    project
+        .supercov(&["--", "cargo", "test", "--", "--exact", "tests::positive"])
+        .succeeds();
+    assert!(
+        project
+            .supercov(&["runs", "latest", "test", "tests::positive"])
+            .succeeds()
+            .contains("outcome passed")
+    );
+}
+
+#[test]
+fn minimize_refuses_background_evidence_and_names_the_filter_that_leaves_it_out() {
+    let project = Project::cart("minimize-background");
+    project.write(
+        "test/setup.test.js",
+        "import { before, test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\nconst loaded = total([{ price: 1, quantity: 1 }]);\nbefore(() => { total([{ price: 2, quantity: 1 }]); });\ntest(\"loaded\", () => assert.equal(loaded, 1));\n",
+    );
+    project.commit("setup");
+    project.measure(&[]);
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    // Module-load work ran with no test running: no subset of tests keeps it.
+    let refused = on_run(&["minimize"]).exits(2);
+    assert!(
+        refused.contains("Narrow it to the tests' own evidence with --kind <kind> or --runner <runner>, which leave the background out"),
+        "{refused}"
+    );
+    for target in ["150", "nan"] {
+        assert!(
+            on_run(&["minimize", "--target", target])
+                .exits(2)
+                .contains("--target must be between 0 and 100")
+        );
+    }
+    // The filter it names: the tests alone, setup scope included.
+    let minimum = on_run(&["minimize", "--kind", "unit"]).succeeds();
+    assert!(
+        minimum.starts_with(
+            "exact minimum 3/4 test(s) keeping the coverage of all 4 tests in every measured metric"
+        ),
+        "{minimum}"
+    );
+    contains_all(
+        &on_run(&["kinds"]).succeeds(),
+        &[
+            "background  0 test(s)  lines 46.15%",
+            "unit  4 test(s) + 1 setup scope(s)  lines 76.92%",
+        ],
+    );
+}
+
+#[test]
+fn a_line_past_the_end_of_its_file_fails_among_several_as_it_does_alone() {
+    let project = Project::cart("lines-past-end");
+    project.measure(&[]);
+    let mixed = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:2", "src/cart.js:999"])
+        .succeeds();
+    contains_all(
+        &mixed,
+        &[
+            "src/cart.js:2\n",
+            "Not answered\n  src/cart.js:999: src/cart.js has 21 lines; there is no line 999",
+        ],
+    );
+    assert!(!mixed.contains("Nothing on this line is code"), "{mixed}");
+    let json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:2",
+            "src/cart.js:999",
+            "--json",
+        ])
+        .json();
+    assert_eq!(json["data"]["lines"].as_array().unwrap().len(), 1, "{json}");
+    assert_eq!(json["data"]["failed"][0]["location"], "src/cart.js:999");
+    // Every location failing fails the call, as one does.
+    let none = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:998",
+            "src/cart.js:999",
+        ])
+        .exits(2);
+    assert!(
+        none.contains("src/cart.js has 21 lines; there is no line 998"),
+        "{none}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_with_nested_dependencies_and_their_links_runs_in_the_copy_as_it_does_in_place() {
+    let project = Project::empty("probe-nested-modules");
+    project.write("package.json", r#"{ "name": "mono", "private": true, "type": "module", "workspaces": ["packages/*"], "scripts": { "test": "node --test packages/a/test/a.test.js" } }"#);
+    project.write(
+        "node_modules/dep/package.json",
+        r#"{ "name": "dep", "type": "module", "main": "index.js" }"#,
+    );
+    project.write(
+        "node_modules/dep/index.js",
+        "export const dep = (x) => x + 1;\n",
+    );
+    project.write(
+        "node_modules/dep/cli.js",
+        "#!/usr/bin/env node\nconsole.log('dep');\n",
+    );
+    project.write(
+        "packages/a/package.json",
+        r#"{ "name": "a", "type": "module", "main": "src/index.js" }"#,
+    );
+    project.write(
+        "packages/a/node_modules/local-dep/package.json",
+        r#"{ "name": "local-dep", "type": "module", "main": "index.js" }"#,
+    );
+    project.write(
+        "packages/a/node_modules/local-dep/index.js",
+        "export const local = (x) => x * 2;\n",
+    );
+    project.write(
+        "packages/a/node_modules/local-dep/bin.js",
+        "#!/usr/bin/env node\nconsole.log('local');\n",
+    );
+    project.write("packages/a/src/index.js", "import { dep } from 'dep';\nimport { local } from 'local-dep';\nexport const both = (x) => (x > 0 ? local(dep(x)) : 0);\n");
+    project.write("packages/a/test/a.test.js", "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { both } from '../src/index.js';\ntest('both', () => { assert.equal(both(1), 4); assert.equal(both(0), 0); });\n");
+    // Links a package manager makes: commands in `.bin` at the root and in a
+    // workspace package, and the package itself linked into the root.
+    {
+        std::fs::create_dir_all(project.root.join("node_modules/.bin")).unwrap();
+        std::os::unix::fs::symlink("../dep/cli.js", project.root.join("node_modules/.bin/dep"))
+            .unwrap();
+        std::fs::create_dir_all(project.root.join("packages/a/node_modules/.bin")).unwrap();
+        std::os::unix::fs::symlink(
+            "../local-dep/bin.js",
+            project.root.join("packages/a/node_modules/.bin/local"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../../packages/a", project.root.join("node_modules/a"))
+            .unwrap();
+    }
+    project.write(".gitignore", "node_modules\n");
+    project.git(&["init", "-q"]);
+    let plain = std::process::Command::new("npm")
+        .arg("test")
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(plain.status.success());
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    let files = project.supercov(&["runs", "latest", "files"]).succeeds();
+    assert!(
+        files.contains("packages/a/src/index.js\n  covered in this projection"),
+        "{files}"
+    );
+    assert!(!files.contains("node_modules"), "{files}");
+}
+
+#[test]
+fn a_summary_narrowed_to_one_kind_lists_only_that_kind() {
+    let project = Project::cart("summary-one-kind");
+    project.write(
+        "test/ship.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { shipping } from \"../src/cart.js\";\ntest(\"ships\", () => assert.equal(shipping(10, true), 15));\n",
+    );
+    project.commit("ship");
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/cart.test.js"],
+            &[("SUPERCOV_TEST_KIND", "unit")],
+        )
+        .succeeds();
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/ship.test.js"],
+            &[("SUPERCOV_TEST_KIND", "integration")],
+        )
+        .succeeds();
+    project.supercov(&["merge"]).succeeds();
+    let whole = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &whole,
+        &["  integration     1 test(s)", "  unit            3 test(s)"],
+    );
+    let narrowed = project
+        .supercov(&["runs", "latest", "--kind", "integration"])
+        .succeeds();
+    contains_all(
+        &narrowed,
+        &[
+            "(kind integration)",
+            "Lines      23.08% (3/13)",
+            "By test kind\n  integration     1 test(s)  lines  23.08%",
+        ],
+    );
+    assert!(!narrowed.contains("  unit "), "{narrowed}");
+    let json = project
+        .supercov(&["runs", "latest", "--kind", "integration", "--json"])
+        .json();
+    assert_eq!(
+        json["data"]["coverageByKind"].as_array().unwrap().len(),
+        1,
+        "{json}"
+    );
+    // A test the kind leaves out is named as left out.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "test", "ships", "--kind", "unit"])
+            .exits(2)
+            .contains("No test matching ships is in this view")
+    );
+}
+
+#[test]
+fn filters_pages_imports_and_help_topics_read_as_a_user_reads_them() {
+    let project = Project::cart("broad-shapes");
+    let first = project.measure(&[]);
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    // Tests affected, narrowed every way a runner's filter wants it.
+    assert_eq!(
+        on_run(&["tests", "affected", "--kind", "unit", "--names"]).succeeds(),
+        "shipping is free over fifty\n"
+    );
+    assert_eq!(
+        on_run(&["tests", "affected", "--runner", "node:test", "--files"]).succeeds(),
+        "test/cart.test.js\n"
+    );
+    assert!(
+        on_run(&["tests", "affected", "--test-file", "test/cart.test.js"])
+            .succeeds()
+            .starts_with(&format!(
+                "Run {first}: 1 of 3 tests affected by changes since the run (--test-file test/cart.test.js)\n"
+            ))
+    );
+    assert!(
+        on_run(&["tests", "affected", "--tag", "nothing"])
+            .exits(2)
+            .contains("No tests match --tag nothing")
+    );
+    // Pages past their end, and options that need another.
+    assert!(
+        on_run(&["scope", "--files", "--offset", "9"])
+            .succeeds()
+            .contains("showing none of 2: --offset 9 is past the end")
+    );
+    assert!(
+        on_run(&["file", "src/cart.js", "--sort", "missing"])
+            .exits(2)
+            .contains("--sort requires --group decision")
+    );
+    assert!(
+        on_run(&[
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--sort",
+            "nonsense"
+        ])
+        .exits(2)
+        .contains("--sort must be location or missing")
+    );
+    contains_all(
+        &on_run(&["test", "total", "--limit", "1"]).succeeds(),
+        &["showing 1-1 of 2 matching tests", "all 2 at once: "],
+    );
+    assert!(
+        project
+            .supercov(&["runs", "--limit", "1", "--offset", "5"])
+            .succeeds()
+            .contains("showing none of 1: --offset 5 is past the end")
+    );
+    assert!(
+        project
+            .supercov(&["runs", "clean", "--keep", "abc"])
+            .exits(2)
+            .contains("--keep must be a non-negative integer")
+    );
+    // An LCOV import names what it left out and keeps a failed outcome.
+    project.write(
+        "cov.info",
+        "TN:\nSF:src/cart.js\nFN:12,shipping\nFNDA:1,shipping\nDA:13,1\nLF:1\nLH:1\nend_of_record\nSF:lib/elsewhere.js\nDA:1,1\nend_of_record\n",
+    );
+    assert!(
+        project
+            .supercov(&[
+                "import", "cov.info", "--test", "imported", "--status", "maybe"
+            ])
+            .exits(2)
+            .contains("--status is passed or failed, not maybe")
+    );
+    let imported = project.supercov(&[
+        "import", "cov.info", "--test", "imported", "--status", "failed",
+    ]);
+    assert_eq!(imported.code(), 0, "{}", imported.stderr());
+    assert!(
+        imported.stderr().contains(
+            "left out 1 file(s) of the evidence: lib/elsewhere.js (no such file in the project)"
+        ),
+        "{}",
+        imported.stderr()
+    );
+    assert!(
+        on_run(&["test", "imported"])
+            .succeeds()
+            .contains("outcome failed; retry 0=failed")
+    );
+    // --gained looks for no losses, and says only what it looked for.
+    let gained = project
+        .supercov(&["diff", &first, "latest", "--gained"])
+        .succeeds();
+    assert!(
+        gained.contains("Nothing was gained.\n") && !gained.contains("or lost"),
+        "{gained}"
+    );
+    // `help <command>` is that command's help.
+    assert!(
+        project
+            .supercov(&["help", "runs"])
+            .succeeds()
+            .starts_with("Usage: supercov runs [options]")
+    );
+    assert!(
+        project
+            .supercov(&["help", "import"])
+            .succeeds()
+            .starts_with("Usage: supercov import")
+    );
+    assert!(
+        project
+            .supercov(&["help", "nope"])
+            .exits(2)
+            .contains("No help for nope: it is no command")
+    );
+    assert!(
+        project
+            .supercov(&["docs", "nonsense"])
+            .exits(2)
+            .contains("unknown guide \"nonsense\"")
+    );
+}
+
+#[test]
+fn the_wrapped_command_exits_as_it_would_alone_and_a_missing_root_is_named() {
+    let project = Project::cart("wrapped-exits");
+    assert!(
+        project
+            .supercov(&["--"])
+            .exits(2)
+            .contains("Usage: supercov -- <test command>")
+    );
+    let missing = project.supercov(&["--", "definitely-not-a-command"]);
+    assert_eq!(missing.code(), 127);
+    assert!(
+        missing
+            .stderr()
+            .contains("could not spawn definitely-not-a-command"),
+        "{}",
+        missing.stderr()
+    );
+    assert_eq!(
+        project
+            .supercov(&["--", "node", "-e", "process.exit(3)"])
+            .code(),
+        3
+    );
+    // Ended by a signal: 128 plus the signal, as a shell says it.
+    #[cfg(unix)]
+    assert_eq!(
+        project
+            .supercov(&["--", "node", "-e", "process.kill(process.pid, 'SIGTERM')"])
+            .code(),
+        143
+    );
+    assert!(
+        project
+            .supercov(&["--exact-attribution", "node"])
+            .exits(2)
+            .contains("--exact-attribution goes before the command")
+    );
+    // Every root named missing is a mistake to name.
+    let roots = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_SOURCE_ROOTS", "nowhere")],
+    );
+    assert_eq!(roots.code(), 1);
+    assert!(
+        roots.stderr().contains(
+            "SUPERCOV_SOURCE_ROOTS=nowhere left no JavaScript or TypeScript source to measure; nowhere does not exist"
+        ),
+        "{}",
+        roots.stderr()
+    );
+    // One of several missing is a checkout without that directory.
+    project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_SOURCE_ROOTS", "src,nowhere")],
+        )
+        .succeeds();
+}
+
+#[test]
+fn private_batch_protocols_and_odd_arguments_say_what_went_wrong() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    // The harnesses' batch protocols fail with a message, not a panic, when
+    // their output cannot be written: nothing reads the other end.
+    for (command, says) in [
+        (
+            "__instrument-js",
+            "failed to write Rust instrumenter output",
+        ),
+        (
+            "__benchmark-js-transform",
+            "failed to write Rust benchmark output",
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_supercov"))
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"[{"file":"a.js","source":"export const a = 1;\n"}]"#)
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{command}: {stderr}");
+        assert!(stderr.contains(says), "{command}: {stderr}");
+    }
+    let project = Project::cart("odd-arguments");
+    let first = project.measure(&[]);
+    // A lone `-` is no option to merge: it names a run that does not exist.
+    let merged = project.supercov(&["merge", &first, "-"]).exits(2);
+    assert!(!merged.contains("Unknown option"), "{merged}");
+    // An evidence path holding `=` is a path, not an option and its value.
+    project.write(
+        "cov=1.info",
+        "TN:\nSF:src/cart.js\nDA:13,1\nLF:1\nLH:1\nend_of_record\n",
+    );
+    let imported = project.supercov(&["import", "cov=1.info", "--test", "imported"]);
+    assert_eq!(imported.code(), 0, "{}", imported.stderr());
+}
+
+#[test]
+fn filters_selectors_and_stray_entries_on_the_run_commands() {
+    let project = Project::cart("run-commands");
+    for directory in ["a", "b", "c", "d", "e", "f"] {
+        project.write(&format!("tools/{directory}.js"), "export const tool = 1;\n");
+    }
+    project.commit("tools");
+    let run = project.measure(&[]);
+    // Six files no source imports, named five at a time.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "check", "--min-lines", "1"])
+            .succeeds()
+            .contains(
+                "6 files outside the source roots that no source imports are not counted: \
+             tools/a.js, tools/b.js, tools/c.js, tools/d.js, tools/e.js, and 1 more."
+            )
+    );
+    // A test filter without its value, on each command that takes one.
+    for (command, usage) in [
+        (
+            vec!["check", "--min-lines", "10"],
+            "supercov runs <run-id> check",
+        ),
+        (
+            vec!["patch", "--base", "HEAD"],
+            "supercov runs <run-id> patch",
+        ),
+        (
+            vec!["report", "--format", "lcov"],
+            "supercov runs <run-id> report",
+        ),
+    ] {
+        let mut args = vec!["runs", "latest"];
+        args.extend(command);
+        args.push("--kind");
+        contains_all(
+            &project.supercov(&args).exits(2),
+            &["--kind needs a value", usage],
+        );
+    }
+    // A decision by a file and something that is no line, and by its id.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "decision", "src/cart.js:abc"])
+            .exits(2)
+            .contains("Decision not found: src/cart.js:abc")
+    );
+    let decisions = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--json",
+        ])
+        .json();
+    let id = decisions["data"]["decisions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        project
+            .supercov(&["runs", "latest", "decision", &id])
+            .succeeds()
+            .contains("coupon && coupon.percent > 0")
+    );
+    // A run stored under a name of the pre-release store, or any name but a
+    // run id, is no run to list.
+    let runs = project.root.join(".supercov/runs");
+    for name in [
+        "2026-08-25T23-33-12-211Z",
+        "run_35c35ceeaf4b843Z",
+        "abcdefghijklmnopqrst",
+    ] {
+        copy_tree(&runs.join(&run), &runs.join(name));
+    }
+    contains_all(
+        &project.supercov(&["runs"]).succeeds(),
+        &[&run, "showing 1-1 of 1"],
+    );
+    // A stale run's patch, as JSON: an error with its reason, no pass.
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let patch = project
+        .supercov(&["runs", "latest", "patch", "--base", "HEAD", "--json"])
+        .json();
+    assert_eq!(patch["data"]["result"], "error", "{patch}");
+    assert!(
+        patch["data"]["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("instrumented source changed"),
+        "{patch}"
+    );
+}
+
+/// The `wrangler` a measured Rust test starts, outside `wrangler dev`: it
+/// refuses without the real one to hand over to, and otherwise becomes it
+/// with the test's arguments untouched.
+#[cfg(unix)]
+#[test]
+fn the_wrangler_shim_hands_over_or_says_why_it_cannot() {
+    let project = Project::empty("wrangler-shim");
+    let refused = project.supercov(&["__wrangler", "--version"]);
+    assert_eq!(refused.code(), 127);
+    assert!(
+        refused
+            .stderr()
+            .contains("__wrangler runs only as the wrangler of a measured test"),
+        "{}",
+        refused.stderr()
+    );
+    project.write_script("real-wrangler", "#!/bin/sh\necho \"wrangler $*\"\nexit 3\n");
+    let real = project.root.join("real-wrangler");
+    let real = real.to_str().unwrap();
+    let handed = project.supercov_with(
+        &["__wrangler", "deploy", "--name", "it"],
+        &[("SUPERCOV_WRANGLER", real)],
+    );
+    assert_eq!(handed.code(), 3, "{}", handed.stderr());
+    assert_eq!(handed.stdout(), "wrangler deploy --name it\n");
+    // The poller wants a process, a port and where to write; given a
+    // process already gone, it ends.
+    assert_eq!(project.supercov(&["__wrangler-poll"]).code(), 2);
+    assert_eq!(
+        project
+            .supercov(&["__wrangler-poll", "nobody", "port", "windows"])
+            .code(),
+        2
+    );
+    let windows = project.root.join("worker.windows");
+    let polled = project.supercov(&[
+        "__wrangler-poll",
+        "2147483646",
+        "9",
+        windows.to_str().unwrap(),
+    ]);
+    assert_eq!(polled.code(), 0, "{}", polled.stderr());
+}
+
+#[test]
+fn a_run_whose_source_is_gone_is_stale_and_never_passes_a_gate() {
+    let project = Project::cart("source-gone");
+    let run = project.measure(&[]);
+    std::fs::rename(
+        project.root.join("src/cart.js"),
+        project.root.join("src/cart.js.bak"),
+    )
+    .unwrap();
+    let reason = "its source cannot be measured as it is now";
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "check", "--min-lines", "10"])
+            .exits(2),
+        &["ERROR: this run cannot answer the question asked.", reason],
+    );
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert_eq!(files.code(), 0, "{}", files.stderr());
+    assert!(
+        files
+            .stderr()
+            .contains(&format!("[supercov] stale run {run}: {reason}")),
+        "{}",
+        files.stderr()
+    );
+    assert!(
+        project
+            .supercov(&["runs"])
+            .succeeds()
+            .contains(&format!("STALE ({reason})"))
+    );
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "tests", "affected"])
+            .succeeds(),
+        &["3 of 3 tests affected", &format!("{reason} (every test)")],
+    );
+}
+
+#[test]
+fn files_named_beyond_ascii_are_changes_like_any_other() {
+    let project = Project::cart("named-beyond-ascii");
+    let base = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    project.write(
+        "src/é.js",
+        "export function hi(a) {\n  if (a) { return 1; }\n  return 2;\n}\n",
+    );
+    project.write(
+        "test/e.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { hi } from \"../src/é.js\";\ntest(\"hi\", () => assert.equal(hi(1), 1));\n",
+    );
+    project.commit("hi");
+    let run = project.measure(&[]);
+    // git quotes such a name unless asked not to; quoted, it was no file the
+    // run measured, and the patch had no executable change.
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "patch", "--base", &base])
+            .succeeds(),
+        &["2 of 3 changed executable line(s) covered", "src/é.js: 3"],
+    );
+    project.write("src/ü.js", "export const x = 1;\n");
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert!(
+        files.stderr().contains(&format!(
+            "[supercov] stale run {run}: instrumented source changed; changed since the run: src/ü.js"
+        )),
+        "{}",
+        files.stderr()
+    );
+}
+
+#[test]
+fn a_patch_names_new_source_it_did_not_measure_and_not_new_tests() {
+    let project = Project::cart("patch-unmeasured");
+    let base = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    project.edit("src/cart.js", "  let sum = 0;", "  let sum = 0 + 0;");
+    project.write("src/cart.bench.js", "export const bench = 1;\n");
+    project.write("src/helper.spec.js", "export const spec = 1;\n");
+    project.commit("branch");
+    project.measure(&[]);
+    let patch = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "patch",
+            "--base",
+            &base,
+            "--min-lines",
+            "50",
+        ])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "Changed but not measured by this run:\n    src/cart.bench.js\n",
+            "PASS: at or above 50%",
+        ],
+    );
+    assert!(!patch.contains("helper.spec.js"), "{patch}");
+}
+
+#[test]
+fn a_run_left_out_of_a_merge_or_read_stale_says_what_moved() {
+    // A source file added and a test file edited: the source is said to
+    // have changed by the file it gained, and the test file is not named.
+    let project = Project::cart("merge-moved");
+    let run = project.measure(&[]);
+    project.write("src/extra.js", "export const extra = 1;\n");
+    project.edit(
+        "test/cart.test.js",
+        "total adds prices",
+        "total sums prices",
+    );
+    let said = project.supercov(&["merge"]).exits(2);
+    assert!(
+        said.contains(&format!(
+            "left out {run} (node --test): the source has changed (1 file(s) added). Measure it again"
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("test/cart.test.js"), "{said}");
+
+    // A measured file edited, with no record of the run's files to judge it
+    // by: left out, as the measured source has changed.
+    let project = Project::cart("merge-no-record");
+    let run = project.measure(&[]);
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
+    let said = project
+        .supercov_with(
+            &["merge"],
+            &[("SUPERCOV_TEST_FAULT", "manifest-unreadable")],
+        )
+        .exits(2);
+    assert!(
+        said.contains(&format!(
+            "left out {run} (node --test): the source has changed. Measure it again"
+        )),
+        "{said}"
+    );
+
+    // A measured file removed whose name reads as configuration.
+    let project = Project::cart("merge-config-named");
+    project.write("src/app.config.js", "export const rate = 1;\n");
+    project.commit("config-named source");
+    let run = project.measure(&[]);
+    std::fs::remove_file(project.root.join("src/app.config.js")).unwrap();
+    let said = project.supercov(&["merge"]).exits(2);
+    assert!(
+        said.contains(&format!(
+            "left out {run} (node --test): the source has changed. Measure it again"
+        )),
+        "{said}"
+    );
+
+    // Only configuration added: stale for it, no file to name; a diff with
+    // a run after it says what it compared.
+    let project = Project::cart("stale-configuration");
+    let older = project.measure(&[]);
+    project.write(".npmrc", "fund=false\n");
+    project.commit("npmrc");
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert!(
+        files.stderr().contains(&format!(
+            "[supercov] stale run {older}: test/build configuration changed\n"
+        )),
+        "{}",
+        files.stderr()
+    );
+    let newer = project.measure(&[]);
+    let diff = project.supercov(&["diff", &older, &newer, "--json"]).json();
+    assert_eq!(
+        diff["data"]["inputs"],
+        serde_json::json!({"sourceChanged": true, "testsChanged": false})
+    );
+
+    // Without the run's history, or without any repository, what changed is
+    // still named from the run's own record.
+    let project = Project::cart("stale-without-history");
+    let run = project.measure(&[]);
+    project.edit("src/cart.js", "return 0;", "return 0; // free");
+    project.write("src/new.js", "export const n = 1;\n");
+    std::fs::rename(project.root.join(".git"), project.root.join("away.git")).unwrap();
+    let files = project.supercov(&["runs", "latest", "files"]);
+    assert!(
+        files.stderr().contains(&format!(
+            "stale run {run}: instrumented source changed; changed since the run: src/cart.js\n"
+        )),
+        "{}",
+        files.stderr()
+    );
+    project.git(&["init", "-q"]);
+    project.git(&["add", "package.json", "src/cart.js"]);
+    project.git(&["commit", "-q", "-m", "fresh"]);
+    assert!(
+        project
+            .supercov(&["runs", "latest", "files"])
+            .stderr()
+            .contains("changed since the run: src/cart.js, src/new.js")
+    );
+}
+
+#[test]
+fn tests_without_evidence_are_explained_by_what_they_load() {
+    let noop = "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\ntest(\"asserts a constant\", () => { assert.equal(1, 1); });\n";
+    let project = Project::cart("without-evidence");
+    project.write("test/noop.test.js", noop);
+    project.write("test/plain", noop);
+    project.write(
+        "test/dyn.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nconst name = \"node:\" + \"path\";\nconst path = await import(name);\ntest(\"dyn import\", () => { assert.equal(typeof path.join, \"function\"); });\n",
+    );
+    project.commit("tests");
+    let without = |command: &[&str], env: &[(&str, &str)]| {
+        let mut args = vec!["--"];
+        args.extend_from_slice(command);
+        project.supercov_with(&args, env).succeeds();
+        project
+            .supercov(&["runs", "latest", "tests", "without-evidence", "--json"])
+            .json()["data"]["tests"][0]
+            .clone()
+    };
+    // A unit test that imports no source says so.
+    let unit = without(&["node", "--test", "test/noop.test.js"], &[]);
+    assert_eq!(unit["importsMeasured"], false, "{unit}");
+    // An end-to-end test reaches source by other means than imports, a file
+    // with no extension cannot be read for them, and a computed import names
+    // no module: none of them is said to import nothing.
+    let e2e = without(
+        &["node", "--test", "test/noop.test.js"],
+        &[("SUPERCOV_TEST_KIND", "e2e")],
+    );
+    assert_eq!(e2e["kind"], "e2e");
+    assert!(e2e.get("importsMeasured").is_none(), "{e2e}");
+    let plain = without(&["node", "--test", "test/plain"], &[]);
+    assert_eq!(plain["file"], "test/plain");
+    assert!(plain.get("importsMeasured").is_none(), "{plain}");
+    let dynamic = without(&["node", "--test", "test/dyn.test.js"], &[]);
+    assert!(dynamic.get("importsMeasured").is_none(), "{dynamic}");
+}
+
+// Its package-manager stand-in is a shell script.
+#[cfg(unix)]
+#[test]
+fn line_queries_and_commands_at_their_edges() {
+    // A command that only mentions another language's runner, and runs node.
+    let project = Project::cart("command-edges");
+    let ran = project.supercov(&["--", "sh", "-c", "echo phpunit && node --test"]);
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    // Several lines from past their end: none, and none failed.
+    let lines = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:2",
+            "src/cart.js:3",
+            "--offset",
+            "5",
+            "--json",
+        ])
+        .json();
+    assert_eq!(lines["data"]["lines"], serde_json::json!([]));
+    assert_eq!(lines["pagination"]["total"], 2);
+    // A script of a package manager other than npm, and the others it has.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test", "test:unit": "node --test", "test:e2e": "node --test" } }"#,
+    );
+    project.write_script("bin/pnpm", "#!/bin/sh\nexec node --test\n");
+    project.commit("scripts");
+    project
+        .supercov(&["--", "bin/pnpm", "test:unit"])
+        .succeeds();
+    assert!(project.supercov(&["runs", "latest"]).succeeds().contains(
+        "wrapped `bin/pnpm test:unit`. Other test scripts include test:e2e. For whole-project"
+    ));
+    // One line whose tests alone outgrow a reply.
+    let mut tests = String::from(
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\n",
+    );
+    for name in ["a", "b", "c", "d", "e", "f"] {
+        tests.push_str(&format!(
+            "test(\"{}\", () => assert.equal(total([]), 0));\n",
+            name.repeat(30_000)
+        ));
+    }
+    project.write("test/long.test.js", &tests);
+    project.commit("long names");
+    project.measure(&[]);
+    assert!(
+        project
+            .supercov(&[
+                "runs",
+                "latest",
+                "line",
+                "src/cart.js:2",
+                "src/cart.js:3",
+                "--json"
+            ])
+            .exits(2)
+            .contains("\"code\":\"RESPONSE_TOO_LARGE\"")
+    );
+}
+
+/// The trash a run starts emptying is empty when the run is over, however
+/// long the sweep it started with takes: the end waits for that sweep rather
+/// than starting another that finds the trash locked and leaves at once.
+#[test]
+fn the_trash_is_empty_when_a_run_ends() {
+    let project = Project::cart("trash-at-end");
+    let trash = project.root.join(".supercov/.trash/old-workspace");
+    std::fs::create_dir_all(&trash).unwrap();
+    for directory in 0..200 {
+        let directory = trash.join(directory.to_string());
+        std::fs::create_dir(&directory).unwrap();
+        for file in 0..400 {
+            std::fs::write(directory.join(file.to_string()), "").unwrap();
+        }
+    }
+    project.measure(&[]);
+    assert!(!project.root.join(".supercov/.trash/old-workspace").exists());
+}
+
+/// The read views' odd inputs and thin corners, read as a user meets them:
+/// a depth of nothing, a lone dash, a colon in a file's name, a decision
+/// line holding two, a line with nothing measured on it, and an unassessed
+/// run read through a filter.
+#[test]
+fn the_read_views_name_their_odd_inputs_and_thin_corners() {
+    let project = Project::cart("read-corners");
+    project.write("util/name.js", "export const name = (item) => item.name;\n");
+    project.write(
+        "src/pick.js",
+        "export const pick = (a, b) => ((a && b) ? 1 : (a || b) ? 2 : 3);\n",
+    );
+    project.write(
+        "test/extra.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { name } from \"../util/name.js\";\nimport { pick } from \"../src/pick.js\";\n\ntest(\"names and picks\", () => {\n  assert.equal(name({ name: \"a\" }), \"a\");\n  assert.equal(pick(true, true), 1);\n});\n",
+    );
+    project.commit("corners");
+    let run = project.measure(&[]);
+    let on_run = |args: &[&str]| {
+        let mut full = vec!["runs", "latest"];
+        full.extend_from_slice(args);
+        project.supercov(&full)
+    };
+    for depth in ["0", "-0"] {
+        assert!(
+            on_run(&["files", "--group", "dir", "--depth", depth])
+                .exits(2)
+                .contains("--depth must be a positive integer")
+        );
+    }
+    // A lone dash is a file to look for, not an option.
+    let dash = on_run(&["file", "-"]).exits(2);
+    assert!(dash.contains("Source file not found: -"), "{dash}");
+    assert!(!dash.contains("Unknown option"), "{dash}");
+    // The line is after the last colon; the rest is the file.
+    assert!(
+        on_run(&["line", "no:such.js:2"])
+            .exits(2)
+            .contains("Source file not found: no:such.js")
+    );
+    assert!(
+        on_run(&["gaps", "--format", "jsonl", "--metric"])
+            .exits(2)
+            .contains("--metric must be all, lines, statements, functions, branches, or mcdc")
+    );
+    // A directory with no branch at all has no share of them.
+    let branches = on_run(&["files", "--group", "dir", "--metric", "branches"]).succeeds();
+    assert!(
+        branches
+            .lines()
+            .any(|line| line.starts_with("util ") && line.trim_end().ends_with("—")),
+        "{branches}"
+    );
+    // Two decisions on one line are listed a page at a time.
+    let decisions = on_run(&["decision", "src/pick.js:1", "--limit", "1"]).succeeds();
+    contains_all(
+        &decisions,
+        &[
+            "showing 1-1 of 2 matching decisions",
+            &format!(
+                "next page: supercov runs '{run}' decision 'src/pick.js:1' --offset 1 --limit 1"
+            ),
+        ],
+    );
+    // A line holding only the brace that closes a loop: nothing on it was
+    // measured, and its source is today's.
+    let brace = on_run(&["line", "src/cart.js:5"]).succeeds();
+    contains_all(
+        &brace,
+        &["(read from the current working tree)", "NOT MEASURED"],
+    );
+    assert!(!brace.contains("Coverage details"), "{brace}");
+    // A run never assessed, read through a filter, says how to assess
+    // those tests.
+    let unassessed = on_run(&["assertions", "--kind", "unit"]).succeeds();
+    contains_all(
+        &unassessed,
+        &[
+            "assertions not assessed for this run",
+            &format!("Assess it with `supercov runs {run} assertions assess --kind 'unit'`"),
+        ],
+    );
+}
+
+/// A line's gap is exported with the line it is on, under `--metric lines`
+/// as under every metric, and an export that cannot be written says why.
+#[cfg(target_os = "linux")]
+#[test]
+fn exported_line_gaps_quote_their_line_and_a_failed_export_says_why() {
+    let project = Project::cart("export-lines");
+    let run = project.measure(&[]);
+    let rows = |metric: &str| {
+        project
+            .supercov(&[
+                "runs", &run, "gaps", "--format", "jsonl", "--metric", metric,
+            ])
+            .succeeds()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let lines = rows("lines");
+    // `describe` never ran: its body is a line gap, quoted by what first
+    // goes unrun on it.
+    let body = lines
+        .iter()
+        .find(|row| row["line"] == 20)
+        .expect("line 20 is a gap");
+    assert_eq!(body["kind"], "line");
+    assert_eq!(body["lineSource"], "(item) => item.name");
+    assert!(
+        lines.iter().all(|row| row["lineSource"].is_string()),
+        "{lines:?}"
+    );
+    // Each line reads as `--metric all` quotes it.
+    let all = rows("all");
+    for row in &lines {
+        let same = all
+            .iter()
+            .find(|other| other["line"] == row["line"])
+            .unwrap();
+        assert_eq!(row["lineSource"], same["lineSource"], "{row}");
+    }
+    let file = project
+        .supercov(&["runs", &run, "file", "src/cart.js", "--metric", "lines"])
+        .succeeds();
+    assert!(
+        file.contains("   20  NOT COVERED   (item) => item.name"),
+        "{file}"
+    );
+    assert!(!file.contains("(source unavailable)"), "{file}");
+    // Standard output on a full disk: exit 2, and the reason.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args([
+            "runs", &run, "gaps", "--format", "jsonl", "--metric", "mcdc",
+        ])
+        .current_dir(&project.root)
+        .stdout(std::fs::File::create("/dev/full").unwrap())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("could not write the gaps to standard output: No space left on device"),
+        "{stderr}"
+    );
+}
+
+/// A runner's configuration written since the run reaches only that
+/// runner's tests, as an edit to one that was there does; a configuration
+/// any runner reads reaches every test.
+#[test]
+fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
+    let project = Project::cart("config-added");
+    project.write("playwright.config.js", "export default {};\n");
+    project.commit("playwright");
+    project.measure(&[]);
+    let affected = || {
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--json"])
+            .json()["data"]
+            .clone()
+    };
+    // node:test runs none of them under Playwright or Vitest.
+    project.write("playwright.config.js", "export default { retries: 2 };\n");
+    project.write("vitest.config.js", "export default {};\n");
+    let other = affected();
+    assert_eq!(other["summary"]["affected"], 0, "{other}");
+    assert_eq!(other["workingTree"]["runWide"], serde_json::json!([]));
+    assert_eq!(
+        other["workingTree"]["reasons"],
+        serde_json::json!(["test/build configuration changed"])
+    );
+    // A TypeScript configuration is read whatever the runner.
+    project.write("tsconfig.json", "{}\n");
+    let every = affected();
+    assert_eq!(every["summary"]["affected"], 3, "{every}");
+    assert_eq!(
+        every["workingTree"]["runWide"],
+        serde_json::json!(["test/build configuration changed"])
+    );
+    let text = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    assert!(
+        text.contains("test/build configuration changed (every test)"),
+        "{text}"
+    );
+}
+
+/// A runner's configuration named where it is not named as one -- a
+/// settings file `SUPERCOV_VITEST_CONFIG` points at -- changes the
+/// configuration without any configuration file to blame: no runner can be
+/// ruled out, and every test is affected.
+#[test]
+fn a_configuration_no_file_is_named_for_affects_every_test() {
+    let project = Project::cart("affected-unnamed-configuration");
+    project.write("runner-settings.mjs", "export default {};\n");
+    project.commit("runner settings");
+    let named = [("SUPERCOV_VITEST_CONFIG", "runner-settings.mjs")];
+    let measured = project.supercov_with(&["--", "node", "--test"], &named);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    project.write("runner-settings.mjs", "export default { test: {} };\n");
+    let every = project
+        .supercov_with(&["runs", "latest", "tests", "affected", "--json"], &named)
+        .json()["data"]
+        .clone();
+    assert_eq!(every["summary"]["affected"], 3, "{every}");
+    assert_eq!(
+        every["workingTree"]["runWide"],
+        serde_json::json!(["test/build configuration changed"])
+    );
+}
+
+/// A change to hundreds of files no test ran affects no test and still
+/// lists every one of them: the JSON keeps the first files and counts the
+/// rest, rather than refusing the reply.
+#[test]
+fn tests_affected_shortens_a_long_list_of_changed_files_to_fit_one_reply() {
+    const FILES: usize = 600;
+    let project = Project::cart("affected-files");
+    let path = |index: usize| {
+        format!(
+            "src/features/a/directory/named/at/the/length/real/projects/nest/their/modules/module{index}.js"
+        )
+    };
+    for index in 0..FILES {
+        project.write(&path(index), &format!("export const value = {index};\n"));
+    }
+    project.commit("modules");
+    project.measure(&[]);
+    for index in 0..FILES {
+        project.write(
+            &path(index),
+            &format!("export const value = {};\n", index + 1),
+        );
+    }
+    let data = project
+        .supercov(&["runs", "latest", "tests", "affected", "--json"])
+        .json()["data"]
+        .clone();
+    assert_eq!(data["summary"]["affected"], 0, "{}", data["summary"]);
+    assert_eq!(data["changedFilesCount"], FILES, "{}", data["truncated"]);
+    let listed = data["changedFiles"].as_array().unwrap().len();
+    assert!(0 < listed && listed < FILES, "{listed}");
+    assert!(
+        data["truncated"].as_array().unwrap().iter().any(|note| note
+            == "the changed files keep their first entries; the text view lists every one"),
+        "{}",
+        data["truncated"]
+    );
+    let text = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    assert!(
+        text.contains(&path(FILES - 1)),
+        "the text view lists every file"
+    );
+}
+
+/// The report says why it will not compare a run with itself, fills its
+/// runs without repeating one, writes nothing where its file is a
+/// directory, opens in the browser, and shows its progress on a terminal.
+#[cfg(unix)]
+#[test]
+fn the_report_refuses_a_run_compared_with_itself_and_opens_when_it_can() {
+    let project = Project::cart("report-edges");
+    let oldest = project.measure(&["--test-name-pattern=total"]);
+    let middle = project.measure(&["--test-name-pattern=shipping"]);
+    let newest = project.measure(&[]);
+    let refused = project
+        .supercov(&[
+            "report",
+            "--no-open",
+            "--compare",
+            "latest",
+            "--output",
+            "r.html",
+        ])
+        .exits(2);
+    assert!(
+        refused.contains(&format!(
+            "report failed: --compare latest is {newest}, the run this report shows; compare it with another run"
+        )),
+        "{refused}"
+    );
+    assert!(!project.root.join("r.html").exists());
+    project
+        .supercov(&[
+            "report",
+            "--no-open",
+            "--compare",
+            &oldest,
+            "--output",
+            "r.html",
+        ])
+        .succeeds();
+    let data = report_data(&project.read("r.html"));
+    let ids = data["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [newest.clone(), oldest.clone(), middle],
+        "the comparison once"
+    );
+    assert_eq!(data["comparisonRunId"], oldest.as_str());
+    // A directory where the report goes: the rename fails and the
+    // temporary file goes with it.
+    std::fs::create_dir_all(project.root.join("reports/supercov-report.html")).unwrap();
+    let blocked = project
+        .supercov(&["report", "--no-open", "--output", "reports"])
+        .exits(2);
+    assert!(
+        blocked.contains(&format!(
+            "report failed: {}: ",
+            project.root.join("reports/supercov-report.html").display()
+        )),
+        "{blocked}"
+    );
+    let left = std::fs::read_dir(project.root.join("reports"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(left, ["supercov-report.html"]);
+    // Opened the way the desktop opens a file.
+    project.write_script(
+        if cfg!(target_os = "macos") {
+            "bin/open"
+        } else {
+            "bin/xdg-open"
+        },
+        "#!/bin/sh\necho \"$1\" > \"$(dirname \"$0\")/../opened.txt\"\n",
+    );
+    let path = format!(
+        "{}:{}",
+        project.root.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let opened = project
+        .supercov_with(&["report", "--output", "r.html"], &[("PATH", &path)])
+        .succeeds();
+    assert!(
+        opened.contains("[supercov] opened the report in your browser"),
+        "{opened}"
+    );
+    let started = std::time::Instant::now();
+    while !project.root.join("opened.txt").exists() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let started = std::time::Instant::now();
+    while !project.read("opened.txt").contains("r.html") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // On a terminal, each run as it is prepared; a filter no test of the
+    // run passes ends it with why.
+    let shown = common::OnTerminal::start(&project, &["report", "--no-open", "--output", "t.html"]);
+    let (code, seen) = shown.finish();
+    assert_eq!(code, 0, "{seen}");
+    assert!(
+        seen.contains(&format!("[supercov] preparing report run 1/3: {newest}")),
+        "{seen}"
+    );
+    let none = common::OnTerminal::start(&project, &["report", "--no-open", "--tag", "nothing"]);
+    let (code, seen) = none.finish();
+    assert_eq!(code, 2, "{seen}");
+    assert!(seen.contains("report failed: "), "{seen}");
+}
+
+/// The report details a file whose only gap is code outside measurement,
+/// and draws a run's multi-line statements from its coverage when the run
+/// was published before their spans were saved beside it.
+#[test]
+fn the_report_details_an_unmeasured_gap_and_spans_a_run_never_saved() {
+    let project = Project::empty("report-limited");
+    project.write("package.json", r#"{ "name": "limited" }"#);
+    project.write(
+        "src/scoped.js",
+        "const scope = { value: 7 };\nfunction sloppy() {\n  with (scope) {\n    return value;\n  }\n}\nfunction sum(a, b) {\n  return [\n    a,\n    b,\n  ].reduce((x, y) => x + y, 0);\n}\nmodule.exports = { sloppy, sum };\n",
+    );
+    project.write(
+        "test/scoped.test.js",
+        "const test = require(\"node:test\");\nconst assert = require(\"node:assert/strict\");\nconst { sloppy, sum } = require(\"../src/scoped.js\");\ntest(\"sloppy reads the scope\", () => assert.equal(sloppy(), 7));\ntest(\"sum adds\", () => assert.equal(sum(1, 2), 3));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("scoped");
+    let run = project.measure(&[]);
+    let files = project
+        .supercov(&["runs", "latest", "files", "--json"])
+        .json();
+    let scoped = &files["data"]["files"][0];
+    assert_eq!(scoped["file"], "src/scoped.js", "{files}");
+    // Every line ran: what is left is the `with` body, outside measurement.
+    assert_eq!(scoped["uncoveredLines"], 0, "{scoped}");
+    assert!(
+        scoped["measurementLimitations"].as_u64() > Some(0),
+        "{scoped}"
+    );
+    let report = |output: &str| {
+        project
+            .supercov(&["report", "--no-open", "--output", output])
+            .succeeds();
+        report_data(&project.read(output))
+    };
+    let first = report("first.html");
+    assert!(
+        first["runs"][0]["fileDetails"]["src/scoped.js"].is_object(),
+        "{}",
+        first["runs"][0]["fileDetails"]
+    );
+    let spans = first["runs"][0]["statementSpans"].clone();
+    assert!(
+        spans.as_array().is_some_and(|spans| !spans.is_empty()),
+        "{spans}"
+    );
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&run)
+            .join("statement-spans.json"),
+    )
+    .unwrap();
+    let again = report("again.html");
+    assert_eq!(again["runs"][0]["statementSpans"], spans);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
+    let project = Project::empty("kept-back");
+    project.write(
+        "package.json",
+        r#"{ "name": "kept-back", "scripts": { "test": "oxlint --fix src && node edit.cjs && node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  var rate = 5;\n  return sum > 100 ? 0 : rate;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    project.write_script(
+        "node_modules/.bin/oxlint",
+        "#!/bin/sh\nsed 's/var rate/const rate/' \"$2\"/fee.js > fixed.tmp && mv fixed.tmp \"$2\"/fee.js\n",
+    );
+    // Someone edits the project's own file while the command runs.
+    project.write(
+        "edit.cjs",
+        "const fs = require('node:fs');\nconst file = process.env.EDITED_PROJECT + '/src/fee.js';\nfs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('var rate = 5', 'let rate = 5'));\n",
+    );
+    project.git(&["init", "-q"]);
+    let root = project.root.display().to_string();
+    let run = project.supercov_with(&["--", "npm", "test"], &[("EDITED_PROJECT", &root)]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(
+        run.stderr().contains(
+            "the command's tools changed 1 source file(s) that were edited in the project while it ran; those changes were not applied"
+        ),
+        "{}",
+        run.stderr()
+    );
+    assert!(project.read("src/fee.js").contains("let rate = 5"));
+}
+
+#[test]
+fn a_repository_the_workspace_cannot_mirror_is_named_under_debug() {
+    let project = Project::empty("unmirrored");
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module" }"#,
+    );
+    project.write("src/cart.js", common::CART);
+    project.write("test/cart.test.js", common::CART_TESTS);
+    // A worktree whose repository is gone.
+    project.write(".git", "gitdir: /nonexistent/supercov/worktree\n");
+    let run = project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_DEBUG", "1")]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(
+        run.stderr()
+            .contains("the workspace has no git repository of its own"),
+        "{}",
+        run.stderr()
+    );
+    let quiet = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(quiet.code(), 0, "{}{}", quiet.stdout(), quiet.stderr());
+    assert!(!quiet.stderr().contains("no git repository of its own"));
+}
+
+#[test]
+fn settings_a_suite_chose_for_docker_playwright_and_uv_reach_it_unchanged() {
+    // A daemon reached over TCP has no socket to relay, and a Playwright
+    // cache or a uv sync someone chose is theirs.
+    let project = Project::cart("chosen-settings");
+    project.write(".venv/pyvenv.cfg", "home = /usr/bin\n");
+    project.write(
+        "test/environment.test.js",
+        "import { test } from 'node:test';\nimport { equal } from 'node:assert/strict';\ntest('settings', () => {\n  equal(process.env.DOCKER_HOST, 'tcp://127.0.0.1:2375');\n  equal(process.env.PWTEST_CACHE_DIR, '/tmp/chosen-playwright-cache');\n  equal(process.env.UV_NO_SYNC, '0');\n});\n",
+    );
+    let run = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            ("DOCKER_HOST", "tcp://127.0.0.1:2375"),
+            ("PWTEST_CACHE_DIR", "/tmp/chosen-playwright-cache"),
+            ("UV_NO_SYNC", "0"),
+        ],
+    );
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(run.stdout().contains("pass 4"), "{}", run.stdout());
+}
+
+#[test]
+fn a_direct_javascript_run_with_no_command_is_refused() {
+    let project = Project::cart("empty-direct-command");
+    let input = project.root.join("input.json");
+    std::fs::write(
+        &input,
+        serde_json::json!({ "root": project.root, "command": [] }).to_string(),
+    )
+    .unwrap();
+    let refused = project
+        .supercov_with(
+            &["__run-js-direct"],
+            &[("SUPERCOV_INTERNAL_INPUT_FILE", input.to_str().unwrap())],
+        )
+        .exits(2);
+    assert!(
+        refused.contains("direct JavaScript run failed: test command must not be empty"),
+        "{refused}"
+    );
+    assert!(!project.root.join(".supercov").exists());
+}
+
+#[test]
+fn a_browser_suite_beside_servers_with_nothing_to_measure_measures_its_javascript() {
+    // A Go workspace and a Maven build with no source: each server language
+    // is looked for, and neither has anything to measure.
+    let project = Project::cart("servers-unmeasured");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write("go.work", "go 1.22\n\nuse ./svc\n");
+    project.write("svc/go.mod", "module example.com/svc\n\ngo 1.22\n");
+    project.write("pom.xml", "<project></project>\n");
+    let run = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(
+        !run.stderr().contains("server the tests start"),
+        "{}",
+        run.stderr()
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("76.92%"), "{summary}");
+    // Without JavaScript source there is nothing left to measure.
+    std::fs::remove_dir_all(project.root.join("src")).unwrap();
+    project.write(
+        "test/cart.test.js",
+        "import { test } from 'node:test';\ntest('nothing', () => {});\n",
+    );
+    let empty = project.supercov(&["--", "node", "--test"]).exits(1);
+    assert!(
+        empty.contains("No application source files were discovered"),
+        "{empty}"
+    );
+}
+
+/// Source roots named for a browser suite's JavaScript leave the Python and
+/// Ruby beside it no server to measure: the run measures its JavaScript
+/// instead of refusing the roots as a Python or Ruby run of its own would.
+#[test]
+fn source_roots_naming_only_javascript_leave_no_python_or_ruby_server() {
+    let project = Project::cart("roots-javascript-only");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write("server.py", "def handle():\n    return 1\n");
+    project.write("app.rb", "def handle\n  1\nend\n");
+    let run = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_SOURCE_ROOTS", "src")],
+    );
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(!run.stderr().contains("left no"), "{}", run.stderr());
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("76.92%"), "{summary}");
+}
+
+/// A run whose query index cannot be written back says the index could not
+/// be opened, and why, instead of blaming the command that ran.
+#[test]
+fn a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure() {
+    let project = Project::cart("index-unwritable");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let runs = project.root.join(".supercov/runs");
+    let run = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().is_dir())
+        .unwrap()
+        .path();
+    let index = run.join("query-index.v1.bin");
+    std::fs::remove_file(&index).unwrap();
+    std::fs::create_dir(&index).unwrap();
+    let refused = project.supercov(&["runs", "latest", "files"]).exits(2);
+    assert!(
+        refused.contains("Failed to open coverage index"),
+        "{refused}"
+    );
+    assert!(!refused.contains("wrapped command"), "{refused}");
+}
+
+/// A script standing in for rustdoc while Supercov stands in for it during
+/// `cargo test --doc`. It reads what to do from the files of the scenario
+/// directory `FAKE_RUSTDOC_DIR` names: `standalone` and `merged` are the
+/// doctests it lists (`name: test` lines), the second through Supercov's
+/// runtool as a merged harness does; `merged.out` is what that harness
+/// prints; and a per-name pass runs `doctest` through the runtool (`twice`
+/// does so twice, `no-run` not at all) and prints `named.out`, or the name it
+/// was given as passing.
+#[cfg(unix)]
+const FAKE_RUSTDOC: &str = r#"#!/bin/sh
+fake="$FAKE_RUSTDOC_DIR"
+printf '%s\n' "$*" >> "$fake/calls"
+tool= pkg= mode= n=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --test-runtool) tool="$2"; shift ;;
+    --test-runtool-arg)
+      n=$((n + 1))
+      [ $n -eq 2 ] && pkg="$2"
+      [ $n -eq 3 ] && mode="$2"
+      shift ;;
+  esac
+  shift
+done
+# Not a pass of Supercov's: a documentation build, or a listing the user
+# asked for.
+[ -z "$mode" ] && exit 0
+case "$mode" in
+  list)
+    if [ -f "$fake/list.status" ]; then
+      cat "$fake/list.err" >&2
+      exit "$(cat "$fake/list.status")"
+    fi
+    cat "$fake/standalone" 2>/dev/null
+    [ -f "$fake/merged" ] && "$tool" __doctest-runner "$pkg" list "$fake/../bin/harness-list"
+    [ -f "$fake/vanish" ] && rm -f "$0"
+    exit 0 ;;
+  merged)
+    "$tool" __doctest-runner "$pkg" merged "$fake/../bin/harness"
+    exit $? ;;
+  named)
+    if [ ! -f "$fake/no-run" ]; then
+      "$tool" __doctest-runner "$pkg" named "$fake/../bin/doctest" > /dev/null
+      [ -f "$fake/twice" ] && "$tool" __doctest-runner "$pkg" named "$fake/../bin/doctest" > /dev/null
+    fi
+    if [ -f "$fake/named.out" ]; then cat "$fake/named.out"; else printf 'test %s ... ok\n' "$SUPERCOV_DOCTEST_NAME"; fi
+    exit "$(cat "$fake/named.status" 2>/dev/null || echo 0)" ;;
+esac
+"#;
+
+/// A project holding the stand-ins: rustdoc, the merged harness (listing
+/// and running) and a standalone doctest binary.
+#[cfg(unix)]
+fn fake_rustdoc_project(label: &str) -> Project {
+    let project = Project::empty(label);
+    project.write_script(
+        "bin/harness-list",
+        "#!/bin/sh\ncat \"$FAKE_RUSTDOC_DIR/merged\"\n",
+    );
+    project.write_script(
+        "bin/harness",
+        "#!/bin/sh\n[ -f \"$FAKE_RUSTDOC_DIR/merged.sh\" ] && . \"$FAKE_RUSTDOC_DIR/merged.sh\"\ncat \"$FAKE_RUSTDOC_DIR/merged.out\"\nexit \"$(cat \"$FAKE_RUSTDOC_DIR/merged.status\" 2>/dev/null || echo 0)\"\n",
+    );
+    project.write_script(
+        "bin/doctest",
+        "#!/bin/sh\ncat \"$FAKE_RUSTDOC_DIR/doctest.out\" 2>/dev/null\nexit 0\n",
+    );
+    project
+}
+
+/// Supercov as rustdoc for one package, in a scenario of its own: the
+/// files it starts with, and rustdoc's arguments. The outcome, and what
+/// the wrapper recorded for the package (`.json`) or why it could not
+/// (`.error`).
+#[cfg(unix)]
+fn wrap_rustdoc(
+    project: &Project,
+    scenario: &str,
+    files: &[(&str, &str)],
+    args: &[&str],
+) -> (common::Ran, String) {
+    for (file, contents) in files {
+        project.write(&format!("{scenario}/{file}"), contents);
+    }
+    project.write(&format!("{scenario}/calls"), "");
+    project.write_script(&format!("{scenario}/rustdoc"), FAKE_RUSTDOC);
+    let directory = project.root.join(scenario);
+    let results = directory.join("results");
+    let ran = project.supercov_with(
+        args,
+        &[
+            ("SUPERCOV_DOCTEST_WRAPPER_ROOT", results.to_str().unwrap()),
+            (
+                "SUPERCOV_DOCTEST_REAL_RUSTDOC",
+                directory.join("rustdoc").to_str().unwrap(),
+            ),
+            ("FAKE_RUSTDOC_DIR", directory.to_str().unwrap()),
+            ("CARGO_PKG_NAME", "fixture"),
+            ("CARGO_MANIFEST_DIR", project.root.to_str().unwrap()),
+            // The run that starts rustdoc names its instrumentation.
+            ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
+        ],
+    );
+    let recorded = ["00000000.json", "00000000.error"]
+        .iter()
+        .find_map(|file| std::fs::read_to_string(results.join("packages").join(file)).ok())
+        .unwrap_or_default();
+    (ran, recorded)
+}
+
+#[cfg(unix)]
+#[test]
+fn rustdoc_runs_untouched_when_it_is_not_running_doctests_for_supercov() {
+    let project = fake_rustdoc_project("rustdoc-passthrough");
+    for (scenario, args) in [
+        ("docs", &["--crate-name", "fixture", "src/lib.rs"][..]),
+        (
+            "listing",
+            &["--test", "src/lib.rs", "--test-args", "--list"][..],
+        ),
+    ] {
+        let (ran, recorded) = wrap_rustdoc(&project, scenario, &[], args);
+        ran.succeeds();
+        assert_eq!(recorded, "", "{scenario}");
+        assert_eq!(
+            project.read(&format!("{scenario}/calls")),
+            format!("{}\n", args.join(" ")),
+            "{scenario}"
+        );
+    }
+    // A listing rustdoc cannot produce stops the package as rustdoc did.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "unlisted",
+        &[
+            ("list.status", "3"),
+            ("list.err", "error: cannot read crate"),
+        ],
+        &["--test", "src/lib.rs"],
+    );
+    let output = ran.exits(3);
+    assert!(output.contains("error: cannot read crate"), "{output}");
+    assert_eq!(recorded, "");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select() {
+    let project = fake_rustdoc_project("rustdoc-merged");
+    let listed = "src/lib.rs - a (line 1): test\nsrc/lib.rs - b (line 5): test\n";
+    let a = "test src/lib.rs - a (line 1) ... ok\n";
+    for (scenario, out, error) in [
+        (
+            "ghost",
+            format!("{a}test src/lib.rs - ghost (line 9) ... ok\n"),
+            "the merged doctest harness reported a case the listing lacks: src/lib.rs - ghost (line 9)",
+        ),
+        (
+            "twice",
+            format!("{a}{a}"),
+            "doctest src/lib.rs - a (line 1) was reported more than once",
+        ),
+        (
+            "short",
+            a.to_owned(),
+            "the merged doctest harness ran a different selection than its arguments describe: src/lib.rs - b (line 5)",
+        ),
+    ] {
+        let (ran, recorded) = wrap_rustdoc(
+            &project,
+            scenario,
+            &[("merged", listed), ("merged.out", &out)],
+            &["--test", "src/lib.rs"],
+        );
+        ran.exits(101);
+        assert_eq!(recorded, error, "{scenario}");
+    }
+    // A harness that failed may have stopped short: it is not held to its
+    // selection, and its exit is the package's.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "failing",
+        &[
+            ("merged", listed),
+            ("merged.out", a),
+            ("merged.status", "101"),
+        ],
+        &["--test", "src/lib.rs"],
+    );
+    ran.exits(101);
+    let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    assert_eq!(recorded["exit_code"], 101, "{recorded}");
+    assert_eq!(
+        recorded["cases"],
+        serde_json::json!([{"name": "src/lib.rs - a (line 1)", "status": "passed", "evidence": null}])
+    );
+    // Under `--ignored` a harness runs the ignored doctests of its selection.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "ignored",
+        &[
+            ("merged", listed),
+            ("merged.out", "test src/lib.rs - a (line 1) ... ignored\n"),
+        ],
+        &["--test", "src/lib.rs", "--test-args", "--ignored"],
+    );
+    ran.succeeds();
+    let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    assert_eq!(
+        recorded["cases"],
+        serde_json::json!([{"name": "src/lib.rs - a (line 1)", "status": "skipped", "evidence": null}])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
+    let project = fake_rustdoc_project("rustdoc-named");
+    let listed = "src/lib.rs - s (line 3): test\n";
+    for (scenario, files, error) in [
+        (
+            "twice",
+            &[("twice", "")][..],
+            "doctest src/lib.rs - s (line 3) ran more than once",
+        ),
+        (
+            "another",
+            &[("named.out", "test src/lib.rs - other (line 7) ... ok\n")][..],
+            "the pass for doctest src/lib.rs - s (line 3) ran src/lib.rs - other (line 7) instead",
+        ),
+    ] {
+        let mut files = files.to_vec();
+        files.push(("standalone", listed));
+        let (ran, recorded) = wrap_rustdoc(&project, scenario, &files, &["--test", "src/lib.rs"]);
+        ran.exits(101);
+        assert_eq!(recorded, error, "{scenario}");
+    }
+    // Under `--ignored` a pass that runs and reports nothing passed over a
+    // doctest that is not ignored...
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "passed-over",
+        &[("standalone", listed), ("no-run", ""), ("named.out", "")],
+        &["--test", "src/lib.rs", "--test-args", "--ignored"],
+    );
+    ran.succeeds();
+    let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    assert_eq!(recorded["cases"], serde_json::json!([]), "{recorded}");
+    // ... reports an ignored one as skipped ...
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "ignored",
+        &[
+            ("standalone", listed),
+            ("no-run", ""),
+            ("named.out", "test src/lib.rs - s (line 3) ... ignored\n"),
+        ],
+        &["--test", "src/lib.rs", "--test-args", "--ignored"],
+    );
+    ran.succeeds();
+    let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    assert_eq!(recorded["cases"][0]["status"], "skipped", "{recorded}");
+    // ... and one that failed without naming a doctest ran none alone.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "failed-silently",
+        &[
+            ("standalone", listed),
+            ("no-run", ""),
+            ("named.out", ""),
+            ("named.status", "101"),
+        ],
+        &["--test", "src/lib.rs", "--test-args", "--ignored"],
+    );
+    ran.exits(101);
+    assert_eq!(
+        recorded,
+        "the pass for doctest src/lib.rs - s (line 3) ran 0 doctest(s) instead of that one alone: "
+    );
+    // A doctest binary that ran for a pass reporting nothing is not
+    // attributed to a guess.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "unclaimed",
+        &[("standalone", listed), ("named.out", "")],
+        &["--test", "src/lib.rs", "--test-args", "--ignored"],
+    );
+    ran.exits(101);
+    assert_eq!(
+        recorded,
+        "a doctest ran that no pass selected: src/lib.rs - s (line 3)"
+    );
+    // A rustdoc that cannot be started for a pass stops the package.
+    let (ran, _) = wrap_rustdoc(
+        &project,
+        "vanished",
+        &[("standalone", listed), ("vanish", "")],
+        &["--test", "src/lib.rs"],
+    );
+    let output = ran.exits(101);
+    assert!(output.contains("could not launch"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
+    let project = fake_rustdoc_project("doctest-runtool");
+    let runtool = |package: &str, mode: &str, binary: &str, files: &[(&str, &str)]| {
+        for (file, contents) in files {
+            project.write(&format!("{package}/{file}"), contents);
+        }
+        let directory = project.root.join(package);
+        let ran = project.supercov_with(
+            &[
+                "__doctest-runner",
+                directory.to_str().unwrap(),
+                mode,
+                project.root.join(binary).to_str().unwrap(),
+            ],
+            &[
+                ("FAKE_RUSTDOC_DIR", directory.to_str().unwrap()),
+                // Neither makes this the wrapper or a merged harness's
+                // child: the runtool is named by its argument, and a child
+                // by both variables.
+                ("SUPERCOV_DOCTEST_WRAPPER_ROOT", directory.to_str().unwrap()),
+                ("RUSTDOC_DOCTEST_RUN_NB_TEST", "0"),
+                ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
+            ],
+        );
+        let record = std::fs::read_to_string(directory.join("invocations/00000000.json"))
+            .map(|text| serde_json::from_str::<serde_json::Value>(&text).unwrap())
+            .unwrap_or_default();
+        (ran, record)
+    };
+    // A binary listing nothing leaves no listing behind.
+    let (ran, record) = runtool("empty-list", "list", "bin/doctest", &[]);
+    ran.succeeds();
+    assert_eq!(record, serde_json::json!({"kind": "listed"}));
+    assert!(!project.root.join("empty-list/listed").exists());
+    // A per-name pass whose binary is a merged harness that matched nothing.
+    let (ran, record) = runtool(
+        "empty-harness",
+        "named",
+        "bin/doctest",
+        &[("doctest.out", "\nrunning 0 tests\n")],
+    );
+    ran.succeeds();
+    assert_eq!(record, serde_json::json!({"kind": "empty-harness"}));
+    // A merged harness whose children's records went missing reports its
+    // cases without evidence.
+    let order = r#"["src/lib.rs - a (line 1)"]"#;
+    let (ran, record) = runtool(
+        "children-gone",
+        "merged",
+        "bin/harness",
+        &[
+            ("merged-order.json", order),
+            ("merged.sh", "rm -rf \"$SUPERCOV_DOCTEST_CHILD_DIR\"\n"),
+            ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
+        ],
+    );
+    ran.succeeds();
+    assert_eq!(
+        record,
+        serde_json::json!({"kind": "merged", "cases": [{"name": "src/lib.rs - a (line 1)", "status": "passed", "evidence": null}]})
+    );
+    // A child ran for a case the harness never reported.
+    let (ran, _) = runtool(
+        "stray-child",
+        "merged",
+        "bin/harness",
+        &[
+            ("merged-order.json", order),
+            (
+                "merged.sh",
+                "printf '{\"index\":5,\"exit_code\":0,\"evidence\":\"/x\"}' > \"$SUPERCOV_DOCTEST_CHILD_DIR/00000005.json\"\n",
+            ),
+            ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
+        ],
+    );
+    let output = ran.exits(101);
+    assert!(
+        output.contains("merged doctest child 5 ran for a case the harness did not report"),
+        "{output}"
+    );
+}
+
+#[test]
+fn a_crate_builds_with_the_rustflags_its_cargo_configuration_sets() {
+    // Supercov sets `RUSTFLAGS` to cap lints, and Cargo then ignores
+    // `build.rustflags`: the crate was built without its own `--cfg`.
+    let project = Project::empty("config-rustflags");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"configured\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lints.rust]\nunexpected_cfgs = \"allow\"\n",
+    );
+    project.write(
+        ".cargo/config.toml",
+        "[build]\nrustflags = [\"--cfg\", \"configured\"]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn configured() -> bool {\n    cfg!(configured)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn sees_its_configured_flag() {\n        assert!(super::configured());\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let output = project
+        .supercov_with(&["--", "cargo", "test", "--lib"], &[("RUSTFLAGS", "")])
+        .exits(101);
+    // An empty `RUSTFLAGS` is the user's choice, and Cargo honours it.
+    assert!(output.contains("1 failed"), "{output}");
+    // Run as `supercov_with` runs it, but with no `RUSTFLAGS` of the test's.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args(["--", "cargo", "test", "--lib"])
+        .current_dir(&project.root)
+        .env_remove("RUSTFLAGS")
+        .env_remove("SUPERCOV_SOURCE_ROOTS")
+        .env_remove("SUPERCOV_TEST_KIND")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("1 passed"), "{text}");
+}
+
+/// A Ruby new enough for Supercov's Ruby frontend (3.3 or newer).
+#[cfg(unix)]
+fn ruby() -> Option<String> {
+    let candidates = std::env::var("SUPERCOV_RUBY").ok().into_iter().chain(
+        [
+            "/opt/homebrew/opt/ruby@3.4/bin/ruby",
+            "/opt/homebrew/opt/ruby/bin/ruby",
+            "ruby",
+        ]
+        .map(str::to_owned),
+    );
+    candidates.into_iter().find(|ruby| {
+        std::process::Command::new(ruby)
+            .args(["-e", "exit(RUBY_VERSION >= '3.3' ? 0 : 1)"])
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+/// Each system call that starts and contains a command, made to fail
+/// (`SUPERCOV_TEST_FAULT`): a failure to set up says what could not be done
+/// and runs nothing, and an interrupted call is made again. Each case checks
+/// its fault was reached: Supercov says so when one fires.
+#[cfg(unix)]
+#[test]
+fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
+    // The watchdog's own sites cannot say so: it has no standard error.
+    let silent = [
+        "watchdog-orphaned",
+        "watchdog-setsid",
+        "watchdog-read",
+        "proc-fd",
+    ];
+    let reached = |fault: &str, said: &str| {
+        for site in fault.split(',') {
+            let site = site.split([':', '=']).next().unwrap();
+            if silent.contains(&site) {
+                continue;
+            }
+            assert!(
+                said.contains(&format!("[supercov] test fault at {site}")),
+                "{site} was never reached:\n{said}"
+            );
+        }
+    };
+    let project = Project::cart("start-faults");
+    let run = |fault: &str| {
+        let output =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        reached(fault, &output.stderr());
+        output
+    };
+    let watchdog = "could not start the watchdog that stops the command if Supercov is killed: it ended before the command started";
+    for (fault, said) in [
+        (
+            "parent-death-pipe",
+            "could not create parent-death supervision pipe",
+        ),
+        (
+            "parent-death-cloexec",
+            "could not protect parent-death supervision pipe across exec",
+        ),
+        (
+            "command-setpgid",
+            "could not spawn node: Operation not permitted",
+        ),
+        ("ready-pipe", "could not spawn node: Too many open files"),
+        (
+            "watchdog-fork",
+            "could not spawn node: Resource temporarily unavailable",
+        ),
+        ("watchdog-dup-input", watchdog),
+        ("watchdog-dup-ready", watchdog),
+        ("watchdog-orphaned", watchdog),
+        ("watchdog-setsid", watchdog),
+        // A readiness read that fails other than by being interrupted.
+        (&format!("ready-read:{}", libc::EIO), watchdog),
+    ] {
+        let failed = run(fault);
+        assert_eq!(failed.code(), 1, "{fault}: {}", failed.stderr());
+        assert!(
+            failed.stderr().contains(said),
+            "{fault}: {}",
+            failed.stderr()
+        );
+    }
+    assert!(
+        !project.root.join(".supercov/runs").exists() || {
+            let runs = project.supercov(&["runs", "--json"]).json();
+            runs["data"]["runs"].as_array().is_some_and(Vec::is_empty)
+        }
+    );
+    // A command that could not start, its run's state not recorded either:
+    // the failure is still the one said.
+    let unrecorded = run("command-setpgid,failed-run-state");
+    assert_eq!(unrecorded.code(), 1, "{}", unrecorded.stderr());
+    assert!(
+        unrecorded.stderr().contains("could not spawn node"),
+        "{}",
+        unrecorded.stderr()
+    );
+    // Interrupted once, then made again; no /proc to list descriptors from;
+    // a copy taken by another run, with no server to prepare again.
+    for fault in ["ready-read=1", "watchdog-read=1", "proc-fd", "copy-moved"] {
+        let passed = run(fault);
+        assert_eq!(passed.code(), 0, "{fault}: {}", passed.stderr());
+    }
+    // A source tool on PATH, and a PATH for its launchers that is not text:
+    // the command keeps the PATH it had.
+    project.write_script("bin/biome", "#!/bin/sh\n");
+    let path = format!(
+        "{}:{}",
+        project.root.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let kept = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            ("SUPERCOV_TEST_FAULT", "launcher-path-text"),
+            ("PATH", &path),
+        ],
+    );
+    assert_eq!(kept.code(), 0, "{}", kept.stderr());
+    reached("launcher-path-text", &kept.stderr());
+
+    // A Go run passes the command's output on itself, so its relay is what
+    // the remaining faults reach.
+    let Some(go) = go() else {
+        eprintln!("skipping the relay's faults: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("start-faults-go");
+    project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+    project.write(
+        "w.go",
+        "package w\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "w_test.go",
+        "package w\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    // Output and errors to one file: one pipe for both, or, when it cannot be
+    // made, one for each, and the file gets both either way.
+    for fault in ["output-pipe", "output-clone"] {
+        let log = project.root.join(format!("log-{fault}.txt"));
+        let file = std::fs::File::create(&log).unwrap();
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+            .args(["--", go, "test", "-v", "./..."])
+            .current_dir(&project.root)
+            .env("SUPERCOV_TEST_FAULT", fault)
+            .stdout(file.try_clone().unwrap())
+            .stderr(file)
+            .status()
+            .unwrap();
+        let written = std::fs::read_to_string(&log).unwrap();
+        assert!(status.success(), "{fault}: {written}");
+        reached(fault, &written);
+        assert!(
+            written.contains("--- PASS: TestDouble"),
+            "{fault}: {written}"
+        );
+    }
+    // On a terminal: one that cannot be sized or opened leaves the command
+    // the streams it had; an interrupted read is read again.
+    for fault in [
+        "terminal-size",
+        "openpty",
+        "terminal-clone",
+        "terminal-read=1",
+    ] {
+        let terminal = common::OnTerminal::start_with(
+            &project,
+            &["--", go, "test", "-v", "./..."],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let (code, seen) = terminal.finish();
+        assert_eq!(code, 0, "{fault}: {seen}");
+        reached(fault, &seen);
+        assert!(seen.contains("PASS"), "{fault}: {seen}");
+    }
+}
+
+/// A Rust run whose evidence cannot be published says so, and leaves none
+/// of its work behind, even when its copy cannot be found again to clear.
+#[test]
+fn a_rust_run_that_cannot_publish_says_so_and_clears_its_work() {
+    let project = Project::empty("rust-unpublished");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn half(x: i32) -> i32 { x / 2 }\n#[cfg(test)]\nmod tests { #[test] fn h() { assert_eq!(super::half(4), 2); } }\n",
+    );
+    project.git(&["init", "-q"]);
+    for fault in [
+        "published-copy-differs",
+        "published-copy-differs,cleanup-copy-path",
+    ] {
+        let failed =
+            project.supercov_with(&["--", "cargo", "test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        assert_ne!(failed.code(), 0, "{fault}: {}", failed.stderr());
+        assert!(
+            failed
+                .stderr()
+                .contains("evidence changed during publication"),
+            "{fault}: {}",
+            failed.stderr()
+        );
+    }
+    let runs = project.supercov(&["runs", "--json"]).json();
+    assert_eq!(
+        runs["data"]["runs"].as_array().map(Vec::len),
+        Some(0),
+        "{runs}"
+    );
+}
+
+/// A trash too large to empty within the command's patience is left to the
+/// sweep it started, which empties it after the command has gone.
+#[test]
+fn a_sweep_that_outlasts_the_command_empties_the_trash_after_it() {
+    let project = Project::cart("sweep-outlasts");
+    let big = project.root.join(".supercov/.trash/big");
+    std::fs::create_dir_all(&big).unwrap();
+    for i in 0..20_000 {
+        std::fs::write(big.join(i.to_string()), b"x").unwrap();
+    }
+    let measured = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "sweep-impatient,sweep-outlasts")],
+    );
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stderr().contains("test fault at sweep-outlasts"),
+        "{}",
+        measured.stderr()
+    );
+    let started = std::time::Instant::now();
+    while big.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(120),
+            "the sweep the command left never emptied the trash"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_parent_death_watchdog_kills_its_parents_group_when_its_input_ends() {
+    use std::io::{Read, Write};
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Command, Stdio};
+    // A shell leading its own process group stands in for the command: the
+    // watchdog says it is ready on descriptor 3, watches its input, and when
+    // the input ends kills the shell's group. Only the watchdog holds the
+    // input; the shell's own is moved away.
+    let watch = |script: &str| {
+        Command::new("sh")
+            .args(["-c", script, env!("CARGO_BIN_EXE_supercov")])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let killed = |mut shell: std::process::Child| {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = shell.try_wait().unwrap() {
+                return status.signal();
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "the watchdog never ended its parent's group"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    // Input that sends a byte, then ends.
+    let mut shell = watch(
+        "exec 4<&0 0</dev/null; \"$0\" __watch-process-group 3>&1 <&4 4<&- & exec 4<&-; sleep 30",
+    );
+    let mut ready = [0_u8; 1];
+    shell.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+    assert_eq!(ready, [1]);
+    let mut input = shell.stdin.take().unwrap();
+    input.write_all(b"x").unwrap();
+    drop(input);
+    assert_eq!(killed(shell), Some(libc::SIGKILL));
+    // Input it cannot read counts as ended.
+    let shell =
+        watch("exec 0</dev/null; \"$0\" __watch-process-group 3>/dev/null 0>/dev/null & sleep 30");
+    assert_eq!(killed(shell), Some(libc::SIGKILL));
+    // With nowhere to say it is ready, it refuses, and kills nothing.
+    let shell = watch("\"$0\" __watch-process-group 3>&- </dev/null; echo \"watchdog $?\"");
+    let output = shell.wait_with_output().unwrap();
+    assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "watchdog 125\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_during_a_go_python_ruby_or_jvm_run_exits_as_the_signal_and_publishes_nothing() {
+    // As a JavaScript run does: 128 plus the signal, the signal named, and no
+    // run recorded for a suite that never finished.
+    let interrupt = |project: &Project, args: &[&str], waiting: &str| {
+        let mut terminal = common::OnTerminal::start(project, args);
+        terminal.wait_for(waiting);
+        terminal.press("\u{3}");
+        let (code, seen) = terminal.finish();
+        assert_eq!(code, 130, "{args:?}\n{seen}");
+        assert!(
+            seen.contains("the test command was interrupted by SIGINT; no run was published"),
+            "{args:?}\n{seen}"
+        );
+        let runs = project.supercov(&["runs", "--json"]).json();
+        assert_eq!(
+            runs["data"]["runs"].as_array().map(Vec::len),
+            Some(0),
+            "{runs}"
+        );
+    };
+    if let Some(go) = go() {
+        let project = Project::empty("interrupt-go");
+        project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+        project.write(
+            "w.go",
+            "package w\n\nfunc Double(n int) int { return n * 2 }\n",
+        );
+        project.write("w_test.go", "package w\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestWaits(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n\tfmt.Println(\"waiting now\")\n\ttime.Sleep(60 * time.Second)\n}\n");
+        project.git(&["init", "-q"]);
+        interrupt(&project, &["--", go, "test", "-v", "./..."], "waiting now");
+    }
+    let project = Project::empty("interrupt-python");
+    project.write("pkg/__init__.py", "");
+    project.write("pkg/w.py", "def double(n):\n    return n * 2\n");
+    project.write("tests/__init__.py", "");
+    project.write("tests/test_w.py", "import time\nimport unittest\nfrom pkg.w import double\n\nclass W(unittest.TestCase):\n    def test_waits(self):\n        self.assertEqual(double(2), 4)\n        print('waiting now', flush=True)\n        time.sleep(60)\n");
+    project.git(&["init", "-q"]);
+    interrupt(
+        &project,
+        &[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ],
+        "waiting now",
+    );
+    if let Some(ruby) = ruby() {
+        let project = Project::empty("interrupt-ruby");
+        project.write("lib/w.rb", "module W\n  def self.double(n) = n * 2\nend\n");
+        project.write("test/w_test.rb", "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_waits\n    assert_equal 4, W.double(2)\n    puts 'waiting now'\n    $stdout.flush\n    sleep 60\n  end\nend\n");
+        project.git(&["init", "-q"]);
+        interrupt(
+            &project,
+            &["--", &ruby, "-Ilib", "test/w_test.rb"],
+            "waiting now",
+        );
+    }
+    let maven = std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if maven {
+        let project = Project::empty("interrupt-jvm");
+        project.write("pom.xml", "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>example</groupId>\n  <artifactId>w</artifactId>\n  <version>1.0</version>\n  <properties>\n    <maven.compiler.source>17</maven.compiler.source>\n    <maven.compiler.target>17</maven.compiler.target>\n    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n  </properties>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n      <scope>test</scope>\n    </dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin>\n        <groupId>org.apache.maven.plugins</groupId>\n        <artifactId>maven-surefire-plugin</artifactId>\n        <version>3.2.5</version>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n");
+        project.write(
+            "src/main/java/w/W.java",
+            "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n * 2;\n    }\n}\n",
+        );
+        project.write("src/test/java/w/WTest.java", "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void waits() throws InterruptedException {\n        assertEquals(4, W.twice(2));\n        System.out.println(\"waiting now\");\n        System.out.flush();\n        Thread.sleep(60_000);\n    }\n}\n");
+        project.git(&["init", "-q"]);
+        interrupt(&project, &["--", "mvn", "test"], "waiting now");
+    }
 }

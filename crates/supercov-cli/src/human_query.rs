@@ -175,11 +175,13 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn page_label(page: &AgentPagination) -> String {
-    let start = if page.total == 0 || page.returned == 0 {
-        0
-    } else {
-        page.offset + 1
-    };
+    if page.returned == 0 && page.total > 0 {
+        return format!(
+            "showing none of {}: --offset {} is past the end",
+            page.total, page.offset
+        );
+    }
+    let start = if page.total == 0 { 0 } else { page.offset + 1 };
     let end = (page.offset + page.returned).min(page.total);
     format!("showing {start}-{end} of {}", page.total)
 }
@@ -483,7 +485,13 @@ fn render_files(
     } else {
         body
     };
-    let mut output = format!("{title}{projection}\n\n{body}\n\n{}", page_label(page));
+    // Past the end, there is no body to set apart.
+    let body = if body.is_empty() {
+        String::new()
+    } else {
+        format!("{body}\n\n")
+    };
+    let mut output = format!("{title}{projection}\n\n{body}{}", page_label(page));
     if let Some(inspect) =
         inspect_file_command(run, request, rows.first().map(|row| row.file.as_str()))
     {
@@ -602,7 +610,18 @@ fn render_dimension(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let mut output = format!("{body}\n{}", page_label(page));
+    // `--filter failed` on a run where everything passed picks no attempt.
+    let body = if values.is_empty() && page.total == 0 {
+        format!("No tests in this view ({})", filter_label(request))
+    } else {
+        body
+    };
+    let body = if body.is_empty() {
+        String::new()
+    } else {
+        format!("{body}\n")
+    };
+    let mut output = format!("{body}{}", page_label(page));
     if let Some(next) = next_page(&coverage_command(run, request, child), page) {
         output.push_str(&format!("\nnext page: {next}"));
     }
@@ -654,10 +673,8 @@ fn render_needed_obligation(obligation: &CoverageFileObligation) -> String {
         CoverageFileObligation::Point(item) if item.kind == "statement" => {
             "statement not executed".into()
         }
-        CoverageFileObligation::Point(item) if item.kind == "function" => {
-            "function not called".into()
-        }
-        CoverageFileObligation::Point(item) => format!("{} not covered", item.kind),
+        // A point is a statement or a function.
+        CoverageFileObligation::Point(_) => "function not called".into(),
         CoverageFileObligation::Branch(item) => branch_need(&item.missing),
         CoverageFileObligation::Mcdc(item) => {
             condition_gap(&item.missing_condition, &item.missing_outcomes, &item.needs)
@@ -776,7 +793,6 @@ fn state_label(state: &str) -> &'static str {
 
 fn confidence_label(level: &str) -> &str {
     match level {
-        "asserted" => "linked to a passing assertion",
         "action" => "linked to a test action",
         "executed" => "execution only",
         "unexecuted" => "not executed",
@@ -849,6 +865,65 @@ fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
     } else {
         format!("{words}; needs {needs}")
     }
+}
+
+/// Where a line's source was read from, when not from the run itself.
+fn source_origin_note(origin: &str) -> &'static str {
+    if origin == "working-tree-stale" {
+        "  (read from the working tree, which changed since this run)"
+    } else {
+        "  (read from the current working tree)"
+    }
+}
+
+/// What a line is, from what is anchored on it, what is left of it, the
+/// tests that reached it, how much of the anchored is complete, and its
+/// limitations.
+fn line_state(
+    anchored: usize,
+    remaining: usize,
+    tests: usize,
+    complete: usize,
+    limitations: usize,
+) -> &'static str {
+    if anchored == 0 && remaining == 0 {
+        "NOT MEASURED"
+    } else if tests == 0 && complete == 0 && anchored > 0 && limitations == 0 {
+        // Nothing anchored on the line was observed, by a test or in the
+        // background: it never ran.
+        "NOT COVERED"
+    } else if complete == anchored && limitations == 0 && remaining == 0 {
+        "COVERED"
+    } else {
+        "PARTIAL"
+    }
+}
+
+/// `1 line, 2 branches, 0 MC/DC conditions`.
+fn diff_counts(lines: usize, branches: usize, conditions: usize) -> String {
+    let counted = |value: usize, one: &str, many: &str| {
+        format!("{} {}", count(value), if value == 1 { one } else { many })
+    };
+    format!(
+        "{}, {}, {}",
+        counted(lines, "line", "lines"),
+        counted(branches, "branch", "branches"),
+        counted(conditions, "MC/DC condition", "MC/DC conditions")
+    )
+}
+
+/// `3 lines, 1 hit, 0 decisions, 1 phase`.
+fn test_totals(totals: &supercov_engine::coverage_query::CoverageTestTotals) -> String {
+    let counted = |value: usize, one: &str, many: &str| {
+        format!("{} {}", count(value), if value == 1 { one } else { many })
+    };
+    format!(
+        "{}, {}, {}, {}",
+        counted(totals.lines, "line", "lines"),
+        counted(totals.hits, "hit", "hits"),
+        counted(totals.decisions, "decision", "decisions"),
+        counted(totals.phases, "phase", "phases")
+    )
 }
 
 fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
@@ -1265,29 +1340,15 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 "{} scope; language {}; model {}",
                 data.kind, data.language, data.model
             )];
-            if let Some(mode) = &data.mode {
-                lines.push(format!(
-                    "mode {}; roots {}; included {}, excluded {}, ambiguous {}",
-                    mode,
-                    if data.roots.is_empty() {
-                        "none".into()
-                    } else {
-                        data.roots.join(", ")
-                    },
-                    data.counts.included,
-                    data.counts.excluded,
-                    data.counts.ambiguous,
-                ));
-            }
-            if let Some(unit) = &data.unit {
-                lines.push(format!("unit {unit}"));
-            }
-            if let Some(complete) = data.measurement_complete {
-                lines.push(format!(
-                    "frontend measurement {}",
-                    if complete { "complete" } else { "incomplete" }
-                ));
-            }
+            lines.push(format!(
+                "mode {}; roots {}; included {}, excluded {}, ambiguous {}",
+                data.mode,
+                // `.` when found automatically, else the roots given.
+                data.roots.join(", "),
+                data.counts.included,
+                data.counts.excluded,
+                data.counts.ambiguous,
+            ));
             lines.push(format!(
                 "measurement {}",
                 if data.measurement.complete {
@@ -1436,6 +1497,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ),
                 String::new(),
                 format!("Tests touching this file: {}", count(data.total_tests)),
+            ];
+            // The assessment's lines go below the tests touching the file.
+            let assertions_at = lines.len();
+            lines.extend([
                 String::new(),
                 "Gaps".into(),
                 format!(
@@ -1446,8 +1511,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ""
                     }
                 ),
-            ];
-            if page.total == 0 && data.total_obligations == 0 {
+            ]);
+            if page.total == 0 && data.counts.total_lines == 0 {
                 // A file the build never compiled, or one with nothing to
                 // run: nothing in it was measured, so nothing is covered.
                 lines.truncate(lines.len() - 1);
@@ -1462,13 +1527,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             } else {
                 lines.push(" LINE  STATUS        SOURCE".into());
             }
-            if let Some(at) = lines
-                .iter()
-                .position(|line| line.starts_with("Tests touching this file"))
-            {
-                let assertions = file_assertion_lines(data.assertions.as_ref());
-                lines.splice(at + 1..at + 1, assertions);
-            }
+            lines.splice(
+                assertions_at..assertions_at,
+                file_assertion_lines(data.assertions.as_ref()),
+            );
             for gap in &data.gap_lines {
                 lines.push(format!(
                     "{:>5}  {:<12}  {}",
@@ -1605,24 +1667,13 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     let complete = data.covered_anchored;
                     // A line nothing measured is not measured, whatever
                     // limitation says why.
-                    let state = if data.total_anchored == 0 && data.total_remaining == 0 {
-                        "NOT MEASURED"
-                    } else if data.total_tests == 0
-                        && complete == 0
-                        && data.total_anchored > 0
-                        && data.total_limitations == 0
-                    {
-                        // Nothing anchored on the line was observed, by a test
-                        // or in the background: it never ran.
-                        "NOT COVERED"
-                    } else if complete == data.total_anchored
-                        && data.total_limitations == 0
-                        && data.total_remaining == 0
-                    {
-                        "COVERED"
-                    } else {
-                        "PARTIAL"
-                    };
+                    let state = line_state(
+                        data.total_anchored,
+                        data.total_remaining,
+                        data.total_tests,
+                        complete,
+                        data.total_limitations,
+                    );
                     let mut lines = vec![
                         format!("{}:{}", data.location.file, data.location.line),
                         String::new(),
@@ -1648,15 +1699,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         );
                     }
                     if let Some(origin) = &data.source_origin {
-                        lines.insert(
-                            4,
-                            if origin == "working-tree-stale" {
-                                "  (read from the working tree, which changed since this run)"
-                                    .into()
-                            } else {
-                                "  (read from the current working tree)".into()
-                            },
-                        );
+                        lines.insert(4, source_origin_note(origin).into());
                     }
                     if !data.remaining.is_empty() {
                         lines.extend([String::new(), "Unobserved coverage".into()]);
@@ -1739,15 +1782,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ),
                     ];
                     if let Some(origin) = &data.source_origin {
-                        lines.insert(
-                            4,
-                            if origin == "working-tree-stale" {
-                                "  (read from the working tree, which changed since this run)"
-                                    .into()
-                            } else {
-                                "  (read from the current working tree)".into()
-                            },
-                        );
+                        lines.insert(4, source_origin_note(origin).into());
                     }
                     if !data.remaining.is_empty() {
                         lines.extend([String::new(), "Unobserved coverage".into()]);
@@ -1891,31 +1926,19 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             // it, so a later test that runs the same line is
                             // recorded against none of it.
                             format!(
-                                "at least {} lines, {} hits, {} decisions, {} phases (a line already recorded for an earlier test is not recorded again)",
-                                test.totals.lines,
-                                test.totals.hits,
-                                test.totals.decisions,
-                                test.totals.phases
+                                "at least {} (a line already recorded for an earlier test is not recorded again)",
+                                test_totals(&test.totals)
                             )
                         } else if test.attribution == "by-time" {
                             // Server work no test could be read from -- a
                             // webhook a mock sent, a Go server's window -- that
                             // ran while this test, and only this test, was.
                             format!(
-                                "{} lines, {} hits, {} decisions, {} phases (with server work credited by time: it ran while only this test was running)",
-                                test.totals.lines,
-                                test.totals.hits,
-                                test.totals.decisions,
-                                test.totals.phases
+                                "{} (with server work credited by time: it ran while only this test was running)",
+                                test_totals(&test.totals)
                             )
                         } else {
-                            format!(
-                                "{} lines, {} hits, {} decisions, {} phases",
-                                test.totals.lines,
-                                test.totals.hits,
-                                test.totals.decisions,
-                                test.totals.phases
-                            )
+                            test_totals(&test.totals)
                         },
                     ];
                     lines.extend(
@@ -1954,14 +1977,21 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             } else {
                 metric_name(data.metric)
             };
+            let goal = match data.target {
+                Some(target) => format!("for {}% {target_label}", number(target)),
+                None if data.metric == MinimizeMetric::All => format!(
+                    "keeping the coverage of all {} tests in every measured metric",
+                    data.total_candidate_tests
+                ),
+                None => format!(
+                    "keeping the {target_label} coverage of all {} tests",
+                    data.total_candidate_tests
+                ),
+            };
             let mut lines = vec![
                 format!(
-                    "exact minimum {}/{} test(s) for {}% {}; explored {} state(s)",
-                    data.selected_count,
-                    data.total_candidate_tests,
-                    number(data.target),
-                    target_label,
-                    data.explored_states
+                    "exact minimum {}/{} test(s) {goal}; explored {} state(s)",
+                    data.selected_count, data.total_candidate_tests, data.explored_states
                 ),
                 summary_line(&data.summary),
             ];
@@ -1976,11 +2006,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 )
             }));
             lines.push(page_label(page));
-            let base = format!(
-                "{} --target {}",
-                coverage_command(&data.run, request, "minimize"),
-                number(data.target)
-            );
+            let mut base = coverage_command(&data.run, request, "minimize");
+            if let Some(target) = data.target {
+                base.push_str(&format!(" --target {}", number(target)));
+            }
             if let Some(next) = next_page(&base, page) {
                 lines.push(format!("next page: {next}"));
             }
@@ -1999,6 +2028,9 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 }
             )];
             if data.tests.is_empty() {
+                if page.total > 0 {
+                    lines.extend([String::new(), page_label(page)]);
+                }
                 return lines.join("\n");
             }
             lines.push(String::new());
@@ -2059,18 +2091,31 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 signed(data.delta.branches),
                 signed(data.delta.mcdc)
             );
+            let label = filter_label(request);
             let mut lines = vec![
-                format!("{} -> {}", data.older, data.newer),
+                if label.is_empty() {
+                    format!("{} -> {}", data.older, data.newer)
+                } else {
+                    format!("{} -> {} ({label})", data.older, data.newer)
+                },
                 format!(
-                    "gained: {} lines, {} branches, {} MC/DC conditions",
-                    data.gained.line_count, data.gained.branch_count, data.gained.mcdc_count
+                    "gained: {}",
+                    diff_counts(
+                        data.gained.line_count,
+                        data.gained.branch_count,
+                        data.gained.mcdc_count
+                    )
                 ),
             ];
             if !data.gained_only {
                 lines.insert(1, delta);
                 lines.push(format!(
-                    "lost: {} lines, {} branches, {} MC/DC conditions",
-                    data.lost.line_count, data.lost.branch_count, data.lost.mcdc_count
+                    "lost: {}",
+                    diff_counts(
+                        data.lost.line_count,
+                        data.lost.branch_count,
+                        data.lost.mcdc_count
+                    )
                 ));
             }
             // Two runs of one commit differ a little wherever what runs
@@ -2098,17 +2143,21 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 const SHOWN: usize = 10;
                 let counted = |counts: &supercov_engine::coverage_query::CoverageDiffCounts| {
                     [
-                        (counts.lines, "lines"),
-                        (counts.branches, "branches"),
-                        (counts.mcdc, "MC/DC"),
+                        (counts.lines, "line", "lines"),
+                        (counts.branches, "branch", "branches"),
+                        (counts.mcdc, "MC/DC", "MC/DC"),
                     ]
                     .into_iter()
-                    .filter(|(count, _)| *count > 0)
-                    .map(|(count, noun)| format!("{count} {noun}"))
+                    .filter(|(count, _, _)| *count > 0)
+                    .map(|(count, one, many)| {
+                        format!("{count} {}", if count == 1 { one } else { many })
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
                 };
-                lines.push(if data.gained_only {
+                let lost_any =
+                    data.lost.line_count + data.lost.branch_count + data.lost.mcdc_count > 0;
+                lines.push(if data.gained_only || !lost_any {
                     format!("in {} files:", data.files)
                 } else {
                     format!("in {} files, most lost first:", data.files)
@@ -2146,13 +2195,25 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     .collect::<Vec<_>>()
             };
             let (lost, gained) = (listed(&data.lost, "-"), listed(&data.gained, "+"));
-            if lost.is_empty() && gained.is_empty() {
-                lines.push(String::new());
+            if !differs {
+                // A file added or removed moves the percentages with nothing
+                // changing state in the code both runs measured.
+                let moved = [data.delta.lines, data.delta.branches, data.delta.mcdc]
+                    .iter()
+                    .any(|delta| *delta != 0.0);
+                lines.push(if data.gained_only {
+                    // Losses are not looked for with --gained.
+                    "Nothing was gained.".into()
+                } else if moved {
+                    "Nothing covered in one run is uncovered in the other: the percentages moved because the runs measure different code.".into()
+                } else {
+                    "Nothing was gained or lost.".into()
+                });
             } else {
                 lines.extend(lost);
                 lines.extend(gained);
+                lines.push(format!("{} per category", page_label(page)));
             }
-            lines.push(format!("{} per category", page_label(page)));
             let mut base = format!(
                 "{} diff {} {}",
                 crate::launcher_command(),
@@ -2273,6 +2334,40 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line with nothing on it is not measured; one nothing ran is not
+    /// covered; one whose every anchored obligation is complete, with no
+    /// limitation and nothing left, is covered; anything between is partial.
+    #[test]
+    fn a_line_s_source_says_where_it_was_read() {
+        assert!(source_origin_note("working-tree-stale").contains("changed since this run"));
+        assert_eq!(
+            source_origin_note("working-tree"),
+            "  (read from the current working tree)"
+        );
+    }
+
+    #[test]
+    fn a_line_s_state_follows_what_is_on_it() {
+        for ((anchored, remaining, tests, complete, limitations), state) in [
+            ((0, 0, 0, 0, 0), "NOT MEASURED"),
+            ((0, 2, 0, 0, 0), "PARTIAL"),
+            ((2, 0, 0, 0, 0), "NOT COVERED"),
+            ((2, 0, 0, 0, 1), "PARTIAL"),
+            ((2, 0, 0, 2, 0), "COVERED"),
+            ((2, 0, 1, 0, 0), "PARTIAL"),
+            ((2, 0, 1, 2, 0), "COVERED"),
+            ((2, 0, 1, 1, 0), "PARTIAL"),
+            ((2, 0, 1, 2, 1), "PARTIAL"),
+            ((2, 1, 1, 2, 0), "PARTIAL"),
+        ] {
+            assert_eq!(
+                line_state(anchored, remaining, tests, complete, limitations),
+                state,
+                "{anchored} {remaining} {tests} {complete} {limitations}"
+            );
+        }
+    }
 
     #[test]
     fn numbers_and_times_read_the_way_people_write_them() {
@@ -2522,6 +2617,487 @@ mod tests {
         assert_eq!(
             attribution_line(&counts(0, 0, 0)),
             "No test recorded coverage"
+        );
+    }
+
+    /// A saved assessment beside a file or a line: nothing without one,
+    /// the share and the lines left, a dozen of them named.
+    #[test]
+    fn assessment_lines_say_what_is_asserted_and_what_is_not() {
+        use serde_json::json;
+        assert!(file_assertion_lines(None).is_empty());
+        assert!(file_assertion_lines(Some(&json!({"available": false}))).is_empty());
+        assert!(
+            file_assertion_lines(Some(&json!({"available": true, "statements": 0}))).is_empty()
+        );
+        let all = file_assertion_lines(Some(&json!({
+            "available": true, "statements": 4, "asserted": 4, "percentage": 100.0
+        })));
+        assert_eq!(
+            all,
+            [
+                "",
+                "Assertions  100% (4/4 statements a test is judged to catch)"
+            ]
+        );
+        let lines = (1..=14).collect::<Vec<u64>>();
+        let some = file_assertion_lines(Some(&json!({
+            "available": true, "statements": 20, "asserted": 6, "percentage": 30.0,
+            "notAssertedLines": lines, "inspect": "supercov runs r assertions a.js"
+        })));
+        assert_eq!(
+            some[2],
+            "  Not asserted on line(s) 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 2 more"
+        );
+        assert_eq!(some[3], "  Inspect: supercov runs r assertions a.js");
+        assert!(
+            line_assertion_lines(Some(&json!({"available": true, "statements": []}))).is_empty()
+        );
+        let line = line_assertion_lines(Some(&json!({
+            "available": true,
+            "inspect": "supercov runs r assertions a.js:3",
+            "statements": [
+                {"asserted": true, "text": "x = 1", "change": "x is undefined", "test": {"name": "adds"}, "answer": 0.9},
+                {"asserted": false, "text": "y = 2", "change": "y is undefined"}
+            ]
+        })));
+        assert_eq!(
+            line,
+            [
+                "",
+                "Assertions",
+                "  Asserted: `x = 1`; adds is judged to fail if it changes (x is undefined, 90% likely to fail)",
+                "  Not asserted: `y = 2`; no test that runs it is judged to fail if it changes (y is undefined); closest: no test",
+                "  Inspect: supercov runs r assertions a.js:3",
+            ]
+        );
+        assert_eq!(state_label("missing"), "NOT COVERED");
+        assert_eq!(state_label("limited"), "NOT MEASURED");
+        assert_eq!(state_label("other"), "UNKNOWN");
+        assert_eq!(confidence_label("action"), "linked to a test action");
+        assert_eq!(branch_need("catch entered"), "catch outcome not observed");
+        assert_eq!(
+            branch_need("short-circuit / left selected"),
+            "left-selected short-circuit outcome not observed"
+        );
+        assert_eq!(branch_need("odd"), "branch outcome not observed: odd");
+    }
+
+    /// The summary's diagnostics, outcomes and scope table as people read them.
+    #[test]
+    fn diagnostics_outcomes_and_scope_groups_read_as_tables_and_sentences() {
+        let diagnostic = |code: &str, message: &str| CoverageDiagnostic {
+            code: code.into(),
+            severity: "warning".into(),
+            message: message.into(),
+        };
+        let many = diagnostic_lines(
+            &diagnostic(
+                "TEST_EVIDENCE_MISSING",
+                "63 test(s) recorded assertion phases ... First: adds",
+            ),
+            Some("supercov runs r tests without-evidence"),
+        );
+        assert_eq!(
+            many[0],
+            "  63 tests made assertions, but Supercov received no source-coverage evidence:"
+        );
+        assert_eq!(many[1], "    Example: adds");
+        assert_eq!(
+            many[2],
+            "    All of them: supercov runs r tests without-evidence"
+        );
+        let one = diagnostic_lines(
+            &diagnostic(
+                "TEST_EVIDENCE_MISSING",
+                "1 test(s) recorded ... First: adds",
+            ),
+            Some("ignored for one"),
+        );
+        assert!(one[0].starts_with("  1 test made"));
+        assert!(!one.iter().any(|line| line.contains("All of them")));
+        // A message that does not read as expected is shown as it is.
+        assert_eq!(
+            diagnostic_lines(&diagnostic("TEST_EVIDENCE_MISSING", "odd message"), None),
+            ["  odd message"]
+        );
+        assert_eq!(
+            diagnostic_lines(&diagnostic("OTHER", "plain"), None),
+            ["  plain"]
+        );
+        let outcomes = IndexedOutcomeCounts {
+            passed: 1_200,
+            failed: 0,
+            flaky: 2,
+            skipped: 0,
+            timed_out: 1,
+            interrupted: 0,
+            unknown: 0,
+            unstarted: 0,
+            todo: 3,
+        };
+        assert_eq!(
+            outcome_lines(&outcomes),
+            [
+                "  Passed      1,200",
+                "  Flaky       2",
+                "  Todo        3",
+                "  Timed out   1"
+            ]
+        );
+        let groups = [supercov_engine::coverage_query::ScopeGroup {
+            status: "included".into(),
+            directory: "src/very/deep".into(),
+            reason: "discovered package source root".into(),
+            files: 12_345,
+        }];
+        assert_eq!(
+            scope_group_lines(&groups),
+            [
+                " Files  Status     Directory      Reason",
+                "12,345  INCLUDED   src/very/deep  discovered package source root",
+            ]
+        );
+    }
+
+    /// The request a `command` makes of a one-test JavaScript run, and the
+    /// answer a real index of that run gives it, for the renderings below to
+    /// start from.
+    fn answered(
+        command: &str,
+        edit: impl FnOnce(&mut IndexedQueryRequest),
+    ) -> (IndexedQueryRequest, IndexedQueryOutput) {
+        use supercov_engine::coverage_analysis::{McdcVector, PointKind};
+        use supercov_engine::coverage_index::coverage_index_sections;
+        use supercov_engine::coverage_report::{
+            CoverageManifest, CoverageReportRequest, DecisionMeta, DecisionSnapshot, ExitCodeInput,
+            PointMeta, RawTestResult, RuntimeSnapshot, TestProvenance, analyze_coverage_results,
+        };
+        use supercov_engine::query_index::{QueryIndex, QueryIndexIdentity, write_query_index};
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let decision = DecisionMeta {
+            id: "d".into(),
+            file: "src/a.js".into(),
+            line: 1,
+            column: 1,
+            source: "a && b".into(),
+            conditions: vec!["a".into(), "b".into()],
+            kind: "if".into(),
+        };
+        let mut report = analyze_coverage_results(&CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: vec![decision.clone()],
+                points: vec![PointMeta {
+                    id: "point".into(),
+                    kind: PointKind::Statement,
+                    file: "src/a.js".into(),
+                    line: 2,
+                    column: 3,
+                    source: "work();".into(),
+                    label: None,
+                }],
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+            },
+            raw_results: vec![RawTestResult {
+                span: None,
+                test_id: Some("test".into()),
+                scope: None,
+                test: "works".into(),
+                test_file: Some("tests/a.js".into()),
+                title: None,
+                retry: Some(0),
+                status: Some("passed".into()),
+                expected_status: None,
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "node:test".into(),
+                    kind: "unit".into(),
+                    project: None,
+                    source: "runner-default".into(),
+                    tags: Vec::new(),
+                },
+                role: "test".into(),
+                attribution: supercov_engine::coverage_report::ATTRIBUTION_EXACT.into(),
+                phases: Vec::new(),
+                runtime: vec![RuntimeSnapshot {
+                    decisions: vec![DecisionSnapshot {
+                        meta: decision,
+                        vectors: vec![McdcVector {
+                            values: vec![Some(false), None],
+                            outcome: false,
+                        }],
+                    }],
+                    hits: vec!["point".into()],
+                    events: Vec::new(),
+                    logicals: Vec::new(),
+                    phase_id: None,
+                }],
+                browser: Vec::new(),
+                server: Vec::new(),
+            }],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(0)),
+        })
+        .unwrap();
+        let scope = serde_json::json!({
+            "version": 1,
+            "mode": "automatic",
+            "roots": ["."],
+            "entries": [{"file": "src/a.js", "status": "included", "reason": "javascript source", "packageRoot": "."}]
+        });
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            view.scope = Some(scope.clone());
+        }
+        let identity = QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-human-query-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("query-index.v1.bin");
+        write_query_index(&coverage_index_sections(&report).unwrap(), &identity, &path).unwrap();
+        let mut request = request();
+        request.command = command.into();
+        edit(&mut request);
+        let output = {
+            let container = QueryIndex::open(&path, &identity).unwrap();
+            let index = supercov_engine::coverage_index::CoverageIndex::new(&container).unwrap();
+            supercov_engine::indexed_query::query_indexed(&index, Some(&report), &request, None)
+        };
+        std::fs::remove_dir_all(&directory).unwrap();
+        (request, output.unwrap())
+    }
+
+    #[test]
+    fn a_run_with_no_source_files_says_so_instead_of_an_empty_list() {
+        let page = AgentPagination {
+            offset: 0,
+            limit: DEFAULT_LIMIT,
+            returned: 0,
+            total: 0,
+            has_more: false,
+            next_offset: None,
+        };
+        let text = render_files(&[], &request(), &page, "files", "run_1");
+        assert!(
+            text.starts_with("Coverage files — every included source file"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n\nNo source files are included in this run.\n\n"),
+            "{text}"
+        );
+    }
+
+    /// An incomplete run with nothing blocked in a file blames the
+    /// transport or the run; a run read with no command, no assessment and
+    /// no lines covered says nothing of them, and shares nothing of zero.
+    #[test]
+    fn a_summary_leaves_out_what_the_run_does_not_have() {
+        let (request, mut output) = answered("summary", |_| {});
+        let IndexedQueryData::Summary(data) = &mut output.data else {
+            panic!("a summary");
+        };
+        data.measurement.complete = false;
+        data.measurement.blocking = 1;
+        data.measurement.files = 0;
+        data.command = Vec::new();
+        data.assertion_coverage = None;
+        data.coverage.lines.covered = 0;
+        let nothing = supercov_engine::coverage_index::IndexedGapDimensions {
+            lines: 0,
+            statements: 0,
+            functions: 0,
+            branches: 0,
+            mcdc_conditions: 0,
+        };
+        data.e2e_gap_context = Some(supercov_engine::coverage_query::CoverageKindGapContext {
+            kind: "e2e".into(),
+            other_kinds: vec!["unit".into()],
+            covered_elsewhere: nothing.clone(),
+            uncovered_everywhere: nothing,
+        });
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("Incomplete — 1 blocking transport or run limitation(s)"),
+            "{text}"
+        );
+        assert!(!text.contains("command:"), "{text}");
+        assert!(!text.contains("Assertions"), "{text}");
+        assert!(
+            text.contains("  Other test kinds only  0 lines (0.00% of all covered lines)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_complete_scope_counts_its_declared_boundaries() {
+        let (request, mut output) = answered("scope", |_| {});
+        let IndexedQueryData::Scope(data) = &mut output.data else {
+            panic!("a scope");
+        };
+        data.measurement.complete = true;
+        data.measurement.declared = 2;
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("measurement complete, 2 declared boundary(ies)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_nothing_measured_says_where_to_ask_why() {
+        let (request, mut output) = answered("file-detail", |request| {
+            request.file = Some("src/a.js".into());
+        });
+        let IndexedQueryData::FileDetail(data) = &mut output.data else {
+            panic!("a file");
+        };
+        data.counts.total_lines = 0;
+        output.pagination.as_mut().unwrap().total = 0;
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("  Nothing measured: the run counts no obligation in this file."),
+            "{text}"
+        );
+    }
+
+    /// A line every anchored obligation of which is complete, with
+    /// something still unobserved, is partial; where its source was read is
+    /// said, and an empty list of details is not shown.
+    #[test]
+    fn a_covered_line_with_something_left_is_partial() {
+        let (request, mut output) = answered("line", |request| {
+            request.file = Some("src/a.js".into());
+            request.line = Some(2);
+        });
+        let IndexedQueryData::Line(data) = &mut output.data else {
+            panic!("a line");
+        };
+        let CoverageCoversData::Line(line) = data.as_mut() else {
+            panic!("a line with a record");
+        };
+        let anchor = line.anchored.first().cloned().expect("the statement");
+        line.covered = true;
+        line.covered_anchored = line.total_anchored;
+        line.total_limitations = 0;
+        line.total_remaining = 1;
+        line.source_origin = Some("working-tree".into());
+        line.anchored.clear();
+        let text = render_coverage(&request, &output);
+        assert!(text.contains("  PARTIAL"), "{text}");
+        assert!(
+            text.contains("(read from the current working tree)"),
+            "{text}"
+        );
+        assert!(!text.contains("Coverage details"), "{text}");
+        // An anchor whose source is unknown is named without it.
+        let mut bare = anchor;
+        bare.source = None;
+        let rendered = render_anchor(&bare);
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
+        assert!(
+            rendered[0].starts_with("  Statement at column 3"),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_partially_attributed_test_s_coverage_is_a_lower_bound() {
+        let (request, mut output) = answered("test", |request| {
+            request.selector = Some("test".into());
+        });
+        let IndexedQueryData::Test(data) = &mut output.data else {
+            panic!("a test");
+        };
+        let CoverageTestData::Detail(detail) = data.as_mut() else {
+            panic!("one test's detail");
+        };
+        detail.tests[0].attribution = "partial".into();
+        let text = render_coverage(&request, &output);
+        assert!(
+            text.contains("at least ")
+                && text.contains(
+                    "(a line already recorded for an earlier test is not recorded again)"
+                ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_coverage_could_not_be_read_is_listed_as_invalid() {
+        let entry = supercov_engine::run_query::RunListEntry {
+            id: "run_1".into(),
+            generated_at: "2026-10-16T10:29:02.377Z".into(),
+            lines: None,
+            branches: None,
+            mcdc: None,
+            coverage_error: Some("index refused".into()),
+            tests: Some(1),
+            command: vec!["npm".into(), "test".into()],
+            duration_ms: 1.0,
+            timings: None,
+            test_exit_code: Some(0),
+            build_reused: None,
+            raw_evidence: supercov_engine::run_store::RawEvidenceMetadata {
+                schema_version: 1,
+                format: "gzip".into(),
+                file: "evidence.raw.gz".into(),
+                files: 1,
+                uncompressed_bytes: 1,
+                compressed_bytes: 1,
+            },
+            stale: None,
+            reasons: Vec::new(),
+        };
+        let page = AgentPagination {
+            offset: 0,
+            limit: DEFAULT_LIMIT,
+            returned: 1,
+            total: 1,
+            has_more: false,
+            next_offset: None,
+        };
+        let text = render_human(
+            &PublicQueryInvocation::Runs {
+                filter: "all".into(),
+                offset: 0,
+                limit: DEFAULT_LIMIT,
+                json: false,
+            },
+            &PublicQueryOutput::Runs {
+                data: supercov_engine::run_query::RunListData {
+                    filters: supercov_engine::coverage_query::CoverageQueryFilters {
+                        outcome: "all".into(),
+                        kind: None,
+                        runner: None,
+                    },
+                    runs: vec![entry],
+                },
+                pagination: page,
+            },
+        );
+        assert!(
+            text.contains("2026-10-16 10:29:02 UTC  INVALID COVERAGE"),
+            "{text}"
         );
     }
 }

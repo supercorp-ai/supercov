@@ -205,6 +205,54 @@ end
   // Shapes beside the ones above: empty branches, a rescue naming its error
   // with \`then\`, jumps that end an arm, and calls that look like the
   // special ones (\`Class.new\`, \`refine\`, \`!\`) but are not.
+  'lib/more.rb': `module More
+  def self.empty_loops(limit)
+    count = 0
+    while (count += 1) < limit
+    end
+    until count >= limit + 2
+      count += 1
+    end
+    count
+  end
+
+  def self.empty_elsif(flag, other)
+    if flag
+      :first
+    elsif other
+    else
+    end
+  end
+
+  def self.unless_else(flag)
+    unless flag
+      :no
+    else
+    end
+  end
+
+  def self.not_called(value) = value.!()
+
+  def self.built(klass) = klass.new
+
+  def self.doubled(value) = begin
+    value * 2
+  end
+
+  def self.retried(attempts)
+    tries = 0
+    begin
+      tries += 1
+      # Not a StandardError: a bare rescue does not select it.
+      raise NotImplementedError if attempts.zero?
+      raise 'again' if tries < attempts
+      tries
+    rescue
+      retry
+    end
+  end
+end
+`,
   'lib/edges.rb': `module Edges
   class Base; end
 
@@ -327,9 +375,66 @@ end
   end
 end
 `,
+  // The long tail: a Ractor's block, \`case/in\` arms that jump, a grouped
+  // condition of two statements, assignment shapes as the last word of a
+  // branch, and a rescue whose clauses say nothing.
+  // A Ractor's block cannot reach the probes: what only a probe proves inside
+  // it is a limitation, said.
+  'lib/ractor.rb': `module InRactor
+  def self.doubled(n)
+    Ractor.new(n) { |value| value * 2 }.take
+  end
+end
+`,
+  'lib/tail.rb': `module Tail
+  def self.matched(items)
+    found = []
+    items.each do |item|
+      case item
+      in Integer if item.negative? then next
+      in Integer if item > 100 then break
+      in Integer then found << item
+      else found << :other
+      end
+    end
+    found
+  end
+
+  def self.grouped_statements(flag)
+    if (seen = flag; seen)
+      :grouped
+    else
+      :not
+    end
+  end
+
+  def self.assigned_last(flag)
+    if flag
+      first, second = 1, 2
+    else
+      first = second = 0
+    end
+    first + second
+  end
+
+  def self.quiet_rescue(kind)
+    begin
+      raise ArgumentError if kind == :raise
+      raise TypeError if kind == :type
+    rescue ArgumentError
+    else
+    ensure
+    end
+    kind
+  end
+end
+`,
   'test/zoo_test.rb': `require 'minitest/autorun'
+require 'tail'
+require 'ractor'
 require 'flow'
 require 'shapes'
+require 'more'
 require 'literals'
 require 'edges'
 
@@ -441,6 +546,37 @@ class ZooTest < Minitest::Test
     assert_raises(TypeError) { Edges.begin_next([nil]) }
   end
 
+  def test_more
+    assert_equal 4, More.empty_loops(2)
+    assert_equal 3, More.empty_loops(1)
+    assert_equal 1, More.empty_loops(-1)
+    assert_equal :first, More.empty_elsif(true, false)
+    assert_nil More.empty_elsif(false, true)
+    assert_nil More.empty_elsif(false, false)
+    assert_equal :no, More.unless_else(false)
+    assert_nil More.unless_else(true)
+    assert_equal true, More.not_called(nil)
+    assert_equal false, More.not_called(1)
+    assert_kind_of Object, More.built(Object)
+    assert_equal 4, More.doubled(2)
+    assert_equal 1, More.retried(1)
+    assert_equal 3, More.retried(3)
+    assert_raises(NotImplementedError) { More.retried(0) }
+  end
+
+  def test_tail
+    assert_equal 4, InRactor.doubled(2)
+    assert_equal [1, :other], Tail.matched([1, -1, 'x', 200, 5])
+    assert_equal [], Tail.matched([])
+    assert_equal :grouped, Tail.grouped_statements(true)
+    assert_equal :not, Tail.grouped_statements(false)
+    assert_equal 3, Tail.assigned_last(true)
+    assert_equal 0, Tail.assigned_last(false)
+    assert_equal :raise, Tail.quiet_rescue(:raise)
+    assert_equal :calm, Tail.quiet_rescue(:calm)
+    assert_raises(TypeError) { Tail.quiet_rescue(:type) }
+  end
+
   def test_literals
     assert_equal %i[yes yes yes yes yes yes yes no no],
                  %i[true integer float rational imaginary string symbol false nil].map { |kind| Literals.constant(kind) }
@@ -467,8 +603,9 @@ try {
   const byFile = Object.fromEntries(listed.map((entry) => [entry.file, entry]));
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
+  assert.ok(byFile['lib/ractor.rb']?.measurementLimitations >= 1, `lib/ractor.rb\n${report}`);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb', 'lib/edges.rb']) {
+  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb', 'lib/edges.rb', 'lib/more.rb', 'lib/tail.rb']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {

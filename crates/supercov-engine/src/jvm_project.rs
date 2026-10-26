@@ -227,14 +227,10 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
                 relative,
                 "shared with a target that has no Supercov runtime",
             )),
-            Some(other) => files.excluded.push((
-                relative,
-                if other == "other" {
-                    "a source set that is neither main nor test"
-                } else {
-                    other
-                },
-            )),
+            // `role` names nothing else.
+            Some(_) => files
+                .excluded
+                .push((relative, "a source set that is neither main nor test")),
             // A loose file outside `src` was never pointed at by this
             // project's build, so measuring it would add obligations nobody
             // agreed to.
@@ -621,6 +617,14 @@ mod tests {
         write(&root, "target/classes/app/Api.java", "class Api {}");
         write(&root, "build/generated/app/Gen.java", "class Gen {}");
         write(&root, "Scratch.java", "class Scratch {}");
+        write(&root, "src/jmh/java/app/Bench.java", "class Bench {}");
+        // A link is not followed: what it names is measured where it lies.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            root.join("src/main/java/app/Api.java"),
+            root.join("src/main/java/app/Alias.java"),
+        )
+        .unwrap();
 
         let files = discover_jvm_files(&root).unwrap();
         assert_eq!(files.sources.len(), 1);
@@ -631,6 +635,10 @@ mod tests {
                 .iter()
                 .any(|(path, why)| path == "Scratch.java" && *why == "outside a src source set")
         );
+        assert!(files.excluded.contains(&(
+            "src/jmh/java/app/Bench.java".to_owned(),
+            "a source set that is neither main nor test"
+        )));
         assert_eq!(detect_build(&root), JvmBuild::Gradle);
         assert!(
             files
@@ -692,6 +700,11 @@ mod tests {
         let root = fixture("empty");
         write(&root, "pom.xml", "<project/>");
         assert!(prepare_jvm_project(&root, None).is_err());
+        // Tests alone are something to run.
+        write(&root, "src/test/java/app/ApiTest.java", "class ApiTest {}");
+        let project = prepare_jvm_project(&root, None).unwrap();
+        assert!(project.files.sources.is_empty());
+        assert_eq!(project.files.tests.len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

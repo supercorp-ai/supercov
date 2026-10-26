@@ -22,6 +22,14 @@ const root = resolve(temporary, 'zoo');
 
 const files = {
   'go.mod': 'module example.com/zoo\n\ngo 1.22\n',
+  // Behind a tag no build sets, and broken on a line too long to quote
+  // whole: discovery reads it anyway and says it did not parse.
+  'flow/broken.go': `//go:build never
+
+package flow
+
+func Broken(first, second, third, fourth, fifth, sixth, seventh, eighth, ninth, tenth, eleventh, twelfth int) int { return (
+`,
   'flow/flow.go': `package flow
 
 import (
@@ -264,6 +272,7 @@ try {
   assert.equal(plain.status, 0, `${plain.stdout}${plain.stderr}`);
   const measured = run(binary, ['--', 'go', 'test', './...']);
   assert.equal(measured.status, 0, `${measured.stdout}${measured.stderr}`);
+  assert.match(measured.stderr, /1 source file\(s\) did not parse/, measured.stderr);
   const listed = JSON.parse(run(binary, ['runs', 'latest', 'files', '--json', '--limit', '100']).stdout).data.files;
   const byFile = Object.fromEntries(listed.map((entry) => [entry.file, entry]));
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');

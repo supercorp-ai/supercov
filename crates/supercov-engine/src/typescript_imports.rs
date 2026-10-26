@@ -128,6 +128,17 @@ pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
 }
 
 pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -> bool {
+    elides_type_imports_in(root, file, command, |name| std::env::var_os(name))
+}
+
+/// `elides_type_imports` with the environment passed in, so a test can name
+/// a loader override without changing the process's own.
+fn elides_type_imports_in(
+    root: &Path,
+    file: &str,
+    command: &[String],
+    environment: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> bool {
     let root_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     let root = root_path.as_path();
     let commands = [expanded_command(root, command)];
@@ -191,7 +202,9 @@ pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -
                     return false;
                 }
                 explicit_configs.push(path);
-            } else if word.starts_with("-p") && !word.starts_with("--") {
+            } else if word.starts_with("-p") {
+                // `-pconfig.json`, a form not read. (No word starting `-p`
+                // starts `--`, so `--project` never reaches here.)
                 return false;
             }
         }
@@ -213,7 +226,7 @@ pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -
             "TSX_TSCONFIG_PATH",
         ]
         .iter()
-        .any(|s| std::env::var_os(s).is_some())
+        .any(|s| environment(s).is_some())
     {
         return false;
     }
@@ -245,16 +258,16 @@ pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -
     if !explicit_configs.iter().all(|path| permits_elision(path)) {
         return false;
     }
-    let mut directory = root.join(file).parent().map(Path::to_path_buf);
-    while let Some(dir) = directory {
-        if !dir.starts_with(root) {
-            break;
-        }
+    let target = root.join(file);
+    for dir in target
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(root))
+    {
         let config = dir.join("tsconfig.json");
         if config.exists() {
             return permits_elision(&config);
         }
-        directory = dir.parent().map(Path::to_path_buf);
     }
     false
 }
@@ -326,6 +339,145 @@ mod tests {
             "src/main.ts",
             &["node".into(), "script.js".into(), "tsx".into()]
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A config chain that leaves the project, runs past 32 configs or
+    /// names something that is not JSON keeps imports; the fingerprint
+    /// follows a chain no further than 257 configs, nor outside the project.
+    #[test]
+    fn config_chains_that_leave_the_project_or_run_long_are_not_followed() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-imports-chains-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("project");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let write = |name: &str, text: &str| fs::write(root.join(name), text).unwrap();
+        let tsx = vec!["tsx".to_owned(), "src/main.ts".to_owned()];
+        let elides = || elides_type_imports(&root, "src/main.ts", &tsx);
+        let configs = || config_paths(&root, &["src/main.ts".to_owned()]);
+        // No tsconfig up to the project's root.
+        assert!(!elides());
+        fs::write(base.join("shared.json"), r#"{"compilerOptions":{}}"#).unwrap();
+        write("tsconfig.json", r#"{"extends":"../shared.json"}"#);
+        assert!(!elides());
+        assert_eq!(configs(), BTreeSet::from([root.join("tsconfig.json")]));
+        let chain = |length: usize| {
+            for n in 0..length {
+                write(
+                    &format!("c{n}.json"),
+                    &format!(r#"{{"extends":"./c{}"}}"#, n + 1),
+                );
+            }
+            write(&format!("c{length}.json"), "{}");
+            write("tsconfig.json", r#"{"extends":"./c0"}"#);
+        };
+        chain(10);
+        assert!(elides());
+        assert!(configs().contains(&root.join("c10.json")));
+        chain(40);
+        assert!(!elides());
+        chain(300);
+        assert_eq!(configs().len(), 257);
+        for n in 0..=300 {
+            fs::remove_file(root.join(format!("c{n}.json"))).unwrap();
+        }
+        write("tsconfig.json", "not json");
+        write("tsconfig.txt", "{}");
+        assert!(!elides());
+        // Named by a file whose directory is gone, too.
+        assert_eq!(
+            config_paths(&root, &["gone/main.ts".to_owned()]),
+            BTreeSet::from([root.join("tsconfig.json")])
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn each_loader_form_config_name_and_override_is_read() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-imports-forms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let elides = |file: &str, command: &str| elides_type_imports(&root, file, &words(command));
+        let write = |name: &str, text: &str| fs::write(root.join(name), text).unwrap();
+        write("tsconfig.json", "{}");
+        write("base.json", r#"{"compilerOptions":{"strict":true}}"#);
+        write(
+            "preserve.json",
+            r#"{"compilerOptions":{"importsNotUsedAsValues":"preserve"}}"#,
+        );
+        // Each way Node is told to load a TypeScript loader.
+        assert!(elides("src/main.ts", "node --import=tsx src/main.ts"));
+        assert!(elides(
+            "src/main.ts",
+            "node --loader ts-node/esm src/main.ts"
+        ));
+        assert!(elides(
+            "src/main.ts",
+            "node --experimental-loader=ts-node/esm src/main.ts"
+        ));
+        assert!(!elides("src/main.ts", "node --loader other src/main.ts"));
+        // An extends chain without an extension, as a list, or leaving the project.
+        write("tsconfig.json", r#"{"extends":"./base"}"#);
+        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", r#"{"extends":["./base.json","./base"]}"#);
+        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", r#"{"extends":"../outside.json"}"#);
+        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", r#"{"extends":7}"#);
+        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", "{}");
+        // Explicit configs: named in every form, and refused where not a root tsconfig.
+        write(
+            "tsconfig.build.json",
+            r#"{"compilerOptions":{"importsNotUsedAsValues":"remove"}}"#,
+        );
+        assert!(elides("src/main.ts", "tsc --project=tsconfig.build.json"));
+        assert!(elides(
+            "src/main.ts",
+            "tsx --tsconfig=tsconfig.build.json src/main.ts"
+        ));
+        assert!(!elides("src/main.ts", "tsc -p"));
+        assert!(!elides("src/main.ts", "tsc -ptsconfig.build.json"));
+        assert!(!elides("src/main.ts", "tsc -p preserve.json"));
+        write(
+            "tsconfig.preserve.json",
+            r#"{"compilerOptions":{"importsNotUsedAsValues":"preserve"}}"#,
+        );
+        assert!(!elides("src/main.ts", "tsc -p tsconfig.preserve.json"));
+        write("tsconfig.txt", "{}");
+        assert!(!elides("src/main.ts", "tsc -p tsconfig.txt"));
+        assert!(!elides("src/main.ts", "tsc -p missing.json"));
+        // An override on the command line, or a bundler beside the compiler.
+        assert!(!elides("src/main.ts", "tsc --verbatimModuleSyntax"));
+        assert!(!elides("src/main.ts", "tsc && vite build"));
+        // Or an override in the environment a loader reads.
+        let overridden = |name: &str| (name == "TS_NODE_PROJECT").then(|| "other.json".into());
+        assert!(!elides_type_imports_in(
+            &root,
+            "src/main.ts",
+            &words("tsx src/main.ts"),
+            overridden
+        ));
+        // The nearest tsconfig decides for a file below it.
+        write(
+            "src/nested/tsconfig.json",
+            r#"{"compilerOptions":{"verbatimModuleSyntax":true}}"#,
+        );
+        assert!(!elides("src/nested/deep.ts", "tsx src/nested/deep.ts"));
+        assert!(elides("src/main.ts", "tsx src/main.ts"));
         fs::remove_dir_all(root).unwrap();
     }
 }

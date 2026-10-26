@@ -41,10 +41,11 @@ function snapshot(root) {
 }
 
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-packed-npx-"));
-const rustBinary = resolve(
-  "target/release",
-  `supercov${process.platform === "win32" ? ".exe" : ""}`,
-);
+// The binary built for the host, or the one named: CI names the release
+// build it already made, rather than building another.
+const rustBinary = process.env.SUPERCOV_RUST_BINARY
+  ? resolve(process.env.SUPERCOV_RUST_BINARY)
+  : resolve("target/release", `supercov${process.platform === "win32" ? ".exe" : ""}`);
 const rustEnvironment = { ...process.env, SUPERCOV_RUST_BINARY: rustBinary };
 try {
   const preflight = spawnSync(process.execPath, ["scripts/package-preflight.mjs"], {

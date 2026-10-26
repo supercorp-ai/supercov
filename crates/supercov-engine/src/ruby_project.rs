@@ -72,22 +72,19 @@ pub struct PreparedRubyProject {
     pub unparseable: Vec<(String, String)>,
 }
 
+/// Asked only of a `.rb` file.
 fn is_test_path(relative: &str) -> Option<&'static str> {
-    let mut components = relative.split('/').peekable();
-    let mut file_name = "";
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            file_name = component;
-            break;
-        }
-        if TEST_DIRECTORIES.contains(&component) {
-            return Some("inside a test directory");
-        }
+    let (directories, file_name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    if directories
+        .split('/')
+        .any(|component| TEST_DIRECTORIES.contains(&component))
+    {
+        return Some("inside a test directory");
     }
     if file_name.ends_with("_spec.rb") || file_name.ends_with("_test.rb") {
         return Some("test module by name");
     }
-    if file_name.starts_with("test_") && file_name.ends_with(".rb") {
+    if file_name.starts_with("test_") {
         return Some("test module by name");
     }
     if matches!(
@@ -171,10 +168,31 @@ pub fn prepare_ruby_project(
     root: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedRubyProject, String> {
+    prepare(root, roots, false).map(|project| project.expect("refused when empty"))
+}
+
+/// The Ruby a browser suite's server runs, or None where the source roots
+/// leave none: roots named for the suite's JavaScript mean there is no Ruby
+/// server to measure, not a mistake.
+pub fn prepare_ruby_server_project(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<Option<PreparedRubyProject>, String> {
+    prepare(root, roots, true)
+}
+
+fn prepare(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    server: bool,
+) -> Result<Option<PreparedRubyProject>, String> {
     let mut files = discover_ruby_files(root)?;
     match roots {
         Some(roots) => {
             roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+            if server && files.sources.is_empty() {
+                return Ok(None);
+            }
             roots.refuse_if_empty(files.sources.len(), "Ruby")?;
         }
         None => crate::source_discovery::leave_out_what_lies_beside(
@@ -226,9 +244,8 @@ pub fn prepare_ruby_project(
             Err(error) => unparseable.push((relative.clone(), error.to_string())),
         }
     }
-    if let Some((file, reason)) = unparseable.first()
-        && limitation_ids.insert(UNPARSEABLE_LIMITATION.into())
-    {
+    // No limitation the instrumenter declares is the file-level one.
+    if let Some((file, reason)) = unparseable.first() {
         manifest.limitations.push(json!({
             "id": UNPARSEABLE_LIMITATION,
             "kind": "source-scope",
@@ -296,14 +313,27 @@ pub fn prepare_ruby_project(
         files: plan_files,
         probes,
         probe_obligations: Vec::new(),
+        ractors: false,
     };
     plan.probe_obligations = plan.probe_obligations();
-    Ok(PreparedRubyProject {
+    if mentions_ractors(root, &files) {
+        plan.use_ractor_safe_receiver();
+    }
+    Ok(Some(PreparedRubyProject {
         root: root.to_owned(),
         plan,
         manifest,
         files,
         unparseable,
+    }))
+}
+
+/// Whether any of the project's Ruby, its tests included, mentions Ractors:
+/// code a test runs inside one is called from a Ractor wherever it lives.
+fn mentions_ractors(root: &Path, files: &RubyFiles) -> bool {
+    files.sources.iter().chain(&files.tests).any(|file| {
+        fs::read(root.join(file))
+            .is_ok_and(|source| source.windows(6).any(|word| word == b"Ractor"))
     })
 }
 
@@ -396,6 +426,30 @@ mod tests {
     }
 
     #[test]
+    fn roots_named_for_a_browser_suites_javascript_mean_no_ruby_server() {
+        let root = fixture("roots-name-javascript");
+        write(&root, "src/app.js", "export const x = 1;\n");
+        write(&root, "app.rb", "def f\n  1\nend\n");
+        let roots = explicit_roots(&root, &["src"]);
+        assert!(
+            prepare_ruby_server_project(&root, Some(&roots))
+                .unwrap()
+                .is_none()
+        );
+        // Asked to measure Ruby itself, the same roots are a mistake.
+        let error = prepare_ruby_project(&root, Some(&roots)).unwrap_err();
+        assert!(error.contains("left no Ruby source"), "{error}");
+        assert!(prepare_ruby_server_project(&root, None).unwrap().is_some());
+        // Roots that name the Ruby too make it a server.
+        let roots = explicit_roots(&root, &["src", "app.rb"]);
+        let server = prepare_ruby_server_project(&root, Some(&roots))
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.files.sources, ["app.rb"]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn explicit_roots_narrow_ruby_to_the_code_they_name() {
         // `third_party`, not `vendor`: vendor is already left out by default,
         // and a test that passed for that reason would prove nothing.
@@ -428,6 +482,55 @@ mod tests {
                 .unwrap();
         assert_eq!(project.files.sources, ["third_party/dep.rb"]);
         fs::remove_dir_all(root).ok();
+    }
+
+    /// A project whose tests start a Ractor probes through the receiver a
+    /// Ractor can call, statements included; one that never mentions them
+    /// keeps the global and its line table.
+    #[test]
+    fn a_project_that_uses_ractors_probes_through_the_ractor_safe_receiver() {
+        let root = fixture("ractors");
+        write(&root, "lib/app.rb", "def f(a)\n  a && 1\nend\n");
+        write(&root, "test/app_test.rb", "def t = 1\n");
+        let plain = prepare_ruby_project(&root, None).unwrap().plan;
+        assert!(!plain.ractors);
+        assert_eq!(plain.receiver, RUBY_PROBE_RECEIVER);
+        assert!(
+            plain.files["lib/app.rb"]
+                .edits
+                .iter()
+                .any(|edit| edit.text.contains("$__supercov."))
+        );
+
+        write(
+            &root,
+            "test/app_test.rb",
+            "def t = Ractor.new { f(1) }.take\n",
+        );
+        let plan = prepare_ruby_project(&root, None).unwrap().plan;
+        assert!(plan.ractors);
+        assert_eq!(
+            plan.receiver,
+            crate::ruby_instrumenter::RUBY_RACTOR_SAFE_RECEIVER
+        );
+        let edits = &plan.files["lib/app.rb"].edits;
+        assert!(
+            edits.iter().all(|edit| !edit.text.contains("$__supercov")),
+            "{edits:?}"
+        );
+        assert!(
+            edits
+                .iter()
+                .any(|edit| edit.text.contains("::Supercov::RactorSafe."))
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["ractors"], true);
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("ractors")
+                .is_none()
+        );
     }
 
     #[test]
@@ -471,5 +574,50 @@ mod tests {
         let unique = keys.iter().collect::<BTreeSet<_>>();
         assert_eq!(keys.len(), unique.len());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tests_helpers_and_gemspecs_are_known_by_their_names() {
+        let root = fixture("names");
+        write(&root, "lib/a.rb", "A = 1\n");
+        write(&root, "lib/a_test.rb", "A = 1\n");
+        write(&root, "test_b.rb", "B = 1\n");
+        write(&root, "spec_helper.rb", "require 'rspec'\n");
+        write(&root, "thing.gemspec", "Gem::Specification.new\n");
+        let files = discover_ruby_files(&root).unwrap();
+        assert_eq!(files.sources, ["lib/a.rb"]);
+        assert_eq!(
+            files.tests,
+            ["lib/a_test.rb", "spec_helper.rb", "test_b.rb"]
+        );
+        assert_eq!(files.dependency_files, [PathBuf::from("thing.gemspec")]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_limitation_two_constructs_share_is_declared_once() {
+        let root = fixture("limitations");
+        assert!(
+            prepare_ruby_project(&root, None)
+                .unwrap_err()
+                .starts_with("no Ruby source files were found")
+        );
+        // Tests alone are a project.
+        write(&root, "test/a_test.rb", "A = 1\n");
+        assert!(prepare_ruby_project(&root, None).is_ok());
+        write(
+            &root,
+            "lib/workers.rb",
+            "def run(x)\n  a = Ractor.new(x) { |y| y ? 1 : 2 }\n  b = Ractor.new(x) { |y| y ? 3 : 4 }\n  [a.take, b.take]\nend\n",
+        );
+        let project = prepare_ruby_project(&root, None).unwrap();
+        let ids = project
+            .manifest
+            .limitations
+            .iter()
+            .map(|limitation| limitation["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [crate::ruby_instrumenter::RACTOR_BLOCK_LIMITATION]);
+        fs::remove_dir_all(&root).unwrap();
     }
 }

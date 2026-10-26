@@ -234,7 +234,11 @@ is your entry, and gives `[dev]` an inspector port unless you set one; your
 own configuration and command are not changed. While the suite runs,
 Supercov reads what the Worker ran through that inspector every 5 ms, and
 each read is credited to the browser test that was running then, if only one
-was, as for a [Go server](#a-go-server-under-browser-tests). The Worker's
+was, as for a [Go server](#a-go-server-under-browser-tests). Several Workers
+in one `wrangler dev` (`-c a/wrangler.toml -c b/wrangler.toml`) are each
+measured: wrangler's inspector shows one of them, so Supercov reads each
+through workerd's own inspector, whose address a small preload in wrangler's
+Node process reports. The Worker's
 coverage is a Rust run of its own, published as the run or beside the browser
 run. Requests made before the first test, such as the readiness check
 `webServer` waits on, are the run's and no test's.
@@ -242,10 +246,11 @@ run. Requests made before the first test, such as the readiness check
 The build runs with `--cap-lints=warn`, so a crate that denies warnings still
 builds with the probes in it.
 
-### A Rust Worker that `cargo test` starts
+### A Cloudflare Worker in Rust that `cargo test` starts
 
-Integration tests that start `wrangler dev` themselves -- to test a Worker in
-Cloudflare's own runtime -- measure the Worker too:
+Integration tests that start `wrangler dev` themselves -- to test a Cloudflare
+Worker written in Rust in workerd, Cloudflare's own runtime -- measure the
+Worker too, Durable Objects included:
 
 ```sh
 npx supercov -- cargo test
@@ -257,19 +262,51 @@ dev` builds it in the copy as usual. The tests find a `wrangler` of
 Supercov's first on `PATH`: for `wrangler dev` it picks an inspector port,
 starts a reader of the Worker through it, and then runs your `wrangler` with
 the test's own arguments, process and signals. What the Worker ran is
-credited to the test that started it, exactly, as its own coverage. The
-Worker crate counts though `cargo test` never compiles it, once a test has
-run it. This needs a `wrangler` on `PATH` when the run starts; without one,
-nothing is put in front of it. A run whose tests start no Worker still compiles the crate under
-`cargo test --workspace`; its files then say they are a Rust Worker no test
-started, in `gaps` and the file view, rather than reading as code the tests
-missed.
+credited to the test that started it, exactly, as its own coverage. This
+needs a `wrangler` on `PATH` when the run starts; without one, nothing is
+put in front of it.
+
+A Worker crate's code is what worker-build compiles: for wasm, as a release
+unless its `[build]` command passes `--dev`, never as a test, with the
+features the command and the crate's defaults enable. Code a
+`#[cfg(target_arch = "wasm32")]`, a feature or `debug_assertions` keeps out
+of that build is not counted, and wasm-only code is, whatever target
+`cargo test` builds the rest for. The crate counts whether or not
+`cargo test` compiles it (`cargo test -p host` does not) and whether or not
+a test started its Worker, so every run of the workspace has one
+denominator. Where no test of a run started a Worker, its files say so, in
+`gaps` and the file view, rather than reading as code the tests missed.
 
 `wrangler dev --remote` runs the Worker on Cloudflare's edge, and wrangler
 opens no inspector into it there, so nothing can read what it ran. A test
 that starts it that way runs as usual; the Worker's files then say they ran
 remotely and could not be read. Start the Worker with `wrangler dev` to
 measure it.
+
+Code in a Durable Object (`#[durable_object]` and its `impl DurableObject`)
+is measured like the rest of the Worker and credited to the test whose
+requests reached it. So is a Worker that runs beside another in one
+`wrangler dev` (`-c plane/wrangler.toml -c runners/wrangler.toml`), reached
+only through the first's service bindings: wrangler's inspector shows one
+Worker of a session, and Supercov reads each through workerd's own, whose
+address a small preload in wrangler's Node process reports. A test that
+sets its own `NODE_OPTIONS` keeps them; the preload is added after. A workspace with several Worker crates counts each crate
+once, and runs of different tests -- each starting different Workers, or
+none -- merge with `supercov merge`. Tests that run a Worker only when its `build/` exists, as a test
+kit that will not start an unbuilt Worker does, run it: a `build/` you made
+beforehand and keep out of git is in the copy, and `wrangler dev` builds the
+crate with probes over it there.
+
+What a project needs:
+
+- `wrangler` on `PATH` in the job that runs Supercov, before the run starts,
+  such as `node_modules/.bin` of a project that installs it.
+- The `wasm32-unknown-unknown` target and `worker-build`, which the Worker's
+  `[build]` command runs.
+- The Worker crates inside the source Supercov measures, as workspace members
+  or under the project root.
+
+The project needs no `cfg` flag or build step of its own for Supercov.
 
 The Worker built with probes stays in the copy: its `build/` output is never
 returned to the project, and neither is the copy's configuration, which
@@ -424,8 +461,13 @@ Ruby 3.3 and newer support statement, method, branch and MC/DC measurement,
 including loops, iterator blocks, short-circuit operators, pattern matching,
 optional calls and exception paths.
 
-Some constructs have narrower coverage. Code in a non-main Ractor keeps line
-coverage but may lack other observations. Certain nested-return expressions
+Some constructs have narrower coverage. Code written inside a `Ractor.new`
+block keeps line coverage but may lack other observations. Code a non-main
+Ractor calls elsewhere runs as it would without Supercov, but what it runs
+there is not recorded: the run says so, and a line only a Ractor reached reads
+as not executed. A project whose code or tests mention `Ractor` gets probes a
+Ractor can call, which cost more than the usual ones (about a fifth more in a
+tight loop). Certain nested-return expressions
 limit normal-completion measurement. Constant predicates are folded as Ruby
 folds them, so unreachable alternatives do not become obligations.
 
@@ -508,8 +550,10 @@ beyond one deferred line per test that binds it to its evidence.
 
 `go test` builds one binary per package, so each test package records its own
 evidence and Supercov merges them. It also caches packages that passed, and a
-cached package does not run — so Supercov adds `-count=1` unless your command
-already says otherwise, and tells you it did.
+cached package does not run — so Supercov adds `-count=1` to `GOFLAGS` unless
+your command or `GOFLAGS` already says otherwise, and tells you it did. Through
+`GOFLAGS` it reaches `go test` however your command starts it, `make test`
+included.
 
 A test that calls `t.Parallel()` runs alongside others. Probes are a store into
 one array shared by the process, so nothing can say which of two concurrent

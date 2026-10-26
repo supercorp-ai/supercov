@@ -146,6 +146,36 @@ extern "C" fn on_signal(signal: libc::c_int) {
     }
 }
 
+/// Installs `on_signal` for each of `signals`, returning the dispositions it
+/// replaced; when one cannot be installed, those already installed are put
+/// back and the error is returned.
+#[cfg(unix)]
+fn install_handlers(signals: &[libc::c_int]) -> io::Result<Vec<(libc::c_int, libc::sighandler_t)>> {
+    let mut previous = Vec::new();
+    for &signal in signals {
+        // SAFETY: installs a handler that is async-signal-safe
+        // (see `on_signal`); the old disposition is kept to restore.
+        let old = unsafe {
+            libc::signal(
+                signal,
+                on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+        if old == libc::SIG_ERR {
+            let error = io::Error::last_os_error();
+            for (installed, disposition) in previous.drain(..).rev() {
+                // SAFETY: restores a disposition `signal` returned.
+                unsafe {
+                    libc::signal(installed, disposition);
+                }
+            }
+            return Err(error);
+        }
+        previous.push((signal, old));
+    }
+    Ok(previous)
+}
+
 /// Installs the handlers for the guard's lifetime and restores the previous
 /// dispositions when dropped. Guards nest: only the outermost installs.
 pub struct ChildSignalGuard {
@@ -159,28 +189,10 @@ impl ChildSignalGuard {
         {
             let mut previous = Vec::new();
             if GUARDS.fetch_add(1, Ordering::SeqCst) == 0 {
-                for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
-                    // SAFETY: installs a handler that is async-signal-safe
-                    // (see `on_signal`); the old disposition is kept to restore.
-                    let old = unsafe {
-                        libc::signal(
-                            signal,
-                            on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
-                        )
-                    };
-                    if old == libc::SIG_ERR {
-                        let error = io::Error::last_os_error();
-                        for (installed, disposition) in previous.drain(..).rev() {
-                            // SAFETY: restores a disposition `signal` returned.
-                            unsafe {
-                                libc::signal(installed, disposition);
-                            }
-                        }
+                previous = install_handlers(&[libc::SIGHUP, libc::SIGINT, libc::SIGTERM])
+                    .inspect_err(|_| {
                         GUARDS.fetch_sub(1, Ordering::SeqCst);
-                        return Err(error);
-                    }
-                    previous.push((signal, old));
-                }
+                    })?;
             }
             Ok(Self { previous })
         }
@@ -240,6 +252,52 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    /// The disposition `signal` has now.
+    fn disposition(signal: libc::c_int) -> libc::sighandler_t {
+        // SAFETY: a null new action only reads the current one.
+        unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            assert_eq!(libc::sigaction(signal, std::ptr::null(), &mut current), 0);
+            current.sa_sigaction
+        }
+    }
+
+    #[test]
+    fn a_handler_that_cannot_be_installed_puts_back_those_that_were() {
+        // SIGKILL cannot be caught; SIGUSR2, installed before it, must be
+        // left as it was found.
+        let before = disposition(libc::SIGUSR2);
+        assert!(install_handlers(&[libc::SIGUSR2, libc::SIGKILL]).is_err());
+        assert_eq!(disposition(libc::SIGUSR2), before);
+    }
+
+    #[test]
+    fn only_the_outermost_guard_installs_and_restores_handlers() {
+        let outer = ChildSignalGuard::install().unwrap();
+        let inner = ChildSignalGuard::install().unwrap();
+        assert!(
+            inner.previous.is_empty(),
+            "a nested guard replaced handlers"
+        );
+        drop(inner);
+        drop(outer);
+    }
+
+    #[test]
+    fn dropping_an_untracked_registration_frees_no_slot() {
+        let mut child = sleeper();
+        let registration = register(&child);
+        let slot = registration.slot.unwrap();
+        drop(RegisteredChild { slot: None });
+        assert_eq!(
+            CHILDREN[slot].load(Ordering::SeqCst),
+            i32::try_from(child.id()).unwrap()
+        );
+        drop(registration);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

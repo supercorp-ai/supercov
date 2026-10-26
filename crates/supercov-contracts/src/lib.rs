@@ -969,6 +969,8 @@ mod tests {
         let mut declaration = exact_frontend_declaration();
         declaration.runners[0].runner = "node:test".into();
         validate_frontend_run_declaration(&declaration).unwrap();
+        declaration.runners[0].runner = "vitest2".into();
+        validate_frontend_run_declaration(&declaration).unwrap();
     }
 
     #[test]
@@ -1359,5 +1361,207 @@ mod tests {
             );
         }
         assert!(!contract.external_coverage_in_product);
+    }
+    /// Each rule of a frontend declaration is enforced on its own: a
+    /// declaration that breaks exactly one is refused for that one.
+    #[test]
+    fn a_declaration_that_breaks_one_rule_is_refused_for_it() {
+        use AttributionPrecision::{Aggregate, Unavailable};
+        use FrontendLimitationScope as Scope;
+        validate_frontend_run_declaration(&exact_frontend_declaration()).unwrap();
+        let limitation = |id: &str, scopes: &[Scope]| FrontendLimitation {
+            id: id.into(),
+            scopes: scopes.to_vec(),
+            reason: "The runner cannot say".into(),
+        };
+        type Edit = Box<dyn Fn(&mut FrontendRunDeclaration)>;
+        let runner = |edit: fn(&mut FrontendRunnerDeclaration)| -> Edit {
+            Box::new(move |declaration: &mut FrontendRunDeclaration| {
+                edit(&mut declaration.runners[0])
+            })
+        };
+        let cases: Vec<(FrontendDeclarationError, Edit)> = vec![
+            (
+                FrontendDeclarationError::UnsupportedProtocolVersion(99),
+                Box::new(|d| d.protocol_version = 99),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("ID"),
+                Box::new(|d| d.frontend_id = "Java Script".into()),
+            ),
+            // A token starts with a lowercase letter and holds no space; the
+            // runner's colon is not allowed in a frontend's ID either.
+            (
+                FrontendDeclarationError::InvalidToken("ID"),
+                Box::new(|d| d.frontend_id = "java script".into()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("ID"),
+                Box::new(|d| d.frontend_id = "node:test".into()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("version"),
+                Box::new(|d| d.frontend_version = String::new()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("language"),
+                Box::new(|d| d.language = "x".repeat(65)),
+            ),
+            (
+                FrontendDeclarationError::NoRunners,
+                Box::new(|d| d.runners.clear()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("structural limitation ID"),
+                Box::new(|d| d.structural_limitations = vec![String::new()]),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("structural limitation ID"),
+                Box::new(|d| d.structural_limitations = vec![" dynamic".into()]),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("structural limitation ID"),
+                Box::new(|d| d.structural_limitations = vec!["dyn\tamic".into()]),
+            ),
+            (
+                FrontendDeclarationError::DuplicateStructuralLimitation("dynamic".into()),
+                Box::new(|d| d.structural_limitations = vec!["dynamic".into(), "dynamic".into()]),
+            ),
+            (
+                FrontendDeclarationError::DuplicateRunner("playwright".into()),
+                Box::new(|d| {
+                    let copy = d.runners[0].clone();
+                    d.runners.push(copy);
+                }),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("runner"),
+                runner(|r| r.runner = "Play wright".into()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("runner"),
+                runner(|r| r.runner = "play wright".into()),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("runner"),
+                runner(|r| r.runner = String::new()),
+            ),
+            (
+                FrontendDeclarationError::RunIdentityNotExact,
+                runner(|r| r.attribution.run = Aggregate),
+            ),
+            (
+                FrontendDeclarationError::InvalidToken("limitation ID"),
+                Box::new(move |d| {
+                    d.runners[0].limitations = vec![limitation("", &[Scope::Action])]
+                }),
+            ),
+            (
+                FrontendDeclarationError::DuplicateLimitation("one".into()),
+                Box::new(move |d| {
+                    d.runners[0].limitations = vec![
+                        limitation("one", &[Scope::Action]),
+                        limitation("one", &[Scope::Test]),
+                    ]
+                }),
+            ),
+            (
+                FrontendDeclarationError::EmptyLimitationScopes("one".into()),
+                Box::new(move |d| d.runners[0].limitations = vec![limitation("one", &[])]),
+            ),
+            (
+                FrontendDeclarationError::DuplicateLimitationScope("one".into()),
+                Box::new(move |d| {
+                    d.runners[0].limitations =
+                        vec![limitation("one", &[Scope::Action, Scope::Action])]
+                }),
+            ),
+            (
+                FrontendDeclarationError::InvalidLimitationReason("one".into()),
+                Box::new(move |d| {
+                    let mut bad = limitation("one", &[Scope::Action]);
+                    bad.reason = " padded".into();
+                    d.runners[0].limitations = vec![bad];
+                }),
+            ),
+            (
+                FrontendDeclarationError::InvalidLimitationReason("one".into()),
+                Box::new(move |d| {
+                    let mut bad = limitation("one", &[Scope::Action]);
+                    bad.reason = String::new();
+                    d.runners[0].limitations = vec![bad];
+                }),
+            ),
+            (
+                FrontendDeclarationError::InvalidLimitationReason("one".into()),
+                Box::new(move |d| {
+                    let mut bad = limitation("one", &[Scope::Action]);
+                    bad.reason = "two\nlines".into();
+                    d.runners[0].limitations = vec![bad];
+                }),
+            ),
+            (
+                FrontendDeclarationError::ExactRetryRequiresExactTest,
+                Box::new(move |d| {
+                    d.runners[0].attribution.test = Aggregate;
+                    d.runners[0].limitations = vec![limitation("t", &[Scope::Test])];
+                }),
+            ),
+            (
+                FrontendDeclarationError::ExactPhaseRequiresExactTest,
+                Box::new(move |d| {
+                    d.runners[0].attribution.test = Aggregate;
+                    d.runners[0].attribution.retry = Unavailable;
+                    d.runners[0].limitations = vec![limitation("t", &[Scope::Test, Scope::Retry])];
+                }),
+            ),
+            (
+                FrontendDeclarationError::MissingDowngradeLimitation(Scope::Worker),
+                runner(|r| r.attribution.worker = Aggregate),
+            ),
+            (
+                FrontendDeclarationError::ExactAssertionRequiresExactTestAndPhase,
+                Box::new(move |d| {
+                    d.runners[0].attribution.phase = Aggregate;
+                    d.runners[0].limitations = vec![limitation("p", &[Scope::Phase])];
+                }),
+            ),
+            (
+                FrontendDeclarationError::ExactActionRequiresExactTestAndPhase,
+                Box::new(move |d| {
+                    d.runners[0].attribution.phase = Aggregate;
+                    d.runners[0].attribution.assertion = Unavailable;
+                    d.runners[0].limitations =
+                        vec![limitation("p", &[Scope::Phase, Scope::Assertion])];
+                }),
+            ),
+            // An exact action needs an exact test as well, whatever the phase.
+            (
+                FrontendDeclarationError::ExactActionRequiresExactTestAndPhase,
+                Box::new(move |d| {
+                    d.runners[0].attribution.test = Aggregate;
+                    d.runners[0].attribution.retry = Aggregate;
+                    d.runners[0].attribution.phase = Aggregate;
+                    d.runners[0].attribution.assertion = Unavailable;
+                    d.runners[0].limitations = vec![limitation(
+                        "t",
+                        &[Scope::Test, Scope::Retry, Scope::Phase, Scope::Assertion],
+                    )];
+                }),
+            ),
+            (
+                FrontendDeclarationError::ParallelUnattributedCannotClaimExactCausality,
+                runner(|r| r.execution_model = ExecutionModel::ParallelUnattributed),
+            ),
+        ];
+        for (expected, edit) in &cases {
+            let mut declaration = exact_frontend_declaration();
+            edit(&mut declaration);
+            assert_eq!(
+                validate_frontend_run_declaration(&declaration),
+                Err(expected.clone()),
+                "{expected:?}"
+            );
+        }
     }
 }

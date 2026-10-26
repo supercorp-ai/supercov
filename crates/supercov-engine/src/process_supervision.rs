@@ -180,8 +180,9 @@ struct RelayTargets {
     stderr: Option<std::fs::File>,
     /// Both streams go to one place (`2>&1`, a CI log), and the command
     /// writes both down this one pipe: two pipes read by two threads would
-    /// pass its lines on in an order it did not write them in.
-    both: Option<io::PipeReader>,
+    /// pass its lines on in an order it did not write them in. Passed on
+    /// through the stderr handle.
+    both: Option<(io::PipeReader, std::fs::File)>,
     /// Streams that are a terminal, each read from a terminal of its own.
     #[cfg(unix)]
     terminals: Vec<Terminal>,
@@ -210,7 +211,9 @@ impl Terminal {
             let mut settings: libc::termios = std::mem::zeroed();
             let mut size: libc::winsize = std::mem::zeroed();
             if libc::tcgetattr(real.as_raw_fd(), &mut settings) != 0
-                || libc::ioctl(real.as_raw_fd(), libc::TIOCGWINSZ, &mut size) != 0
+                || crate::fault::libc("terminal-size", libc::ENOTTY, || {
+                    libc::ioctl(real.as_raw_fd(), libc::TIOCGWINSZ, &mut size)
+                }) != 0
             {
                 return None;
             }
@@ -220,13 +223,15 @@ impl Terminal {
             let (mut ours, mut theirs) = (-1, -1);
             // Raw pointers: Linux declares the last two as read only, macOS
             // does not.
-            if libc::openpty(
-                &mut ours,
-                &mut theirs,
-                std::ptr::null_mut(),
-                &raw mut settings,
-                &raw mut size,
-            ) != 0
+            if crate::fault::libc("openpty", libc::ENOENT, || {
+                libc::openpty(
+                    &mut ours,
+                    &mut theirs,
+                    std::ptr::null_mut(),
+                    &raw mut settings,
+                    &raw mut size,
+                )
+            }) != 0
             {
                 return None;
             }
@@ -305,26 +310,48 @@ impl Relays {
     /// written to by a handle of its own.
     fn request(command: &mut Command, names: Option<&ConsoleNames>) -> RelayTargets {
         use std::io::IsTerminal;
-        let mut targets = RelayTargets::default();
         if names.is_none() {
-            return targets;
+            return RelayTargets::default();
         }
-        if !io::stdout().is_terminal() {
-            targets.stdout = own_handle(&io::stdout());
-        }
-        if !io::stderr().is_terminal() {
-            targets.stderr = own_handle(&io::stderr());
-        }
+        Self::request_for(
+            command,
+            (io::stdout().is_terminal(), own_handle(&io::stdout())),
+            (io::stderr().is_terminal(), own_handle(&io::stderr())),
+        )
+    }
+
+    /// [`Relays::request`] for this process's `stdout` and `stderr`: whether
+    /// each is a terminal, and a handle of its own to it.
+    fn request_for(
+        command: &mut Command,
+        (stdout_is_terminal, stdout): (bool, Option<std::fs::File>),
+        (stderr_is_terminal, stderr): (bool, Option<std::fs::File>),
+    ) -> RelayTargets {
+        let mut targets = RelayTargets::default();
+        let (stdout, stdout_terminal) = if stdout_is_terminal {
+            (None, stdout)
+        } else {
+            (stdout, None)
+        };
+        let (stderr, stderr_terminal) = if stderr_is_terminal {
+            (None, stderr)
+        } else {
+            (stderr, None)
+        };
+        targets.stdout = stdout;
+        targets.stderr = stderr;
+        #[cfg(not(unix))]
+        let _ = (stdout_terminal, stderr_terminal);
         #[cfg(unix)]
         {
-            let terminal = |is: bool, handle: Option<std::fs::File>| handle.filter(|_| is);
-            let stdout = terminal(io::stdout().is_terminal(), own_handle(&io::stdout()));
-            let stderr = terminal(io::stderr().is_terminal(), own_handle(&io::stderr()));
-            match (stdout, stderr) {
+            match (stdout_terminal, stderr_terminal) {
                 // One terminal for both, so the command's lines keep their order.
                 (Some(stdout), Some(stderr)) if one_place(&stdout, &stderr) => {
                     if let Some((terminal, theirs)) = Terminal::like(stdout)
-                        && let Ok(second) = theirs.try_clone()
+                        && let Ok(second) =
+                            crate::fault::io("terminal-clone", io::ErrorKind::Other, || {
+                                theirs.try_clone()
+                            })
                     {
                         command.stdout(theirs).stderr(second);
                         targets.terminals.push(terminal);
@@ -344,11 +371,13 @@ impl Relays {
         }
         if let (Some(stdout), Some(stderr)) = (&targets.stdout, &targets.stderr)
             && one_place(stdout, stderr)
-            && let Ok((reader, writer)) = io::pipe()
-            && let Ok(second) = writer.try_clone()
+            && let Ok((reader, writer)) =
+                crate::fault::io("output-pipe", io::ErrorKind::Other, io::pipe)
+            && let Ok(second) =
+                crate::fault::io("output-clone", io::ErrorKind::Other, || writer.try_clone())
         {
             command.stdout(writer).stderr(second);
-            targets.both = Some(reader);
+            targets.both = targets.stderr.take().map(|to| (reader, to));
             return targets;
         }
         if targets.stdout.is_some() {
@@ -373,10 +402,8 @@ impl Relays {
         for terminal in targets.terminals {
             relays.push(relay_terminal(terminal, names.clone()));
         }
-        if let Some(pipe) = targets.both {
-            if let Some(to) = targets.stderr.or(targets.stdout) {
-                relays.push(relay(pipe, to, names.clone()));
-            }
+        if let Some((pipe, to)) = targets.both {
+            relays.push(relay(pipe, to, names.clone()));
             return Self(relays);
         }
         if let (Some(pipe), Some(to)) = (child.stdout.take(), targets.stdout) {
@@ -501,7 +528,9 @@ fn relay_terminal(mut terminal: Terminal, names: ConsoleNames) -> std::sync::mps
             }
             // The last process holding the other end has gone: a read of
             // nothing on macOS, an error on Linux.
-            let read = match terminal.ours.read(&mut buffer) {
+            let read = match crate::fault::io("terminal-read", io::ErrorKind::Interrupted, || {
+                terminal.ours.read(&mut buffer)
+            }) {
                 Ok(0) => break,
                 Ok(read) => read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -712,6 +741,18 @@ pub enum ForwardedSignal {
 }
 
 impl ForwardedSignal {
+    /// The signal as a shell names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sighup => "SIGHUP",
+            Self::Sigint => "SIGINT",
+            Self::Sigterm => "SIGTERM",
+        }
+    }
+
+    /// Every signal Supercov forwards, to read one back from its name.
+    pub const ALL: [Self; 3] = [Self::Sighup, Self::Sigint, Self::Sigterm];
+
     pub fn exit_code(self) -> i32 {
         match self {
             Self::Sighup => 129,
@@ -753,7 +794,11 @@ impl SupervisedResult {
         } else if let Some(signal) = self.interrupted_signal {
             signal.exit_code()
         } else {
-            self.status.unwrap_or(128)
+            // A command a signal ended exits as a shell reports it: 128 plus
+            // the signal, so 143 for SIGTERM and 137 for SIGKILL.
+            self.status
+                .or(self.signal.map(|signal| 128 + signal))
+                .unwrap_or(128)
         }
     }
 }
@@ -897,12 +942,18 @@ struct SignalFlags {
 #[cfg(unix)]
 impl SignalFlags {
     fn install() -> Result<Self, SupervisionError> {
+        Self::install_for(&[libc::SIGHUP, libc::SIGINT, libc::SIGTERM])
+    }
+
+    /// Records each of `signals` for the guard's lifetime; when one cannot
+    /// be recorded, those already are put back as they were.
+    fn install_for(signals: &[i32]) -> Result<Self, SupervisionError> {
         let exclusive = SIGNAL_HANDLER_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
         let mut previous = Vec::new();
-        for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+        for &signal in signals {
             // SAFETY: zero is a valid initial state for `sigaction`; every
             // field used by the kernel is initialized below before the call.
             let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
@@ -912,8 +963,8 @@ impl SignalFlags {
             action.sa_flags = 0;
             // SAFETY: `old` is initialized by a successful `sigaction` call.
             let mut old = unsafe { std::mem::zeroed::<libc::sigaction>() };
-            // SAFETY: pointers reference live `sigaction` values and the
-            // signal is one of the three catchable POSIX signals above.
+            // SAFETY: pointers reference live `sigaction` values; a signal
+            // that cannot be caught is refused, not installed.
             if unsafe { libc::sigaction(signal, &action, &mut old) } != 0 {
                 for (installed, old) in previous.iter().rev() {
                     // SAFETY: restores a handler returned by `sigaction`.
@@ -1214,7 +1265,10 @@ struct ParentDeathGuard {
 fn parent_death_pipe() -> Result<(OwnedFd, OwnedFd), SupervisionError> {
     let mut descriptors = [-1_i32; 2];
     // SAFETY: `descriptors` is a live two-element output buffer for pipe(2).
-    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } != 0 {
+    if crate::fault::libc("parent-death-pipe", libc::EMFILE, || unsafe {
+        libc::pipe(descriptors.as_mut_ptr())
+    }) != 0
+    {
         return Err(SupervisionError::PlatformOperation {
             operation: "create parent-death supervision pipe",
             source: io::Error::last_os_error(),
@@ -1226,7 +1280,10 @@ fn parent_death_pipe() -> Result<(OwnedFd, OwnedFd), SupervisionError> {
     let write = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
     for descriptor in [read.as_raw_fd(), write.as_raw_fd()] {
         // SAFETY: the descriptor is live and F_SETFD accepts FD_CLOEXEC.
-        if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        if crate::fault::libc("parent-death-cloexec", libc::EBADF, || unsafe {
+            libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC)
+        }) != 0
+        {
             return Err(SupervisionError::PlatformOperation {
                 operation: "protect parent-death supervision pipe across exec",
                 source: io::Error::last_os_error(),
@@ -1235,6 +1292,11 @@ fn parent_death_pipe() -> Result<(OwnedFd, OwnedFd), SupervisionError> {
     }
     Ok((read, write))
 }
+
+/// What a command's pre-exec step reports when its watchdog ended before
+/// saying it was ready.
+#[cfg(unix)]
+const WATCHDOG_ENDED: i32 = libc::ECHILD;
 
 #[cfg(unix)]
 fn spawn_contained(
@@ -1251,11 +1313,8 @@ fn spawn_contained(
         return Ok((child, None));
     };
     let (read, write) = parent_death_pipe()?;
-    let (ready_read, ready_write) = parent_death_pipe()?;
     let read_descriptor = read.as_raw_fd();
     let write_descriptor = write.as_raw_fd();
-    let ready_read_descriptor = ready_read.as_raw_fd();
-    let ready_write_descriptor = ready_write.as_raw_fd();
     let watchdog_program = std::ffi::CString::new(watchdog_program.as_os_str().as_bytes())
         .map_err(|_| SupervisionError::PlatformOperation {
             operation: "encode parent-death watchdog executable",
@@ -1263,26 +1322,47 @@ fn spawn_contained(
         })?;
     let watchdog_argument =
         std::ffi::CString::new("__watch-process-group").expect("static CString");
+    crate::fault::prepare();
     // SAFETY: this closure calls only async-signal-safe syscalls between fork
     // and exec. The forked watchdog immediately execs the already-loaded
     // Supercov binary; it never returns to Rust or touches an inherited lock.
     unsafe {
         command.pre_exec(move || {
-            if libc::setpgid(0, 0) != 0 {
+            if crate::fault::libc("command-setpgid", libc::EPERM, || libc::setpgid(0, 0)) != 0 {
                 return Err(io::Error::last_os_error());
             }
             let _ = libc::close(write_descriptor);
-            let watchdog = libc::fork();
+            // The readiness pipe is made here, so that only the command and
+            // its watchdog hold it: a watchdog that ends without saying it
+            // is ready ends the pipe, where one this process also held would
+            // keep the command waiting for good.
+            let mut ready_descriptors = [-1_i32; 2];
+            if crate::fault::libc("ready-pipe", libc::EMFILE, || {
+                libc::pipe(ready_descriptors.as_mut_ptr())
+            }) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let [ready_read_descriptor, ready_write_descriptor] = ready_descriptors;
+            let watchdog = crate::fault::libc("watchdog-fork", libc::EAGAIN, || libc::fork());
             if watchdog < 0 {
                 return Err(io::Error::last_os_error());
             }
             if watchdog == 0 {
                 let _ = libc::close(ready_read_descriptor);
-                if libc::dup2(read_descriptor, 0) < 0 || libc::dup2(ready_write_descriptor, 3) < 0 {
+                if crate::fault::libc("watchdog-dup-input", libc::EBADF, || {
+                    libc::dup2(read_descriptor, 0)
+                }) < 0
+                    || crate::fault::libc("watchdog-dup-ready", libc::EBADF, || {
+                        libc::dup2(ready_write_descriptor, 3)
+                    }) < 0
+                {
                     libc::_exit(125);
                 }
+                // The pipes were made while 0 to 2 were open, so neither is
+                // 0; one may be 3, now the readiness pipe's copy.
                 for descriptor in [read_descriptor, ready_write_descriptor, 1, 2] {
-                    if descriptor != 0 && descriptor != 3 {
+                    if descriptor != 3 {
                         let _ = libc::close(descriptor);
                     }
                 }
@@ -1298,28 +1378,37 @@ fn spawn_contained(
             let _ = libc::close(ready_write_descriptor);
             let mut ready = 0_u8;
             loop {
-                let received = libc::read(ready_read_descriptor, (&raw mut ready).cast(), 1);
+                let received = crate::fault::libc("ready-read", libc::EINTR, || {
+                    libc::read(ready_read_descriptor, (&raw mut ready).cast(), 1)
+                });
                 if received == 1 && ready == 1 {
                     break;
                 }
                 if received < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                return Err(io::Error::other(
-                    "parent-death watchdog failed before command exec",
-                ));
+                // Only an errno crosses back to the parent, and none of the
+                // calls above or exec sets this one: the parent names it.
+                return Err(io::Error::from_raw_os_error(WATCHDOG_ENDED));
             }
             let _ = libc::close(ready_read_descriptor);
             Ok(())
         });
     }
-    let child = command.spawn().map_err(|source| SupervisionError::Spawn {
-        program: program.clone(),
-        source,
+    let child = command.spawn().map_err(|source| {
+        if source.raw_os_error() == Some(WATCHDOG_ENDED) {
+            SupervisionError::PlatformOperation {
+                operation: "start the watchdog that stops the command if Supercov is killed",
+                source: io::Error::other("it ended before the command started"),
+            }
+        } else {
+            SupervisionError::Spawn {
+                program: program.clone(),
+                source,
+            }
+        }
     })?;
     drop(read);
-    drop(ready_read);
-    drop(ready_write);
     Ok((child, Some(ParentDeathGuard { _writer: write })))
 }
 
@@ -1327,21 +1416,22 @@ fn spawn_contained(
 pub fn watch_parent_process_group() -> io::Result<()> {
     // The target waits for our readiness byte, so its PID remains both our
     // parent PID and the process-group ID until containment is armed.
-    let process_group = unsafe { libc::getppid() };
+    let process_group = crate::fault::or("watchdog-orphaned", || 1, || unsafe { libc::getppid() });
     if process_group <= 1 {
         return Err(io::Error::other(
             "parent-death watchdog has no target process",
         ));
     }
     // SAFETY: the watchdog is a non-leader child in the target's process group.
-    if unsafe { libc::setsid() } < 0 {
+    if crate::fault::libc("watchdog-setsid", libc::EPERM, || unsafe { libc::setsid() }) < 0 {
         return Err(io::Error::last_os_error());
     }
-    let descriptor_root = if Path::new("/proc/self/fd").is_dir() {
-        Path::new("/proc/self/fd")
-    } else {
-        Path::new("/dev/fd")
-    };
+    let descriptor_root =
+        if crate::fault::or("proc-fd", || false, || Path::new("/proc/self/fd").is_dir()) {
+            Path::new("/proc/self/fd")
+        } else {
+            Path::new("/dev/fd")
+        };
     let descriptors = fs::read_dir(descriptor_root)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
@@ -1362,7 +1452,9 @@ pub fn watch_parent_process_group() -> io::Result<()> {
     loop {
         // The supervisor never writes. EOF means normal supervisor teardown,
         // unwind, or uncatchable process death.
-        let read = unsafe { libc::read(0, buffer.as_mut_ptr().cast(), buffer.len()) };
+        let read = crate::fault::libc("watchdog-read", libc::EINTR, || unsafe {
+            libc::read(0, buffer.as_mut_ptr().cast(), buffer.len())
+        });
         if read == 0 {
             break;
         }
@@ -1535,12 +1627,18 @@ fn write_line(writer: &mut dyn Write, line: &str) -> std::io::Result<()> {
     writer.flush()
 }
 
-fn write_diagnostic(child: &Child, started: Instant, writer: &mut dyn Write) {
+/// Whether `SUPERCOV_VERBOSE`, or failing it `SUPERCOV_DEBUG`, asks for
+/// everything, read through `variable` so tests need not set either.
+pub(crate) fn verbose_output(variable: impl Fn(&str) -> Option<String>) -> bool {
+    variable("SUPERCOV_VERBOSE")
+        .or_else(|| variable("SUPERCOV_DEBUG"))
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
+/// The command's process tree, all of it when `verbose`, else its first line.
+fn write_diagnostic(child: &Child, started: Instant, verbose: bool, writer: &mut dyn Write) {
     let tree = descendant_process_tree(child.id());
     let diagnostic = format_process_diagnostic(child.id(), started.elapsed(), &tree);
-    let verbose = std::env::var("SUPERCOV_VERBOSE")
-        .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
     let diagnostic = if verbose {
         diagnostic.as_str()
     } else {
@@ -1583,6 +1681,22 @@ fn captured_bytes(
             operation: "read captured process output",
             source,
         })
+}
+
+/// Whether a command that ended with `status` or of `signal` was ended by
+/// Ctrl-C at the keyboard `lent` to it: a run interrupted, unless the run was
+/// already interrupted or had timed out.
+#[cfg(unix)]
+fn interrupted_at_the_keyboard(
+    lent: bool,
+    interrupted_signal: Option<ForwardedSignal>,
+    timed_out: bool,
+    status: Option<i32>,
+    signal: Option<i32>,
+) -> bool {
+    lent && interrupted_signal.is_none()
+        && !timed_out
+        && (signal == Some(libc::SIGINT) || status == Some(128 + libc::SIGINT))
 }
 
 #[cfg(unix)]
@@ -1709,12 +1823,12 @@ impl ProcessSupervisor {
         writer: &mut dyn Write,
     ) -> Result<SupervisedResult, SupervisionError> {
         let started = Instant::now();
+        let verbose = verbose_output(|name| std::env::var(name).ok());
         let mut next_diagnostic = started + options.diagnostic_interval;
         let timeout_at = options.timeout.map(|timeout| started + timeout);
         let mut termination: Option<(Instant, Option<ForwardedSignal>)> = None;
         let mut timed_out = false;
         let mut interrupted_signal = None;
-        let mut escalated = false;
         let mut keyboard = Keyboard::default();
 
         loop {
@@ -1731,11 +1845,13 @@ impl ProcessSupervisor {
                 // With the terminal lent, Ctrl-C went to the command alone.
                 // A command it ended is a run that was interrupted, as it
                 // is when Supercov is the one told.
-                if keyboard.lent
-                    && interrupted_signal.is_none()
-                    && !timed_out
-                    && (signal == Some(libc::SIGINT) || status == Some(128 + libc::SIGINT))
-                {
+                if interrupted_at_the_keyboard(
+                    keyboard.lent,
+                    interrupted_signal,
+                    timed_out,
+                    status,
+                    signal,
+                ) {
                     interrupted_signal = Some(ForwardedSignal::Sigint);
                 }
                 keyboard.take_back();
@@ -1770,21 +1886,23 @@ impl ProcessSupervisor {
                 );
                 signal_process_group(child, libc::SIGTERM);
                 termination = Some((now, None));
-                write_diagnostic(child, started, writer);
+                write_diagnostic(child, started, verbose, writer);
             }
             if now >= next_diagnostic && !timed_out {
-                write_diagnostic(child, started, writer);
+                write_diagnostic(child, started, verbose, writer);
                 while next_diagnostic <= now {
                     next_diagnostic += options.diagnostic_interval;
                 }
             }
-            if !escalated
-                && termination.is_some_and(|(terminated_at, _)| {
-                    now.duration_since(terminated_at) >= options.termination_grace
-                })
-            {
+            if termination.is_some_and(|(terminated_at, _)| {
+                now.duration_since(terminated_at) >= options.termination_grace
+            }) {
+                // Nothing outlives SIGKILL, and the command leads the group
+                // it is sent to: wait for it to go, and the next pass returns
+                // how it ended.
                 signal_process_group(child, libc::SIGKILL);
-                escalated = true;
+                let _ = child.wait();
+                continue;
             }
             thread::sleep(POLL_INTERVAL);
         }
@@ -1915,6 +2033,7 @@ impl ProcessSupervisor {
         writer: &mut dyn Write,
     ) -> Result<SupervisedResult, SupervisionError> {
         let started = Instant::now();
+        let verbose = verbose_output(|name| std::env::var(name).ok());
         let mut next_diagnostic = started + options.diagnostic_interval;
         let timeout_at = options.timeout.map(|timeout| started + timeout);
         let mut termination: Option<Instant> = None;
@@ -1959,10 +2078,10 @@ impl ProcessSupervisor {
                 );
                 forward_windows_control(child);
                 termination = Some(now);
-                write_diagnostic(child, started, writer);
+                write_diagnostic(child, started, verbose, writer);
             }
             if now >= next_diagnostic && !timed_out {
-                write_diagnostic(child, started, writer);
+                write_diagnostic(child, started, verbose, writer);
                 while next_diagnostic <= now {
                     next_diagnostic += options.diagnostic_interval;
                 }
@@ -2050,6 +2169,68 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// A writer whose reader has gone.
+    struct Gone;
+
+    impl Write for Gone {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Reads that are interrupted once, then give what they hold, then fail.
+    struct Uneven {
+        steps: Vec<io::Result<Vec<u8>>>,
+    }
+
+    impl Read for Uneven {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.steps.is_empty() {
+                return Ok(0);
+            }
+            let bytes = self.steps.remove(0)?;
+            buffer[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    fn relayed(pipe: impl Read + Send + 'static) -> Vec<u8> {
+        let kept = Kept::default();
+        relay(pipe, kept.clone(), ConsoleNames::default())
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the relay ends with its input");
+        kept.0.lock().unwrap().clone()
+    }
+
+    /// A line longer than the limit, bytes that are not text, an interrupted
+    /// read and a failed one all pass on what was written; a reader that
+    /// has gone ends the relay.
+    #[test]
+    fn the_relay_passes_on_long_lines_raw_bytes_and_uneven_reads() {
+        let long = [vec![b'a'; RELAY_LINE_LIMIT * 2], b"\nend".to_vec()].concat();
+        assert_eq!(relayed(io::Cursor::new(long.clone())), long);
+        let raw = b"\xff\xfe\nnext\n".to_vec();
+        assert_eq!(relayed(io::Cursor::new(raw.clone())), raw);
+        let uneven = Uneven {
+            steps: vec![
+                Err(io::ErrorKind::Interrupted.into()),
+                Ok(b"one\ntw".to_vec()),
+                Err(io::ErrorKind::Other.into()),
+                Ok(b"never\n".to_vec()),
+            ],
+        };
+        assert_eq!(relayed(uneven), b"one\ntw");
+        for input in [b"line\n".to_vec(), vec![b'a'; RELAY_LINE_LIMIT * 2]] {
+            relay(io::Cursor::new(input), Gone, ConsoleNames::default())
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a relay with no reader ends");
         }
     }
 
@@ -2530,5 +2711,487 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.exit_code(), 0);
+    }
+
+    /// A terminal of the user's: what is written to the second shows at the
+    /// first.
+    #[cfg(unix)]
+    fn user_terminal() -> (std::fs::File, std::fs::File) {
+        let (mut screen, mut users) = (-1, -1);
+        // SAFETY: the two descriptors are owned by nothing else.
+        unsafe {
+            assert_eq!(
+                libc::openpty(
+                    &mut screen,
+                    &mut users,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut::<libc::termios>(),
+                    std::ptr::null_mut::<libc::winsize>(),
+                ),
+                0
+            );
+            (
+                std::fs::File::from_raw_fd(screen),
+                std::fs::File::from_raw_fd(users),
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_terminal_is_copied_and_only_one_file_is_one_place() {
+        let null = || {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")
+                .unwrap()
+        };
+        assert!(Terminal::like(null()).is_none());
+        let root = scratch_directory("one-place");
+        let first = std::fs::File::create(root.join("first")).unwrap();
+        let second = std::fs::File::create(root.join("second")).unwrap();
+        assert!(one_place(&first, &first.try_clone().unwrap()));
+        // Another file on the same device, and a device elsewhere.
+        assert!(!one_place(&first, &second));
+        assert!(!one_place(&first, &null()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A user's terminal that has gone takes nothing more: the relay ends at
+    /// the next line, or the next piece of a long one, though the command
+    /// still holds its end. Its size, asked for while it waits, is not
+    /// there to give.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_the_user_has_closed_ends_the_relay_at_its_next_write() {
+        for written in [b"a line\n".to_vec(), vec![b'x'; RELAY_LINE_LIMIT * 2]] {
+            let (screen, users) = user_terminal();
+            let (terminal, mut theirs) = Terminal::like(users).expect("a terminal");
+            drop(screen);
+            let ended = relay_terminal(terminal, ConsoleNames::default());
+            assert!(
+                ended
+                    .recv_timeout(TERMINAL_SIZE_EVERY + Duration::from_millis(50))
+                    .is_err(),
+                "nothing written, nothing ended"
+            );
+            let writer = thread::spawn(move || {
+                let _ = theirs.write_all(&written);
+                theirs
+            });
+            ended
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the relay ends with the user's terminal");
+            drop(writer.join().unwrap());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_line_longer_than_the_limit_reaches_the_terminal_whole() {
+        let (mut screen, users) = user_terminal();
+        let (terminal, mut theirs) = Terminal::like(users).expect("a terminal");
+        let ended = relay_terminal(terminal, ConsoleNames::default());
+        let expected = RELAY_LINE_LIMIT * 2 + 2;
+        let shown = thread::spawn(move || {
+            let mut shown = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            while shown.len() < expected {
+                match screen.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => shown.extend_from_slice(&buffer[..read]),
+                }
+            }
+            shown
+        });
+        theirs.write_all(&vec![b'x'; RELAY_LINE_LIMIT * 2]).unwrap();
+        theirs.write_all(b"\n").unwrap();
+        drop(theirs);
+        ended
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the relay ends when the command has gone");
+        let shown = shown.join().unwrap();
+        assert_eq!(shown.len(), expected);
+        assert!(shown.ends_with(b"x\r\n"));
+    }
+
+    /// Each stream that is a terminal gets a terminal of its own, unless the
+    /// two are one terminal; each that is not is relayed, down one pipe when
+    /// both go to one place.
+    #[cfg(unix)]
+    #[test]
+    fn each_stream_is_relayed_through_what_it_is() {
+        let request =
+            |stdout, stderr| Relays::request_for(&mut Command::new("true"), stdout, stderr);
+        let (_first_screen, first) = user_terminal();
+        let (_second_screen, second) = user_terminal();
+        let apart = request((true, Some(first)), (true, Some(second)));
+        assert_eq!(apart.terminals.len(), 2);
+        assert!(apart.stdout.is_none() && apart.stderr.is_none() && apart.both.is_none());
+
+        let (_screen, users) = user_terminal();
+        let together = request(
+            (true, Some(users.try_clone().unwrap())),
+            (true, Some(users)),
+        );
+        assert_eq!(together.terminals.len(), 1);
+
+        let root = scratch_directory("relay-targets");
+        let log = std::fs::File::create(root.join("log")).unwrap();
+        let one_log = request((false, Some(log.try_clone().unwrap())), (false, Some(log)));
+        assert!(one_log.both.is_some() && one_log.stderr.is_none());
+
+        let (_screen, users) = user_terminal();
+        let file = std::fs::File::create(root.join("out")).unwrap();
+        let mixed = request((false, Some(file)), (true, Some(users)));
+        assert!(mixed.stdout.is_some() && mixed.stderr.is_none() && mixed.both.is_none());
+        assert_eq!(mixed.terminals.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A partial line -- a prompt -- passed on to a user's terminal that has
+    /// gone ends the relay too.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_for_a_terminal_the_user_has_closed_ends_the_relay() {
+        let (screen, users) = user_terminal();
+        let (terminal, mut theirs) = Terminal::like(users).expect("a terminal");
+        drop(screen);
+        let ended = relay_terminal(terminal, ConsoleNames::default());
+        theirs.write_all(b"continue? ").unwrap();
+        ended
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the relay ends with the user's terminal");
+    }
+
+    /// A signal that cannot be caught is refused, and the signals recorded
+    /// before it are put back as they were.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_that_cannot_be_recorded_puts_back_those_that_were() {
+        let disposition = || {
+            // SAFETY: a null new action only reads the current one.
+            unsafe {
+                let mut current: libc::sigaction = std::mem::zeroed();
+                assert_eq!(
+                    libc::sigaction(libc::SIGUSR1, std::ptr::null(), &mut current),
+                    0
+                );
+                current.sa_sigaction
+            }
+        };
+        let before = disposition();
+        assert!(matches!(
+            SignalFlags::install_for(&[libc::SIGUSR1, libc::SIGKILL]),
+            Err(SupervisionError::Signal(_))
+        ));
+        assert_eq!(disposition(), before);
+    }
+
+    #[test]
+    fn verbose_output_is_asked_for_by_either_variable() {
+        let environment = |pairs: &'static [(&str, &str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        assert!(!verbose_output(environment(&[])));
+        assert!(verbose_output(environment(&[("SUPERCOV_VERBOSE", "yes")])));
+        assert!(verbose_output(environment(&[("SUPERCOV_DEBUG", "1")])));
+        assert!(!verbose_output(environment(&[("SUPERCOV_DEBUG", "0")])));
+        // The first variable set is the one that answers.
+        assert!(!verbose_output(environment(&[
+            ("SUPERCOV_VERBOSE", "no"),
+            ("SUPERCOV_DEBUG", "true"),
+        ])));
+    }
+
+    /// A diagnostic is one line unless verbose output is asked for.
+    #[cfg(unix)]
+    #[test]
+    fn a_diagnostic_is_one_line_unless_verbose() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let written = |verbose| {
+            let mut writer = Vec::new();
+            write_diagnostic(&child, Instant::now(), verbose, &mut writer);
+            String::from_utf8(writer).unwrap()
+        };
+        let brief = written(false);
+        assert_eq!(brief.lines().count(), 1, "{brief}");
+        let full = written(true);
+        assert!(full.lines().count() > 1, "{full}");
+        for diagnostic in [&brief, &full] {
+            assert!(
+                diagnostic.starts_with("[supercov] command still running after "),
+                "{diagnostic}"
+            );
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    /// Ctrl-C at a lent keyboard interrupts the run, whether the command
+    /// died of the signal or exited as a shell does for it; not when the
+    /// keyboard was not lent, the run was already interrupted or had timed
+    /// out, or the command ended otherwise.
+    #[cfg(unix)]
+    #[test]
+    fn ctrl_c_at_a_lent_keyboard_interrupts_the_run() {
+        let sigint = Some(libc::SIGINT);
+        let shell = Some(128 + libc::SIGINT);
+        assert!(interrupted_at_the_keyboard(true, None, false, None, sigint));
+        assert!(interrupted_at_the_keyboard(true, None, false, shell, None));
+        assert!(!interrupted_at_the_keyboard(
+            false, None, false, None, sigint
+        ));
+        assert!(!interrupted_at_the_keyboard(
+            true,
+            Some(ForwardedSignal::Sigterm),
+            false,
+            None,
+            sigint
+        ));
+        assert!(!interrupted_at_the_keyboard(true, None, true, None, sigint));
+        assert!(!interrupted_at_the_keyboard(
+            true,
+            None,
+            false,
+            Some(1),
+            None
+        ));
+    }
+
+    /// A command already collected has no stop to report.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_already_collected_is_not_stopped() {
+        let mut child = Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        assert_eq!(Keyboard::stopped(&child), None);
+    }
+
+    /// A watchdog that never says it is ready refuses the command before it
+    /// runs. The command waited for it for good while this process held the
+    /// readiness pipe too.
+    #[cfg(unix)]
+    #[test]
+    fn a_watchdog_that_never_says_it_is_ready_refuses_the_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch_directory("never-ready");
+        // One that ends saying nothing, and one that says something else.
+        let silent = root.join("silent-watchdog");
+        let other = root.join("other-watchdog");
+        for (watchdog, script) in [
+            (&silent, "#!/bin/sh\n"),
+            (&other, "#!/bin/sh\nprintf x >&3\n"),
+        ] {
+            std::fs::write(watchdog, script).unwrap();
+            std::fs::set_permissions(watchdog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for watchdog in [&silent, &other] {
+            let supervisor = ProcessSupervisor::new_crash_safe(watchdog).unwrap();
+            let marker = root.join("ran");
+            let spec = CommandSpec {
+                program: "touch".into(),
+                arguments: vec![marker.clone().into()],
+                cwd: root.clone(),
+                environment: None,
+                captured_output: None,
+                console: None,
+            };
+            let refused =
+                supervisor.supervise(&spec, SupervisionOptions::default(), &mut Vec::new());
+            assert_eq!(
+                refused.as_ref().map(|_| ()).map_err(ToString::to_string),
+                Err("could not start the watchdog that stops the command if Supercov is killed: it ended before the command started".into()),
+                "{}",
+                watchdog.display()
+            );
+            assert!(!marker.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_empty_program_is_refused_before_anything_starts() {
+        let spec = CommandSpec {
+            program: OsString::new(),
+            arguments: Vec::new(),
+            cwd: std::env::current_dir().unwrap(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        assert!(matches!(
+            spec.command(),
+            Err(SupervisionError::EmptyCommand)
+        ));
+    }
+
+    #[test]
+    fn a_diagnostic_says_what_it_does_not_know() {
+        assert_eq!(
+            format_process_diagnostic(20, Duration::from_millis(1_500), &[]),
+            "[supercov] command still running after 2s\n  pid=20 process details unavailable"
+        );
+        assert_eq!(
+            format_process_diagnostic(
+                20,
+                Duration::from_millis(500),
+                &[ProcessSnapshot {
+                    pid: 20,
+                    parent_pid: 10,
+                    executable: "node".into(),
+                    state: None,
+                    cpu_tenths: None,
+                }],
+            ),
+            "[supercov] command still running after 500ms\n  pid=20 ppid=10 exe=node"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_watchdog_that_is_not_a_file_is_refused() {
+        let root = scratch_directory("watchdog");
+        assert!(matches!(
+            ProcessSupervisor::new_crash_safe(&root),
+            Err(SupervisionError::PlatformOperation {
+                operation: "validate parent-death watchdog executable",
+                ..
+            })
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Separate capture is refused beside merged capture, and a command is
+    /// not started once the run has been told to stop.
+    #[cfg(unix)]
+    #[test]
+    fn a_captured_command_is_not_started_merged_or_after_a_signal() {
+        let root = scratch_directory("captured");
+        let marker = root.join("ran");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec!["-c".into(), format!("touch '{}'", marker.display()).into()],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let supervisor = ProcessSupervisor::new().unwrap();
+        let merged = CommandSpec {
+            captured_output: Some(root.join("output")),
+            ..spec.clone()
+        };
+        assert!(matches!(
+            supervisor.supervise_captured(&merged, SupervisionOptions::default(), &mut Vec::new()),
+            Err(SupervisionError::PlatformOperation { .. })
+        ));
+        RECEIVED_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
+        let output = supervisor
+            .supervise_captured(&spec, SupervisionOptions::default(), &mut Vec::new())
+            .unwrap();
+        drop(supervisor);
+        assert_eq!(
+            output.result.interrupted_signal,
+            Some(ForwardedSignal::Sigterm)
+        );
+        assert_eq!(output.result.exit_code(), 143);
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+        assert!(!marker.exists() && !root.join("output").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Without a terminal to lend, a command stopped for one is left as it
+    /// stands, as is one stopped by Ctrl-Z or stopped again once lent it.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_stopped_for_a_terminal_that_cannot_be_lent_is_left_stopped() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut keyboard = Keyboard {
+            terminal: Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("/dev/null")
+                    .unwrap(),
+            ),
+            lent: false,
+        };
+        assert!(!keyboard.command_stopped(&mut child, libc::SIGTTIN));
+        assert!(!keyboard.lent);
+        assert!(!keyboard.command_stopped(&mut child, libc::SIGTSTP));
+        keyboard.lent = true;
+        assert!(!keyboard.command_stopped(&mut child, libc::SIGTTOU));
+        drop(keyboard);
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    /// A command that is no process group's leader is signalled itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_without_a_group_of_its_own_is_signalled_alone() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        signal_process_group(&mut child, libc::SIGKILL);
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+}
+
+#[cfg(test)]
+mod console_name_tests {
+    use super::*;
+
+    /// A path Go prints from the copy (`../../../../pkg/a.go`) reads as it
+    /// would from the project, wherever it stands in the line and with either
+    /// separator; text that only contains the prefix inside a word, or reaches
+    /// above the project, is left as printed.
+    #[test]
+    fn a_path_printed_from_the_copy_reads_from_the_project() {
+        let names = ConsoleNames {
+            places: Vec::new(),
+            up_to_the_project: Some("../../".into()),
+        };
+        for (printed, shown) in [
+            ("../../pkg/a.go:12: failed", "pkg/a.go:12: failed"),
+            ("--- FAIL ../../a.go done", "--- FAIL ./a.go done"),
+            ("at ..\\..\\pkg\\a.go:3", "at pkg\\a.go:3"),
+            ("x../../pkg/a.go", "x../../pkg/a.go"),
+            ("../../../outside.go", "../../../outside.go"),
+            ("nothing to see", "nothing to see"),
+        ] {
+            assert_eq!(names.line(printed), shown, "{printed}");
+        }
+        let plain = ConsoleNames::default();
+        assert_eq!(plain.line("../../a.go"), "../../a.go");
+    }
+
+    #[test]
+    fn a_zero_interval_or_timeout_is_refused() {
+        let zero = Duration::ZERO;
+        for options in [
+            SupervisionOptions {
+                diagnostic_interval: zero,
+                ..SupervisionOptions::default()
+            },
+            SupervisionOptions {
+                termination_grace: zero,
+                ..SupervisionOptions::default()
+            },
+            SupervisionOptions {
+                timeout: Some(zero),
+                ..SupervisionOptions::default()
+            },
+        ] {
+            assert!(validate_options(options).is_err(), "{options:?}");
+        }
+        assert!(validate_options(SupervisionOptions::default()).is_ok());
     }
 }

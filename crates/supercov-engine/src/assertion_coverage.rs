@@ -189,7 +189,13 @@ impl Language {
             Self::Python | Self::Ruby => t.starts_with('#'),
             Self::JavaScript | Self::Go | Self::Rust | Self::Jvm => {
                 t.starts_with("//")
-                    || t.starts_with("/*")
+                    // A block comment closed before code on its own line
+                    // (`/** @type {number} */ const max = read();`) leaves
+                    // the line code.
+                    || t.strip_prefix("/*").is_some_and(|r| {
+                        r.split_once("*/")
+                            .is_none_or(|(_, rest)| rest.trim().is_empty() || self.comment(rest))
+                    })
                     || t.starts_with("*/")
                     || t == "*"
                     || t.starts_with("* ")
@@ -356,7 +362,8 @@ pub fn assessment_input(report: &CoverageReport) -> AssessmentInput {
     let points = view
         .points
         .iter()
-        .filter(|p| p.measured && p.meta.kind == PointKind::Statement)
+        // A view leaves out every point the run declined, so each is measured.
+        .filter(|p| p.meta.kind == PointKind::Statement)
         .map(|p| InputPoint {
             file: p.meta.file.clone(),
             line: p.meta.line,
@@ -498,7 +505,18 @@ pub fn population_from(
                 let first = first.trim_end_matches(';');
                 replacements
                     .entry(file.clone())
-                    .or_insert_with(|| rust_source::replacements(file, source, &signatures))
+                    // A bug reading one file's values costs its questions
+                    // their replacements, which then describe the change.
+                    .or_insert_with(|| {
+                        crate::contained::contained(|| {
+                            crate::fault::or(
+                                "value-changes-panic",
+                                || panic!("injected fault at value-changes-panic"),
+                                || rust_source::replacements(file, source, &signatures),
+                            )
+                        })
+                        .unwrap_or_default()
+                    })
                     .get(&line)
                     .and_then(|all| all.iter().find(|(t, _)| t.starts_with(first)))
                     .map(|(_, r)| r.clone())
@@ -1460,7 +1478,7 @@ impl Population {
                     }
                     if open && t.contains("*/") {
                         open = false;
-                        return true;
+                        return was || self.language.comment(l);
                     }
                 }
                 was || open || self.language.comment(l)
@@ -1720,12 +1738,13 @@ impl Population {
                 show.extend(around(l, WINDOW_LINES));
             }
             // How far the file was going to be shown, for the line that says
-            // how much of it is not.
+            // how much of it is not. Every line `around` gives is one of the
+            // file's, counted from one.
             let end = show
                 .iter()
                 .rev()
                 .copied()
-                .find(|&i| i != 0 && i <= text.len() && !self.language.comment(text[i - 1]))
+                .find(|&i| !self.language.comment(text[i - 1]))
                 .unwrap_or(0);
             if within {
                 let functions = outermost_functions(self.language, &f, &source);
@@ -1770,7 +1789,7 @@ impl Population {
             let mut lines = Vec::new();
             let mut last = 0;
             for i in show {
-                if i == 0 || i > text.len() || self.language.comment(text[i - 1]) {
+                if self.language.comment(text[i - 1]) {
                     continue;
                 }
                 if i != last + 1 {
@@ -2511,7 +2530,9 @@ fn strip_numbers(text: &str) -> String {
                 - trimmed
                     .trim_start_matches(|c: char| c.is_ascii_digit())
                     .len();
-            if digits > 0 && trimmed[digits..].starts_with(' ') {
+            // Every line given starts its number as `{:5} ` or `numbered`
+            // writes it: a space always follows.
+            if digits > 0 {
                 format!(
                     "{}{}",
                     mark.map(String::from).unwrap_or_default(),
@@ -2564,6 +2585,108 @@ fn normalize(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn questions_of(
+        file: &str,
+        source: &str,
+        lines: &[(usize, &str)],
+        language: Language,
+    ) -> Vec<Vec<String>> {
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "t".into(),
+                file: Some("t".into()),
+                name: "t".into(),
+                role: "test".into(),
+                runner: "r".into(),
+            }],
+            points: lines
+                .iter()
+                .map(|(line, text)| InputPoint {
+                    file: file.into(),
+                    line: *line,
+                    source: (*text).into(),
+                    tests: vec![0],
+                })
+                .collect(),
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([(file.to_owned(), source.to_owned())]);
+        let population =
+            population_from(Path::new("/nonexistent"), &input, &sources, language).unwrap();
+        (0..population.statements.len())
+            .map(|s| population.questions(s))
+            .collect()
+    }
+
+    /// Go, the JVM languages and Rust are asked in their own terms: a zero
+    /// value written out, a default value after the expression runs, a
+    /// `switch` whose every returned value changes, and an `Ok` that becomes
+    /// an error. A replacement that is the statement itself is not asked.
+    #[test]
+    fn each_language_is_asked_in_its_own_terms() {
+        let go = "package a\n\nfunc f(x int) (int, error) {\n\ty := g(x)\n\tif y > 1 {\n\t\treturn y, nil\n\t}\n\treturn 0, nil\n}\n";
+        let asked = questions_of(
+            "a.go",
+            go,
+            &[(4, "y := g(x)"), (6, "return y, nil"), (8, "return 0, nil")],
+            Language::Go,
+        );
+        assert_eq!(asked.len(), 2, "{asked:#?}");
+        assert!(
+            asked[0][0].contains("hold the zero value of their type"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[1][0].contains(
+                "becomes `return 0, nil` (the original expression is still evaluated first)"
+            ),
+            "{asked:#?}"
+        );
+
+        let java = "class A {\n  int f(int x) {\n    switch (x) {\n      case 1: return 1;\n      default: return 2;\n    }\n  }\n  int g(int x) {\n    int y = x + 1;\n    return y;\n  }\n}\n";
+        let asked = questions_of(
+            "A.java",
+            java,
+            &[
+                (
+                    3,
+                    "switch (x) {\n      case 1: return 1;\n      default: return 2;\n    }",
+                ),
+                (9, "int y = x + 1;"),
+                (10, "return y;"),
+            ],
+            Language::Jvm,
+        );
+        assert!(
+            asked[0][0].contains("every value `switch (x) {` returns becomes"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[1][0].contains("the variable it assigns holds the default value"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[2][0].contains("returns the default value"),
+            "{asked:#?}"
+        );
+
+        let rust = "fn f(x: u8) -> Result<u8, ()> {\n    if x > 2 {\n        return Ok(x);\n    }\n    Ok(0)\n}\n";
+        let asked = questions_of(
+            "src/a.rs",
+            rust,
+            &[(3, "return Ok(x);"), (5, "Ok(0)")],
+            Language::Rust,
+        );
+        assert!(
+            asked[0][0].contains("becomes `return Err(());`"),
+            "{asked:#?}"
+        );
+        assert!(
+            asked[1][0].contains("(it is the value the enclosing block produces)"),
+            "{asked:#?}"
+        );
+    }
+
     #[test]
     fn a_replacement_that_is_the_statement_is_no_change() {
         assert!(super::same_code("return 0, nil", "return 0,  nil"));
@@ -2701,6 +2824,11 @@ mod tests {
         assert_eq!(change_at(&starts, 1, "import x from 'y'", js), None);
         assert_eq!(
             change_at(&starts, 2, "const a = 1", js),
+            Some(Change::ValueUndefined)
+        );
+        // Measured with its `export`, too.
+        assert_eq!(
+            change_at(&starts, 2, "export const a = 1", js),
             Some(Change::ValueUndefined)
         );
         assert_eq!(change_at(&starts, 3, "let b: number", js), None);
@@ -2929,6 +3057,235 @@ mod tests {
         assert!(quoted_fragments("return a + b").is_empty());
     }
 
+    /// The code shown for a test, in a fresh directory holding its file.
+    fn shown_test_code(
+        file: &str,
+        text: &str,
+        name: &str,
+        runner: &str,
+        language: Language,
+    ) -> String {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-shown-test-code-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: name.into(),
+                file: Some(file.into()),
+                name: name.into(),
+                role: "test".into(),
+                runner: runner.into(),
+            }],
+            points: vec![InputPoint {
+                file: "src/a".into(),
+                line: 1,
+                source: "x".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("src/a".to_owned(), "x\n".to_owned())]);
+        population_from(&root, &input, &sources, language)
+            .unwrap()
+            .test_code(0)
+    }
+
+    /// A Ruby test's helpers are what it loads that is not measured source,
+    /// cut to fit and stopping once full; the support files its constants
+    /// name follow, cut to their own allowance and stopping once it is spent.
+    #[test]
+    fn a_ruby_test_s_helpers_and_support_files_are_shown_within_their_limits() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-ruby-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let write = |file: &str, text: &str| {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("lib/m.rb", "def m\n  1\nend\n");
+        write("spec/spec_helper.rb", &"# helper\n".repeat(500));
+        write("spec/support/fake_api.rb", "class FakeApi\nend\n");
+        write("spec/support/big_fixture.rb", &"# fixture\n".repeat(2000));
+        write(
+            "spec/a_spec.rb",
+            "require_relative '../lib/m'\nrequire_relative 'support/fake_api'\nRSpec.describe FakeApi do\n  it { BigFixture }\nend\n",
+        );
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "spec/a_spec.rb[1:1]".into(),
+                file: Some("spec/a_spec.rb".into()),
+                name: "spec/a_spec.rb[1:1]".into(),
+                role: "test".into(),
+                runner: "rspec".into(),
+            }],
+            points: vec![InputPoint {
+                file: "lib/m.rb".into(),
+                line: 2,
+                source: "1".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("lib/m.rb".to_owned(), "def m\n  1\nend\n".to_owned())]);
+        let population = population_from(&root, &input, &sources, Language::Ruby).unwrap();
+        let helpers = population.helpers(0, 1);
+        assert!(
+            !helpers.contains_key("lib/m.rb"),
+            "measured source is not a helper"
+        );
+        let helper = &helpers["spec/spec_helper.rb"];
+        assert!(helper.contains("... (cut)"), "{helper}");
+        assert!(helper.len() < 4000, "{}", helper.len());
+        let fixture = &helpers["spec/support/big_fixture.rb"];
+        assert!(fixture.contains("... (cut)"));
+        // The helper filled its allowance before the require came up, and
+        // the fixture filled the support files' before this one did.
+        assert!(
+            !helpers.contains_key("spec/support/fake_api.rb"),
+            "{:?}",
+            helpers.keys()
+        );
+    }
+
+    /// A JVM test's code leaves out block comments -- a license header, a
+    /// one-line `/* */`, one inside the body -- and keeps the code.
+    #[test]
+    fn block_comments_are_left_out_of_a_jvm_test_s_code() {
+        let text = "/*\n * License header\n */\npackage shop;\n\nimport org.junit.jupiter.api.Test;\n/* one-line */\nclass CartTest {\n    @Test\n    void adds() {\n        /* inside\n           block */\n        assertEquals(2, add(1, 1));\n    }\n}\n";
+        let code = shown_test_code(
+            "src/test/java/shop/CartTest.java",
+            text,
+            "shop.CartTest#adds()",
+            "junit",
+            Language::Jvm,
+        );
+        for kept in [
+            "package shop;",
+            "import org.junit",
+            "void adds()",
+            "assertEquals(2, add(1, 1));",
+        ] {
+            assert!(code.contains(kept), "{kept}: {code}");
+        }
+        for left in ["License header", "one-line", "inside", "block */"] {
+            assert!(!code.contains(left), "{left}: {code}");
+        }
+        // A method the file does not have: its head, then the rest of it.
+        let missing = shown_test_code(
+            "src/test/java/shop/CartTest.java",
+            text,
+            "shop.CartTest#gone()",
+            "junit",
+            Language::Jvm,
+        );
+        assert!(missing.contains("  ..."), "{missing}");
+        assert!(missing.contains("assertEquals"), "{missing}");
+    }
+
+    /// A line that opens with a block comment closed before its code is
+    /// code: the statement on it is shown, marked as run, and a test's line
+    /// written that way is kept.
+    #[test]
+    fn a_statement_after_a_block_comment_on_its_line_is_shown() {
+        let source = "export function limit(read) {\n  /** @type {number} */ const max = read();\n  return max;\n}\n";
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "t".into(),
+                file: Some("test/limit.test.js".into()),
+                name: "limit".into(),
+                role: "test".into(),
+                runner: "node:test".into(),
+            }],
+            points: vec![InputPoint {
+                file: "src/limit.js".into(),
+                line: 2,
+                source: "const max = read();".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("src/limit.js".to_owned(), source.to_owned())]);
+        let population = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::JavaScript,
+        )
+        .unwrap()
+        .with_files(sources);
+        let code = &population.code_run(0, &[0])["src/limit.js"];
+        assert!(
+            code.contains("▶    2   /** @type {number} */ const max = read();"),
+            "{code}"
+        );
+        assert!(!code.contains("1 lines not shown\n     3"), "{code}");
+        let java = "package shop;\n\nclass CartTest {\n    @Test\n    void adds() {\n        /* given */ cart.add(1);\n        /* then */\n        assertEquals(1, cart.size());\n    }\n}\n";
+        let code = shown_test_code(
+            "src/test/java/shop/CartTest.java",
+            java,
+            "shop.CartTest#adds()",
+            "junit",
+            Language::Jvm,
+        );
+        assert!(code.contains("/* given */ cart.add(1);"), "{code}");
+        assert!(!code.contains("/* then */"), "{code}");
+        for (line, comment) in [
+            ("/* a */ run();", false),
+            ("/**/", true),
+            ("/* a */ // b", true),
+            ("/* open", true),
+        ] {
+            assert_eq!(Language::JavaScript.comment(line), comment, "{line}");
+        }
+    }
+
+    /// An `async def` test is found; one not in the file shows the file.
+    #[test]
+    fn a_python_test_is_found_by_async_def_or_shown_as_its_file() {
+        let constants = (0..12).map(|i| format!("C{i} = {i}\n")).collect::<String>();
+        let text = &format!(
+            "import pytest\n{constants}\n\n@pytest.mark.asyncio\nasync def test_fetch():\n    assert await fetch() == 1\n\n\ndef test_other():\n    assert True\n"
+        );
+        let code = shown_test_code(
+            "tests/test_fetch.py",
+            text,
+            "tests/test_fetch.py::test_fetch",
+            "pytest",
+            Language::Python,
+        );
+        assert!(code.contains("@pytest.mark.asyncio"), "{code}");
+        assert!(code.contains("assert await fetch() == 1"), "{code}");
+        assert!(!code.contains("test_other"), "{code}");
+        let missing = shown_test_code(
+            "tests/test_fetch.py",
+            text,
+            "tests/test_fetch.py::test_gone",
+            "pytest",
+            Language::Python,
+        );
+        assert!(missing.contains("  ..."), "{missing}");
+    }
+
     /// A pytest method far into its file: the file's first lines, then the
     /// class around it, its decorators and its body, each once.
     #[test]
@@ -3118,6 +3475,49 @@ mod tests {
         );
     }
 
+    /// A boolean assigned or returned is flipped; one of several targets,
+    /// or a value that is not a literal, becomes None instead.
+    #[test]
+    fn python_booleans_flip_and_other_values_become_none() {
+        let source = "def f(flag):\n    a = b = True\n    x: bool = True\n    y: bool = flag\n    return True\n    return None\n";
+        let starts = python_statement_starts(source);
+        let py = Language::Python;
+        assert_eq!(
+            change_at(&starts, 2, "a = b = True", py),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 3, "x: bool = True", py),
+            Some(Change::Flip)
+        );
+        assert_eq!(
+            change_at(&starts, 4, "y: bool = flag", py),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(change_at(&starts, 5, "return True", py), Some(Change::Flip));
+        assert_eq!(change_at(&starts, 6, "return None", py), Some(Change::Skip));
+        // No statement there: JavaScript reads the expression as undefined,
+        // other languages do not guess.
+        let none = BTreeMap::new();
+        assert_eq!(
+            change_at(&none, 1, "go()", Language::JavaScript),
+            Some(Change::ExpressionUndefined)
+        );
+        assert_eq!(change_at(&none, 1, "go()", Language::Rust), None);
+    }
+
+    /// A title not quoted is found where its words are, inside its group
+    /// first and then anywhere; an empty title is not looked for.
+    #[test]
+    fn a_javascript_test_title_falls_back_to_its_words() {
+        let lines = ["describe('g', () => {", "  test(x)", "});", "y = 1"];
+        assert_eq!(js_test_line(&lines, "g > x"), Some(1));
+        assert_eq!(js_test_line(&lines, "zzz > y"), Some(3));
+        assert_eq!(js_test_line(&lines, " > y"), Some(3));
+        assert_eq!(js_test_line(&lines, ""), None);
+        assert_eq!(js_test_line(&lines, "g > nowhere"), None);
+    }
+
     #[test]
     fn a_javascript_test_is_found_in_the_group_its_name_gives() {
         let text = "import { totals } from '../src/cart.js';\n\ndescribe('cart', () => {\n  it('totals', () => {\n    expect(totals([])).toBe(0);\n  });\n});\n\ndescribe('order', () => {\n  describe('refund', () => {\n    it('totals', () => {});\n  });\n  it('totals', () => {\n    expect(1).toBe(1);\n  });\n});\n";
@@ -3254,6 +3654,725 @@ mod tests {
         assert!(!is_test_call("items.push(1)"));
     }
 
+    /// A fresh directory holding these files.
+    fn project(files: &[(&str, &str)]) -> crate::test_directory::TestDirectory {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-assertion-project-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        for (file, text) in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        root
+    }
+
+    fn input_test(file: Option<&str>, name: &str, runner: &str) -> InputTest {
+        InputTest {
+            id: name.into(),
+            file: file.map(Into::into),
+            name: name.into(),
+            role: "test".into(),
+            runner: runner.into(),
+        }
+    }
+
+    fn point(file: &str, line: usize, source: &str, tests: &[u32]) -> InputPoint {
+        InputPoint {
+            file: file.into(),
+            line,
+            source: source.into(),
+            tests: tests.to_vec(),
+        }
+    }
+
+    /// An assessment asks about the statements the run measured and the
+    /// decisions it executed: not a statement it declined, a function, or a
+    /// decision no test reached.
+    #[test]
+    fn an_assessment_reads_measured_statements_and_executed_decisions() {
+        use crate::coverage_analysis::McdcVector;
+        use crate::coverage_report::{
+            CoverageManifest, CoverageReportRequest, DecisionMeta, DecisionSnapshot, ExitCodeInput,
+            PointMeta, RawTestResult, RuntimeSnapshot, TestProvenance, analyze_coverage_results,
+        };
+        let decision = |id: &str, line: usize| DecisionMeta {
+            id: id.into(),
+            file: "src/a.js".into(),
+            line,
+            column: 3,
+            source: "ready".into(),
+            conditions: vec!["ready".into()],
+            kind: "if".into(),
+        };
+        let point = |id: &str, kind: PointKind, line: usize, source: &str| PointMeta {
+            id: id.into(),
+            kind,
+            file: "src/a.js".into(),
+            line,
+            column: 3,
+            source: source.into(),
+            label: None,
+        };
+        let report = analyze_coverage_results(&CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                unmeasured: vec!["declined".into()],
+                decisions: vec![decision("ran", 2), decision("skipped", 5)],
+                points: vec![
+                    point("function", PointKind::Function, 1, "function f() {"),
+                    point("work", PointKind::Statement, 3, "work();"),
+                    point("declined", PointKind::Statement, 4, "eval(code);"),
+                ],
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+            },
+            raw_results: vec![RawTestResult {
+                span: None,
+                test_id: Some("test".into()),
+                scope: None,
+                test: "test".into(),
+                test_file: Some("tests/a.js".into()),
+                title: None,
+                retry: Some(0),
+                status: Some("passed".into()),
+                expected_status: None,
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "node:test".into(),
+                    kind: "unit".into(),
+                    project: None,
+                    source: "runner-default".into(),
+                    tags: Vec::new(),
+                },
+                role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
+                phases: Vec::new(),
+                runtime: vec![RuntimeSnapshot {
+                    decisions: vec![DecisionSnapshot {
+                        meta: decision("ran", 2),
+                        vectors: vec![McdcVector {
+                            values: vec![Some(true)],
+                            outcome: true,
+                        }],
+                    }],
+                    hits: vec!["function".into(), "work".into(), "declined".into()],
+                    events: Vec::new(),
+                    logicals: Vec::new(),
+                    phase_id: None,
+                }],
+                browser: Vec::new(),
+                server: Vec::new(),
+            }],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(0)),
+        })
+        .unwrap();
+        let input = assessment_input(&report);
+        assert_eq!(input.points, [self::point("src/a.js", 3, "work();", &[0])]);
+        assert_eq!(input.decisions, [self::point("src/a.js", 2, "ready", &[0])]);
+        assert_eq!(
+            input.tests,
+            [InputTest {
+                id: "test".into(),
+                file: Some("tests/a.js".into()),
+                name: "test".into(),
+                role: "test".into(),
+                runner: "node:test".into(),
+            }]
+        );
+    }
+
+    /// A JVM test is named by its class, and found by the path that class
+    /// would have when the run gives it no file; elsewhere such a test is
+    /// not asked, nor is one whose class has no file.
+    #[test]
+    fn a_test_without_a_file_is_found_by_its_class_on_the_jvm_alone() {
+        let root = project(&[
+            (
+                "src/test/java/shop/CartTest.java",
+                "package shop;\nclass CartTest {}\n",
+            ),
+            ("AcmeCartTest.java", "class AcmeCartTest {}\n"),
+            ("CartTest.java", "class CartTest {}\n"),
+        ]);
+        let cart =
+            "package shop;\n\nclass Cart {\n  int total(int a) {\n    return a + 1;\n  }\n}\n";
+        let input = AssessmentInput {
+            tests: vec![
+                input_test(None, "shop.CartTest#adds()", "junit-platform"),
+                input_test(None, "CartTest#adds()", "junit-platform"),
+                input_test(None, "gone.Missing#adds()", "junit-platform"),
+            ],
+            points: vec![point(
+                "src/main/java/shop/Cart.java",
+                5,
+                "return a + 1;",
+                &[0, 1, 2],
+            )],
+            decisions: Vec::new(),
+        };
+        let sources =
+            BTreeMap::from([("src/main/java/shop/Cart.java".to_owned(), cart.to_owned())]);
+        let jvm = population_from(&root, &input, &sources, Language::Jvm).unwrap();
+        assert_eq!(
+            jvm.tests
+                .iter()
+                .map(|t| t.file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/test/java/shop/CartTest.java", "CartTest.java"]
+        );
+        assert_eq!(jvm.statements[0].tests, [0, 1]);
+        let python = population_from(&root, &input, &sources, Language::Python).unwrap();
+        assert!(python.tests.is_empty());
+        assert!(python.statements.is_empty());
+    }
+
+    /// A Rust statement in a test, bench or example file is the test's own
+    /// code, not code under test; and a decision is asked only as the
+    /// condition it is, not as a statement that starts like it.
+    #[test]
+    fn test_code_and_decisions_that_are_no_condition_are_not_asked() {
+        let input = AssessmentInput {
+            tests: vec![input_test(
+                Some("tests/it.rs"),
+                "tests/it.rs::adds",
+                "rust-libtest",
+            )],
+            points: vec![
+                point("src/lib.rs", 2, "let y = x + 1;", &[0]),
+                point("tests/it.rs", 2, "let z = 2;", &[0]),
+            ],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([
+            (
+                "src/lib.rs".to_owned(),
+                "pub fn f(x: u8) -> u8 {\n    let y = x + 1;\n    y\n}\n".to_owned(),
+            ),
+            (
+                "tests/it.rs".to_owned(),
+                "fn helper() -> u8 {\n    let z = 2;\n    z\n}\n".to_owned(),
+            ),
+        ]);
+        let rust =
+            population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust).unwrap();
+        assert_eq!(
+            rust.statements
+                .iter()
+                .map(|s| s.file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/lib.rs"]
+        );
+        // `queue` is the loop's condition, though `queue.pop()` starts with it.
+        let source = "def f(v, queue):\n    if v:\n        pass\n    elif v is None:\n        pass\n    while queue: queue.pop()\n";
+        let input = AssessmentInput {
+            tests: vec![input_test(Some("tests/test_f.py"), "test_f", "pytest")],
+            points: Vec::new(),
+            decisions: vec![
+                point("f.py", 4, "v is None", &[0]),
+                point("f.py", 6, "queue", &[0]),
+            ],
+        };
+        let sources = BTreeMap::from([("f.py".to_owned(), source.to_owned())]);
+        let python = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::Python,
+        )
+        .unwrap();
+        assert_eq!(
+            python
+                .statements
+                .iter()
+                .map(|s| (s.line, s.change))
+                .collect::<Vec<_>>(),
+            [(4, Change::Invert)]
+        );
+    }
+
+    /// An overload signature, or a function only declared, has no body to
+    /// run: only the implementation is a function a statement is in.
+    #[test]
+    fn a_typescript_signature_without_a_body_is_no_function() {
+        let source = "export function f(a: string): string;\nexport function f(a: number): number;\nexport function f(a: any) {\n  return a\n}\ndeclare function g(): void;\n";
+        assert_eq!(
+            outermost_functions(Language::JavaScript, "src/f.ts", source),
+            [(3, 5)]
+        );
+    }
+
+    /// Tests whose file quotes what a statement writes are asked first, one
+    /// per file, then the rest of them; the groups of every file follow,
+    /// round-robin, each test asked once however it was picked.
+    #[test]
+    fn tests_that_quote_a_statement_are_asked_first_and_once() {
+        let quotes = "expect(log).toContain(\"Server listening on port\");\n";
+        let tests = [
+            ("tests/a.test.js", "x > one"),
+            ("tests/a.test.js", "y > two"),
+            ("tests/b.test.js", "x > three"),
+            ("tests/c.test.js", "z > four"),
+            ("tests/c.test.js", "w > seven"),
+            ("tests/c.test.js", "w > eight"),
+            ("tests/d.test.js", "x > five"),
+            ("tests/d.test.js", "x > six"),
+        ];
+        let input = AssessmentInput {
+            tests: tests
+                .iter()
+                .map(|(file, name)| input_test(Some(file), name, "vitest"))
+                .collect(),
+            points: vec![point(
+                "src/server.js",
+                1,
+                "log(\"Server listening on port \" + port);",
+                &(0..8).collect::<Vec<_>>(),
+            )],
+            decisions: Vec::new(),
+        };
+        let mut files = BTreeMap::from([(
+            "src/server.js".to_owned(),
+            "log(\"Server listening on port \" + port);\n".to_owned(),
+        )]);
+        let population = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &files,
+            Language::JavaScript,
+        )
+        .unwrap();
+        for file in ["tests/a.test.js", "tests/b.test.js", "tests/d.test.js"] {
+            files.insert(file.into(), quotes.into());
+        }
+        files.insert("tests/c.test.js".into(), "expect(1).toBe(1);\n".into());
+        let population = population.with_files(files);
+        let names = |picked: Vec<usize>| {
+            picked
+                .into_iter()
+                .map(|t| {
+                    population.tests[t]
+                        .name
+                        .rsplit(' ')
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(population.order(0, 3)), ["one", "three", "five"]);
+        assert_eq!(
+            names(population.order(0, 7)),
+            ["one", "three", "five", "two", "six", "eight", "four"]
+        );
+    }
+
+    /// A JavaScript test's body runs to the next test at its own depth: a
+    /// call deeper in that reads like a test is part of it, and its comment
+    /// lines are left out.
+    #[test]
+    fn a_javascript_test_ends_at_the_next_test_beside_it() {
+        let fixtures = (0..10)
+            .map(|n| format!("const fixture{n} = {n};\n"))
+            .collect::<String>();
+        let text = format!(
+            "{fixtures}describe('cart', () => {{\n  it('totals', () => {{\n    // the empty cart\n    expect(total([])).toBe(0);\n      it.todo('rounds');\n    expect(total([1])).toBe(1);\n  }});\n  it('next', () => {{\n    expect(2).toBe(2);\n  }});\n}});\n"
+        );
+        let code = shown_test_code(
+            "test/cart.test.js",
+            &text,
+            "cart > totals",
+            "vitest",
+            Language::JavaScript,
+        );
+        assert!(code.contains("it.todo('rounds');"), "{code}");
+        assert!(code.contains("expect(total([1])).toBe(1);"), "{code}");
+        assert!(!code.contains("the empty cart"), "{code}");
+        assert!(!code.contains("expect(2).toBe(2);"), "{code}");
+    }
+
+    /// A doctest lives in comments, and is shown though comments are not.
+    #[test]
+    fn a_rust_doctest_is_shown_from_its_comments() {
+        let consts = (0..12)
+            .map(|n| format!("pub const C{n}: u8 = {n};\n"))
+            .collect::<String>();
+        let text = format!(
+            "{consts}/// Adds two numbers.\n///\n/// ```\n/// assert_eq!(shop::add(1, 1), 2);\n/// ```\npub fn add(a: u8, b: u8) -> u8 {{\n    a + b\n}}\n"
+        );
+        let code = shown_test_code(
+            "src/lib.rs",
+            &text,
+            "src/lib.rs - add (line 15)",
+            "rustdoc",
+            Language::Rust,
+        );
+        assert!(
+            code.contains("/// assert_eq!(shop::add(1, 1), 2);"),
+            "{code}"
+        );
+        assert!(code.contains("pub fn add(a: u8, b: u8) -> u8 {"), "{code}");
+        assert!(!code.contains("Adds two numbers."), "{code}");
+    }
+
+    /// A Python test is shown in its own class, not a class nested beside
+    /// it; a test on the file's first line is found; and a line above it
+    /// that starts with `@` at another depth is no decorator of it.
+    #[test]
+    fn a_python_test_is_shown_with_its_own_class_and_decorators_alone() {
+        let constants = (0..10).map(|i| format!("C{i} = {i}\n")).collect::<String>();
+        let nested = format!(
+            "{constants}\n\nclass TestCart:\n    def test_total(self):\n        assert cart() == 0\n\n\nclass TestOrder:\n    class TestRefund:\n        def test_total(self):\n            assert refund() == 1\n\n    def test_total(self):\n        assert order() == 2\n"
+        );
+        let code = shown_test_code(
+            "tests/test_a.py",
+            &nested,
+            "tests/test_a.py::TestOrder::test_total",
+            "pytest",
+            Language::Python,
+        );
+        assert!(code.contains("class TestOrder:"), "{code}");
+        assert!(code.contains("assert order() == 2"), "{code}");
+        for left in ["class TestRefund:", "refund()", "cart()"] {
+            assert!(!code.contains(left), "{left}: {code}");
+        }
+        let first = shown_test_code(
+            "tests/test_one.py",
+            "def test_first():\n    assert one() == 1\n",
+            "tests/test_one.py::test_first",
+            "pytest",
+            Language::Python,
+        );
+        assert!(first.contains("assert one() == 1"), "{first}");
+        assert!(!first.contains("..."), "{first}");
+        let matrix = format!(
+            "{constants}\n\nproduct = (a\n    @ b)\ndef test_after():\n    assert product\n"
+        );
+        let code = shown_test_code(
+            "tests/test_m.py",
+            &matrix,
+            "tests/test_m.py::test_after",
+            "pytest",
+            Language::Python,
+        );
+        assert!(code.contains("def test_after():"), "{code}");
+        assert!(code.contains("assert product"), "{code}");
+        assert!(!code.contains("@ b)"), "{code}");
+    }
+
+    /// A JVM test's helpers are the classes it imports, each once: not the
+    /// source under assessment, nor a class from `node_modules`.
+    #[test]
+    fn a_jvm_test_s_helpers_are_its_own_imports_once() {
+        let root = project(&[
+            (
+                "src/test/java/shop/CartTest.java",
+                "package shop;\n\nimport shop.Cart;\nimport shop.Fixtures;\nimport shop.Fixtures;\nimport com.facebook.react.Bridge;\nimport static org.junit.Assert.assertEquals;\n\nclass CartTest {\n  @Test\n  void adds() {\n    assertEquals(2, new Cart().total(Fixtures.ONE));\n  }\n}\n",
+            ),
+            (
+                "src/test/java/shop/Fixtures.java",
+                "package shop;\n\nclass Fixtures {\n  static final int ONE = 1;\n}\n",
+            ),
+            (
+                "node_modules/react-native/android/com/facebook/react/Bridge.java",
+                "package com.facebook.react;\nclass Bridge {}\n",
+            ),
+        ]);
+        let cart =
+            "package shop;\n\nclass Cart {\n  int total(int a) {\n    return a + 1;\n  }\n}\n";
+        let input = AssessmentInput {
+            tests: vec![input_test(
+                Some("src/test/java/shop/CartTest.java"),
+                "shop.CartTest#adds()",
+                "junit-platform",
+            )],
+            points: vec![point(
+                "src/main/java/shop/Cart.java",
+                5,
+                "return a + 1;",
+                &[0],
+            )],
+            decisions: Vec::new(),
+        };
+        let sources =
+            BTreeMap::from([("src/main/java/shop/Cart.java".to_owned(), cart.to_owned())]);
+        let population = population_from(&root, &input, &sources, Language::Jvm).unwrap();
+        let helpers = population.helpers(0, 1);
+        assert_eq!(
+            helpers.keys().collect::<Vec<_>>(),
+            ["src/test/java/shop/Fixtures.java"]
+        );
+        assert!(helpers["src/test/java/shop/Fixtures.java"].contains("static final int ONE = 1;"));
+    }
+
+    /// A Ruby test's spec helper, loaded and required, is shown once and
+    /// whole when it fits; a support file it requires is not shown again
+    /// among the support files its constants name.
+    #[test]
+    fn a_ruby_test_s_helpers_that_fit_are_shown_once_and_whole() {
+        let root = project(&[
+            ("lib/m.rb", "def m\n  1\nend\n"),
+            ("spec/spec_helper.rb", "require 'rspec'\n"),
+            ("spec/support/fake_api.rb", "class FakeApi\nend\n"),
+            (
+                "spec/support/order_factory.rb",
+                "module OrderFactory\nend\n",
+            ),
+            (
+                "spec/a_spec.rb",
+                "require 'spec_helper'\nrequire_relative '../lib/m'\nrequire_relative 'support/fake_api'\nRSpec.describe FakeApi do\n  it { expect(OrderFactory.build(m)).to be_ok }\nend\n",
+            ),
+        ]);
+        let input = AssessmentInput {
+            tests: vec![input_test(
+                Some("spec/a_spec.rb"),
+                "spec/a_spec.rb[1:1]",
+                "rspec",
+            )],
+            points: vec![point("lib/m.rb", 2, "1", &[0])],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("lib/m.rb".to_owned(), "def m\n  1\nend\n".to_owned())]);
+        let population = population_from(&root, &input, &sources, Language::Ruby).unwrap();
+        let helpers = population.helpers(0, 1);
+        assert_eq!(
+            helpers.keys().collect::<Vec<_>>(),
+            [
+                "spec/spec_helper.rb",
+                "spec/support/fake_api.rb",
+                "spec/support/order_factory.rb"
+            ]
+        );
+        assert_eq!(
+            helpers["spec/spec_helper.rb"],
+            "    1 require 'rspec'\n    2 "
+        );
+        assert!(!helpers.values().any(|body| body.contains("(cut)")));
+    }
+
+    /// When the file has changed since the run, what is left of it near the
+    /// statement is shown, its comments aside, and nothing when the
+    /// statement now lies past its end.
+    #[test]
+    fn the_code_run_of_a_file_shorter_than_the_run_shows_what_is_left() {
+        let source = (1..=30)
+            .map(|n| format!("step{n}();"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let now = (1..=9)
+            .map(|n| format!("step{n}();\n"))
+            .chain(std::iter::once("// moved".to_owned()))
+            .collect::<String>();
+        let shown = |line: usize| {
+            let input = AssessmentInput {
+                tests: vec![input_test(Some("test/a.test.js"), "a", "vitest")],
+                points: vec![point("src/a.js", line, &format!("step{line}();"), &[0])],
+                decisions: Vec::new(),
+            };
+            let sources = BTreeMap::from([("src/a.js".to_owned(), source.clone())]);
+            population_from(
+                Path::new("/nonexistent"),
+                &input,
+                &sources,
+                Language::JavaScript,
+            )
+            .unwrap()
+            .with_files(BTreeMap::from([("src/a.js".to_owned(), now.clone())]))
+            .code_run(0, &[0])
+            .remove("src/a.js")
+            .unwrap()
+        };
+        assert_eq!(
+            shown(12),
+            "        ... 7 lines not shown\n     8 step8();\n     9 step9();"
+        );
+        assert_eq!(shown(20), "");
+    }
+
+    /// Outside JavaScript and Python the other files a test ran are shown
+    /// too, largest first, each only if it fits what is left of the budget.
+    #[test]
+    fn other_files_a_test_ran_are_shown_while_they_fit() {
+        let big = format!(
+            "package a\n\nfunc g() {{\n{}}}\n",
+            (0..60)
+                .map(|n| format!("\tvalue{n} := compute({n})\n"))
+                .collect::<String>()
+        );
+        let sources = BTreeMap::from([
+            (
+                "a.go".to_owned(),
+                "package a\n\nfunc f(x int) int {\n\ty := x + 1\n\treturn y\n}\n".to_owned(),
+            ),
+            ("b.go".to_owned(), big),
+            (
+                "c.go".to_owned(),
+                "package a\n\nfunc h() {\n\tready := compute(0)\n}\n".to_owned(),
+            ),
+        ]);
+        let mut points = vec![point("a.go", 4, "y := x + 1", &[0])];
+        points.extend(
+            (0..60).map(|n| point("b.go", 4 + n, &format!("value{n} := compute({n})"), &[0])),
+        );
+        points.push(point("c.go", 4, "ready := compute(0)", &[0]));
+        let input = AssessmentInput {
+            tests: vec![input_test(Some("a_test.go"), "TestF", "go-test")],
+            points,
+            decisions: Vec::new(),
+        };
+        let population = population_from(Path::new("/nonexistent"), &input, &sources, Language::Go)
+            .unwrap()
+            .with_files(sources.clone());
+        let asked = population
+            .statements
+            .iter()
+            .position(|s| s.file == "a.go")
+            .unwrap();
+        assert_eq!(
+            population.ran[0]["b.go"].len(),
+            60,
+            "b.go ran, and is left out"
+        );
+        let shown = population.code_run(0, &[asked]);
+        assert_eq!(shown.keys().collect::<Vec<_>>(), ["a.go", "c.go"]);
+        assert!(
+            shown["c.go"].contains("▶    4 \tready := compute(0)"),
+            "{shown:?}"
+        );
+    }
+
+    /// Where no value is written out for a change, each language keeps its
+    /// own wording: Go's zero values in general when the function's result
+    /// types cannot be read, the JVM's default value whatever a statement
+    /// carries, Rust's default (an `Ok` of it for an `Ok`), and Python's
+    /// bare `return` and `raise` deleted.
+    #[test]
+    fn a_change_with_no_value_written_out_keeps_its_language_s_wording() {
+        let go = questions_of(
+            "a.go",
+            "package a\n\nfunc f() {\n\treturn g()\n}\n",
+            &[(4, "return g()")],
+            Language::Go,
+        );
+        assert!(
+            go[0][0].contains("`return g()` returns the zero value of each result instead"),
+            "{go:#?}"
+        );
+
+        let population = |file: &str, source: &str, lines: &[(usize, &str)], language| {
+            let input = AssessmentInput {
+                tests: vec![input_test(Some("t"), "t", "r")],
+                points: lines
+                    .iter()
+                    .map(|(line, text)| point(file, *line, text, &[0]))
+                    .collect(),
+                decisions: Vec::new(),
+            };
+            let sources = BTreeMap::from([(file.to_owned(), source.to_owned())]);
+            population_from(Path::new("/nonexistent"), &input, &sources, language).unwrap()
+        };
+        let java = "class A {\n  int g(int x) {\n    int y = x + 1;\n    return y;\n  }\n}\n";
+        let mut jvm = population(
+            "A.java",
+            java,
+            &[(3, "int y = x + 1;"), (4, "return y;")],
+            Language::Jvm,
+        );
+        for statement in &mut jvm.statements {
+            statement.replacement = Some("0".into());
+        }
+        assert_eq!(
+            jvm.questions(0),
+            [
+                "A.java:3: `int y = x + 1;`: after it runs, the variable it assigns holds the default value (null, or 0 or false for a primitive) instead."
+            ]
+        );
+        assert_eq!(
+            jvm.questions(1),
+            [
+                "A.java:4: `return y;` returns the default value (null, or 0 or false for a primitive) instead (its expression still runs)."
+            ]
+        );
+
+        let rust = "fn f(x: u8) -> Result<u8, ()> {\n    return Ok(x);\n}\nfn g(x: u8) -> u8 {\n    return x;\n}\n";
+        let mut rust = population(
+            "src/a.rs",
+            rust,
+            &[(2, "return Ok(x);"), (5, "return x;")],
+            Language::Rust,
+        );
+        for statement in &mut rust.statements {
+            statement.replacement = None;
+        }
+        assert_eq!(
+            rust.questions(0),
+            [
+                "src/a.rs:2: `return Ok(x);` returns `Ok(Default::default())` instead (the expression is not evaluated)."
+            ]
+        );
+        assert_eq!(
+            rust.questions(1),
+            [
+                "src/a.rs:5: `return x;` returns `Default::default()` instead (the expression is not evaluated)."
+            ]
+        );
+
+        let python = questions_of(
+            "f.py",
+            "def f(v):\n    try:\n        v()\n    except ValueError:\n        raise\n    if v:\n        return\n",
+            &[(5, "raise"), (7, "return")],
+            Language::Python,
+        );
+        assert_eq!(
+            python,
+            [
+                [
+                    "f.py:5: `raise` is deleted: no error is raised here, and execution carries on with whatever follows it."
+                ],
+                [
+                    "f.py:7: `return` is deleted: the function does not return here, and execution carries on with whatever follows it."
+                ],
+            ]
+        );
+    }
+
+    /// The readers' rarer shapes: a helper too long for what is left of the
+    /// budget, JVM lines that call rather than declare, a test call with an
+    /// underscore in its modifier, and a `}` before an `if` that is no
+    /// `else`.
+    #[test]
+    fn the_readers_take_their_rarer_shapes() {
+        let mut rust = vec!["fn big() {"];
+        rust.extend(std::iter::repeat_n("    work();", 130));
+        rust.extend([
+            "}",
+            "fn small() {",
+            "}",
+            "fn t() {",
+            "    big(); small();",
+            "}",
+        ]);
+        let t = rust.len() - 3;
+        assert_eq!(
+            used_definitions(&rust, Language::Rust, t, t + 2),
+            [t - 2, t - 1]
+        );
+        let lines = ["@Test(timeout = 1)", "call(a, () -> {", "});"];
+        assert!(definitions(&lines, Language::Jvm).is_empty());
+        assert!(is_test_call("test.skip_on_ci('x', () => {"));
+        assert_eq!(condition("} if (x) {"), "} if (x) {");
+    }
+
     #[test]
     fn keys_ignore_line_numbers() {
         assert_eq!(
@@ -3264,5 +4383,172 @@ mod tests {
             strip_location("src/a.ts:41: `x` is deleted."),
             "src/a.ts:: `x` is deleted."
         );
+    }
+}
+
+#[cfg(test)]
+mod helper_shape_tests {
+    use super::*;
+
+    /// The line readers the questions are rendered with, each fed the shapes
+    /// that take its other ways: block-comment continuations, escaped and
+    /// unterminated quotes, braces in fixed text, a division beside a
+    /// comment, words that only contain a boolean, Ruby blocks closed on
+    /// their own line, and each language's definitions.
+    #[test]
+    fn the_line_readers_take_each_way() {
+        for (line, comment) in [
+            ("/* c", true),
+            ("*/", true),
+            ("*", true),
+            ("* doc", true),
+            ("*\tdoc", true),
+            ("  // x", true),
+            ("code", false),
+        ] {
+            assert_eq!(Language::Rust.comment(line), comment, "{line:?}");
+        }
+        assert_eq!(
+            name_words("parseV2Header getHTTPResponse"),
+            ["header", "http", "parse", "response"]
+                .map(str::to_owned)
+                .into()
+        );
+        for (text, fragments) in [
+            (
+                r#"x("a \"quoted\" value here")"#,
+                vec![r#"a \"quoted\" value here"#],
+            ),
+            ("'unterminated text here", vec![]),
+            (
+                r#""closing } brace text here""#,
+                vec!["closing } brace text here"],
+            ),
+            (r#""${a$b} literal text here""#, vec!["literal text here"]),
+            (r#""{x} after brace text""#, vec!["after brace text"]),
+        ] {
+            assert_eq!(quoted_fragments(text), fragments, "{text}");
+        }
+        // A `//` in a string is no comment, a lone `/` is division, and a
+        // `#` with no space after it is a JavaScript private field.
+        for (line, at) in [
+            (r#"let s = "a \" // b"; // c"#, 21),
+            ("a / b // c", 6),
+            ("x # y", 2),
+            ("x #y", 4),
+        ] {
+            assert_eq!(comment_start(line), at, "{line}");
+        }
+        assert_eq!(flipped_code("is_true(x) || true"), "is_true(x) || false");
+        assert_eq!(flipped_code("trueish = false"), "trueish = true");
+        assert_eq!(flipped_code("x = True"), "x = False");
+        assert_eq!(
+            brace_end_within(&["fn a() {", "  let x = 1 / 2; // }", "}", "after"], 0, 10),
+            2,
+            "a brace in a comment does not close the block"
+        );
+        let ruby = [
+            "it 'x' do x end",
+            "describe 'y' do",
+            "  it 'z' do",
+            "  end",
+            "end )",
+            "foo {",
+            "}",
+        ];
+        assert_eq!(keyword_end(&ruby, 0), 0);
+        assert_eq!(keyword_end(&ruby, 1), 4);
+        assert_eq!(keyword_end(&ruby, 5), 6);
+        let named = |lines: &[&str], language| {
+            definitions(lines, language)
+                .into_iter()
+                .map(|(name, a, b)| format!("{name} {a}-{b}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            named(
+                &[
+                    "subject{ make }",
+                    "subject(:thing) { 1 }",
+                    "def self.ready?",
+                    "end",
+                    "def go!",
+                    "end",
+                    "let(:item) { 2 }",
+                ],
+                Language::Ruby
+            ),
+            [
+                "subject 0-0",
+                "thing 1-1",
+                "ready? 2-3",
+                "go! 4-5",
+                "item 6-6"
+            ]
+        );
+        assert_eq!(
+            named(
+                &[
+                    "@Test",
+                    "public void run(int a) {",
+                    "}",
+                    "foo(1);",
+                    "return x(",
+                    "int y = z(",
+                    "  fun `helper name`() {}",
+                    "val f = { fun inner() }",
+                ],
+                Language::Jvm
+            ),
+            ["run 1-2", "helper 6-6", "inner 7-7"]
+        );
+        assert_eq!(
+            named(
+                &[
+                    "func (s *S) Method() {",
+                    "}",
+                    "var table = []int{",
+                    "}",
+                    "type T struct {",
+                    "}",
+                    "  func inner() {",
+                ],
+                Language::Go
+            ),
+            ["Method 0-1", "table 2-3", "T 4-5"]
+        );
+        // The test's own lines are not its helpers; what a helper names is.
+        let rust = [
+            "pub(crate) fn helper() {",
+            "}",
+            "const N: u8 = 1;",
+            "#[test]",
+            "fn t() {",
+            "  helper(); big();",
+            "}",
+            "fn big() {",
+            "  helper();",
+            "}",
+        ];
+        assert_eq!(
+            used_definitions(&rust, Language::Rust, 4, 6),
+            [0, 1, 7, 8, 9]
+        );
+        for (text, change, whole) in [
+            ("break\n;", Change::Skip, None),
+            ("call(\n1)", Change::Skip, Some(2)),
+            ("x", Change::Skip, None),
+            ("call(\n1)", Change::Invert, None),
+        ] {
+            let statement = Statement {
+                file: "a".into(),
+                line: 1,
+                text: text.into(),
+                change,
+                replacement: None,
+                tests: vec![],
+            };
+            assert_eq!(whole_statement(&statement), whole, "{text:?}");
+        }
     }
 }

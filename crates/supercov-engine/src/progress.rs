@@ -43,7 +43,12 @@ pub struct ProgressLine {
 
 impl ProgressLine {
     pub fn start(message: &'static str) -> Option<Self> {
-        if cfg!(not(unix)) || !std::io::stderr().is_terminal() {
+        Self::start_when(std::io::stderr().is_terminal(), message)
+    }
+
+    /// The line, when stderr is the `terminal` it is shown on.
+    fn start_when(terminal: bool, message: &'static str) -> Option<Self> {
+        if !terminal {
             return None;
         }
         Self::start_on_terminal(message)
@@ -78,9 +83,8 @@ impl ProgressLine {
 impl Drop for ProgressLine {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        // Only this drop takes the handle, so it is always there to join.
+        let _ = self.handle.take().map(JoinHandle::join);
     }
 }
 
@@ -93,6 +97,14 @@ mod tests {
     /// blocked on that lock via `eprint!`, and `Drop`'s join then hung the
     /// process. The status line must start, write, and drop to completion
     /// while the calling thread holds std's stderr lock.
+    #[test]
+    fn the_status_line_starts_only_on_a_terminal() {
+        assert!(ProgressLine::start_when(false, "not shown").is_none());
+        let line = ProgressLine::start_when(true, "shown on a terminal");
+        assert!(line.is_some());
+        drop(line);
+    }
+
     #[test]
     fn status_line_never_needs_stds_stderr_lock() {
         let diagnostics = std::io::stderr().lock();

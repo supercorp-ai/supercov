@@ -7,7 +7,7 @@ use crate::{
     coverage_report::{
         ArchiveReportRequest, CoverageReport, ExitCodeInput, analyze_coverage_archive,
     },
-    evidence_archive::read_archive_selected,
+    evidence_archive::{read_archive_each, read_archive_selected},
     lifecycle::atomic_write,
     run_store::{RunMetadata, StoredRun},
     source_units::{Code, Diff, named},
@@ -352,8 +352,15 @@ fn the_one(
 }
 fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String> {
     let merged = run.metadata.merged == Some(true);
-    let bytes = fs::read(&run.evidence_path).map_err(|e| e.to_string())?;
-    let evidence_digest = format!("{:x}", Sha256::digest(&bytes));
+    let hex = |digest: [u8; 32]| {
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let (digest, _) =
+        crate::run_store::file_sha256(&run.evidence_path).map_err(|e| e.to_string())?;
+    let evidence_digest = hex(digest);
     if let Some(cached) = fs::read(run.directory.join(MANIFEST_CACHE_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<ManifestCache>(&bytes).ok())
@@ -373,10 +380,19 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
             path == name
         }
     };
-    let entries = read_archive_selected(&run.evidence_path, |path| {
-        named(path, ARCHIVE_PATH) || named(path, "statement-exclusions.json")
-    })
+    // Named by the bytes the entries were read from, whatever the file holds
+    // by the time they are parsed.
+    let mut entries = Vec::new();
+    let read = read_archive_each(
+        &run.evidence_path,
+        |path| named(path, ARCHIVE_PATH) || named(path, "statement-exclusions.json"),
+        |entry| {
+            entries.push(entry);
+            Ok(())
+        },
+    )
     .map_err(|e| e.to_string())?;
+    let evidence_digest = hex(read.sha256);
     let Some(value) = the_one(&entries, |path| named(path, ARCHIVE_PATH))? else {
         return Ok(None);
     };
@@ -387,9 +403,6 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
     }
     let manifest = serde_json::from_value::<InputManifest>(value).map_err(|e| e.to_string())?;
     validate_manifest(&manifest)?;
-    if fs::read(&run.evidence_path).map_err(|e| e.to_string())? != bytes {
-        return Err("Run archive changed during read".into());
-    }
     Ok(Some(RunManifest {
         manifest,
         evidence_digest,
@@ -704,12 +717,11 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
                 }
             }
         }
+        // `affected_tests` names the file of every entry it writes.
         for file in report["changedFiles"].as_array().into_iter().flatten() {
-            if let Some(name) = file["file"].as_str() {
-                changed
-                    .entry(name.to_owned())
-                    .or_insert_with(|| file.clone());
-            }
+            changed
+                .entry(file["file"].as_str().unwrap_or_default().to_owned())
+                .or_insert_with(|| file.clone());
         }
         if meaning.is_null() {
             meaning = report["meaning"].clone();
@@ -1237,7 +1249,8 @@ fn split_words(text: &str) -> Vec<String> {
             previous_lower = false;
             continue;
         }
-        if c.is_uppercase() && previous_lower && !current.is_empty() {
+        // A lowercase letter or digit before is in `current`.
+        if c.is_uppercase() && previous_lower {
             words.push(std::mem::take(&mut current));
         }
         previous_lower = c.is_lowercase() || c.is_ascii_digit();
@@ -1349,6 +1362,20 @@ fn byte_column_in(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_shard_is_a_number_and_anything_else_is_an_entrys_own_name() {
+        assert_eq!(
+            unsharded("shards/1/shards/2/manifest.json"),
+            "manifest.json"
+        );
+        assert_eq!(unsharded("shards//manifest.json"), "shards//manifest.json");
+        assert_eq!(
+            unsharded("shards/a1/manifest.json"),
+            "shards/a1/manifest.json"
+        );
+        assert_eq!(unsharded("manifest.json"), "manifest.json");
+    }
+
     use super::*;
     use crate::evidence_archive::{read_archive, write_archive};
     use crate::run_store::discover_runs;
@@ -1617,6 +1644,32 @@ mod tests {
             "src/app.js removed (this test ran code in it)"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// What moved between two readings of a file, by name: changed, added
+    /// and removed units each where there are some, and `declarations` when
+    /// no unit did.
+    #[test]
+    fn a_change_is_described_by_the_units_that_moved() {
+        let read = |source: &str| crate::source_units::code("a.js", source).unwrap();
+        let describe_between = |before: &str, after: &str| {
+            let (before, after) = (read(before), read(after));
+            let diff = before.diff(&after);
+            describe(&before, &after, &diff)
+        };
+        let base = "function a() {\n  return 1;\n}\nfunction b() {\n  return 2;\n}\n";
+        assert_eq!(
+            describe_between(
+                base,
+                &base.replace("function b() {\n  return 2;", "function c() {\n  return 3;")
+            ),
+            "added c (line 4); removed b (line 4)"
+        );
+        assert_eq!(
+            describe_between(base, &base.replace("return 1;", "return 9;")),
+            "a (line 1)"
+        );
+        assert_eq!(describe_between(base, base), "declarations");
     }
 
     /// h11's `test_receivebuffer.py` for `_receivebuffer.py`, commons-cli's
@@ -1896,5 +1949,476 @@ mod tests {
             "and not the run's stand-in: {report}"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_names_local_paths_with_full_hashes() {
+        assert!(local_path("src/a.ts"));
+        for bad in ["", "a\\b", "C:/a", "a//b", "./a", "a/../b", "a/."] {
+            assert!(!local_path(bad), "{bad:?}");
+        }
+        let manifest = |path: &str, sha256: &str| InputManifest {
+            schema_version: MANIFEST_SCHEMA,
+            language: "javascript".into(),
+            files: [(
+                path.to_owned(),
+                FileFingerprint {
+                    sha256: sha256.into(),
+                    bytes: 1,
+                    code: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let good = "a".repeat(64);
+        validate_manifest(&manifest("src/a.ts", &good)).unwrap();
+        for (path, sha256) in [
+            ("../a.ts", good.as_str()),
+            ("src/a.ts", "abc"),
+            ("src/a.ts", &"z".repeat(64)),
+        ] {
+            assert!(
+                validate_manifest(&manifest(path, sha256)).is_err(),
+                "{path} {sha256}"
+            );
+        }
+    }
+
+    /// Names split the way identifiers read, and a declaration's own lines
+    /// are its span less its children's.
+    #[test]
+    fn words_names_and_own_lines_read_the_way_code_does() {
+        assert_eq!(split_words("receiveBuffer_v2"), ["receive", "buffer", "v2"]);
+        assert_eq!(split_words("HTTPServer"), ["httpserver"]);
+        assert_eq!(split_words("aB"), Vec::<String>::new());
+        assert_eq!(split_words("__x__yz"), ["yz"]);
+        let words = |path: &str| words_of(path).into_iter().collect::<Vec<_>>();
+        assert_eq!(words("tests/test_receive_buffer.py"), ["buffer", "receive"]);
+        assert_eq!(words("ReceiveBufferTest.java"), ["buffer", "receive"]);
+        assert_eq!(words("C:\\app\\spec_io.rb"), ["io"]);
+        assert!(names_word("let total_x = total;", "total"));
+        assert!(names_word("(total)", "total"));
+        assert!(!names_word("subtotal + total_x", "total"));
+        assert!(!names_word("", "total"));
+        let changed = ["buffer", "receive", "send"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            name_match(
+                &serde_json::json!({"file": "tests/test_buffer.py", "name": "tests/test_buffer.py::test_receive[1]"}),
+                &changed
+            ),
+            2
+        );
+        assert_eq!(
+            name_match(&serde_json::json!({"name": "Suite > sends(x)"}), &changed),
+            0
+        );
+        assert_eq!(name_match(&serde_json::json!({}), &changed), 0);
+        let own = |source: &str, path: &str| {
+            let code = crate::source_units::code("src/a.rs", source).unwrap();
+            let index = code
+                .units
+                .iter()
+                .position(|unit| unit.path == path)
+                .unwrap();
+            own_lines(&code, index)
+        };
+        // Adjacent children leave the first and last lines.
+        assert_eq!(
+            own("mod m {\n    fn a() {}\n    fn b() {}\n}\n", "m"),
+            [[1, 1], [4, 4]]
+        );
+        // A gap between children is the declaration's own.
+        assert_eq!(
+            own("mod m {\n    fn a() {}\n\n    fn b() {}\n}\n", "m"),
+            [[1, 1], [3, 3], [5, 5]]
+        );
+        // A child that fills the declaration leaves it nothing.
+        assert_eq!(own("mod m { fn a() {} }\n", "m"), Vec::<[usize; 2]>::new());
+        assert_eq!(own("fn a() {\n}\n", "a"), [[1, 2]]);
+    }
+
+    use std::path::PathBuf;
+
+    /// A project with the fixture run's source, and one of its runs per id,
+    /// made by `make` and published with `files` as its source manifest.
+    struct Project {
+        /// Holds the project, and room beside it.
+        base: crate::test_directory::TestDirectory,
+        root: PathBuf,
+    }
+
+    const APP: &str = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
+
+    impl Project {
+        fn new(label: &str) -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "supercov-manifest-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let root = base.join("project");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join("tests")).unwrap();
+            fs::write(root.join("src/app.js"), APP).unwrap();
+            fs::write(
+                root.join("tests/app.test.js"),
+                "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n",
+            )
+            .unwrap();
+            Self {
+                base: crate::test_directory::TestDirectory::adopt(base),
+                root,
+            }
+        }
+
+        fn write(&self, file: &str, text: &str) {
+            fs::write(self.root.join(file), text).unwrap();
+        }
+
+        /// The run's directory, its archive holding `added` beside the rest.
+        fn run_with(
+            &self,
+            id: &str,
+            make: fn(&Path, &str) -> PathBuf,
+            added: Vec<crate::evidence_archive::EvidenceArchiveEntry>,
+        ) -> PathBuf {
+            let directory = make(&self.root, id);
+            let path = directory.join("evidence.raw.gz");
+            let mut entries = read_archive(&path).unwrap();
+            entries.extend(added);
+            let archive = write_archive(entries, &path).unwrap();
+            let metadata_path = directory.join("run.json");
+            let mut metadata: RunMetadata =
+                serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+            metadata.raw_evidence.files = archive.files;
+            metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+            metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+            fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+            directory
+        }
+
+        fn stored(&self, id: &str) -> StoredRun {
+            discover_runs(&self.root)
+                .unwrap()
+                .runs
+                .into_iter()
+                .find(|run| run.id == id)
+                .unwrap()
+        }
+
+        fn published(
+            &self,
+            id: &str,
+            make: fn(&Path, &str) -> PathBuf,
+            files: &[&str],
+        ) -> StoredRun {
+            self.published_with(id, make, files, Vec::new())
+        }
+
+        fn published_with(
+            &self,
+            id: &str,
+            make: fn(&Path, &str) -> PathBuf,
+            files: &[&str],
+            mut added: Vec<crate::evidence_archive::EvidenceArchiveEntry>,
+        ) -> StoredRun {
+            let inputs = crate::source_capture::capture(
+                &self.root,
+                "python",
+                files.iter().map(PathBuf::from),
+            )
+            .unwrap();
+            let entry = crate::evidence_archive::EvidenceArchiveEntry {
+                path: ARCHIVE_PATH.into(),
+                contents: serde_json::to_vec(&inputs.manifest()).unwrap(),
+            };
+            added.push(entry);
+            let directory = self.run_with(id, make, added);
+            let metadata: RunMetadata =
+                serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap()).unwrap();
+            prepare_publication(&self.root, &directory, &metadata, None).unwrap();
+            self.stored(id)
+        }
+
+        fn affected(&self, run: &StoredRun) -> Value {
+            affected_tests(&self.root, run).unwrap()
+        }
+    }
+
+    fn edit_record(run: &StoredRun, edit: impl FnOnce(&mut Executions)) {
+        let mut executions = recorded(run);
+        edit(&mut executions);
+        fs::write(
+            run.directory.join(EXECUTIONS_FILE),
+            serde_json::to_vec(&executions).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn bucket(report: &Value, key: &str) -> Vec<String> {
+        report[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_manifest_of_another_schema_is_refused() {
+        let project = Project::new("schema");
+        let entry = crate::evidence_archive::EvidenceArchiveEntry {
+            path: ARCHIVE_PATH.into(),
+            contents: br#"{"schemaVersion":2,"language":"python","files":{}}"#.to_vec(),
+        };
+        project.run_with(
+            "old",
+            crate::run_store::create_analyzable_test_run,
+            vec![entry],
+        );
+        assert_eq!(
+            load_manifest(&project.stored("old")).err().unwrap(),
+            "Unsupported source manifest schema; rerun tests with this version of Supercov"
+        );
+    }
+
+    #[test]
+    fn one_incomplete_appearance_of_a_test_makes_its_record_a_lower_bound() {
+        let project = Project::new("appearances");
+        let run = project.published(
+            "partial",
+            crate::run_store::create_partial_test_run,
+            &["src/app.js", "tests/app.test.js"],
+        );
+        let mut report = coverage(&run).unwrap();
+        let mut again = report.view.tests[0].clone();
+        again.attribution = crate::coverage_report::ATTRIBUTION_EXACT.into();
+        report.view.tests.push(again);
+        let manifest = load_manifest(&run).unwrap().manifest;
+        let executions = executions(&report, &manifest, None).unwrap();
+        assert_eq!(executions.tests.len(), 1);
+        assert_eq!(
+            executions.tests[0].attribution,
+            crate::coverage_report::ATTRIBUTION_PARTIAL
+        );
+    }
+
+    /// A source file that is now a link out of the project, or a directory,
+    /// is no longer the run's file: it was removed.
+    #[test]
+    fn a_source_replaced_by_a_link_out_or_a_directory_is_removed() {
+        let project = Project::new("replaced");
+        let run = project.published(
+            "first",
+            crate::run_store::create_analyzable_test_run,
+            &["src/app.js", "tests/app.test.js"],
+        );
+        let removed = "src/app.js removed (this test ran code in it)";
+        let outside = project.base.join("outside.js");
+        fs::write(&outside, APP).unwrap();
+        fs::remove_file(project.root.join("src/app.js")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, project.root.join("src/app.js")).unwrap();
+            let report = project.affected(&run);
+            assert_eq!(report["affected"][0]["reasons"][0], removed, "{report}");
+            fs::remove_file(project.root.join("src/app.js")).unwrap();
+        }
+        fs::create_dir(project.root.join("src/app.js")).unwrap();
+        let report = project.affected(&run);
+        assert_eq!(report["affected"][0]["reasons"][0], removed, "{report}");
+    }
+
+    /// A record naming a unit the run's manifest does not have -- written by
+    /// another version, or by hand -- stands for that unit alone, which no
+    /// change can name.
+    #[test]
+    fn a_recorded_unit_the_manifest_lacks_reaches_no_changed_unit() {
+        let project = Project::new("stale-unit");
+        let run = project.published(
+            "first",
+            crate::run_store::create_analyzable_test_run,
+            &["src/app.js", "tests/app.test.js"],
+        );
+        edit_record(&run, |executions| {
+            executions.tests[0]
+                .files
+                .insert("src/app.js".into(), vec![99]);
+            executions.covered.insert("src/app.js".into(), vec![99]);
+        });
+        project.write("src/app.js", &APP.replace("return 1;", "return 1 + 0;"));
+        let report = project.affected(&run);
+        assert!(bucket(&report, "affected").is_empty(), "{report}");
+        assert_eq!(bucket(&report, "unaffected"), ["test"], "{report}");
+    }
+
+    /// A merged run answers from its parents: a test is as affected as the
+    /// most affected of them says, with every reason any of them gives.
+    #[test]
+    fn a_merge_takes_each_test_at_its_most_affected_with_all_its_reasons() {
+        let project = Project::new("merge");
+        let files = ["src/app.js", "tests/app.test.js"];
+        let make = crate::run_store::create_analyzable_test_run;
+        let ran = project.published("ran", make, &files);
+        let missed = project.published("missed", make, &files);
+        let failed = project.published("failed", make, &files);
+        edit_record(&missed, |executions| executions.tests[0].files.clear());
+        edit_record(&failed, |executions| executions.tests[0].passed = false);
+        project.write("src/app.js", &APP.replace("return 1;", "return 1 + 0;"));
+        let merged = |parents: &[&str]| {
+            let mut run = ran.clone();
+            run.id = "merged".into();
+            run.metadata.merged = Some(true);
+            run.metadata.parents = Some(parents.iter().map(|id| (*id).to_owned()).collect());
+            project.affected(&run)
+        };
+        for parents in [["ran", "missed"], ["missed", "ran"]] {
+            let report = merged(&parents);
+            assert_eq!(bucket(&report, "affected"), ["test"], "{report}");
+            assert!(bucket(&report, "unaffected").is_empty(), "{report}");
+        }
+        let report = merged(&["ran", "failed"]);
+        assert_eq!(
+            report["affected"][0]["reasons"],
+            json!([
+                "src/app.js: work (line 1) changed (this test ran it)",
+                "did not pass in the run"
+            ]),
+            "{report}"
+        );
+        assert_eq!(report["summary"]["changedFiles"], 1, "{report}");
+    }
+
+    /// A JVM file whose declarations changed reaches a test whose file names
+    /// one of them, unless what the test ran there, or its being the test
+    /// file, already decided.
+    #[test]
+    fn a_test_file_naming_a_changed_jvm_class_is_affected_by_it() {
+        let project = Project::new("named");
+        let java = "class Converter {\n    static int size(int n) {\n        return n;\n    }\n}\n";
+        project.write("src/Converter.java", java);
+        let files = ["src/app.js", "tests/app.test.js", "src/Converter.java"];
+        let run = project.published(
+            "first",
+            crate::run_store::create_analyzable_test_run,
+            &files,
+        );
+        project.write(
+            "src/Converter.java",
+            &java.replace("static int size", "static long size"),
+        );
+        // The test file does not name it.
+        let report = project.affected(&run);
+        assert!(bucket(&report, "affected").is_empty(), "{report}");
+        // It does.
+        project.write(
+            "tests/app.test.js",
+            "import assert from 'node:assert/strict';\nassert.equal(work(), 1); // Converter\n",
+        );
+        let report = project.affected(&run);
+        assert_eq!(bucket(&report, "affected"), ["test"], "{report}");
+        let named = "src/Converter.java: declarations changed, and the test file names Converter (code that runs once per process is credited to the first test to reach it)";
+        assert!(
+            report["affected"][0]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == named),
+            "{report}"
+        );
+        // What it ran in the file decides instead, and so does the file
+        // being the test's own.
+        let names_it = |report: &Value| {
+            report["affected"][0]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == named)
+        };
+        edit_record(&run, |executions| {
+            executions.tests[0]
+                .files
+                .insert("src/Converter.java".into(), vec![]);
+        });
+        let report = project.affected(&run);
+        assert!(!names_it(&report), "{report}");
+        edit_record(&run, |executions| {
+            executions.tests[0].files.remove("src/Converter.java");
+            executions.tests[0].test.file = "src/Converter.java".into();
+        });
+        let report = project.affected(&run);
+        assert!(!names_it(&report), "{report}");
+        assert!(
+            report["affected"][0]["reasons"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("test file changed"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_short_or_generic_file_name_is_no_name_a_test_uses() {
+        let java = "class Holder {\n    int n;\n}\n";
+        let kotlin = "class Holder {\n    val n: Int = 1\n}\n";
+        for (file, text, expected) in [
+            ("src/A.java", java, ["Holder"].as_slice()),
+            ("src/main.kt", kotlin, ["Holder"].as_slice()),
+            ("src/Store.java", java, ["Holder", "Store"].as_slice()),
+        ] {
+            let before = FileFingerprint::read(file, text);
+            let after = FileFingerprint::read(file, &text.replace("Holder", "Holder<T>"));
+            let changes = BTreeMap::from([(
+                file,
+                file_change(Some(&before), Some(&after), Some(&[])).unwrap(),
+            )]);
+            let named = named_by_tests(&changes);
+            assert_eq!(
+                named[file],
+                expected.iter().map(|name| (*name).to_owned()).collect(),
+                "{file}"
+            );
+        }
+    }
+
+    /// A helper a serving process loaded for a test, which the test's own
+    /// file imports too, reaches it through the import.
+    #[test]
+    fn a_served_helper_the_test_imports_reaches_it_through_the_import() {
+        let project = Project::new("served");
+        fs::create_dir_all(project.root.join("tests/helpers")).unwrap();
+        project.write("tests/helpers/server.js", "export const port = 1;\n");
+        project.write(
+            "tests/app.test.js",
+            "import assert from 'node:assert/strict';\nimport { port } from './helpers/server.js';\nassert.equal(port, 1);\n",
+        );
+        let reach = crate::evidence_archive::EvidenceArchiveEntry {
+            path: crate::support_reach::ARCHIVE_PATH.into(),
+            contents: serde_json::to_vec(&json!({
+                "files": {"tests/helpers/server.js": ["t1"]},
+                "names": {"t1": "test"},
+            }))
+            .unwrap(),
+        };
+        let run = project.published_with(
+            "first",
+            crate::run_store::create_analyzable_test_run,
+            &["src/app.js", "tests/app.test.js", "tests/helpers/server.js"],
+            vec![reach],
+        );
+        project.write("tests/helpers/server.js", "export const port = 2;\n");
+        let report = project.affected(&run);
+        assert_eq!(
+            report["affected"][0]["reasons"],
+            json!(["tests/helpers/server.js changed: top level (this test's file loads it)"]),
+            "{report}"
+        );
     }
 }

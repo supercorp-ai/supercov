@@ -488,9 +488,11 @@ fn shift_source_map(
                 shift += replacement.len() as isize - (*end - *start) as isize;
                 edit_index += 1;
             }
+            // The loop above stops at the first edit that ends past the
+            // token, so the token is inside it exactly when it starts there.
             let shifted_offset = edits
                 .get(edit_index)
-                .filter(|(start, end, _)| *start <= original_offset && original_offset < *end)
+                .filter(|(start, _, _)| *start <= original_offset)
                 .map_or_else(
                     || original_offset.saturating_add_signed(shift),
                     |(start, _, _)| start.saturating_add_signed(shift),
@@ -695,8 +697,10 @@ fn restore_function_source(
 fn generated_statement_span(source: &str) -> Option<Span> {
     let last_line = source.rfind('\n').map_or(0, |newline| newline + 1);
     let length = u32::try_from(source.len()).ok()?;
-    (source[last_line..].is_ascii() && length < u32::MAX - 2)
-        .then(|| Span::new(length + 1, length + 2))
+    // Saturating only for a source of 4 GiB, which oxc does not parse.
+    source[last_line..]
+        .is_ascii()
+        .then(|| Span::new(length.saturating_add(1), length.saturating_add(2)))
 }
 
 /// A coverage tool the tests run itself (c8, nyc, Node's `--test-coverage`,
@@ -746,7 +750,8 @@ impl<'a> VisitMut<'a> for GeneratedStatementSpans<'a, '_> {
     }
 
     fn visit_block_statement(&mut self, block: &mut oxc_ast::ast::BlockStatement<'a>) {
-        if self.depth > 0 && block.span.is_empty() {
+        // Every block is inside a statement, so never at the top level.
+        if block.span.is_empty() {
             block.span = self.span;
         } else if self.borrowed(block.span)
             // Not after a jump: `allowUnreachableCode: false` would reject it
@@ -1064,6 +1069,9 @@ pub struct CandidateLimitation {
 pub enum CandidateError {
     UnknownSourceType(String),
     Parse(Vec<String>),
+    /// Supercov broke one of its own invariants on this file: a bug, with
+    /// the message it panicked with.
+    Internal(String),
     CommentPreservation {
         expected: usize,
         actual: usize,
@@ -1078,6 +1086,7 @@ impl std::fmt::Display for CandidateError {
                 write!(formatter, "no JavaScript source type for {file}")
             }
             Self::Parse(messages) => write!(formatter, "{}", messages.join("; ")),
+            Self::Internal(message) => write!(formatter, "an internal error: {message}"),
             Self::CommentPreservation {
                 expected,
                 actual,
@@ -1748,10 +1757,12 @@ impl<'a> Visit<'a> for AssertionEdits<'_> {
 
 /// A callee that is an identifier or a qualified name (`assert`,
 /// `assert.strict.ok`), dotted and without whitespace: what `typeof` takes.
+/// No member of it is optional: an optional link puts the whole call inside
+/// a chain expression, and the callee here is a statement's own call.
 fn entity_name(callee: &Expression<'_>) -> Option<String> {
     match callee {
         Expression::Identifier(identifier) => Some(identifier.name.to_string()),
-        Expression::StaticMemberExpression(member) if !member.optional => Some(format!(
+        Expression::StaticMemberExpression(member) => Some(format!(
             "{}.{}",
             entity_name(&member.object)?,
             member.property.name
@@ -2298,8 +2309,19 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                 }),
             callee => {
                 let member_operation = assertion_member_object(callee).and_then(|object| {
-                    let Expression::Identifier(identifier) = object else {
-                        return None;
+                    // `assert.strict.equal(...)`: the strict namespace of the
+                    // module the binding holds.
+                    let (identifier, strict) = match object {
+                        Expression::Identifier(identifier) => (identifier, false),
+                        Expression::StaticMemberExpression(member)
+                            if member.property.name == "strict" =>
+                        {
+                            let Expression::Identifier(identifier) = &member.object else {
+                                return None;
+                            };
+                            (identifier, true)
+                        }
+                        _ => return None,
                     };
                     let symbol = referenced_symbol(identifier, self.scoping)?;
                     let method = assertion_member_name(callee)?;
@@ -2307,6 +2329,10 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                         .objects
                         .get(&symbol)
                         .filter(|_| NODE_ASSERT_METHODS.contains(&method))
+                        .map(|module| match module.as_str() {
+                            "node:assert" if strict => "node:assert/strict",
+                            module => module,
+                        })
                         .map(|module| format!("{module}.{method}"))
                 });
                 member_operation.or_else(|| expect_operation(callee, self.bindings, self.scoping))
@@ -2627,11 +2653,12 @@ impl SourceReads<'_> {
                 self.read(&inner.left);
                 self.read(&inner.right);
             }
-            Expression::SequenceExpression(inner) => {
-                if let Some(last) = inner.expressions.last() {
-                    self.read(last);
-                }
-            }
+            Expression::SequenceExpression(inner) => self.read(
+                inner
+                    .expressions
+                    .last()
+                    .expect("a parsed sequence has at least two expressions"),
+            ),
             Expression::AssignmentExpression(inner) => self.read(&inner.right),
             _ => {}
         }
@@ -2656,10 +2683,13 @@ impl<'a> Visit<'a> for SourceReads<'_> {
     }
 
     fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'a>) {
-        if property.computed
-            && let Some(key) = property.key.as_expression()
-        {
-            self.read(key);
+        if property.computed {
+            self.read(
+                property
+                    .key
+                    .as_expression()
+                    .expect("a computed key is an expression"),
+            );
         }
         walk::walk_object_property(self, property);
     }
@@ -2896,14 +2926,20 @@ fn erased_imports(program: &Program<'_>, elide_type_imports: bool) -> HashSet<Sp
                                         scoping.get_resolved_references(symbol).peekable();
                                     // An unused binding may be needed by a JSX/decorator
                                     // transform. Only positively identified type uses count.
-                                    refs.peek().is_some()
-                                        && refs.all(|r| r.is_type() && !r.is_value())
+                                    refs.peek().is_some() && refs.all(|r| r.flags().is_type_only())
                                 })
                             })
                     }));
             erased.then_some(span_key(declaration.span))
         })
         .collect()
+}
+
+/// Holds the rewrite to the plan: a tree it rewrites as planned is planned.
+fn assert_planned<T>(targets: &HashMap<SpanKey, T>, span: Span) {
+    targets
+        .get(&span_key(span))
+        .expect("a declarator's logical initializer is planned");
 }
 
 fn executable_statement(statement: &Statement<'_>) -> bool {
@@ -3047,12 +3083,9 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
         node: &mut ArrowFunctionExpression<'a>,
         context: &mut TraverseCtx<'a, ()>,
     ) {
-        let point_span = function_point_span(node.span, context);
-        let label = if point_span == node.span {
-            function_label(None, context)
-        } else {
-            None
-        };
+        // A method or an accessor, whose point is its whole definition, is a
+        // function, never an arrow: an arrow's point is its own span.
+        let label = function_label(None, context);
         if self
             .source_sensitive_functions
             .contains(&span_key(node.span))
@@ -3061,7 +3094,7 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
             return;
         }
         if self.pass == PointPass::Functions && !self.unsafe_context() {
-            let point = self.point(point_span, "function", label);
+            let point = self.point(node.span, "function", label);
             self.function_targets
                 .insert(span_key(node.span), point.id.clone());
             self.points.push(point);
@@ -3890,13 +3923,23 @@ pub fn instrument_with_import_policy(
     capability_wrapper: &str,
     elide_type_imports: bool,
 ) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(
-        source,
-        file,
-        RuntimeBinding::DirectGlobal,
-        Some(capability_wrapper),
-        elide_type_imports,
-    )
+    // One file's bug costs that file its measurement, not the run.
+    crate::contained::contained(|| {
+        crate::fault::or(
+            "instrument-panic",
+            || panic!("injected fault at instrument-panic"),
+            || {
+                instrument_candidate_with_binding(
+                    source,
+                    file,
+                    RuntimeBinding::DirectGlobal,
+                    Some(capability_wrapper),
+                    elide_type_imports,
+                )
+            },
+        )
+    })
+    .unwrap_or_else(|message| Err(CandidateError::Internal(message)))
 }
 
 fn instrument_candidate_with_binding(
@@ -4706,11 +4749,17 @@ impl<'a> StatementProbeTransformer<'a> {
         {
             ids.extend(nested);
         }
+        // Such a class always has a point: `enter_class` gives one to every
+        // class an `export default` holds but an ambient one, which a default
+        // export cannot spell, and an export is never in an unsafe function.
         if let Statement::ExportDefaultDeclaration(export) = statement
             && let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration
-            && let Some(nested) = self.targets.remove(&span_key(class.span))
         {
-            ids.extend(nested);
+            ids.extend(
+                self.targets
+                    .remove(&span_key(class.span))
+                    .unwrap_or_default(),
+            );
         }
         ids
     }
@@ -4894,10 +4943,14 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
         {
             return;
         }
-        if let Some(target) = self.targets.remove(&span_key(function.span))
-            && let Some(body) = &mut function.body
-        {
-            body.statements.insert(0, self.probe(&target));
+        // A function is given a point only where it has a body.
+        if let Some(target) = self.targets.remove(&span_key(function.span)) {
+            function
+                .body
+                .as_mut()
+                .expect("a function with a point has a body")
+                .statements
+                .insert(0, self.probe(&target));
         }
         walk_mut::walk_function(self, function, flags);
     }
@@ -5543,10 +5596,9 @@ impl<'a> DefaultTransformer<'a> {
         }
     }
 
+    /// `entries` is never empty: a declaration has entries only once one is
+    /// pushed.
     fn prepend_entries(&self, body: &mut Statement<'a>, entries: Vec<Statement<'a>>) {
-        if entries.is_empty() {
-            return;
-        }
         if let Statement::BlockStatement(block) = body {
             for (index, entry) in entries.into_iter().enumerate() {
                 block.body.insert(index, entry);
@@ -6210,9 +6262,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         while let Expression::ParenthesizedExpression(parenthesized) = inner {
             inner = &mut parenthesized.expression;
         }
-        if matches!(inner, Expression::LogicalExpression(_))
-            && self.logical_targets.contains_key(&span_key(inner.span()))
-        {
+        // Planned, as every logical operand of a planned tree is: the plan
+        // leaves out only trees in a decision, a `with` body or a function
+        // whose source is read, and an operand shares its tree's context.
+        // `instrument_tree` holds it to that.
+        if matches!(inner, Expression::LogicalExpression(_)) {
             self.instrument_tree(inner, path);
             return;
         }
@@ -6267,9 +6321,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         while let Expression::ParenthesizedExpression(parenthesized) = inner {
             inner = &parenthesized.expression;
         }
-        if let Expression::LogicalExpression(logical) = inner
-            && let Some(first) = self.logical_targets.remove(&span_key(logical.span))
-        {
+        if let Expression::LogicalExpression(logical) = inner {
+            let first = self
+                .logical_targets
+                .remove(&span_key(logical.span))
+                .expect("every logical operand of a planned tree is planned: the plan leaves out only trees in a decision, a `with` body or a function whose source is read, and an operand shares its tree's context");
             let kind = match logical.operator {
                 LogicalOperator::Or => 0,
                 LogicalOperator::And => 1,
@@ -6427,10 +6483,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
                 .map(|deciders| {
                     let mut by_leaf = Vec::new();
                     if deciders.len() > 1 {
+                        // Leaves are numbered in evaluation order and the
+                        // deciders come in that order, each once, so every
+                        // one is past the end of the table so far.
                         for (leaf, points) in deciders {
-                            if by_leaf.len() <= *leaf {
-                                by_leaf.resize(*leaf + 1, Vec::new());
-                            }
+                            by_leaf.resize(*leaf + 1, Vec::new());
                             by_leaf[*leaf] = points.clone();
                         }
                     }
@@ -6568,9 +6625,11 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
             while let Expression::ParenthesizedExpression(parenthesized) = tree {
                 tree = &mut parenthesized.expression;
             }
-            if matches!(tree, Expression::LogicalExpression(_))
-                && self.logical_targets.contains_key(&span_key(tree.span()))
-            {
+            // An initializer's tree is planned: it is in no decision, and a
+            // declarator in a `with` body or a source-read function is not
+            // visited.
+            if matches!(tree, Expression::LogicalExpression(_)) {
+                assert_planned(&self.logical_targets, tree.span());
                 let site = self.name_tree(tree);
                 let recorded = self.record_tree(&site, self.identifier(&name.name));
                 self.after_declaration.push(recorded);
@@ -6861,13 +6920,14 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
         components[..components.len().saturating_sub(1)].contains(&"app")
     }
 
+    /// Asked only of a route module, which is a Remix route, a Next.js one,
+    /// or both.
     fn is_handler_name(&self, name: &str) -> bool {
-        (self.is_remix_route() && matches!(name, "loader" | "action"))
-            || (self.is_next_route()
-                && matches!(
-                    name,
-                    "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS"
-                ))
+        (matches!(name, "loader" | "action") && self.is_remix_route())
+            || (matches!(
+                name,
+                "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS"
+            ) && self.is_next_route())
     }
 
     fn identifier(&self, name: &str) -> Expression<'a> {
@@ -7085,13 +7145,8 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
 
     fn transform_program(&mut self, program: &mut Program<'a>) {
         let route_module = self.is_remix_route() || self.is_next_route();
-        let server_entry = self.file.starts_with("app/entry.server.")
-            && ["js", "jsx", "ts", "tsx", "mjs", "mts", "cjs", "cts"].contains(
-                &Path::new(self.file)
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or(""),
-            );
+        // Every file instrumented has a JavaScript or TypeScript extension.
+        let server_entry = self.file.starts_with("app/entry.server.");
         if !route_module && !server_entry {
             return;
         }
@@ -7145,16 +7200,11 @@ impl<'a> RequestPhaseTransformer<'a> {
         )
     }
 
-    fn already_wrapped(&self, argument: &Argument<'a>) -> bool {
-        matches!(
-            argument,
-            Argument::CallExpression(call)
-                if expression_is_identifier(&call.callee, &self.with_request_phase)
-        )
-    }
-
+    /// An argument is wrapped once: the walk has passed it by the time it is,
+    /// the route pass wraps only an export's value, and the helper's name is
+    /// one the source does not use.
     fn wrap_argument(&mut self, argument: &mut Argument<'a>, event: Option<&str>) {
-        if self.already_wrapped(argument) || !argument.is_expression() {
+        if !argument.is_expression() {
             return;
         }
         let expression = argument.to_expression_mut();
@@ -8056,21 +8106,26 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         });
         let is_root = self.value_decisions.values().any(|root| *root == key);
         walk_mut::walk_expression(self, expression);
-        if let Some(names) = self.inline_names.take()
-            && matches!(expression, Expression::ConditionalExpression(_))
-        {
+        // Only `visit_conditional_expression` sets the names, at its end, and
+        // only `walk_expression` calls it: the expression is that conditional.
+        if let Some(names) = self.inline_names.take() {
             let conditional = expression.take_in(self.ast.allocator);
             *expression = self.wrap_inline_frame(conditional, &names);
         }
-        if let Some((root, plan, shape)) = value
-            && let Some(applied) = self.apply_decision(expression, plan)
-        {
+        // A value decision has at most 32 conditions, and so is applied.
+        if let Some((root, plan, shape)) = value {
+            let applied = self
+                .apply_decision(expression, plan)
+                .expect("a value decision fits the encoding");
             self.pending_values
                 .entry(root)
                 .or_default()
                 .push((applied, shape));
         }
-        if is_root && let Some(pending) = self.pending_values.remove(&key) {
+        if is_root {
+            let pending = self.pending_values.remove(&key).expect(
+                "a value tree's root is visited after the decisions inside it, each of which leaves its value pending",
+            );
             self.record_value_outcomes(expression, pending);
         }
     }
@@ -8372,9 +8427,10 @@ fn reachable_vector_count(expression: &Expression<'_>, conditions: &[Span]) -> u
         indices: &HashMap<SpanKey, usize>,
     ) -> bool {
         match transparent_expression(expression) {
-            Expression::LogicalExpression(logical)
-                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
-            {
+            // Only a decision whose conditions are transparent is evaluated,
+            // and a `??` is not: every logical expression here is `&&` or
+            // `||`.
+            Expression::LogicalExpression(logical) => {
                 let left = evaluate(&logical.left, assignment, encoded, indices);
                 if logical.operator == LogicalOperator::And {
                     left && evaluate(&logical.right, assignment, encoded, indices)
@@ -9106,14 +9162,11 @@ impl DefaultCollector<'_> {
         match pattern {
             BindingPattern::AssignmentPattern(_) => true,
             BindingPattern::ObjectPattern(object) => {
+                // An object's rest is a name, never a pattern with defaults.
                 object
                     .properties
                     .iter()
                     .any(|property| Self::has_binding_default(&property.value))
-                    || object
-                        .rest
-                        .as_ref()
-                        .is_some_and(|rest| Self::has_binding_default(&rest.argument))
             }
             BindingPattern::ArrayPattern(array) => {
                 array
@@ -9908,9 +9961,8 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
             }
             Expression::UnaryExpression(unary)
                 if unary.operator.is_not()
-                    && has_compound_boolean_decision(&unary.argument)
-                    && !compound_root(&unary.argument)
-                        .is_some_and(|root| self.in_a_decision(root.span)) =>
+                    && compound_root(&unary.argument)
+                        .is_some_and(|root| !self.in_a_decision(root.span)) =>
             {
                 Some(expression)
             }
@@ -10001,18 +10053,7 @@ fn transparent_expression<'a>(expression: &'a Expression<'a>) -> &'a Expression<
 }
 
 fn has_compound_boolean_decision(expression: &Expression<'_>) -> bool {
-    match expression {
-        Expression::ParenthesizedExpression(parenthesized) => {
-            has_compound_boolean_decision(&parenthesized.expression)
-        }
-        Expression::LogicalExpression(logical) => {
-            matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or)
-        }
-        Expression::UnaryExpression(unary) if unary.operator.is_not() => {
-            has_compound_boolean_decision(&unary.argument)
-        }
-        _ => false,
-    }
+    compound_root(expression).is_some()
 }
 
 /// A decision's and/or/not structure over its conditions, numbered as
@@ -10253,6 +10294,170 @@ fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shapes the instrumenter has to place probes around: each
+    /// instruments (output that does not parse is an error), and a test
+    /// file's assertions are counted through every way of importing them.
+    #[test]
+    fn every_shape_instruments_and_every_assertion_import_counts() {
+        for (file, source) in [
+            (
+                "src/a.js",
+                "export default function f(a, b) { return (a && b) || (a, b); }\n",
+            ),
+            (
+                "src/b.ts",
+                "export function g(x = 1, y?: number): number { return -1 + x + (y ?? 0); }\nlet z;\nexport const t = `a${z}b`;\nexport const u = `plain`;\n",
+            ),
+            (
+                "src/c.jsx",
+                "export const V = ({ x }) => <div>{}{/* c */}{x ? 1 : 2}</div>;\n",
+            ),
+            (
+                "src/d.js",
+                "const k = 'a';\nexport const o = { [k]: 1, [`t`]: 2 };\nString(o);\nconst a = null;\na?.b();\na?.();\na?.y?.z;\n",
+            ),
+            (
+                "src/e.js",
+                "import * as stylex from '@stylexjs/stylex';\nexport const s = stylex.create({ a: { color: 'red' } });\n",
+            ),
+            (
+                "app/routes/x.jsx",
+                "export async function loader() { return null; }\nexport async function action() { return null; }\nexport default function R() { return null; }\n",
+            ),
+            (
+                "app/entry.server.jsx",
+                "export default function handleRequest() { return 1; }\n",
+            ),
+            (
+                "src/f.js",
+                "export function f(a, b) {\n  switch (a) { case 1: break; default: }\n  label: for (;;) { break label; }\n  for (const x of []) ;\n  while (a) b();\n  do {} while (0);\n}\n",
+            ),
+            (
+                "src/g.js",
+                "export function g(b, c, e, f, h, i, p, q) {\n  const a = b && c;\n  const d = (e || f);\n  let w = (f ?? h) && i;\n  if ((p && q)) { return w; }\n  return [a, d];\n}\n",
+            ),
+            (
+                "src/h.js",
+                "export function h(x, y, z, arr) {\n  x = y || z;\n  x ||= y;\n  x += 1;\n  arr.map(function (v) { return v; });\n  setTimeout(() => {}, 1);\n  return x;\n}\n",
+            ),
+            (
+                "src/i.ts",
+                "declare const q: number;\ndeclare function r(): void;\nexport type T = { a: string };\nimport type { U } from './u';\nexport enum E { A }\nexport namespace N { export const n = 1; }\nexport class C { constructor(private readonly v = 1) {} m(): number { return this.v; } }\n",
+            ),
+        ] {
+            let out = instrument_candidate(source, file)
+                .unwrap_or_else(|error| panic!("{file}: {error:?}\n{source}"));
+            assert!(!out.code.is_empty(), "{file}");
+        }
+        for (source, assertions) in [
+            (
+                "import assert from 'node:assert';\nimport test from 'node:test';\ntest('a', () => { assert.strict.equal(1, 1); assert(1); });\n",
+                2,
+            ),
+            (
+                "import { strict as assert } from 'assert';\ntest('b', () => { assert.ok(true); });\n",
+                1,
+            ),
+            (
+                "const assert = require('node:assert');\ntest('c', () => { assert.strict.equal(1, 1); assert.strict.deepEqual([], []); });\n",
+                2,
+            ),
+            (
+                "import expect from 'expect';\ntest('d', () => { expect(1).toBe(1); });\n",
+                1,
+            ),
+            ("test('e', () => { notExpect(1); });\n", 0),
+        ] {
+            let out = instrument_node_assertion_phases(source, "tests/x.test.mjs")
+                .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+            assert_eq!(out.assertions, assertions, "{source}\n{}", out.code);
+            if source.contains("assert.strict.equal") {
+                assert!(
+                    out.code.contains("\"node:assert/strict.equal\""),
+                    "{}",
+                    out.code
+                );
+            }
+        }
+    }
+
+    /// More shapes the instrumenter reads: optional links in every
+    /// position, negations of literals and names, template literals with and
+    /// without substitutions, `String()` with and without an argument,
+    /// route modules of each framework, names its helpers must step around,
+    /// and StyleX's compile-time and runtime calls. Each instruments to
+    /// source that parses again.
+    #[test]
+    fn more_shapes_instrument_to_source_that_parses() {
+        for (file, source) in [
+            (
+                "src/m.js",
+                "const a = {}, k = 'x';\nexport const r = [a?.b.c, a.b?.c(), a?.[k], a?.b?.(), -k, -1, `t`, `${k}`, String(), String(a)];\n",
+            ),
+            (
+                "app/routes/y.tsx",
+                "export const loader = async () => null;\nexport async function action() { return null; }\nexport function meta() { return []; }\n",
+            ),
+            (
+                "app/api/x/route.ts",
+                "export async function GET() { return new Response('x'); }\nexport async function helper() { return 1; }\n",
+            ),
+            (
+                "app/entry.server.tsx",
+                "export default function handleRequest(): number { return 1; }\n",
+            ),
+            (
+                "src/under.js",
+                "const _a = 1, __b = 2, a$1 = 3;\nexport function f(_) { return _ ? _a : __b + a$1; }\n",
+            ),
+            (
+                "src/style.js",
+                "import * as stylex from '@stylexjs/stylex';\nexport const s = stylex.create({ a: { color: 'red' } });\nexport const k = stylex.keyframes({ from: { opacity: 0 } });\nexport const p = (x) => stylex.props(x);\n",
+            ),
+        ] {
+            let out = instrument_candidate(source, file)
+                .unwrap_or_else(|error| panic!("{file}: {error:?}\n{source}"));
+            assert!(!out.code.is_empty(), "{file}");
+        }
+        for (source, assertions) in [
+            ("test('g', () => { expect(1).toBe(1); check(2); });\n", 1),
+            (
+                "const assert = require('assert');\ntest('h', () => { assert.ok(1); });\n",
+                1,
+            ),
+        ] {
+            let out = instrument_node_assertion_phases(source, "tests/y.test.mjs")
+                .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+            assert_eq!(out.assertions, assertions, "{source}\n{}", out.code);
+        }
+    }
+
+    /// Text edits are refused where they overlap, run past the source,
+    /// are reversed, or would add or remove a line.
+    #[test]
+    fn text_edits_that_overlap_or_move_a_line_are_refused() {
+        let edit = |start: usize, end: usize, text: &str| TextEdit {
+            start,
+            end,
+            rank: 0,
+            text: text.into(),
+        };
+        let source = "a(1);\nb(2);\n";
+        let apply = |edits: Vec<TextEdit>| match apply_text_edits(source, edits, "a.test.js") {
+            Ok((code, _)) => code,
+            Err(CandidateError::Parse(reasons)) => reasons.join("; "),
+            Err(error) => format!("{error:?}"),
+        };
+        assert_eq!(apply(vec![edit(0, 4, "x(9)")]), "x(9);\nb(2);\n");
+        assert!(
+            apply(vec![edit(0, 4, "x"), edit(2, 5, "y")]).contains("overlapping assertion edits")
+        );
+        assert!(apply(vec![edit(5, 99, "x")]).contains("overlapping assertion edits"));
+        assert!(apply(vec![edit(4, 2, "x")]).contains("overlapping assertion edits"));
+        assert!(apply(vec![edit(0, 4, "x(\n9)")]).contains("would move a line"));
+        assert!(apply(vec![edit(4, 7, ";")]).contains("would move a line"));
+    }
 
     #[test]
     fn line_index_lookups_agree_with_walking_the_line() {
@@ -10536,6 +10741,26 @@ mod tests {
         );
     }
 
+    /// A function whose text is read keeps it whole, the functions inside
+    /// it with it; a file that reads no function's text is printed as is.
+    #[test]
+    fn a_read_function_keeps_its_nested_functions_as_written() {
+        let source = "export function outer(a) {\n  function inner(b) {  return b  * 2; }\n  const arrow = (c) =>  c + 1;\n  return inner(a) + arrow(a);\n}\nexport const text = outer.toString();\n";
+        let output = instrument_direct_candidate(source, "src/outer.js").unwrap();
+        assert!(
+            output
+                .code
+                .contains("function inner(b) {  return b  * 2; }")
+                && output.code.contains("const arrow = (c) =>  c + 1;"),
+            "{}",
+            output.code
+        );
+        let plain =
+            instrument_direct_candidate("export function f(a) {  return a; }\n", "src/f.js")
+                .unwrap();
+        assert!(!plain.code.contains("{  return a; }"), "{}", plain.code);
+    }
+
     #[test]
     fn codegen_output_reparses_for_typescript_and_tsx() {
         for (file, source) in [
@@ -10641,6 +10866,65 @@ mod tests {
         assert_eq!(output.capability_imports, 1);
         assert!(output.code.contains("__supercovRawlaunch"));
         assert!(!output.code.contains("__supercovRawunrelated"));
+    }
+
+    #[test]
+    fn type_only_imports_are_never_wrapped_as_capabilities() {
+        let source = concat!(
+            "import type { Options } from './sdk';\n",
+            "import { type Shape, ImageBuilder } from './sdk';\n",
+            "const shape: Shape = { mounts: [{ source: process.cwd(), target: '/workspace' }] } as Options;\n",
+            "await ImageBuilder.build(shape);\n",
+        );
+        // In a test file, as text edits.
+        let test = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.ts",
+            &[],
+            Some("../.supercov/launchSupervisor.mjs"),
+        )
+        .unwrap();
+        assert_eq!(test.capability_imports, 1);
+        assert!(
+            test.code.contains("__supercovRawImageBuilder"),
+            "{}",
+            test.code
+        );
+        assert!(!test.code.contains("__supercovRawShape"), "{}", test.code);
+        assert!(!test.code.contains("__supercovRawOptions"), "{}", test.code);
+        // In a source file, through the syntax tree.
+        let candidate = instrument_with_import_policy(
+            source,
+            "src/launch.ts",
+            "../.supercov/launchSupervisor.mjs",
+            false,
+        )
+        .unwrap();
+        assert!(
+            candidate.code.contains("__supercovRawImageBuilder"),
+            "{}",
+            candidate.code
+        );
+        assert!(
+            !candidate.code.contains("__supercovRawShape"),
+            "{}",
+            candidate.code
+        );
+        assert!(
+            !candidate.code.contains("__supercovRawOptions"),
+            "{}",
+            candidate.code
+        );
+    }
+
+    #[test]
+    fn the_expect_package_s_default_export_is_an_assertion() {
+        let source = concat!(
+            "import expect from 'expect';\n",
+            "test('value', () => { expect(value()).toBe(1); });\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
     }
 
     #[test]
@@ -11954,6 +12238,13 @@ mod tests {
         let mixed = instrument_with_import_policy(source, "src/mixed.ts", "./capability.mjs", true)
             .unwrap();
         assert!(mixed.excluded_statements.is_empty());
+        // A binding re-exported by name may be a value, whatever else uses it
+        // as a type: it remains.
+        let source = "import { Shared } from './shared.js';\nexport function g(s: Shared) { return s; }\nexport { Shared };\n";
+        let reexported =
+            instrument_with_import_policy(source, "src/reexport.ts", "./capability.mjs", true)
+                .unwrap();
+        assert!(reexported.excluded_statements.is_empty());
     }
 
     /// A line's first mapping: `None` for no segment, `Some(None)` for an
@@ -12461,6 +12752,15 @@ mod tests {
                 "app/route.ts",
                 "export function helper(request) { return request.url; }",
             ),
+            // One framework's handler name in the other's route module.
+            (
+                "app/api/items/route.ts",
+                "export function loader(request) { return request.url; }",
+            ),
+            (
+                "app/routes/items.tsx",
+                "export function GET(request) { return request.url; }",
+            ),
         ] {
             let output = instrument_candidate(source, file).unwrap();
             assert!(
@@ -12549,5 +12849,740 @@ mod tests {
             analyze_candidate("let value = 1", "unknown.extension"),
             Err(CandidateError::UnknownSourceType(_))
         ));
+    }
+
+    /// What a classic script prints with `script` run after it, as written
+    /// and as instrumented, which must be the same.
+    fn printed_alike(source: &str, script: &str) -> String {
+        let instrumented = instrument_direct_candidate(source, "public/a.js").unwrap();
+        let runtime = include_str!("../runtime-assets/javascript/runtime.mjs");
+        let runtime = &runtime[..runtime.rfind("\nexport {").unwrap()];
+        let run = |code: &str| {
+            let program = format!(
+                "const vm = require('node:vm'); const out = []; const ctx = vm.createContext({{ setTimeout, clearTimeout, queueMicrotask, console, print: (value) => out.push(String(value)) }});\
+                 vm.runInContext({}, ctx); vm.runInContext({}, ctx); process.stdout.write(out.join('\\n'));",
+                serde_json::to_string(runtime).unwrap(),
+                serde_json::to_string(&format!("{code}\n{script}")).unwrap(),
+            );
+            let mut node = std::process::Command::new("node")
+                .arg("-")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("Node.js for the JavaScript regression");
+            std::io::Write::write_all(&mut node.stdin.take().unwrap(), program.as_bytes()).unwrap();
+            let result = node.wait_with_output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{code}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            String::from_utf8(result.stdout).unwrap()
+        };
+        let written = run(source);
+        assert_eq!(run(&instrumented.code), written, "{}", instrumented.code);
+        written
+    }
+
+    #[test]
+    fn a_nested_position_scope_leaves_the_outer_ones_index() {
+        let outer = PositionScope::enter();
+        {
+            let _inner = PositionScope::enter();
+            line_and_utf16_column("a\nb", 2);
+        }
+        assert!(POSITIONS.with(|positions| positions.borrow().is_some()));
+        drop(outer);
+        assert!(POSITIONS.with(|positions| positions.borrow().is_none()));
+    }
+
+    #[test]
+    fn an_index_describes_only_the_text_it_was_built_for() {
+        let _positions = PositionScope::enter();
+        let mut text = String::from("ab\ncd\nef");
+        // A prefix starts where the text does.
+        assert_eq!(line_and_utf16_column(&text, 4), (2, 2));
+        assert_eq!(line_and_utf16_column(&text[..5], 4), (2, 2));
+        // The same buffer with other text: same address, same length.
+        text.replace_range(.., "abcd\nef\n");
+        assert_eq!(line_and_utf16_column(&text, 4), (1, 5));
+    }
+
+    #[test]
+    fn a_generated_name_is_never_one_taken_before() {
+        let mut names = CandidateNames::new("const plain = 1;");
+        assert_eq!(names.allocate("_p1"), "_p1");
+        // `_p` with the first suffix is `_p1`, already given out.
+        assert_eq!(names.allocate("_p"), "_p2");
+        // A name the source has is taken, underscored or not.
+        assert_eq!(names.allocate("plain"), "plain3");
+    }
+
+    #[test]
+    fn a_last_line_that_is_not_ascii_leaves_generated_statements_unmapped() {
+        assert_eq!(generated_statement_span("a();\n// é"), None);
+        assert_eq!(generated_statement_span("a();\n"), Some(Span::new(6, 7)));
+    }
+
+    #[test]
+    fn capability_imports_wrap_only_imported_roots_in_a_test_file() {
+        let wrap = |source: &str, file: &str| {
+            instrument_node_assertion_phases_with_runtime_hooks(
+                source,
+                file,
+                &[],
+                Some("../.supercov/launchSupervisor.mjs"),
+            )
+            .unwrap()
+        };
+        let source = concat!(
+            "import { readFileSync } from 'node:fs';\n",
+            "import { launch, unrelated } from './sdk.mjs';\n",
+            "import { other } from './other.mjs';\n",
+            "launch({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+        );
+        let output = wrap(source, "tests/runner.mjs");
+        assert_eq!(output.capability_imports, 1);
+        assert!(output.code.contains("__supercovRawlaunch"));
+        assert!(!output.code.contains("__supercovRawunrelated"));
+        assert!(!output.code.contains("__supercovRawother"));
+        assert!(!output.code.contains("__supercovRawreadFileSync"));
+        // A launcher the file declares itself is not an import to wrap.
+        let local = "function launch(options) {}\nlaunch({ hostPath: 1, guestPath: 2 });\n";
+        let output = wrap(local, "tests/runner.mjs");
+        assert_eq!(
+            (output.capability_imports, output.code.as_str()),
+            (0, local)
+        );
+        // A CommonJS file has no imports to wrap.
+        let output = wrap(source, "tests/runner.cjs");
+        assert_eq!(output.capability_imports, 0);
+        // A mapping no call is given selects nothing.
+        let unused = "import { launch } from './sdk.mjs';\nexport const options = { hostPath: 1, guestPath: 2 };\n";
+        assert_eq!(wrap(unused, "tests/runner.mjs").capability_imports, 0);
+    }
+
+    #[test]
+    fn capability_imports_wrap_only_imported_roots_in_a_source_file() {
+        let wrap = |source: &str| {
+            instrument_with_import_policy(source, "src/run.mjs", "./capability.mjs", false)
+                .unwrap()
+                .code
+        };
+        let code = wrap(concat!(
+            "import { launch } from './sdk.mjs';\n",
+            "import { other } from './other.mjs';\n",
+            "launch({ hostPath: process.cwd(), guestPath: '/workspace' }, other);\n",
+        ));
+        assert!(code.contains("__supercovRawlaunch"), "{code}");
+        assert!(!code.contains("__supercovRawother"), "{code}");
+        let code = wrap("function launch(options) {}\nlaunch({ hostPath: 1, guestPath: 2 });\n");
+        assert!(!code.contains("wrapImportedCapability"), "{code}");
+    }
+
+    #[test]
+    fn a_mount_call_without_both_sides_of_a_mount_selects_nothing() {
+        let source = concat!(
+            "import { GenericContainer } from 'testcontainers';\n",
+            "import { helper } from './helper.mjs';\n",
+            "const target = '/workspace';\n",
+            "new GenericContainer('node').withBindMounts(paths);\n",
+            "helper.withMounts([{ source: '.' }]);\n",
+            "(await import('./sdk.mjs')).launch({ hostPath: 1, guestPath: target });\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.mjs",
+            &[],
+            Some("../.supercov/launchSupervisor.mjs"),
+        )
+        .unwrap();
+        assert_eq!(output.capability_imports, 0);
+        assert_eq!(output.code, source);
+    }
+
+    #[test]
+    fn a_stylex_call_that_is_not_a_macro_is_measured() {
+        // `props` runs in the browser; only `create` and its kind are
+        // compiled away.
+        let source = "import * as stylex from '@stylexjs/stylex';\nexport const view = (dark) => stylex.props(() => dark);\n";
+        let output = instrument_direct_candidate(source, "src/view.js").unwrap();
+        assert_eq!(
+            output
+                .points
+                .iter()
+                .filter(|point| point.kind == "function")
+                .count(),
+            2,
+            "{:?}",
+            output.points
+        );
+    }
+
+    #[test]
+    fn a_function_compared_or_added_to_text_keeps_its_source() {
+        let source = concat!(
+            "print('' + function f() { return 1; });\n",
+            "print(function g() { return 2; } < 'z');\n",
+            "print('a' >= function k() { return 4; });\n",
+            "print('' + (function h() { return 3; }, 0));\n",
+        );
+        let printed = printed_alike(source, "");
+        assert_eq!(printed, "function f() { return 1; }\ntrue\nfalse\n0");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        for text in ["function g() { return 2; }", "function k() { return 4; }"] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+        // A function only passed through a sequence is not read as text.
+        assert!(!output.code.contains("function h() { return 3; }"));
+    }
+
+    #[test]
+    fn a_function_whose_source_is_read_records_no_branch_inside_it() {
+        let source = concat!(
+            "function shown(items) {\n",
+            "  try { items.check(); } catch { return 0; }\n",
+            "  for (const item of items) { print(item); }\n",
+            "  class Local {}\n",
+            "  return new Local();\n",
+            "}\n",
+            "print(String(shown).length > 0);\n",
+        );
+        printed_alike(source, "");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        assert!(output.branches.is_empty(), "{:?}", output.branches);
+        assert!(
+            !output
+                .points
+                .iter()
+                .any(|point| point.source.contains("class Local")),
+            "{:?}",
+            output.points
+        );
+    }
+
+    #[test]
+    fn an_ambient_class_is_no_statement() {
+        let output = instrument_direct_candidate(
+            "declare class Shape {}\nexport class Real {}\n",
+            "src/a.ts",
+        )
+        .unwrap();
+        assert!(
+            !output
+                .points
+                .iter()
+                .any(|point| point.source.contains("Shape"))
+        );
+        assert!(
+            output
+                .points
+                .iter()
+                .any(|point| point.source.contains("class Real"))
+        );
+    }
+
+    #[test]
+    fn a_decision_too_wide_to_encode_still_decides_the_same() {
+        // Thirty-four conditions, past the 32 the encoding holds: the
+        // decision keeps the call-based form. Among them a nested `!`, a `!`
+        // and a `+` of one operand, and a `??`, each one condition.
+        let mut conditions = (0..29)
+            .map(|index| format!("v[{index}]"))
+            .collect::<Vec<_>>();
+        conditions.push("!v[29]".into());
+        conditions.push("!(v[30] && v[31])".into());
+        conditions.push("+v[32]".into());
+        conditions.push("(v[33] ?? true)".into());
+        let wide = conditions.join(" && ");
+        let source = format!(
+            "function wide(v) {{ if ({wide}) return 'all'; return 'not'; }}\nfunction later(v, seen = ({wide}) ? 1 : 0) {{ return seen; }}\nfunction value(v) {{ return {wide}; }}\n"
+        );
+        let printed = printed_alike(
+            &source,
+            "const all = Array(34).fill(true); all[29] = false; all[30] = false; all[32] = 1; print(wide(all)); print(later(all)); print(value(all)); all[5] = false; print(wide(all)); print(later(all)); print(value(all));",
+        );
+        assert_eq!(printed, "all\n1\ntrue\nnot\n0\nfalse");
+        let output = instrument_direct_candidate(&source, "public/a.js").unwrap();
+        assert!(
+            output
+                .decisions
+                .iter()
+                .any(|decision| decision.conditions.len() == 34),
+            "{:?}",
+            output.decisions
+        );
+    }
+
+    #[test]
+    fn a_decision_in_a_default_value_decides_the_same() {
+        // A parameter's default has no function body to declare a frame in:
+        // the decision carries its own. Its `??` is one condition.
+        // So does a decision used as a value, and one whose outcome the
+        // syntax fixes is no decision.
+        let source = concat!(
+            "function pick(a, b, c, d, chosen = (a && (b ?? c)) || !d ? 'yes' : 'no') { return chosen; }\n",
+            "function kept(a, b, c, chosen = (a && b) || c) { return chosen; }\n",
+            "function fixed(a, c, chosen = (a && false) || c) { return chosen; }\n",
+        );
+        let printed = printed_alike(
+            source,
+            "print(pick(1, null, 0, 1)); print(pick(1, 2, 0, 1)); print(pick(0, 0, 0, 0)); print(kept(1, 2, 3)); print(kept(0, 2, 3)); print(fixed(1, 5));",
+        );
+        assert_eq!(printed, "no\nyes\nyes\n2\n3\n5");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        assert!(
+            !output
+                .decisions
+                .iter()
+                .any(|decision| decision.source.contains("false")),
+            "{:?}",
+            output.decisions
+        );
+    }
+
+    #[test]
+    fn a_rest_pattern_with_a_default_inside_is_measured() {
+        let source = "function first(list) { const [...[a = 1]] = list; const { ...rest } = { list }; return a + rest.list.length; }\n";
+        let printed = printed_alike(source, "print(first([])); print(first([2]));");
+        assert_eq!(printed, "1\n3");
+        let output = instrument_direct_candidate(source, "public/a.js").unwrap();
+        assert!(
+            output
+                .branches
+                .iter()
+                .any(|branch| branch.source.contains("a = 1")),
+            "{:?}",
+            output.branches
+        );
+        // An object's rest is only ever a name.
+        assert!(analyze_candidate("const { ...{ a = 1 } } = x;", "a.js").is_err());
+    }
+
+    #[test]
+    fn a_required_assert_is_known_only_by_what_require_returns() {
+        let source = concat!(
+            "const helper = { strict: { equal() {} } };\n",
+            "const loose = helper.strict;\n",
+            "const strict = require('node:assert/strict').strict;\n",
+            "const vitest = require('vitest');\n",
+            "const { expect = null } = require('vitest');\n",
+            "loose.equal(1, 1);\n",
+            "strict.equal(value(), 1);\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.cjs").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+        assert!(output.code.contains("node:assert/strict.equal"));
+    }
+
+    #[test]
+    fn a_global_expect_is_the_one_named_expect() {
+        let source = concat!(
+            "test('adds', () => {\n",
+            "  expect(add(1, 1)).toBe(2);\n",
+            "  want(add(1, 1)).toBe(2);\n",
+            "});\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/add.test.js").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+    }
+
+    #[test]
+    fn a_matcher_called_through_an_optional_member_is_no_assertion() {
+        // It may short-circuit before any matcher runs, and a passed
+        // occurrence is never made up.
+        let source = concat!(
+            "import { expect } from 'vitest';\n",
+            "expect(add(1, 1))?.['toBe'](2);\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/add.test.js").unwrap();
+        assert_eq!((output.assertions, output.code.as_str()), (0, source));
+    }
+
+    #[test]
+    fn a_typescript_script_declares_the_runtime_it_asserts_with() {
+        let source = "const assert = require('node:assert');\nassert.ok(value());\n";
+        let output = instrument_node_assertion_phases(source, "tests/value.test.cts").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(analyze_candidate(&output.code, "tests/value.test.cts").is_ok());
+    }
+
+    #[test]
+    fn import_elision_is_typescripts_alone() {
+        let erased = |source: &str, file: &str| {
+            instrument_with_import_policy(source, file, "./capability.mjs", true)
+                .unwrap()
+                .excluded_statements
+                .len()
+        };
+        // JavaScript keeps every import, and TSX keeps one a JSX transform
+        // may need.
+        assert_eq!(
+            erased(
+                "import { T } from './t.js';\nexport const x = 1;\n",
+                "src/a.js"
+            ),
+            0
+        );
+        assert_eq!(
+            erased(
+                "import { T } from './t';\nexport const x: T = 1;\n",
+                "src/a.tsx"
+            ),
+            0
+        );
+        assert_eq!(
+            erased(
+                "import { T } from './t';\nexport const x: T = 1;\n",
+                "src/a.ts"
+            ),
+            1
+        );
+        assert_eq!(
+            erased(
+                "import { T } from './t';\nexport let x: typeof T;\n",
+                "src/a.ts"
+            ),
+            1
+        );
+        // An export may be of a value: only TypeScript's checker knows.
+        assert_eq!(
+            erased("import { T } from './t';\nexport { T };\n", "src/a.ts"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_rendered_optional_call_is_measured_and_an_optional_read_is_not() {
+        let source = "export const View = ({ user }) => <p>{user?.name}{user?.load()}</p>;\n";
+        let output = instrument_candidate(source, "src/view.jsx").unwrap();
+        let rendered = output
+            .points
+            .iter()
+            .filter(|point| point.label.as_deref() == Some("jsx-rendered-expression"))
+            .map(|point| point.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, ["user?.load()"]);
+    }
+
+    #[test]
+    fn route_handlers_without_a_value_are_left_alone() {
+        let source = "export let loader;\nexport const action = async () => 1;\nexport const meta = () => [];\n";
+        let output = instrument_candidate(source, "app/routes/users.ts").unwrap();
+        assert!(
+            output.code.contains("export let loader;"),
+            "{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("WithRequestPhase") && output.code.contains("action ="),
+            "{}",
+            output.code
+        );
+        // A server made from options alone has no handler to wrap.
+        let output = instrument_candidate(
+            "import http from 'node:http';\nexport const server = http.createServer({ keepAlive: true });\n",
+            "src/server.js",
+        )
+        .unwrap();
+        assert!(
+            !output.code.contains("WithRequestPhase("),
+            "{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn default_values_and_trees_in_unusual_places_behave_as_written() {
+        let source = concat!(
+            "function each(list) { const seen = []; for (const [a = 1] of list) seen.push(a); return seen.join(','); }\n",
+            "function grouped(a, b, c, x = (a || b) && c) { return x; }\n",
+            "function later(a, b, f = () => { const ok = a && b; return ok; }) { return f(); }\n",
+            "function empty(a, b) { if (a && b); else; while (a && b) b = 0; for (const [c = 1] of [[]]); return b; }\n",
+            "function made(a, b, C = class { static { const ok = a && b; this.ok = ok; } }) { return C.ok; }\n",
+            "var y; (y) = 1;\n",
+            "var user = { load() { return 'loaded'; } };\n",
+            "user?.load();\n",
+        );
+        let printed = printed_alike(
+            source,
+            "print(each([[], [2]])); print(grouped(0, 1, 2)); print(grouped(0, 0, 2)); print(later(1, 2)); print(empty(1, 1)); print(made(1, 2)); print(y);",
+        );
+        assert_eq!(printed, "1,2\n2\n0\n2\n0\n2\n1");
+    }
+
+    #[test]
+    fn an_overload_signature_keeps_its_parameters_as_written() {
+        // A default in a signature is TypeScript's error to report, and a
+        // build that only strips types runs the file: the signature has no
+        // body to measure the default in.
+        let source = "export function size(value = ''): number;\nexport function size(value = '') { return value.length; }\n";
+        let output = instrument_direct_candidate(source, "src/size.ts").unwrap();
+        assert!(
+            output
+                .code
+                .contains("export function size(value = \"\"): number;"),
+            "{}",
+            output.code
+        );
+        assert!(analyze_candidate(&output.code, "src/size.ts").is_ok());
+    }
+
+    #[test]
+    fn a_block_comment_put_back_mid_line_is_set_apart_from_the_code_before_it() {
+        // The printer drops a comment that opens a template's substitution;
+        // put back right after `${`, it gets a space of its own.
+        let source = "export const s = `\n  ${/* inside */ value}`;\n";
+        let output = instrument_direct_candidate(source, "src/a.js").unwrap();
+        assert!(
+            output.code.contains("${ /* inside */ value}"),
+            "{}",
+            output.code
+        );
+    }
+    #[test]
+    fn an_arrow_that_ends_the_file_still_returns_its_value() {
+        // Its body is made a block, whose brace would map past the source.
+        let printed = printed_alike("var both = (a, b) => a && b", "print(both(1, 2));");
+        assert_eq!(printed, "2");
+    }
+
+    /// A source map from `(generated line, column, source line, column,
+    /// source)` tuples.
+    fn source_map(tokens: &[(u32, u32, u32, u32, Option<u32>)]) -> oxc_sourcemap::SourceMap {
+        oxc_sourcemap::SourceMap::new(
+            None,
+            vec![],
+            None,
+            vec!["a.js".into()],
+            vec![None],
+            tokens
+                .iter()
+                .map(|&(dst_line, dst_col, src_line, src_col, source)| {
+                    oxc_sourcemap::Token::new(dst_line, dst_col, src_line, src_col, source, None)
+                })
+                .collect(),
+            None,
+        )
+    }
+
+    /// `generated` with the comments of `source` put back, by `tokens`.
+    fn restored(
+        source: &str,
+        generated: &str,
+        tokens: &[(u32, u32, u32, u32, Option<u32>)],
+    ) -> Result<String, CandidateError> {
+        let allocator = Allocator::default();
+        let program = Parser::new(&allocator, source, SourceType::mjs())
+            .parse()
+            .program;
+        restore_comment_text(&program, generated, source_map(tokens)).map(|(code, _)| code)
+    }
+
+    #[test]
+    fn comments_go_back_only_into_output_that_parses_and_matches() {
+        assert!(matches!(
+            restored("// c\nf();\n", "f(;\n", &[]),
+            Err(CandidateError::Parse(_))
+        ));
+        // A printed comment no source comment matches, after one that did.
+        let Err(CandidateError::CommentPreservation { detail, .. }) =
+            restored("/*a*/ /*b*/ /*c*/ x;\n", "/*c*/ x; /*z*/\n", &[])
+        else {
+            panic!("an unknown comment was accepted");
+        };
+        assert!(detail.contains("\"/*z*/\""), "{detail}");
+        // A map that sends a dropped comment into a printed one.
+        let Err(CandidateError::CommentPreservation { detail, .. }) = restored(
+            "/* kept */ f(); // gone\n",
+            "/* kept */ f();\n",
+            &[(0, 3, 99, 0, Some(0))],
+        ) else {
+            panic!("overlapping comments were accepted");
+        };
+        assert!(detail.contains("restored comments overlap"), "{detail}");
+    }
+
+    #[test]
+    fn a_line_comment_put_back_mid_line_opens_its_statement_at_its_indentation() {
+        assert_eq!(
+            restored(
+                "a(); b( // c\n);\n",
+                "a(); b(\n);\n",
+                &[(0, 7, 99, 0, Some(0))]
+            )
+            .unwrap(),
+            "a(); // c\nb(\n);\n"
+        );
+        assert_eq!(
+            restored("  b( // c\n);\n", "  b(\n);\n", &[(0, 4, 99, 0, Some(0))]).unwrap(),
+            "  // c\n  b(\n);\n"
+        );
+    }
+
+    #[test]
+    fn a_read_function_is_put_back_once_and_only_where_the_map_says() {
+        let source = "function f() { return 1; }\n";
+        let allocator = Allocator::default();
+        let program = Parser::new(&allocator, source, SourceType::mjs())
+            .parse()
+            .program;
+        let sensitive = HashSet::from([(0, 26)]);
+        let put_back = |generated: &str, tokens: &[(u32, u32, u32, u32, Option<u32>)]| {
+            restore_function_source(&program, &sensitive, generated, source_map(tokens))
+                .map(|(code, _)| code)
+        };
+        assert!(matches!(
+            put_back("f(;\n", &[]),
+            Err(CandidateError::Parse(_))
+        ));
+        let printed = "function f() {\n\treturn 1;\n}\nfunction g() {\n\treturn 1;\n}\n";
+        // Nothing maps into the function: the output stays as printed.
+        assert_eq!(put_back(printed, &[]).unwrap(), printed);
+        // Two printed functions map into it: the first takes its text.
+        assert_eq!(
+            put_back(printed, &[(0, 9, 0, 9, Some(0)), (3, 9, 0, 9, Some(0))]).unwrap(),
+            "function f() { return 1; }\nfunction g() {\n\treturn 1;\n}\n"
+        );
+    }
+
+    /// The `;` line before a top-level declaration maps to the declaration,
+    /// when one starts the next line and has a mapping of its own.
+    #[test]
+    fn a_separator_line_maps_only_to_a_declaration_that_starts_the_next_line() {
+        let separator = |code: &str, tokens: &[(u32, u32, u32, u32, Option<u32>)]| {
+            map_closing_lines(source_map(tokens), code, "x\n")
+                .get_tokens()
+                .find(|token| token.get_dst_line() == 0)
+                .and_then(|token| token.get_source_id())
+        };
+        assert_eq!(
+            separator(";\nx", &[(0, 0, 0, 0, None), (1, 0, 0, 0, Some(0))]),
+            Some(0)
+        );
+        assert_eq!(separator(";", &[(0, 0, 0, 0, None)]), None);
+        assert_eq!(
+            separator(";\n  x", &[(0, 0, 0, 0, None), (1, 2, 0, 0, Some(0))]),
+            None
+        );
+        assert_eq!(
+            separator(";\nx", &[(0, 0, 0, 0, None), (1, 0, 0, 0, None)]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_helper_name_that_does_not_parse_has_no_type() {
+        let allocator = Allocator::default();
+        assert!(runtime_helper_type(&allocator, SourceType::ts(), "not a name").is_none());
+        assert!(runtime_helper_type(&allocator, SourceType::ts(), "hit").is_some());
+    }
+
+    /// Bindings are by symbol, and a tree that was never analysed has none.
+    #[test]
+    fn an_identifier_without_a_symbol_binds_nothing() {
+        let allocator = Allocator::default();
+        let ast = AstBuilder::new(&allocator);
+        let identifier = ast.binding_identifier(Span::default(), ast.ident("assert"));
+        let mut bindings = NodeAssertionBindings::default();
+        bind_object(&mut bindings, &identifier, "node:assert".into());
+        bind_direct(&mut bindings, &identifier, "ok".into());
+        bind_expect(&mut bindings, &identifier);
+        assert!(bindings.objects.is_empty());
+        assert!(bindings.direct.is_empty());
+        assert!(bindings.expects.is_empty());
+    }
+
+    #[test]
+    fn an_import_used_as_a_value_too_is_not_elided() {
+        let erased = |source: &str| {
+            let allocator = Allocator::default();
+            let program = Parser::new(&allocator, source, SourceType::ts())
+                .parse()
+                .program;
+            erased_imports(&program, true).len()
+        };
+        assert_eq!(erased("import { Foo } from './foo';\nlet x: Foo;\n"), 1);
+        assert_eq!(
+            erased("import { Foo } from './foo';\nlet x: Foo;\nexport { Foo };\n"),
+            0
+        );
+    }
+
+    #[test]
+    fn capability_imports_are_wrapped_only_in_a_module_and_only_where_called() {
+        let candidate = |source: &str, file: &str| {
+            instrument_with_import_policy(source, file, "../.supercov/launchSupervisor.mjs", false)
+                .unwrap()
+                .code
+        };
+        let launch = concat!(
+            "import { ImageBuilder } from './sdk.js';\n",
+            "ImageBuilder.build({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+        );
+        assert!(candidate(launch, "src/launch.mjs").contains("__supercovRawImageBuilder"));
+        // A CommonJS file has no import to wrap.
+        let script = "const { ImageBuilder } = require('./sdk.js');\nImageBuilder.build({ hostPath: process.cwd(), guestPath: '/workspace' });\n";
+        assert!(!candidate(script, "src/launch.cjs").contains("wrapImportedCapability"));
+        // The words alone, with no imported root called with them.
+        let words = concat!(
+            "import { ImageBuilder } from './sdk.js';\n",
+            "const paths = { hostPath: 1, guestPath: 2 };\n",
+            "ImageBuilder.build();\n",
+        );
+        assert!(!candidate(words, "src/launch.mjs").contains("wrapImportedCapability"));
+        // Node's own modules are never wrapped.
+        let node = concat!(
+            "import { spawn } from 'node:child_process';\n",
+            "import { ImageBuilder } from './sdk.js';\n",
+            "spawn({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+            "ImageBuilder.build({ hostPath: process.cwd(), guestPath: '/workspace' });\n",
+        );
+        let code = candidate(node, "src/launch.mjs");
+        assert!(code.contains("__supercovRawImageBuilder"), "{code}");
+        assert!(!code.contains("__supercovRawspawn"), "{code}");
+    }
+
+    #[test]
+    fn a_rendered_function_whose_source_is_read_stays_as_written() {
+        let function = "function g() { return String(g); }";
+        let source = format!("export const C = () => <A>{{{function}}}</A>;\n");
+        let output = instrument_direct_candidate(&source, "app/c.jsx").unwrap();
+        assert!(output.code.contains(function), "{}", output.code);
+    }
+
+    #[test]
+    fn optional_links_through_computed_and_private_members_behave_as_written() {
+        let printed = printed_alike(
+            concat!(
+                "class K {\n",
+                "  #x = { y: { z: 1 } };\n",
+                "  a = { b: this };\n",
+                "  m() {\n",
+                "    return [this.#x.y?.z, this.a?.b.#x?.y.z, this.a?.b?.#x.y.z, this.n?.b.#x];\n",
+                "  }\n",
+                "}\n",
+                "var o = { a: [{ b: { c: 2 } }] };\n",
+            ),
+            "print(JSON.stringify([new K().m(), o?.a?.[0].b?.c, o.z?.[0].b?.c]));",
+        );
+        assert_eq!(printed, "[[1,1,1,null],2,null]");
+    }
+
+    #[test]
+    fn a_decision_with_a_nullish_or_negated_condition_decides_the_same() {
+        let printed = printed_alike(
+            concat!(
+                "function f(a, b, c, d) { return (a && (b ?? c)) || d; }\n",
+                "function g(a, b, d) { return (a && -b) || d; }\n",
+                "function h(a, b) { if (!(a ?? b) || !-a) return 1; return 0; }\n",
+            ),
+            concat!(
+                "for (const [a, b, c, d] of [[1, null, 2, 3], [1, 0, 2, 4], [0, 1, 1, 5], [1, 1, 0, 6]])\n",
+                "  print([f(a, b, c, d), g(a, b, d), h(a, b)]);\n",
+            ),
+        );
+        assert_eq!(printed, "2,3,0\n4,4,0\n5,5,1\n1,-1,0");
     }
 }
