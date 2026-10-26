@@ -8523,6 +8523,11 @@ fn imports_that_cannot_add_anything_are_refused() {
 /// written instead of being handed `-count=1`.
 #[test]
 fn a_go_suite_behind_make_is_measured_and_other_go_commands_are_left_alone() {
+    // The Makefile runs `go` by name.
+    if go() != Some("go") {
+        eprintln!("skipping: no Go toolchain on PATH");
+        return;
+    }
     let made = Project::empty("go-make");
     made.write("go.mod", "module example.com/made\n\ngo 1.21\n");
     made.write(
@@ -8590,6 +8595,10 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
 /// one relay and names the project rather than Supercov's copy.
 #[test]
 fn both_streams_into_one_file_name_the_project() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
     let project = Project::empty("one-file");
     project.write("go.mod", "module example.com/onefile\n\ngo 1.21\n");
     project.write(
@@ -8603,7 +8612,7 @@ fn both_streams_into_one_file_name_the_project() {
     let log = project.root.join("both.log");
     let file = std::fs::File::create(&log).unwrap();
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
-        .args(["--", "go", "test", "-v", "./..."])
+        .args(["--", go, "test", "-v", "./..."])
         .current_dir(&project.root)
         .env_remove("SUPERCOV_SOURCE_ROOTS")
         .stdout(file.try_clone().unwrap())
@@ -9051,6 +9060,10 @@ fn a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for() {
 #[cfg(unix)]
 #[test]
 fn a_go_test_on_a_terminal_passes_partial_lines_on_and_names_the_project() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
     let project = Project::empty("go-terminal");
     project.write("go.mod", "module example.com/term\n\ngo 1.21\n");
     project.write(
@@ -9061,7 +9074,7 @@ fn a_go_test_on_a_terminal_passes_partial_lines_on_and_names_the_project() {
         "x_test.go",
         "package x\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestX(t *testing.T) {\n\tfmt.Print(\"prompt> \")\n\ttime.Sleep(600 * time.Millisecond)\n\tdir, _ := os.Getwd()\n\tfmt.Println(\"done in \" + dir)\n\tF(true)\n}\n",
     );
-    let mut terminal = common::OnTerminal::start(&project, &["--", "go", "test", "-v", "./..."]);
+    let mut terminal = common::OnTerminal::start(&project, &["--", go, "test", "-v", "./..."]);
     terminal.wait_for("prompt> ");
     terminal.wait_for("done in ");
     let (code, seen) = terminal.finish();
