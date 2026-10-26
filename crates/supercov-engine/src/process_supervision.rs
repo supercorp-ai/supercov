@@ -3209,4 +3209,99 @@ mod console_name_tests {
         }
         assert!(validate_options(SupervisionOptions::default()).is_ok());
     }
+
+    #[test]
+    fn each_supervision_error_says_what_failed() {
+        let failed = || io::Error::other("busy");
+        let messages = [
+            SupervisionError::InvalidMilliseconds {
+                name: "timeout".into(),
+            },
+            SupervisionError::EmptyCommand,
+            SupervisionError::Spawn {
+                program: "node".into(),
+                source: io::ErrorKind::NotFound.into(),
+            },
+            SupervisionError::Spawn {
+                program: "node".into(),
+                source: io::Error::from_raw_os_error(NOT_RUNNABLE),
+            },
+            SupervisionError::Spawn {
+                program: "node".into(),
+                source: failed(),
+            },
+            SupervisionError::Wait(failed()),
+            SupervisionError::Signal(failed()),
+            SupervisionError::PlatformOperation {
+                operation: "create a pipe",
+                source: failed(),
+            },
+            SupervisionError::UnsupportedPlatform("no process groups"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages[0],
+            "timeout must be a positive integer number of milliseconds"
+        );
+        assert_eq!(messages[1], "test command must not be empty");
+        assert!(
+            messages[2].starts_with("could not spawn node: no such program: "),
+            "{}",
+            messages[2]
+        );
+        assert!(
+            messages[3].starts_with("could not spawn node: not allowed to run: "),
+            "{}",
+            messages[3]
+        );
+        assert_eq!(messages[4], "could not spawn node: busy");
+        assert_eq!(messages[5], "could not wait for test command: busy");
+        assert_eq!(messages[6], "could not install signal forwarding: busy");
+        assert_eq!(messages[7], "could not create a pipe: busy");
+        assert_eq!(
+            messages[8],
+            "unsupported process supervision platform: no process groups"
+        );
+    }
+
+    #[test]
+    fn each_signal_and_process_state_has_its_names() {
+        assert_eq!(
+            ForwardedSignal::ALL.map(ForwardedSignal::name),
+            ["SIGHUP", "SIGINT", "SIGTERM"]
+        );
+        assert_eq!(
+            ForwardedSignal::ALL.map(ForwardedSignal::exit_code),
+            [129, 130, 143]
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            ForwardedSignal::ALL.map(ForwardedSignal::raw),
+            [libc::SIGHUP, libc::SIGINT, libc::SIGTERM]
+        );
+        use sysinfo::ProcessStatus;
+        let letters = [
+            ProcessStatus::Idle,
+            ProcessStatus::Run,
+            ProcessStatus::Sleep,
+            ProcessStatus::Stop,
+            ProcessStatus::Zombie,
+            ProcessStatus::Tracing,
+            ProcessStatus::Dead,
+            ProcessStatus::Wakekill,
+            ProcessStatus::Waking,
+            ProcessStatus::Parked,
+            ProcessStatus::LockBlocked,
+            ProcessStatus::UninterruptibleDiskSleep,
+            ProcessStatus::Suspended,
+            ProcessStatus::Unknown(9),
+        ]
+        .map(process_status);
+        assert_eq!(
+            letters,
+            [
+                "I", "R", "S", "T", "Z", "t", "X", "K", "W", "P", "L", "D", "S", "?"
+            ]
+        );
+    }
 }
