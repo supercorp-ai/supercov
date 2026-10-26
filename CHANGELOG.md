@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `assertions assess` and its `--dry-run` estimate took minutes before printing anything on a run whose tests share most of what they run, as a merged or end-to-end run's do: each request and each cache key worked out its test's code and its files' functions again. They are worked out once, and the requests are the same: 400 tests sharing 6,000 statements went from 166 s to 4 s on one core.
+
 ## 4.20.3
 
 **Fixed**
