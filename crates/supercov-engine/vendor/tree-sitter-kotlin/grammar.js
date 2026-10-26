@@ -24,6 +24,9 @@ module.exports = grammar({
   conflicts: $ => [
     [$.class_body, $.enum_class_body],
 
+    // `when`-entry guards: `if (guard)` is locally ambiguous with if_expression
+    [$.if_expression, $.parenthesized_expression],
+
     [$.binary_expression, $.call_expression],
     [$.binary_expression, $.in_expression, $.call_expression],
     [$.binary_expression, $.infix_expression, $.call_expression],
@@ -631,6 +634,7 @@ module.exports = grammar({
       $._identifier,
       $.string_literal,
       $.multiline_string_literal,
+      $.multi_dollar_string_literal,
       $.character_literal,
       $.number_literal,
       $.float_literal,
@@ -670,7 +674,20 @@ module.exports = grammar({
       ),
     )),
 
-    annotated_expression: $ => seq($.annotation, $.expression),
+    // A declaration under annotations and an annotated expression are both valid readings of
+    // `@A @B class X { ... }` and `@A annotation class X`; without a preference the parser picked
+    // by node count, so the result depended on what followed. Declarations win. The margin has to
+    // clear what the expression reading collects from soft keywords read as identifiers
+    // (_reserved_identifier carries +1 each): -2 is enough under runtime 0.25+, -10 is needed
+    // under runtime 0.24, which merges the two readings earlier.
+    annotated_expression: $ => prec.dynamic(-10, seq($.annotation, $.expression)),
+
+    // `$$"..."` and `$$"""..."""` (Kotlin 2.2 multi-dollar interpolation). Read as one opaque token:
+    // the interpolation prefix is `$$` so a lone `$` is literal text; templates inside are not separated.
+    multi_dollar_string_literal: _ => token(choice(
+      seq(/\$\$+/, '"""', /([^"]|"[^"]|""[^"])*/, '"""'),
+      seq(/\$\$+/, '"', repeat(choice(/[^"\\\n]/, /\\./)), '"'),
+    )),
 
     labeled_expression: $ => seq($.label, $.expression),
 
@@ -732,7 +749,8 @@ module.exports = grammar({
 
     infix_expression: $ => prec.left(PREC.INFIX, seq(
       $.expression,
-      $.identifier,
+      // `get` is a soft keyword (property getters) and a common infix function name (`insert { } get Table.id`)
+      choice($.identifier, alias('get', $.identifier)),
       $.expression,
     )),
 
@@ -852,6 +870,8 @@ module.exports = grammar({
         seq(
           commaSep1(field('condition', $._when_condition)),
           optional(','),
+          // Kotlin 2.1+ guard: `is Type if condition ->`
+          optional(seq('if', field('guard', $.expression))),
         ),
         'else',
       ),

@@ -63,6 +63,33 @@ static bool scan_words(TSLexer *lexer, const char words[MAX_WORDS][MAX_WORD_SIZE
     return false;
 }
 
+// With the lookahead on the `(` after a `set` that may be a setter: true when it is a call on a
+// new statement. A setter's parameter is a name, possibly annotated (`set(v) {`, `set(@A v) {`);
+// `set("k") {` and `set("k", v)` are calls.
+static bool set_paren_is_call(TSLexer *lexer) {
+    skip(lexer);
+    while (iswspace(lexer->lookahead)) {
+        skip(lexer);
+    }
+    if (!(iswalpha(lexer->lookahead) || lexer->lookahead > 127 || lexer->lookahead == '_' ||
+          lexer->lookahead == '`' || lexer->lookahead == '@')) {
+        return true;
+    }
+    // skip until the closing parenthesis
+    while (lexer->lookahead != ')' && !lexer->eof(lexer)) {
+        skip(lexer);
+    }
+    skip(lexer);
+
+    while (iswspace(lexer->lookahead)) {
+        if (lexer->lookahead == '\n') {
+            return true;
+        }
+        skip(lexer);
+    }
+    return false;
+}
+
 void *tree_sitter_kotlin_external_scanner_create() { return NULL; }
 
 void tree_sitter_kotlin_external_scanner_destroy(void *payload) {}
@@ -299,7 +326,15 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                     while (iswspace(lexer->lookahead)) {
                         skip(lexer);
                     }
-                    if (valid_symbols[CLASS_MEMBER_SEMI] || lexer->lookahead == '.' || lexer->lookahead == '=') {
+                    if (lexer->lookahead == '.' || lexer->lookahead == '=') {
+                        return true;
+                    }
+                    // Right after a class header, `constructor` on a later line still belongs to it: Kotlin
+                    // allows newlines before the primary constructor (`class B\n  @A\n  constructor(x: X)`).
+                    if (valid_symbols[CONSTRUCTOR]) {
+                        return false;
+                    }
+                    if (valid_symbols[CLASS_MEMBER_SEMI]) {
                         return true;
                     }
                 }
@@ -317,33 +352,65 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                     }
                 }
                 // If `get` was found and the keyword is not valid, return a semi since it's being used as an identifier
-                else if (index == 3 && (!valid_symbols[GET] || lexer->lookahead == '[')) {
+                // `get` is also an infix function name, so GET is valid after any expression. A getter is
+                // possible only where SET is too (after a property) or where no expression continues (after
+                // a setter); on a new line `get` is never infix.
+                else if (index == 3 && (!valid_symbols[GET] || (!valid_symbols[SET] && valid_symbols[NOT_IS]) ||
+                                        lexer->lookahead == '[')) {
                     return true;
+                }
+                // A getter is `get` alone on its line or `get()`: anything else (`get("/a") {`, `get {`,
+                // `get<T>()`, `get_x`) is a call on a new statement.
+                else if (index == 3) {
+                    while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                        skip(lexer);
+                    }
+                    if (lexer->lookahead == '(') {
+                        skip(lexer);
+                        while (iswspace(lexer->lookahead)) {
+                            skip(lexer);
+                        }
+                        return lexer->lookahead != ')';
+                    }
+                    return !(lexer->lookahead == '\n' || lexer->lookahead == '\r' || lexer->lookahead == ';' ||
+                             lexer->lookahead == '}' || lexer->lookahead == '/' || lexer->eof(lexer));
                 }
                 // If `set` was found and the keyword is not valid, return a semi since it's being used as an identifier
                 else if (index == 4 && (!valid_symbols[SET] || lexer->lookahead == '[' || lexer->lookahead == '(' ||
                                         lexer->lookahead == '.')) {
                     if (lexer->lookahead == '(' && valid_symbols[SET]) {
-                        // skip until the closing parenthesis
-                        while (lexer->lookahead != ')' && !lexer->eof(lexer)) {
-                            skip(lexer);
-                        }
-                        skip(lexer);
-
-                        while (iswspace(lexer->lookahead)) {
-                            if (lexer->lookahead == '\n') {
-                                return true;
-                            }
-                            skip(lexer);
-                        }
-                        return false;
+                        return set_paren_is_call(lexer);
                     }
                     return true;
+                }
+                // A setter is `set` alone on its line or `set(name)`: `set {` is a call on a new statement.
+                else if (index == 4) {
+                    while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                        skip(lexer);
+                    }
+                    if (lexer->lookahead == '(') {
+                        return set_paren_is_call(lexer);
+                    }
+                    return !(lexer->lookahead == '\n' || lexer->lookahead == '\r' ||
+                             lexer->lookahead == ';' || lexer->lookahead == '}' || lexer->lookahead == '/' ||
+                             lexer->eof(lexer));
                 }
                 // If `in` was found and this specific external keyword is valid,
                 // return a semi since it's being used in a range test
                 else if (index == 1 && valid_symbols[IN]) {
                     return true;
+                }
+                // `where` continues a declaration only as a type-constraints
+                // clause; followed by `?` `.` `=` `(` it is an ordinary
+                // identifier (`where?.let { ... }`) — close the statement.
+                else if (index == 8) {
+                    while (iswspace(lexer->lookahead)) {
+                        skip(lexer);
+                    }
+                    if (lexer->lookahead == '?' || lexer->lookahead == '.' ||
+                        lexer->lookahead == '=' || lexer->lookahead == '(') {
+                        return true;
+                    }
                 }
                 return !res;
             case ';':
@@ -351,26 +418,11 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                 lexer->mark_end(lexer);
                 return true;
             case '@':
-                if (valid_symbols[CONSTRUCTOR]) {
-                    // At EOF lookahead is 0, which is not whitespace, so this loop has to stop
-                    // at end of input as well -- otherwise skip() has nothing left to consume
-                    // and the condition stays true forever.
-                    while (!lexer->eof(lexer) && !iswspace(lexer->lookahead)) {
-                        skip(lexer);
-                    }
-                    while (iswspace(lexer->lookahead)) {
-                        skip(lexer);
-                    }
-                    char ctor[12] = "constructor";
-                    for (uint8_t i = 0; i < 11; i++) {
-                        if (lexer->lookahead != ctor[i]) {
-                            return true;
-                        }
-                        skip(lexer);
-                    }
-                    return false;
-                }
-                if (valid_symbols[GET] || valid_symbols[SET]) {
+                // An annotation may prefix a continuation (accessor, secondary or primary
+                // constructor): skip it and re-dispatch on the word that follows, whose own case
+                // decides. Bailing to a semi here orphans `@OptIn(...) get()` accessors and
+                // `@X internal constructor` headers.
+                if (valid_symbols[CONSTRUCTOR] || valid_symbols[GET] || valid_symbols[SET]) {
                     bool saw_paren = false;
                     // Same EOF guard as above: at end of input lookahead is neither '\n' nor
                     // whitespace, so neither arm of this condition can end the loop.
