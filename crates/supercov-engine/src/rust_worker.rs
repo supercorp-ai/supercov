@@ -2060,6 +2060,11 @@ mod tests {
         assert_eq!(strip_jsonc("{\"n\": 1 / 2}"), "{\"n\": 1 / 2}");
         // A star inside a block comment does not end it.
         assert_eq!(strip_jsonc("/* a * b **/{}"), "{}");
+        // Nothing, a quote at the very end, a comment the text ends in.
+        assert_eq!(strip_jsonc(""), "");
+        assert_eq!(strip_jsonc("\""), "\"");
+        assert_eq!(strip_jsonc("{}/*"), "{}");
+        assert_eq!(strip_jsonc("// only a comment"), "");
     }
 
     #[test]
