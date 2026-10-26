@@ -6311,4 +6311,238 @@ mod tests {
         .unwrap();
         assert!(data.areas.is_empty(), "{data:?}");
     }
+
+    /// Every query over an index, each asking for a real page; what each
+    /// returned, as an error or nothing.
+    fn every_query(index: &CoverageIndex<'_>) -> Vec<Result<(), QueryError>> {
+        let view = CoverageViewId::All;
+        let mut results = vec![
+            coverage_covers_query(
+                index,
+                CoverageCoversQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    file: "src/a.js",
+                    line: 1,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_test_query(
+                index,
+                CoverageTestQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "admin",
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_decision_query(
+                index,
+                CoverageDecisionQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "src/a.js:1",
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_file_detail_query(
+                index,
+                CoverageFileDetailOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "src/a.js",
+                    metric: MinimizeMetric::All,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_diff_query(
+                index,
+                index,
+                CoverageDiffQueryOptions {
+                    older_run: "a",
+                    newer_run: "b",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 10,
+                    gained_only: false,
+                },
+            )
+            .map(drop),
+            coverage_scope_query(
+                index,
+                CoverageScopeQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_summary_query(
+                index,
+                CoverageSummaryQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    valid: true,
+                    test_exit_code: Some(0),
+                    stale: false,
+                    stale_reasons: Vec::new(),
+                },
+            )
+            .map(drop),
+            coverage_areas_query(
+                index,
+                CoverageAreasQueryOptions {
+                    run: "r",
+                    view,
+                    metric: MinimizeMetric::All,
+                    kind: None,
+                    runner: None,
+                    depth: 1,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            tests_without_evidence_query(
+                index,
+                TestsWithoutEvidenceOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_file_decisions_query(
+                index,
+                CoverageFileDecisionsOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    file: "src/a.js",
+                    sort: DecisionSort::Location,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+        ];
+        for dimension in [
+            CoverageDimension::Kind,
+            CoverageDimension::Runner,
+            CoverageDimension::Tests,
+        ] {
+            results.push(
+                coverage_dimension_query(
+                    index,
+                    CoverageDimensionQueryOptions {
+                        run: "r",
+                        view,
+                        dimension,
+                        filters: query_filters(view, None, None),
+                        offset: 0,
+                        limit: 10,
+                    },
+                )
+                .map(drop),
+            );
+        }
+        for gaps_only in [true, false] {
+            results.push(
+                coverage_file_query(
+                    index,
+                    CoverageFileQueryOptions {
+                        run: "r",
+                        view,
+                        metric: MinimizeMetric::All,
+                        gaps_only,
+                        kind: None,
+                        runner: None,
+                        offset: 0,
+                        limit: 10,
+                    },
+                )
+                .map(drop),
+            );
+        }
+        results
+    }
+
+    /// An index damaged on disk in any one section after it was signed
+    /// makes each query that reads that section return an error, never
+    /// panic: pages are checked as they are read.
+    #[test]
+    fn every_query_refuses_an_index_damaged_in_any_section() {
+        let reports = [
+            report(vec![result(
+                "admin",
+                McdcVector {
+                    values: vec![Some(true), None],
+                    outcome: true,
+                },
+            )]),
+            two_runner_report(),
+        ];
+        for report in reports {
+            let (root, container) = index_of(&report);
+            let pristine_answers = every_query(&CoverageIndex::new(&container).unwrap());
+            let descriptors = crate::coverage_index::coverage_index_sections(&report)
+                .unwrap()
+                .iter()
+                .map(|section| container.descriptor(section.kind).unwrap())
+                .filter(|descriptor| descriptor.length > 0)
+                .collect::<Vec<_>>();
+            drop(container);
+            let path = root.join("query-index.v1.bin");
+            let pristine = std::fs::read(&path).unwrap();
+            let identity = crate::query_index::QueryIndexIdentity {
+                evidence_sha256: [1; 32],
+                evidence_bytes: 100,
+                analysis_sha256: [2; 32],
+                producer_sha256: [3; 32],
+                archive_schema_version: 2,
+            };
+            let mut refused = 0;
+            for descriptor in descriptors {
+                let mut bytes = pristine.clone();
+                bytes[usize::try_from(descriptor.offset).unwrap()] ^= 0xff;
+                std::fs::write(&path, &bytes).unwrap();
+                let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+                let Ok(index) = CoverageIndex::new(&container) else {
+                    refused += 1;
+                    continue;
+                };
+                for (damaged, pristine) in every_query(&index).iter().zip(&pristine_answers) {
+                    refused += usize::from(damaged.is_err() && pristine.is_ok());
+                }
+            }
+            assert!(refused > 0);
+        }
+    }
 }
