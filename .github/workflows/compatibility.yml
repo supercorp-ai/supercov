@@ -157,10 +157,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # One Rust cache per platform, saved by the job that builds the whole
+      # workspace and restored by the rest: every job compiled from nothing.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: true
       - run: npm ci
       # The only clippy pass that sees Windows- and macOS-only code.
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: npm run test:platform
+      # `npm run test:platform` under nextest: the test binaries side by side,
+      # where `cargo test` ran them one after another.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      - run: cargo nextest run --workspace --no-fail-fast && cargo test --workspace --doc && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs
         timeout-minutes: 30
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
@@ -192,6 +203,10 @@ jobs:
           python-version: ${{ matrix.python }}
           architecture: ${{ matrix.os == 'windows-11-arm' && (matrix.python == '3.9' || matrix.python == '3.10') && 'x64' || '' }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       # Every interpreter measures itself: the gate refuses to fall back to
       # another Python on the runner, and asserts the version it measured.
@@ -241,6 +256,10 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       # Before Ruby, and that order is the whole point. `ruby/setup-ruby`
       # installs an MSYS2 toolchain on arm64 Windows and puts its clang on
@@ -277,6 +296,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: ${{ matrix.os == 'ubuntu-latest' }}
       # One of the nextest releases the gate runs under; it fetches the other,
       # 0.9.148, itself. Any release from 0.9.138 is accepted.
       - uses: taiki-e/install-action@v2
@@ -320,6 +343,10 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       - run: npm run test:go
         timeout-minutes: 15
@@ -395,6 +422,10 @@ jobs:
             https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
           echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
       - run: npm ci
       - run: npm run test:jvm
         timeout-minutes: 28
