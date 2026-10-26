@@ -319,13 +319,13 @@ fn a_harness_config_outside_the_crate_runs_the_built_worker() {
     std::fs::write(
         harness.join("harness.mjs"),
         format!(
-            "// The test's own module, loading the built Worker.\nexport * from \"{0}\";\nexport {{ default }} from \"{0}\";\n",
+            "// The test's own module, loading the built Worker.\\nexport * from \\"{0}\\";\\nexport {{ default }} from \\"{0}\\";\\n",
             shim.display()
         ),
     )
     .unwrap();
     let config = format!(
-        "name = \"harness\"\nmain = \"harness.mjs\"\ncompatibility_date = \"2026-10-01\"\n\n[build]\ncommand = \"worker-build --release\"\ncwd = \"{0}\"\nwatch_dir = \"{0}/src\"\n",
+        "name = \\"harness\\"\\nmain = \\"harness.mjs\\"\\ncompatibility_date = \\"2026-10-01\\"\\n\\n[build]\\ncommand = \\"worker-build --release\\"\\ncwd = \\"{0}\\"\\nwatch_dir = \\"{0}/src\\"\\n",
         crate_directory.display()
     );
     std::fs::write(harness.join("wrangler.toml"), &config).unwrap();
