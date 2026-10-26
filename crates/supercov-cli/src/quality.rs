@@ -584,13 +584,13 @@ fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
             snapshot: positional.next(),
             json,
         },
-        "diff" => Command::Diff {
+        // `diff`: the last of the views `parse` sends here.
+        _ => Command::Diff {
             from: required("two snapshots to compare")?,
             to: required("a second snapshot to compare")?,
             json,
             limit,
         },
-        other => return Err(format!("unknown quality view: {other}")),
     })
 }
 

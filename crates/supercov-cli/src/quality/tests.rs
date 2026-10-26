@@ -3377,3 +3377,104 @@ fn a_file_too_near_the_budget_for_its_line_questions_is_windowed() {
     // A file question over the budget.
     assert!(!fits(&with_room(0).repeat(2)));
 }
+
+/// Every option each subcommand reads, and each mistake named by what it is.
+#[test]
+fn each_option_is_read_and_each_mistake_named() {
+    let words = |text: &str| {
+        text.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let refused = |text: &str| match parse(words(text)) {
+        Err(error) => error,
+        Ok(_) => panic!("{text} was accepted"),
+    };
+    assert!(matches!(
+        parse(words(
+            "patch --annotate github --json --refresh --all --run latest --limit 5 --staged src"
+        )),
+        Ok(Command::Patch {
+            json: true,
+            refresh: true,
+            all: true,
+            annotate: true,
+            limit: 5,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse(words("patch --cached")),
+        Ok(Command::Patch { range: Some(_), .. })
+    ));
+    for (text, said) in [
+        ("patch --staged --unstaged", "pick one change range"),
+        ("patch --annotate", "--annotate needs a format"),
+        ("patch --annotate gitlab", "--annotate does not know gitlab"),
+        ("patch --limit", "--limit needs a number"),
+        ("patch --limit many", "--limit needs a number"),
+        ("patch --base", "--base needs a commit"),
+        ("patch --run", "--run needs a run id"),
+        ("patch --nope", "unknown option --nope for quality patch"),
+        ("scan --run", "--run requires a run id"),
+        ("scan --run a --run b", "--run may only be specified once"),
+        ("scan --context", "--context requires a file"),
+        (
+            "scan --context a --context b",
+            "--context may only be specified once",
+        ),
+        ("scan --nope", "unknown quality option: --nope"),
+        ("file --limit 2 a.rs", "takes no --limit"),
+        ("file", "quality file requires a file path"),
+        ("diff one", "quality diff requires a second snapshot"),
+        ("diff", "quality diff requires two snapshots"),
+        (
+            "snapshots --limit 1 --limit 2",
+            "--limit may only be specified once",
+        ),
+        ("snapshots --limit", "--limit requires a row count"),
+        ("show -x", "unknown quality show option: -x"),
+        ("clean --keep", "--keep requires a count"),
+        (
+            "clean --keep 1 --keep 1",
+            "--keep may only be specified once",
+        ),
+        ("clean --nope", "unknown quality clean option: --nope"),
+    ] {
+        let error = refused(text);
+        assert!(error.contains(said), "{text}: {error}");
+    }
+    assert!(matches!(
+        parse(words(
+            "scan --json --dry-run --refresh --all --run latest --context notes.md -- --odd"
+        )),
+        Ok(Command::Health(Options {
+            json: true,
+            dry_run: true,
+            refresh: true,
+            all: true,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        parse(words("gaps --json --limit 3 -- snap")),
+        Ok(Command::Gaps {
+            json: true,
+            limit: 3,
+            snapshot: Some(_)
+        })
+    ));
+    assert!(matches!(parse(words("scope")), Ok(Command::Scope { .. })));
+    assert!(matches!(
+        parse(words("diff a b --json")),
+        Ok(Command::Diff { json: true, .. })
+    ));
+    assert!(matches!(
+        parse(words("clean --keep 2 --dry-run --json")),
+        Ok(Command::Clean {
+            keep: 2,
+            dry_run: true,
+            json: true
+        })
+    ));
+}
