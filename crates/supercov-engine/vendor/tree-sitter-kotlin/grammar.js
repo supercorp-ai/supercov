@@ -58,6 +58,10 @@ module.exports = grammar({
     [$.class_modifier, $._reserved_identifier],
     [$.platform_modifier, $._reserved_identifier],
     [$.property_modifier, $._reserved_identifier],
+    [$.context_parameters, $._reserved_identifier],
+    [$.modifiers, $.function_type],
+    [$.type_modifiers, $._reserved_identifier],
+    [$.function_modifier, $.type_modifiers, $._reserved_identifier],
 
     [$.explicit_delegation, $.expression],
     [$.qualified_identifier],
@@ -452,6 +456,7 @@ module.exports = grammar({
 
     modifiers: $ => prec.right(repeat1(choice(
       $.annotation,
+      $.context_parameters,
       $.class_modifier,
       $.member_modifier,
       $.function_modifier,
@@ -461,6 +466,16 @@ module.exports = grammar({
       $.parameter_modifier,
       $.platform_modifier,
     ))),
+
+    // Kotlin 2.2 context parameters (`context(scope: Scope)`) and the older context receivers
+    // (`context(Scope)`), on declarations and on function types.
+    context_parameters: $ => seq(
+      'context',
+      '(',
+      commaSep1(choice($.parameter, $.type)),
+      optional(','),
+      ')',
+    ),
 
     class_modifier: _ => choice(
       'enum',
@@ -595,6 +610,7 @@ module.exports = grammar({
     ),
 
     function_type: $ => seq(
+      optional($.context_parameters),
       optional($.type_modifiers),
       optional(seq($._receiver_type, '.')),
       $.function_type_parameters,
@@ -942,8 +958,11 @@ module.exports = grammar({
     ),
 
     callable_reference: $ => seq(
-      optional($._receiver_type),
-      '::',
+      choice(
+        seq(optional($._receiver_type), '::'),
+        // `String?::plus`: one token, or `?:` would be read as the elvis operator
+        seq($._receiver_type, '?::'),
+      ),
       choice($.identifier, 'class'),
     ),
 
@@ -1071,6 +1090,7 @@ module.exports = grammar({
         'annotation',
         'constructor',
         'const',
+        'context',
         'data',
         'enum',
         'expect',
@@ -1078,6 +1098,7 @@ module.exports = grammar({
         'get',
         'set',
         'operator',
+        'suspend',
         'value',
       ),
       $.identifier,

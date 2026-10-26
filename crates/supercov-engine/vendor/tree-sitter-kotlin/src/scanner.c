@@ -113,20 +113,30 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                     did_advance = true;
                     break;
                 case '"':
-                    lexer->mark_end(lexer);
-                    // 3 or 4 quotes means we're done
-                    advance(lexer);
-                    if (lexer->lookahead == '"') {
+                    // The last three quotes of a run end the string; any before them are text
+                    // (`"""say "hi"""""` ends with the quote after `hi` as text).
+                    if (did_advance) {
+                        lexer->mark_end(lexer);
                         advance(lexer);
                         if (lexer->lookahead == '"') {
                             advance(lexer);
                             if (lexer->lookahead == '"') {
-                                advance(lexer);
+                                return true;
                             }
-                            return did_advance;
+                        }
+                        break;
+                    }
+                    // At the start of the token: one quote of text when at least three follow it.
+                    advance(lexer);
+                    lexer->mark_end(lexer);
+                    did_advance = true;
+                    if (lexer->lookahead == '"') {
+                        advance(lexer);
+                        if (lexer->lookahead == '"') {
+                            advance(lexer);
+                            return lexer->lookahead == '"';
                         }
                     }
-                    did_advance = true;
                     break;
                 default:
                     advance(lexer);
@@ -306,7 +316,7 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                 while (scan_words(lexer,
                                   (const char[16][16]){"public", "private", "protected", "internal", "abstract",
                                                        "final", "open", "override", "lateinit", "vararg", "noinline",
-                                                       "crossinline", "external", "suspend", "inline"},
+                                                       "crossinline", "external", "suspend", "inline", "actual"},
                                   scanned_word, NULL)) {
                     memset(scanned_word, 0, MAX_WORD_SIZE);
                     while (iswspace(lexer->lookahead)) {
