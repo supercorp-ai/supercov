@@ -336,7 +336,9 @@ jobs:
           merged=$(grep -oE 'merged run run_[0-9a-f]{16}' "$out/merge.log" | awk '{print $3}')
           if [ -z "$merged" ]; then echo "the slices did not merge"; exit 1; fi
           "$supercov" runs "$merged" > "$out/summary.txt"
-          "$supercov" runs "$merged" gaps --format jsonl --metric mcdc --output "$out/mcdc-gaps.jsonl"
+          for metric in mcdc lines branches; do
+            "$supercov" runs "$merged" gaps --format jsonl --metric "$metric" --limit 0 --output "$out/$metric-gaps.jsonl"
+          done
           {
             echo "### ${{ matrix.os }}"
             echo '```'
