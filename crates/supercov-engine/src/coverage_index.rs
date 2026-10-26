@@ -390,17 +390,6 @@ pub struct IndexedGapDimensions {
     pub mcdc_conditions: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IndexedCoverageSnapshot {
-    pub all_summary: CoverageSummary,
-    pub passed_summary: CoverageSummary,
-    pub failed_summary: CoverageSummary,
-    pub all_files: Vec<IndexedFileGap>,
-    pub passed_files: Vec<IndexedFileGap>,
-    pub failed_files: Vec<IndexedFileGap>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedDecisionGap {
@@ -3904,17 +3893,6 @@ impl<'a> CoverageIndex<'a> {
         anchors.sort_by_key(|anchor| anchor.column);
         Ok(anchors)
     }
-
-    pub fn snapshot(&self) -> Result<IndexedCoverageSnapshot, CoverageIndexError> {
-        Ok(IndexedCoverageSnapshot {
-            all_summary: self.summary(CoverageViewId::All)?,
-            passed_summary: self.summary(CoverageViewId::Passed)?,
-            failed_summary: self.summary(CoverageViewId::Failed)?,
-            all_files: self.file_gaps(CoverageViewId::All, None, None)?,
-            passed_files: self.file_gaps(CoverageViewId::Passed, None, None)?,
-            failed_files: self.file_gaps(CoverageViewId::Failed, None, None)?,
-        })
-    }
 }
 
 fn bool_field(value: u8) -> Result<bool, CoverageIndexError> {
@@ -5429,11 +5407,24 @@ mod tests {
                 read += index.dimensions(view, dimension)?.len();
             }
             read += index.scope_entries(view)?.len();
+            index.projection(view, None, None)?;
             let lines = index.lines(view)?;
             for line in &lines {
                 read += index.anchors(view, &line.file, line.line)?.len();
+                read += usize::from(index.line(view, &line.file, line.line)?.is_some());
             }
             read += lines.len();
+            let files = lines
+                .iter()
+                .map(|line| line.file.as_str())
+                .collect::<BTreeSet<_>>();
+            for file in files {
+                read += index.decision_gaps(view, None, None, file)?.len();
+                read += index.lines_in_file(view, file)?.len();
+                read += index.hit_metadata_in_file(view, file)?.len();
+                read += index.decision_details_in_file(view, file)?.len();
+                read += index.limitations_in_file(view, file)?.len();
+            }
             read += index.test_summaries(view)?.len();
             read += index.test_details(view)?.len();
             read += index.hit_metadata(view)?.len();
@@ -5464,10 +5455,24 @@ mod tests {
                 refused += usize::from(index.dimensions(view, dimension).is_err());
             }
             refused += usize::from(index.scope_entries(view).is_err());
+            refused += usize::from(index.projection(view, None, None).is_err());
             match index.lines(view) {
                 Ok(lines) => {
                     for line in &lines {
                         refused += usize::from(index.anchors(view, &line.file, line.line).is_err());
+                        refused += usize::from(index.line(view, &line.file, line.line).is_err());
+                    }
+                    for file in lines
+                        .iter()
+                        .map(|line| line.file.as_str())
+                        .collect::<BTreeSet<_>>()
+                    {
+                        refused +=
+                            usize::from(index.decision_gaps(view, None, None, file).is_err());
+                        refused += usize::from(index.lines_in_file(view, file).is_err());
+                        refused += usize::from(index.hit_metadata_in_file(view, file).is_err());
+                        refused += usize::from(index.decision_details_in_file(view, file).is_err());
+                        refused += usize::from(index.limitations_in_file(view, file).is_err());
                     }
                 }
                 Err(_) => refused += 1,
