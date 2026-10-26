@@ -12482,6 +12482,19 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let reached =
         fail_each_place_of_a_run("run-faults-rs", small_crate, &["--", "cargo", "test", "-q"]);
     assert!(reached > 50, "{reached}");
+    // And through nextest, where it is installed.
+    let nextest = std::process::Command::new("cargo")
+        .args(["nextest", "--version"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if nextest {
+        let reached = fail_each_place_of_a_run(
+            "run-faults-nextest",
+            small_crate,
+            &["--", "cargo", "nextest", "run"],
+        );
+        assert!(reached > 50, "{reached}");
+    }
 }
 
 /// `runs patch` reads the change from git: each git call failing in turn

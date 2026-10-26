@@ -202,6 +202,13 @@ impl Project {
         ] {
             command.env_remove(name);
         }
+        // Under nextest the tests inherit its own variables, which a
+        // `cargo nextest run` the test starts would read as its own.
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("NEXTEST_") {
+                command.env_remove(name);
+            }
+        }
         Ran {
             args: args.iter().map(|arg| arg.to_string()).collect(),
             output: command.envs(env.iter().copied()).output().unwrap(),
