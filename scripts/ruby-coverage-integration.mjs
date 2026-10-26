@@ -572,11 +572,11 @@ try {
     'a run missing a process cannot call itself complete',
   );
 
-  // Ruby 4 on Windows ARM never finished a suite that started a Ractor: the
-  // job hung at this case until CI cancelled it, while Ruby 3.4 on the same
-  // runner passed in two minutes (addressable skips its own Ractor spec on
-  // Ruby 4 Windows for the same reason). It runs everywhere else.
-  const ractorsRun = !(windows && process.arch === 'arm64' && version.major >= 4);
+  // Ruby 4 on Windows never finished a suite that started a Ractor, on ARM
+  // or x64: the job hung at this case until CI cancelled it, while Ruby 3.4
+  // on the same runners passed in minutes (addressable skips its own Ractor
+  // spec on Ruby 4 Windows for the same reason). It runs everywhere else.
+  const ractorsRun = !(windows && version.major >= 4);
   if (ractorsRun) {
     // Code a test runs inside a Ractor. A non-main Ractor cannot touch a
     // global, so a probe reaching for one raised Ractor::IsolationError in the
