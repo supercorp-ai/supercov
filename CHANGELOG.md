@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A Kotlin file with a class body on one line (`class C { val x = 1 }`), two members on one line, or a line starting with an identifier that begins with a keyword (`set_value = ...`) was read as not parsing and left unmeasured; Supercov now builds the Kotlin grammar itself with upstream's unreleased fixes for these. A file ending inside an annotation could stop the run for good; it now ends.
 - `assertions assess` and its `--dry-run` estimate took minutes before printing anything on a run whose tests share most of what they run, as a merged or end-to-end run's do: each request and each cache key worked out its test's code and its files' functions again. They are worked out once, and the requests are the same: 400 tests sharing 6,000 statements went from 166 s to 4 s on one core.
 
 ## 4.20.3

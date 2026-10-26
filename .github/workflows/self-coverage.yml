@@ -79,7 +79,15 @@ jobs:
           printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
             | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
           versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
-          npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
+          # Bounded and tried again, as the compatibility runner legs do: an
+          # apt mirror slowed to a package every few seconds held this step
+          # until the job's limit on 2026-10-26.
+          for attempt in 1 2 3; do
+            timeout 8m npx -y "playwright@$(echo "$versions" | tail -1)" install-deps && break
+            echo "attempt $attempt did not finish; trying again"
+            sudo dpkg --configure -a || true
+            [ "$attempt" = 3 ] && exit 1
+          done
           sudo chown -R "$USER" ~/apt-archives
       - run: cargo build --release -p supercov
       - uses: actions/upload-artifact@v4

@@ -48,6 +48,27 @@ fn digest_files(files: &[PathBuf], crate_root: &Path) -> String {
     digest
 }
 
+/// The Kotlin grammar Supercov builds itself: upstream's generated parser
+/// with scanner fixes it has not released (see its README).
+const KOTLIN_GRAMMAR: &str = "vendor/tree-sitter-kotlin";
+
+fn compile_kotlin_grammar(crate_root: &Path) {
+    let source = crate_root.join(KOTLIN_GRAMMAR).join("src");
+    let mut build = cc::Build::new();
+    build
+        .std("c11")
+        .include(&source)
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-but-set-variable")
+        .flag_if_supported("-Wno-trigraphs");
+    #[cfg(target_env = "msvc")]
+    build.flag("-utf-8");
+    build
+        .file(source.join("parser.c"))
+        .file(source.join("scanner.c"))
+        .compile("supercov-tree-sitter-kotlin");
+}
+
 fn main() {
     // Everything digested lives inside the crate: the runtime shims are
     // synchronised copies under runtime-assets/, so the tarball cargo packages
@@ -60,6 +81,7 @@ fn main() {
     let ruby_runtime_root = crate_root.join("runtime-assets/ruby");
     let go_runtime_root = crate_root.join("runtime-assets/go");
     let jvm_runtime_root = crate_root.join("runtime-assets/jvm");
+    compile_kotlin_grammar(&crate_root);
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
     collect_files(&runtime_root, &mut files);
@@ -67,6 +89,7 @@ fn main() {
     collect_files(&ruby_runtime_root, &mut files);
     collect_files(&go_runtime_root, &mut files);
     collect_files(&jvm_runtime_root, &mut files);
+    collect_files(&crate_root.join(KOTLIN_GRAMMAR), &mut files);
     files.extend([crate_root.join("build.rs"), crate_root.join("Cargo.toml")]);
     files.sort();
     files.dedup();
@@ -161,6 +184,7 @@ fn main() {
         crate_root.join("Cargo.toml"),
     ];
     collect_files(&jvm_runtime_root, &mut jvm_frontend);
+    collect_files(&crate_root.join(KOTLIN_GRAMMAR), &mut jvm_frontend);
     jvm_frontend.sort();
     jvm_frontend.dedup();
     println!(
