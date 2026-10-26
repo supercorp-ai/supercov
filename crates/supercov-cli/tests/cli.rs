@@ -12483,3 +12483,41 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
         fail_each_place_of_a_run("run-faults-rs", small_crate, &["--", "cargo", "test", "-q"]);
     assert!(reached > 50, "{reached}");
 }
+
+/// `runs patch` reads the change from git: each git call failing in turn
+/// (`SUPERCOV_TEST_FAULT=git@N`) is named and ends the command with `2`, never
+/// a panic, and the call no fault reaches answers as usual.
+#[test]
+fn a_patch_whose_git_call_fails_says_so() {
+    let project = Project::cart("patch-git-faults");
+    project.edit(
+        "src/cart.js",
+        "  return items.map((item) => item.name).join(\", \");",
+        "  const names = items.map((item) => item.name);\n  return names.join(\", \");",
+    );
+    project.write("src/new.js", "export const fresh = 1;\n");
+    project.measure(&[]);
+    for query in [
+        &["runs", "patch", "--base", "HEAD", "--min-lines", "100"][..],
+        &["runs", "patch", "--base", "HEAD", "--annotate", "github"],
+        &["runs", "patch", "--base", "HEAD", "--json"],
+    ] {
+        let mut nth = 0;
+        loop {
+            nth += 1;
+            let fault = format!("git@{nth}");
+            let ran = project.supercov_with(query, &[("SUPERCOV_TEST_FAULT", &fault)]);
+            let said = format!("{}{}", ran.stdout(), ran.stderr());
+            assert!(
+                !said.contains("panicked at") && ran.code() != 101,
+                "{query:?} with {fault} panicked:\n{said}"
+            );
+            if !ran.stderr().contains("[supercov] test fault at git") {
+                break;
+            }
+            assert_ne!(ran.code(), 0, "{query:?} with {fault}:\n{said}");
+            assert!(said.contains("git"), "{query:?} with {fault}:\n{said}");
+        }
+        assert!(nth > 2, "{query:?} ran no git");
+    }
+}

@@ -1317,11 +1317,13 @@ pub(crate) fn picked_tests(
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(arguments)
-        .current_dir(root)
-        .output()
-        .map_err(|error| format!("could not run git: {error}"))?;
+    let output = supercov_engine::fault::io("git", std::io::ErrorKind::NotFound, || {
+        Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .output()
+    })
+    .map_err(|error| format!("could not run git: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "git {} failed: {}",
