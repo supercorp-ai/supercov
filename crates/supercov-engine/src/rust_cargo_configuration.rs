@@ -2189,4 +2189,58 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Each way a configuration or the environment can be written wrong is
+    /// refused by what is wrong in it, before anything runs.
+    #[test]
+    fn each_malformed_configuration_is_refused_by_name() {
+        let root = fixture();
+        let refused = |config: &str, arguments: &[&str], inputs: CargoModelInputs| {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            match resolve_with_inputs(&root, &root, &invocation(arguments), inputs) {
+                Err(error) => error.to_string(),
+                Ok(plan) => panic!("{config} {arguments:?} was accepted: {plan:?}"),
+            }
+        };
+        let mut real_host = model_inputs();
+        real_host.host_override = None;
+        for (config, arguments, said) in [
+            (
+                "[target.'cfg(foo bar)']\nrunner='never'\n",
+                &["test"][..],
+                "invalid Cargo target cfg key",
+            ),
+            (
+                "[target.'cfg(foo bar)']\nrustflags=['--cfg', 'x']\n",
+                &["test"][..],
+                "invalid Cargo target cfg key",
+            ),
+            ("[build]\ntarget=5\n", &["test"][..], "build.target"),
+            (
+                "",
+                &["test", "--target", "missing-spec.json"][..],
+                "missing-spec.json",
+            ),
+        ] {
+            let error = refused(config, arguments, real_host.clone());
+            assert!(error.contains(said), "{config} {arguments:?}: {error}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let not_utf8 = || OsString::from_vec(vec![0xff, 0xfe]);
+            for (variable, said) in [
+                ("CARGO_BUILD_TARGET", "CARGO_BUILD_TARGET is not UTF-8"),
+                ("CARGO_BUILD_RUSTFLAGS", "is not UTF-8"),
+            ] {
+                let error = refused(
+                    "",
+                    &["test"],
+                    model_inputs_with([(OsString::from(variable), not_utf8())]),
+                );
+                assert!(error.contains(said), "{variable}: {error}");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }
