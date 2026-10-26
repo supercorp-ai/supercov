@@ -111,12 +111,7 @@ pub fn run_list_query(
     Ok((
         RunListData {
             filters: CoverageQueryFilters {
-                outcome: match view {
-                    CoverageViewId::All => "all",
-                    CoverageViewId::Passed => "passed",
-                    CoverageViewId::Failed => "failed",
-                }
-                .into(),
+                outcome: view.name().into(),
                 kind: None,
                 runner: None,
             },

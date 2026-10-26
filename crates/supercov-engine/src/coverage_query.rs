@@ -699,12 +699,7 @@ fn query_filters(
     runner: Option<&str>,
 ) -> CoverageQueryFilters {
     CoverageQueryFilters {
-        outcome: match view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: view.name().into(),
         kind: kind.map(str::to_owned),
         runner: runner.map(str::to_owned),
     }
@@ -3142,12 +3137,7 @@ pub fn coverage_scope_query(
         CoverageScopeData {
             run: options.run.into(),
             filters: CoverageQueryFilters {
-                outcome: match options.view {
-                    CoverageViewId::All => "all",
-                    CoverageViewId::Passed => "passed",
-                    CoverageViewId::Failed => "failed",
-                }
-                .into(),
+                outcome: options.view.name().into(),
                 kind: options.kind.map(str::to_owned),
                 runner: options.runner.map(str::to_owned),
             },
@@ -3294,12 +3284,7 @@ pub fn coverage_summary_query(
         None
     };
     let filters = CoverageQueryFilters {
-        outcome: match options.view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: options.view.name().into(),
         kind: options.kind.map(str::to_owned),
         runner: options.runner.map(str::to_owned),
     };
@@ -3562,12 +3547,7 @@ pub fn coverage_areas_query(
         CoverageAreasData {
             run: options.run.into(),
             filters: CoverageQueryFilters {
-                outcome: match options.view {
-                    CoverageViewId::All => "all",
-                    CoverageViewId::Passed => "passed",
-                    CoverageViewId::Failed => "failed",
-                }
-                .into(),
+                outcome: options.view.name().into(),
                 kind: options.kind.map(str::to_owned),
                 runner: options.runner.map(str::to_owned),
             },
@@ -3675,12 +3655,7 @@ pub fn tests_without_evidence_query(
         TestsWithoutEvidenceData {
             run: options.run.into(),
             filters: CoverageQueryFilters {
-                outcome: match options.view {
-                    CoverageViewId::All => "all",
-                    CoverageViewId::Passed => "passed",
-                    CoverageViewId::Failed => "failed",
-                }
-                .into(),
+                outcome: options.view.name().into(),
                 kind: options.kind.map(str::to_owned),
                 runner: options.runner.map(str::to_owned),
             },
@@ -4028,12 +4003,7 @@ pub fn coverage_file_decisions_query(
         .collect::<Vec<_>>();
     let returned = rows.len();
     let filters = CoverageQueryFilters {
-        outcome: match options.view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: options.view.name().into(),
         kind: options.kind.map(str::to_owned),
         runner: options.runner.map(str::to_owned),
     };
@@ -4096,12 +4066,7 @@ pub fn coverage_file_query(
         .collect::<Vec<_>>();
     let page_info = pagination(offset, limit, page.len(), total);
     let filters = CoverageQueryFilters {
-        outcome: match view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: view.name().into(),
         kind: kind.map(str::to_owned),
         runner: runner.map(str::to_owned),
     };

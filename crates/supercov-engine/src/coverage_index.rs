@@ -84,6 +84,17 @@ pub enum CoverageViewId {
     Failed = 2,
 }
 
+impl CoverageViewId {
+    /// The view's name, as filters and replies write it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 impl TryFrom<u8> for CoverageViewId {
     type Error = CoverageIndexError;
 
@@ -5564,6 +5575,19 @@ mod tests {
                 "invalid UTF-8 in coverage index",
                 "coverage index exceeds format limits",
             ]
+        );
+    }
+
+    #[test]
+    fn each_view_is_named_as_filters_write_it() {
+        assert_eq!(
+            [
+                CoverageViewId::All,
+                CoverageViewId::Passed,
+                CoverageViewId::Failed
+            ]
+            .map(CoverageViewId::name),
+            ["all", "passed", "failed"]
         );
     }
 }
