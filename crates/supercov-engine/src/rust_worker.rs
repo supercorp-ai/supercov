@@ -875,7 +875,7 @@ pub struct RustWorkerServer {
     project: PreparedRustProject,
     pollers: Vec<Poller>,
     /// Every Worker of a `wrangler dev`, read through workerd's inspector.
-    others: Option<OtherWorkers>,
+    others: OtherWorkers,
     hook: PathBuf,
     notes: PathBuf,
     integrity: RunIntegrity,
@@ -977,7 +977,7 @@ impl RustWorkerServer {
             servers.push(Self {
                 project,
                 pollers,
-                others: Some(others),
+                others,
                 hook,
                 notes,
                 integrity,
@@ -1037,9 +1037,7 @@ impl RustWorkerServer {
         for poller in std::mem::take(&mut self.pollers) {
             poller.finish();
         }
-        if let Some(others) = self.others.take() {
-            others.finish();
-        }
+        self.others.finish();
         let evidence_directory = self.directory.join("evidence");
         let result = read_windows(&evidence_directory).and_then(|windows| {
             crate::rust_wasm_evidence::publish(

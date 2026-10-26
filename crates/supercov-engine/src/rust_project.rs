@@ -1269,6 +1269,13 @@ fn integration_choice() {
         .unwrap();
         let worker = "#[cfg(target_arch = \"wasm32\")]\npub fn runtime() -> u8 {\n    1\n}\n\n#[cfg(not(target_arch = \"wasm32\"))]\npub fn runtime() -> u8 {\n    2\n}\n\n#[cfg(feature = \"audit\")]\npub fn audit() -> u8 {\n    3\n}\n\n#[cfg(debug_assertions)]\npub fn debug() -> u8 {\n    4\n}\n\n#[cfg(custom)]\npub fn custom() -> u8 {\n    5\n}\n";
         fs::write(root.join("worker/src/lib.rs"), worker).unwrap();
+        // Its integration tests are built by `cargo test`, not worker-build.
+        fs::create_dir_all(root.join("worker/tests")).unwrap();
+        fs::write(
+            root.join("worker/tests/smoke.rs"),
+            "#[test]\nfn smoke() {}\n",
+        )
+        .unwrap();
         fs::write(
             root.join("host/Cargo.toml"),
             "[package]\nname = \"host\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
