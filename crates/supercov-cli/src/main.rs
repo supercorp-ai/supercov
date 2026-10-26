@@ -88,21 +88,40 @@ Guides:
   supercov docs <topic>                print Markdown to stdout
 "#;
 
-const DOC_TOPICS: &[&str] = &[
-    "getting-started",
-    "agent-loop",
-    "assertions",
-    "troubleshooting",
-    "cli",
-    "coverage-model",
-    "quality",
-    "security",
-    "evidence",
-    "supported-suites",
-    "verification",
-    "performance",
-    "reports",
-    "workspace-isolation",
+/// The bundled guides, by topic, in the order `docs` lists them.
+const DOC_TOPICS: &[(&str, &str)] = &[
+    (
+        "getting-started",
+        include_str!("../assets/docs/getting-started.md"),
+    ),
+    ("agent-loop", include_str!("../assets/docs/agent-loop.md")),
+    ("assertions", include_str!("../assets/docs/assertions.md")),
+    (
+        "troubleshooting",
+        include_str!("../assets/docs/troubleshooting.md"),
+    ),
+    ("cli", include_str!("../assets/docs/cli.md")),
+    (
+        "coverage-model",
+        include_str!("../assets/docs/coverage-model.md"),
+    ),
+    ("quality", include_str!("../assets/docs/quality.md")),
+    ("security", include_str!("../assets/docs/security.md")),
+    ("evidence", include_str!("../assets/docs/evidence.md")),
+    (
+        "supported-suites",
+        include_str!("../assets/docs/supported-suites.md"),
+    ),
+    (
+        "verification",
+        include_str!("../assets/docs/verification.md"),
+    ),
+    ("performance", include_str!("../assets/docs/performance.md")),
+    ("reports", include_str!("../assets/docs/reports.md")),
+    (
+        "workspace-isolation",
+        include_str!("../assets/docs/workspace-isolation.md"),
+    ),
 ];
 
 /// The source files a query is about: a line's, several lines', a file's or
@@ -438,34 +457,17 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
     }
     let Some(topic) = arguments.first() else {
         println!("Bundled guides");
-        for topic in DOC_TOPICS {
+        for (topic, _) in DOC_TOPICS {
             println!("  {topic}");
         }
         return ExitCode::SUCCESS;
     };
-    if !DOC_TOPICS.contains(&topic.as_str()) {
+    let Some((_, guide)) = DOC_TOPICS.iter().find(|(name, _)| name == topic) else {
         eprintln!(
             "[supercov] unknown guide {topic:?}; run `{} docs` to list topics",
             launcher_command()
         );
         return ExitCode::from(2);
-    }
-    let guide = match topic.as_str() {
-        "getting-started" => include_str!("../assets/docs/getting-started.md"),
-        "agent-loop" => include_str!("../assets/docs/agent-loop.md"),
-        "assertions" => include_str!("../assets/docs/assertions.md"),
-        "troubleshooting" => include_str!("../assets/docs/troubleshooting.md"),
-        "cli" => include_str!("../assets/docs/cli.md"),
-        "coverage-model" => include_str!("../assets/docs/coverage-model.md"),
-        "quality" => include_str!("../assets/docs/quality.md"),
-        "security" => include_str!("../assets/docs/security.md"),
-        "evidence" => include_str!("../assets/docs/evidence.md"),
-        "supported-suites" => include_str!("../assets/docs/supported-suites.md"),
-        "verification" => include_str!("../assets/docs/verification.md"),
-        "performance" => include_str!("../assets/docs/performance.md"),
-        "workspace-isolation" => include_str!("../assets/docs/workspace-isolation.md"),
-        "reports" => include_str!("../assets/docs/reports.md"),
-        _ => unreachable!("every listed guide is bundled"),
     };
     print!("{}", localize_guide(guide, launcher_command()));
     ExitCode::SUCCESS

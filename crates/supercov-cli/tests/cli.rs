@@ -1040,6 +1040,19 @@ fn help_and_bundled_guides_need_no_project() {
         let help = project.supercov(&args).succeeds();
         assert!(help.contains("supercov"), "{args:?}: {help}");
     }
+    // `help <command>` is `<command> --help`, for every command.
+    for command in [
+        "quality", "security", "docs", "runs", "diff", "report", "merge", "import",
+    ] {
+        let help = project.supercov(&["help", command]).succeeds();
+        assert_eq!(
+            help,
+            project.supercov(&[command, "--help"]).succeeds(),
+            "{command}"
+        );
+    }
+    let unknown = project.supercov(&["help", "fly"]).exits(2);
+    assert!(unknown.contains("No help for fly"), "{unknown}");
     let guides = project.supercov(&["docs"]).succeeds();
     contains_all(
         &guides,
@@ -12313,4 +12326,15 @@ fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
         }
         assert!(nth > 1, "{query:?} made no file operation");
     }
+}
+
+/// `--exact-attribution` goes before the command, and the run is the
+/// command's as any other.
+#[test]
+fn exact_attribution_runs_the_command_after_it() {
+    let project = Project::cart("exact-attribution");
+    let measured = project
+        .supercov(&["--exact-attribution", "--", "node", "--test"])
+        .succeeds();
+    contains_all(&measured, &["pass 3", "[coverage] evidence:"]);
 }
