@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- Ruby files loaded after Bootsnap 1.26.1 is set up ran without Supercov's probes, its compile cache on or off: Bootsnap now always puts its own loader in front, so a Rails app counted no branches, and a line two tests ran was credited to the first alone. Supercov's loader stays in front of any loader added after it.
 - `supercov merge` merges Rust runs whose tests started different Cloudflare Workers of one workspace, instead of refusing them for different coverage denominators; a Worker stays marked as started by no test only where no merged run started it.
 - Every Rust Worker in one `wrangler dev -c a/wrangler.toml -c b/wrangler.toml` is measured, under `cargo test` or a browser suite, instead of only one: wrangler's inspector shows one, and each is read through workerd's own inspector.
 - A Rust Worker's crate that `cargo test` starts is measured as worker-build compiles it -- for wasm, a release unless `--dev`, never a test, with the features its command and defaults enable -- instead of for the host: wasm-only code (`#[cfg(target_arch = "wasm32")]`) is now counted, and native-only, debug-only or disabled-feature code no longer is. The crate counts whether or not `cargo test` compiles it, so runs with `cargo test -p <crate>` have the same denominator as any other and merge.

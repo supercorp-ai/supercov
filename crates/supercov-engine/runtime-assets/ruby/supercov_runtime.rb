@@ -1605,6 +1605,25 @@ module Supercov
       end
       defined?(super) ? super : nil
     end
+
+    # Put the hook in front of Ruby's loader and keep it there. A library
+    # that prepends its own `load_iseq` later runs before this one, and one
+    # that compiles the file itself never reaches it: Bootsnap 1.26.1 does
+    # that on every setup, its compile cache on or off, and a Rails app's
+    # files then ran without probes. Whatever is prepended after this hook
+    # gets a fresh copy of it on top (a module already in the chain is not
+    # moved), and the files Supercov does not measure go on to it.
+    def self.install
+      target = RubyVM::InstructionSequence.singleton_class
+      target.prepend(Loader)
+      target.define_singleton_method(:prepend) do |*modules|
+        result = super(*modules)
+        # `super`, Module#prepend itself: the copy goes on top without
+        # coming back here.
+        super(Loader.dup) if modules.any? { |mod| mod.method_defined?(:load_iseq) || mod.private_method_defined?(:load_iseq) }
+        result
+      end
+    end
   end
 
   # Runner adapters attach when their classes finish defining.
@@ -1860,7 +1879,7 @@ module Supercov
     runtime = Runtime.new(plan_path, evidence_dir, run_id, worker)
     $__supercov = Probe.new(runtime)
     Ractor.singleton_class.prepend(RactorSafe::Started) if runtime.plan["ractors"]
-    RubyVM::InstructionSequence.singleton_class.prepend(Loader)
+    Loader.install
     @runtime = runtime
     inherited = ENV[CONTEXT_ENV]
     if inherited && !inherited.empty?
