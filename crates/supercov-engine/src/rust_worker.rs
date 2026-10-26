@@ -2886,6 +2886,34 @@ mod tests {
         let broken = root.join("broken.toml");
         fs::write(&broken, "main = \"m.mjs\"\n[").unwrap();
         assert!(wrap_config(&broken, None, 6).is_err());
+        // A `main` inside a copy Supercov wrapped before is its entry too.
+        let rewrapped = root.join("rewrapped.toml");
+        fs::write(
+            &rewrapped,
+            format!("main = \"{WRAPPED_PREFIX}1-0/other.mjs\"\n"),
+        )
+        .unwrap();
+        assert!(
+            wrap_config(&rewrapped, None, 7)
+                .unwrap_err()
+                .contains("Supercov's entry already")
+        );
+        // A JSON configuration's environment `main` is the entry too.
+        let staged = root.join("staged.json");
+        fs::write(
+            &staged,
+            "{\"main\": \"a.mjs\", \"env\": {\"staging\": {\"main\": \"b.mjs\"}}}",
+        )
+        .unwrap();
+        let (copy, _) = wrap_config(&staged, Some("staging"), 8).unwrap();
+        let document: Value = serde_json::from_str(&fs::read_to_string(&copy).unwrap()).unwrap();
+        assert!(
+            document["env"]["staging"]["main"]
+                .as_str()
+                .unwrap()
+                .ends_with(ENTRY_FILE)
+        );
+        assert!(document["main"].as_str().unwrap().ends_with(ENTRY_FILE));
         fs::remove_dir_all(root).unwrap();
     }
 

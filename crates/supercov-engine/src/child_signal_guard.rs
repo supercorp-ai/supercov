@@ -126,13 +126,27 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
     let _registered = register(&child);
     child.wait_with_output()
 }
+/// Everything `source` gives until it ends or fails, each piece handed to
+/// `each` as it comes. A pipe that fails part way ends what was read there.
+fn read_all(mut source: impl std::io::Read, mut each: impl FnMut(&[u8])) -> Vec<u8> {
+    let mut recorded = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    while let Ok(read) = source.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        recorded.extend_from_slice(&chunk[..read]);
+        each(&chunk[..read]);
+    }
+    recorded
+}
 
 /// `output`, also passing what the child writes on to this process's own
 /// streams as it arrives: a test asked to run without capture shows its
 /// output while it runs, and the run still reads all of it. A line of the
 /// child's standard output that `keep` refuses is recorded and not shown.
 pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Result<Output> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -143,16 +157,9 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
     let stderr = child.stderr.take();
     let (stdout, stderr) = std::thread::scope(|scope| {
         let out = scope.spawn(move || {
-            let mut recorded = Vec::new();
             let mut line = Vec::new();
-            let mut chunk = [0_u8; 8192];
-            let mut source = stdout.expect("piped above");
-            while let Ok(read) = source.read(&mut chunk) {
-                if read == 0 {
-                    break;
-                }
-                recorded.extend_from_slice(&chunk[..read]);
-                for byte in &chunk[..read] {
+            let recorded = read_all(stdout.expect("piped above"), |chunk| {
+                for byte in chunk {
                     line.push(*byte);
                     if *byte == b'\n' {
                         if keep(&line) {
@@ -161,24 +168,16 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
                         line.clear();
                     }
                 }
-            }
+            });
             if keep(&line) {
                 let _ = io::stdout().lock().write_all(&line);
             }
             recorded
         });
         let err = scope.spawn(move || {
-            let mut recorded = Vec::new();
-            let mut chunk = [0_u8; 8192];
-            let mut source = stderr.expect("piped above");
-            while let Ok(read) = source.read(&mut chunk) {
-                if read == 0 {
-                    break;
-                }
-                recorded.extend_from_slice(&chunk[..read]);
-                let _ = io::stderr().lock().write_all(&chunk[..read]);
-            }
-            recorded
+            read_all(stderr.expect("piped above"), |chunk| {
+                let _ = io::stderr().lock().write_all(chunk);
+            })
         });
         (
             out.join().unwrap_or_default(),
@@ -406,5 +405,25 @@ mod tests {
         drop(registration);
         released.kill().unwrap();
         released.wait().unwrap();
+    }
+    /// A pipe that fails part way ends the reading there, with what was read
+    /// before it kept.
+    #[test]
+    fn a_pipe_that_fails_ends_what_is_read_from_it() {
+        struct Failing(usize);
+        impl std::io::Read for Failing {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("closed"));
+                }
+                self.0 -= 1;
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+        let mut seen = 0;
+        assert_eq!(read_all(Failing(3), |chunk| seen += chunk.len()), b"xxx");
+        assert_eq!(seen, 3);
+        assert_eq!(read_all(&b"ab"[..], |_| {}), b"ab");
     }
 }

@@ -741,39 +741,27 @@ pub fn run_direct_go(
             .map_err(|error| error.to_string())?;
         }
         let test_started = Instant::now();
-        let replaced = go_flags.is_some();
-        let plan =
-            ExecutionPlan {
-                preparation: Vec::new(),
-                test: ExecutionPhase {
-                    name: "test".into(),
-                    kind: PhaseKind::Test,
-                    command: CommandSpec {
-                        program: command[0].clone().into(),
-                        arguments: command[1..].iter().map(OsString::from).collect(),
-                        cwd: workspace.clone(),
-                        // The run's id, for a test that wants to know it is
-                        // measured; and Go's flags where Supercov added any.
-                        environment: Some(
-                            std::env::vars_os()
-                                .filter(|(name, _)| {
-                                    name != crate::rust_runtime::RUN_ID_ENV
-                                        && (!replaced || name != "GOFLAGS")
-                                })
-                                .chain(go_flags.map(|flags| {
-                                    (OsString::from("GOFLAGS"), OsString::from(flags))
-                                }))
-                                .chain([(
-                                    OsString::from(crate::rust_runtime::RUN_ID_ENV),
-                                    OsString::from(&request.run_id),
-                                )])
-                                .collect(),
-                        ),
-                        captured_output: None,
-                        console: Some(crate::workspace::console_names(&root, &workspace)),
-                    },
+        let plan = ExecutionPlan {
+            preparation: Vec::new(),
+            test: ExecutionPhase {
+                name: "test".into(),
+                kind: PhaseKind::Test,
+                command: CommandSpec {
+                    program: command[0].clone().into(),
+                    arguments: command[1..].iter().map(OsString::from).collect(),
+                    cwd: workspace.clone(),
+                    // The run's id, for a test that wants to know it is
+                    // measured; and Go's flags where Supercov added any.
+                    environment: Some(crate::rust_runtime::measured_environment(
+                        std::env::vars_os(),
+                        go_flags.map(|value| ("GOFLAGS", value)),
+                        &request.run_id,
+                    )),
+                    captured_output: None,
+                    console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
-            };
+            },
+        };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.

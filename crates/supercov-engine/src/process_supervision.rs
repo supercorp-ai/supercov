@@ -50,6 +50,13 @@ pub enum SupervisionError {
     UnsupportedPlatform(&'static str),
 }
 
+/// The error of a file that may not be run: EACCES, or Windows' access
+/// denied. EPERM is a step of Supercov's own refused.
+#[cfg(windows)]
+const NOT_RUNNABLE: i32 = 5;
+#[cfg(not(windows))]
+const NOT_RUNNABLE: i32 = 13;
+
 impl std::fmt::Display for SupervisionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -64,12 +71,9 @@ impl std::fmt::Display for SupervisionError {
             // platform's own words: Windows looks a program up itself and
             // has its own for one that is not there.
             Self::Spawn { program, source } => {
-                // A file that may not be run is EACCES, Windows' access
-                // denied; EPERM is a step of Supercov's own refused.
-                let not_runnable = if cfg!(windows) { 5 } else { 13 };
                 let kind = match source.kind() {
                     std::io::ErrorKind::NotFound => "no such program: ",
-                    _ if source.raw_os_error() == Some(not_runnable) => "not allowed to run: ",
+                    _ if source.raw_os_error() == Some(NOT_RUNNABLE) => "not allowed to run: ",
                     _ => "",
                 };
                 write!(

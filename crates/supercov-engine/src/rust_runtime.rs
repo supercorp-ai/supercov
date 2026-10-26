@@ -67,6 +67,25 @@ pub const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
 /// Every process a measured command starts finds the run's id here: a test
 /// or a harness that wants to know it is measured looks for this variable.
 pub const RUN_ID_ENV: &str = "SUPERCOV_RUN_ID";
+
+/// The environment a measured command runs in: the inherited one, with the
+/// run's id in `RUN_ID_ENV` and, where Supercov set one of the command's own
+/// variables (Go's `GOFLAGS`, Maven's `MAVEN_OPTS`), that value in place of
+/// the inherited one.
+pub(crate) fn measured_environment(
+    inherited: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    replaced: Option<(&str, String)>,
+    run_id: &str,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let replaced_name = replaced.as_ref().map(|(name, _)| *name);
+    inherited
+        .filter(|(name, _)| {
+            name != RUN_ID_ENV && replaced_name.is_none_or(|replaced| name != replaced)
+        })
+        .chain(replaced.map(|(name, value)| (name.into(), value.into())))
+        .chain([(RUN_ID_ENV.into(), run_id.into())])
+        .collect()
+}
 /// The instrumentation the tests a runner starts belong to: a runner of
 /// Supercov's (nextest's target runner, the doctest wrappers) runs in a
 /// process of its own and reads it from here.
@@ -464,6 +483,39 @@ mod tests {
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    /// A measured command's environment: the run's id in place of any it
+    /// inherited, and a variable Supercov set in place of the inherited one;
+    /// the rest as inherited.
+    #[test]
+    fn a_measured_command_gets_the_run_id_and_what_supercov_set() {
+        use std::ffi::OsString;
+        let pair = |name: &str, value: &str| (OsString::from(name), OsString::from(value));
+        let inherited = || {
+            [
+                pair(RUN_ID_ENV, "outer"),
+                pair("GOFLAGS", "-v"),
+                pair("HOME", "/home/t"),
+            ]
+            .into_iter()
+        };
+        assert_eq!(
+            super::measured_environment(inherited(), Some(("GOFLAGS", "-count=1".into())), "run"),
+            [
+                pair("HOME", "/home/t"),
+                pair("GOFLAGS", "-count=1"),
+                pair(RUN_ID_ENV, "run"),
+            ]
+        );
+        assert_eq!(
+            super::measured_environment(inherited(), None, "run"),
+            [
+                pair("GOFLAGS", "-v"),
+                pair("HOME", "/home/t"),
+                pair(RUN_ID_ENV, "run"),
+            ]
+        );
+    }
 
     #[test]
     fn each_probe_read_error_says_what_failed() {

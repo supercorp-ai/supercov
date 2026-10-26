@@ -209,8 +209,9 @@ fn shown_without_capture(line: &[u8]) -> bool {
     let text = String::from_utf8_lossy(line);
     let text = text.trim();
     !(text.is_empty()
-        || text.starts_with("running ") && text.ends_with(" test")
-        || text.starts_with("running ") && text.ends_with(" tests")
+        || text
+            .strip_prefix("running ")
+            .is_some_and(|count| count.ends_with(" test") || count.ends_with(" tests"))
         || text.starts_with("test result: "))
 }
 
