@@ -8,6 +8,7 @@
 
 **Fixed**
 
+- A JavaScript or TypeScript file Supercov could not parse was reported one column to the right of the error.
 - A container time from the Docker daemon with anything but digits after its seconds made the Docker relay panic while reading it; it is read as no time.
 - A test command that could not start says whether there is no such program or it may not be run, before the system's own words, and exits `127` or `126` by that on every platform rather than by the message's wording; a step of Supercov's own that the system refused no longer reads as a file that may not be run.
 
