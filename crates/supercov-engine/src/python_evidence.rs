@@ -4161,17 +4161,21 @@ pub(crate) mod tests {
         // its process already removed.
         let below = file.join("p.1.slot");
         let metadata = entry_metadata("p.1.slot", &below);
+        let mapped = map_slot(&below);
         if cfg!(unix) {
             assert!(metadata.is_err());
+            assert!(mapped.is_err());
         } else {
             assert!(matches!(metadata, Ok(None)), "{metadata:?}");
+            assert!(matches!(mapped, Ok(None)));
         }
-        assert!(map_slot(&below).is_err());
         let no_marker = |marker: &Path| {
             materialize_shared_slot(marker, "p.1.slot", &|_| unreachable!()).map_err(|_| ())
         };
         assert_eq!(no_marker(&base.join("missing/p.1.shm")), Ok(None));
-        assert_eq!(no_marker(&file.join("p.1.shm")), Err(()));
+        // A marker below a file: not found, on Windows, as above.
+        let below_marker = no_marker(&file.join("p.1.shm"));
+        assert_eq!(below_marker, if cfg!(unix) { Err(()) } else { Ok(None) });
     }
 
     /// What a macOS process kept in shared memory is copied into a slot file
