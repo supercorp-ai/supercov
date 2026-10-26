@@ -63,6 +63,9 @@ const REGION_TEMPLATE: &str = include_str!("../runtime-assets/rust-region-runtim
 
 /// Where a test's instrumented code writes its evidence.
 pub const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
+/// Every process a measured command starts finds the run's id here: a test
+/// or a harness that wants to know it is measured looks for this variable.
+pub const RUN_ID_ENV: &str = "SUPERCOV_RUN_ID";
 /// The instrumentation the tests a runner starts belong to: a runner of
 /// Supercov's (nextest's target runner, the doctest wrappers) runs in a
 /// process of its own and reads it from here.

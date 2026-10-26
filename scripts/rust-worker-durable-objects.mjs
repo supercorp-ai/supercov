@@ -22,7 +22,7 @@
 // gate says so; a job that installed them sets SUPERCOV_REQUIRE_RUST_WORKER=1.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, resolve } from 'node:path';
 
 const repository = resolve(import.meta.dirname, '..');
@@ -303,8 +303,43 @@ fn a_runner_reached_through_the_plane_is_busy() {
     assert_eq!(get(dev.port, "/runners?slots=2").as_deref(), Some("busy"));
 }
 
+/// A test kit's own configuration, written for the test outside the crate,
+/// whose \`main\` is the test's own module loading the built Worker: the
+/// shape of a harness that wraps a Worker with stand-ins of its own.
+#[test]
+fn a_harness_config_outside_the_crate_runs_the_built_worker() {
+    let _one = exclusive();
+    let crate_directory = workspace().join("runners").canonicalize().unwrap();
+    if !crate_directory.join("build").exists() {
+        return;
+    }
+    let harness = std::env::temp_dir().join(format!("planes-harness-{}", std::process::id()));
+    std::fs::create_dir_all(&harness).unwrap();
+    let shim = crate_directory.join("build/worker/shim.mjs");
+    std::fs::write(
+        harness.join("harness.mjs"),
+        format!(
+            "// The test's own module, loading the built Worker.\\nexport * from \\"{0}\\";\\nexport {{ default }} from \\"{0}\\";\\n",
+            shim.display()
+        ),
+    )
+    .unwrap();
+    let config = format!(
+        "name = \\"harness\\"\\nmain = \\"harness.mjs\\"\\ncompatibility_date = \\"2026-10-01\\"\\n\\n[build]\\ncommand = \\"worker-build --release\\"\\ncwd = \\"{0}\\"\\nwatch_dir = \\"{0}/src\\"\\n",
+        crate_directory.display()
+    );
+    std::fs::write(harness.join("wrangler.toml"), &config).unwrap();
+    let dev = start(&harness, &[], &[]);
+    assert_eq!(get(dev.port, "/?slots=2").as_deref(), Some("busy"));
+    drop(dev);
+    // The test's configuration is as the test wrote it.
+    assert_eq!(std::fs::read_to_string(harness.join("wrangler.toml")).unwrap(), config);
+    let _ = std::fs::remove_dir_all(&harness);
+}
+
 #[test]
 fn a_test_that_starts_no_worker() {
+    println!("printed by a test that starts no worker, measured in {}", std::env::var("SUPERCOV_RUN_ID").unwrap_or_default());
     assert_eq!(1 + 1, 2);
 }
 `,
@@ -347,7 +382,7 @@ try {
   };
   const { measured, id } = measure();
   console.log(measured.stderr.split('\n').filter((line) => line.includes('synced')).join('\n'));
-  assert.match(measured.stderr, /Rust coverage: 5 test\(s\)/u, measured.stderr);
+  assert.match(measured.stderr, /Rust coverage: 6 test\(s\)/u, measured.stderr);
   const lines = (runId, name, file) => [...new Set(run(root, binary, ['runs', runId, 'test', name, '--limit', '0']).stdout.match(new RegExp(`${file.replace(/[/.]/gu, '\\$&')}:\\d+`, 'gu')) ?? [])];
   const at = (file, source, text) => `${file}:${lineOf(source, text)}`;
 
@@ -388,7 +423,20 @@ try {
   assert.ok(together.includes(at('runners/src/lib.rs', RUNNERS, '"busy"')), `the runner beside the plane: ${together.join(' ')}`);
   const forwarded = lines(id, 'a_runner_reached_through_the_plane_is_busy', 'plane/src/lib.rs');
   assert.ok(forwarded.includes(at('plane/src/lib.rs', PLANE, 'env.service("RUNNERS")')), `the plane forwarding: ${forwarded.join(' ')}`);
+  // A configuration a test writes outside the crate, whose \`main\` is its
+  // own module loading the built Worker, is measured as the crate's is.
+  const harness = lines(id, 'a_harness_config_outside_the_crate_runs_the_built_worker', 'runners/src/lib.rs');
+  assert.ok(harness.includes(at('runners/src/lib.rs', RUNNERS, '"busy"')), `the harness test: ${harness.join(' ')}`);
   assert.deepEqual(lines(id, 'a_test_that_starts_no_worker', 'plane/src/lib.rs'), []);
+  // wrangler's state stays in the copy.
+  for (const state of ['.wrangler', 'plane/.wrangler', 'runners/.wrangler']) {
+    assert.ok(!existsSync(resolve(root, state)), `${state} came back to the project`);
+  }
+  // Asked not to capture, a test's output is shown.
+  const shown = run(root, binary, ['--', 'cargo', 'test', '-p', 'host', '--', '--nocapture', 'a_test_that_starts_no_worker'], { PATH: path });
+  assert.equal(shown.status, 0, shown.stdout + shown.stderr);
+  // And the test knows it is measured, and in which run.
+  assert.match(shown.stdout, /printed by a test that starts no worker, measured in run_[0-9a-f]{16}/u, shown.stdout);
   const scope = JSON.parse(run(root, binary, ['runs', id, 'scope', '--json', '--limit', '0']).stdout).data.entries;
   for (const file of ['plane/src/lib.rs', 'runners/src/lib.rs']) {
     assert.equal(scope.filter((entry) => entry.file === file).length, 1, `${file} counted once: ${JSON.stringify(scope)}`);

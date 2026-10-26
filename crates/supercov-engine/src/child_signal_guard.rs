@@ -127,6 +127,72 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
     child.wait_with_output()
 }
 
+/// `output`, also passing what the child writes on to this process's own
+/// streams as it arrives: a test asked to run without capture shows its
+/// output while it runs, and the run still reads all of it. A line of the
+/// child's standard output that `keep` refuses is recorded and not shown.
+pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Result<Output> {
+    use std::io::{Read, Write};
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _registered = register(&child);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (stdout, stderr) = std::thread::scope(|scope| {
+        let out = scope.spawn(move || {
+            let mut recorded = Vec::new();
+            let mut line = Vec::new();
+            let mut chunk = [0_u8; 8192];
+            let mut source = stdout.expect("piped above");
+            while let Ok(read) = source.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                recorded.extend_from_slice(&chunk[..read]);
+                for byte in &chunk[..read] {
+                    line.push(*byte);
+                    if *byte == b'\n' {
+                        if keep(&line) {
+                            let _ = io::stdout().lock().write_all(&line);
+                        }
+                        line.clear();
+                    }
+                }
+            }
+            if keep(&line) {
+                let _ = io::stdout().lock().write_all(&line);
+            }
+            recorded
+        });
+        let err = scope.spawn(move || {
+            let mut recorded = Vec::new();
+            let mut chunk = [0_u8; 8192];
+            let mut source = stderr.expect("piped above");
+            while let Ok(read) = source.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                recorded.extend_from_slice(&chunk[..read]);
+                let _ = io::stderr().lock().write_all(&chunk[..read]);
+            }
+            recorded
+        });
+        (
+            out.join().unwrap_or_default(),
+            err.join().unwrap_or_default(),
+        )
+    });
+    let status = child.wait()?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// `Command::status()`, with the child registered while it runs.
 pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
     let mut child = command.spawn()?;
@@ -232,6 +298,24 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// A streamed child is read whole, both streams, whatever is shown of
+    /// its standard output on the way.
+    #[test]
+    fn a_streamed_child_is_recorded_whole() {
+        let output = output_streamed(
+            Command::new("sh").args([
+                "-c",
+                "echo kept; echo dropped; printf tail; echo err >&2; exit 3",
+            ]),
+            |line| !line.starts_with(b"dropped"),
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stdout, b"kept\ndropped\ntail");
+        assert_eq!(output.stderr, b"err\n");
+        assert!(output_streamed(&mut Command::new("/no/such/program"), |_| true).is_err());
+    }
 
     fn sleeper() -> Child {
         Command::new("sleep")
