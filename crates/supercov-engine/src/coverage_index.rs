@@ -151,12 +151,27 @@ fn get_u64(record: &[u8], offset: usize) -> u64 {
     )
 }
 
-fn usize_u64(value: usize) -> Result<u64, CoverageIndexError> {
-    u64::try_from(value).map_err(|_| CoverageIndexError::SizeOverflow)
+/// A length or offset as the index stores it: lossless, `usize` being at
+/// most 64 bits.
+fn usize_u64(value: usize) -> u64 {
+    value as u64
 }
 
-fn usize_u32(value: usize) -> Result<u32, CoverageIndexError> {
-    u32::try_from(value).map_err(|_| CoverageIndexError::SizeOverflow)
+/// A count or id the index stores in 32 bits. No index holds 2^32 of
+/// anything: four billion strings alone would not fit in memory to write.
+fn usize_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("an index holds fewer than 2^32 of each record")
+}
+
+/// A 64-bit count of a run of strings, stored in 32 bits, as `usize_u32`.
+fn u64_u32(value: u64) -> u32 {
+    u32::try_from(value).expect("an index holds fewer than 2^32 of each record")
+}
+
+/// A stored 64-bit number as a length or offset: lossless on the 64-bit
+/// targets Supercov builds for (`lib.rs`).
+fn get_usize(record: &[u8], offset: usize) -> usize {
+    get_u64(record, offset) as usize
 }
 
 #[derive(Default)]
@@ -190,119 +205,110 @@ impl StringRelations {
         &mut self,
         values: impl IntoIterator<Item = impl AsRef<str>>,
         strings: &mut StringTable,
-    ) -> Result<(u64, u64), CoverageIndexError> {
+    ) -> (u64, u64) {
         let mut run = Vec::new();
         for value in values {
-            run.push(strings.intern(value.as_ref())?);
+            run.push(strings.intern(value.as_ref()));
         }
         self.push_run(run)
     }
 
-    fn push_ids(
-        &mut self,
-        values: &[Id],
-        strings: &mut StringTable,
-    ) -> Result<(u64, u64), CoverageIndexError> {
+    fn push_ids(&mut self, values: &[Id], strings: &mut StringTable) -> (u64, u64) {
         let mut run = Vec::with_capacity(values.len());
         for value in values {
-            run.push(strings.intern_shared(value)?);
+            run.push(strings.intern_shared(value));
         }
         self.push_run(run)
     }
 
-    fn push_run(&mut self, run: Vec<u32>) -> Result<(u64, u64), CoverageIndexError> {
+    fn push_run(&mut self, run: Vec<u32>) -> (u64, u64) {
         if let Some(found) = self.interned.get(&run) {
-            return Ok(*found);
+            return *found;
         }
-        let offset = usize_u64(self.values.len())?;
-        let count = usize_u64(run.len())?;
+        let offset = usize_u64(self.values.len());
+        let count = usize_u64(run.len());
         self.values.extend_from_slice(&run);
         self.interned.insert(run, (offset, count));
-        Ok((offset, count))
+        (offset, count)
     }
 
-    fn section(self) -> Result<QueryIndexSection, CoverageIndexError> {
+    fn section(self) -> QueryIndexSection {
         let mut bytes = Vec::with_capacity(self.values.len() * 4);
         for value in self.values {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        Ok(QueryIndexSection {
+        QueryIndexSection {
             kind: SECTION_STRING_RELATIONS,
             record_size: 4,
-            count: usize_u64(bytes.len() / 4)?,
+            count: usize_u64(bytes.len() / 4),
             bytes,
-        })
+        }
     }
 }
 
 impl StringTable {
-    fn intern_shared(&mut self, value: &Id) -> Result<u32, CoverageIndexError> {
+    fn intern_shared(&mut self, value: &Id) -> u32 {
         let allocation = value.as_str().as_ptr() as usize;
         if let Some((_, id)) = self.shared_ids.get(&allocation) {
-            return Ok(*id);
+            return *id;
         }
         // Different allocations of identical text still use the same string
         // table entry, including IDs built outside the report's interner.
-        let id = self.intern(value.as_str())?;
+        let id = self.intern(value.as_str());
         self.shared_ids.insert(allocation, (value.clone(), id));
-        Ok(id)
+        id
     }
 
-    fn intern(&mut self, value: &str) -> Result<u32, CoverageIndexError> {
+    fn intern(&mut self, value: &str) -> u32 {
         if let Some(id) = self.ids.get(value) {
-            return Ok(*id);
+            return *id;
         }
-        let id = usize_u32(self.strings.len())?;
+        let id = usize_u32(self.strings.len());
         self.ids.insert(value.into(), id);
         self.strings.push(value.into());
-        Ok(id)
+        id
     }
 
-    fn sections(self) -> Result<[QueryIndexSection; 2], CoverageIndexError> {
+    fn sections(self) -> [QueryIndexSection; 2] {
         let mut blob = Vec::new();
         let mut records = Vec::with_capacity(self.strings.len() * STRING_RECORD_SIZE);
         for string in self.strings {
-            let offset = usize_u64(blob.len())?;
+            let offset = usize_u64(blob.len());
             let value = string.as_bytes();
-            let length = usize_u32(value.len())?;
+            let length = usize_u32(value.len());
             blob.extend_from_slice(value);
             let mut record = [0_u8; STRING_RECORD_SIZE];
             put_u64(&mut record, 0, offset);
             put_u32(&mut record, 8, length);
             records.extend_from_slice(&record);
         }
-        Ok([
+        [
             QueryIndexSection {
                 kind: SECTION_STRING_BYTES,
                 record_size: 0,
-                count: usize_u64(blob.len())?,
+                count: usize_u64(blob.len()),
                 bytes: blob,
             },
             QueryIndexSection {
                 kind: SECTION_STRINGS,
                 record_size: STRING_RECORD_SIZE as u32,
-                count: usize_u64(records.len() / STRING_RECORD_SIZE)?,
+                count: usize_u64(records.len() / STRING_RECORD_SIZE),
                 bytes: records,
             },
-        ])
+        ]
     }
 }
 
-fn put_count(
-    bytes: &mut [u8],
-    offset: usize,
-    count: &CoverageCount,
-) -> Result<(), CoverageIndexError> {
-    put_u64(bytes, offset, usize_u64(count.covered)?);
-    put_u64(bytes, offset + 8, usize_u64(count.total)?);
-    Ok(())
+fn put_count(bytes: &mut [u8], offset: usize, count: &CoverageCount) {
+    put_u64(bytes, offset, usize_u64(count.covered));
+    put_u64(bytes, offset + 8, usize_u64(count.total));
 }
 
 fn summary_record(
     id: CoverageViewId,
     view: &CoverageView,
     strings: &mut StringTable,
-) -> Result<[u8; SUMMARY_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; SUMMARY_RECORD_SIZE] {
     let mut record = [0_u8; SUMMARY_RECORD_SIZE];
     record[0] = id as u8;
     record[1] = u8::from(view.summary.coverage_complete);
@@ -311,8 +317,8 @@ fn summary_record(
         Some(false) => 1,
         Some(true) => 2,
     };
-    put_u32(&mut record, 4, strings.intern(&view.generated_at)?);
-    put_u32(&mut record, 8, strings.intern(&view.variant)?);
+    put_u32(&mut record, 4, strings.intern(&view.generated_at));
+    put_u32(&mut record, 8, strings.intern(&view.variant));
     let values = [
         view.summary.decisions,
         view.summary.executed_decisions,
@@ -321,7 +327,7 @@ fn summary_record(
         view.summary.covered_conditions,
     ];
     for (index, value) in values.into_iter().enumerate() {
-        put_u64(&mut record, 16 + index * 8, usize_u64(value)?);
+        put_u64(&mut record, 16 + index * 8, usize_u64(value));
     }
     for (index, count) in [
         &view.summary.lines,
@@ -335,9 +341,9 @@ fn summary_record(
     .into_iter()
     .enumerate()
     {
-        put_count(&mut record, 56 + index * 16, count)?;
+        put_count(&mut record, 56 + index * 16, count);
     }
-    Ok(record)
+    record
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -778,10 +784,10 @@ fn file_gap_record(
     kind: Option<&str>,
     runner: Option<&str>,
     strings: &mut StringTable,
-) -> Result<[u8; FILE_GAP_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; FILE_GAP_RECORD_SIZE] {
     let mut record = [0_u8; FILE_GAP_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(file)?);
+    put_u32(&mut record, 4, strings.intern(file));
     for (index, value) in [
         gap.uncovered_lines,
         gap.uncovered_statements,
@@ -793,7 +799,7 @@ fn file_gap_record(
     .into_iter()
     .enumerate()
     {
-        put_u64(&mut record, 8 + index * 8, usize_u64(value)?);
+        put_u64(&mut record, 8 + index * 8, usize_u64(value));
     }
     put_u32(&mut record, 56, gap.limitation_mask);
     let score = gap.uncovered_lines
@@ -801,27 +807,27 @@ fn file_gap_record(
         + gap.missing_branches * 2
         + gap.missing_mcdc_conditions * 3
         + gap.measurement_limitations * 3;
-    put_u64(&mut record, 64, usize_u64(score)?);
+    put_u64(&mut record, 64, usize_u64(score));
     put_u32(
         &mut record,
         72,
-        kind.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+        kind.map_or(NO_STRING, |value| strings.intern(value)),
     );
     put_u32(
         &mut record,
         76,
-        runner.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+        runner.map_or(NO_STRING, |value| strings.intern(value)),
     );
     for (index, value) in gap.covered_by_other_tests.into_iter().enumerate() {
-        put_u64(&mut record, 80 + index * 8, usize_u64(value)?);
+        put_u64(&mut record, 80 + index * 8, usize_u64(value));
     }
     for (index, value) in gap.uncovered_everywhere.into_iter().enumerate() {
-        put_u64(&mut record, 120 + index * 8, usize_u64(value)?);
+        put_u64(&mut record, 120 + index * 8, usize_u64(value));
     }
     for (index, value) in gap.totals.into_iter().enumerate() {
-        put_u64(&mut record, 160 + index * 8, usize_u64(value)?);
+        put_u64(&mut record, 160 + index * 8, usize_u64(value));
     }
-    Ok(record)
+    record
 }
 
 /// The tests a projection selects. Hashed: every line, point, branch and
@@ -896,16 +902,16 @@ fn decision_gap_record(
     put_u32(
         &mut record,
         4,
-        kind.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+        kind.map_or(NO_STRING, |value| strings.intern(value)),
     );
     put_u32(
         &mut record,
         8,
-        runner.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+        runner.map_or(NO_STRING, |value| strings.intern(value)),
     );
-    put_u32(&mut record, 12, strings.intern(&decision.meta.id)?);
-    put_u32(&mut record, 16, strings.intern(&decision.meta.file)?);
-    put_u32(&mut record, 20, strings.intern(&decision.meta.kind)?);
+    put_u32(&mut record, 12, strings.intern(&decision.meta.id));
+    put_u32(&mut record, 16, strings.intern(&decision.meta.file));
+    put_u32(&mut record, 20, strings.intern(&decision.meta.kind));
     put_u32(
         &mut record,
         24,
@@ -916,15 +922,15 @@ fn decision_gap_record(
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" "),
-        )?,
+        ),
     );
-    put_u64(&mut record, 32, usize_u64(decision.meta.line)?);
-    put_u64(&mut record, 40, usize_u64(decision.meta.column)?);
-    put_u64(&mut record, 48, usize_u64(decision.meta.conditions.len())?);
+    put_u64(&mut record, 32, usize_u64(decision.meta.line));
+    put_u64(&mut record, 40, usize_u64(decision.meta.column));
+    put_u64(&mut record, 48, usize_u64(decision.meta.conditions.len()));
     put_u64(
         &mut record,
         56,
-        usize_u64(witnesses.iter().filter(|witness| witness.is_none()).count())?,
+        usize_u64(witnesses.iter().filter(|witness| witness.is_none()).count()),
     );
     Ok(record)
 }
@@ -951,7 +957,7 @@ fn put_summary_payload(
     .into_iter()
     .enumerate()
     {
-        put_u64(record, base + index * 8, usize_u64(value)?);
+        put_u64(record, base + index * 8, usize_u64(value));
     }
     for (index, count) in [
         &summary.lines,
@@ -965,7 +971,7 @@ fn put_summary_payload(
     .into_iter()
     .enumerate()
     {
-        put_count(record, base + 40 + index * 16, count)?;
+        put_count(record, base + 40 + index * 16, count);
     }
     Ok(())
 }
@@ -985,13 +991,13 @@ fn dimension_record(
         CoverageDimension::Tests => Some(""),
     }
     .ok_or(CoverageIndexError::InvalidRecord("dimension name"))?;
-    put_u32(&mut record, 4, strings.intern(name)?);
-    put_u64(&mut record, 8, usize_u64(value.tests)?);
-    put_u64(&mut record, 16, usize_u64(value.setups)?);
+    put_u32(&mut record, 4, strings.intern(name));
+    put_u64(&mut record, 8, usize_u64(value.tests));
+    put_u64(&mut record, 16, usize_u64(value.setups));
     // Bytes 184..192 were reserved from the start and the reader refuses a
     // record that sets them, so this is an addition rather than a format
     // change: the record is the same 192 bytes it always was.
-    put_u64(&mut record, 184, usize_u64(value.attributed)?);
+    put_u64(&mut record, 184, usize_u64(value.attributed));
     put_summary_payload(&mut record, 24, 32, &value.summary)?;
     Ok(record)
 }
@@ -1060,14 +1066,14 @@ fn projection_record(
     put_u32(
         &mut record,
         4,
-        kind.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+        kind.map_or(NO_STRING, |value| strings.intern(value)),
     );
     put_u32(
         &mut record,
         8,
-        runner.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+        runner.map_or(NO_STRING, |value| strings.intern(value)),
     );
-    put_u32(&mut record, 12, strings.intern(&view.generated_at)?);
+    put_u32(&mut record, 12, strings.intern(&view.generated_at));
 
     let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
     record[2] = u8::from(scope.is_some());
@@ -1078,18 +1084,14 @@ fn projection_record(
         16,
         scope
             .as_ref()
-            .map_or(Ok(NO_STRING), |scope| strings.intern(scope.mode))?,
+            .map_or(NO_STRING, |scope| strings.intern(scope.mode)),
     );
     let roots = scope
         .as_ref()
         .map_or_else(Vec::new, |scope| scope.roots.clone());
-    let (roots_offset, roots_count) = relations.push(roots, strings)?;
+    let (roots_offset, roots_count) = relations.push(roots, strings);
     put_u64(&mut record, 24, roots_offset);
-    put_u32(
-        &mut record,
-        32,
-        u32::try_from(roots_count).map_err(|_| CoverageIndexError::SizeOverflow)?,
-    );
+    put_u32(&mut record, 32, u64_u32(roots_count));
 
     let summary = selected.map_or_else(
         || Ok(view.summary.clone()),
@@ -1138,7 +1140,7 @@ fn projection_record(
         (232, limitation_kinds[1]),
         (240, limitation_kinds[2]),
     ] {
-        put_u64(&mut record, offset, usize_u64(value)?);
+        put_u64(&mut record, offset, usize_u64(value));
     }
 
     let phases = view
@@ -1153,7 +1155,7 @@ fn projection_record(
         attribution[3] += phase.inferred_server_events;
     }
     for (index, value) in attribution.into_iter().enumerate() {
-        put_u64(&mut record, 248 + index * 8, usize_u64(value)?);
+        put_u64(&mut record, 248 + index * 8, usize_u64(value));
     }
 
     // 304 and 312 held the lines and MC/DC conditions an assertion map
@@ -1168,7 +1170,7 @@ fn projection_record(
                     .iter()
                     .filter(|line| line.confidence.level == level)
                     .count(),
-            )?,
+            ),
         );
     }
 
@@ -1187,7 +1189,7 @@ fn projection_record(
                         || gap.measurement_limitations > 0
                 })
                 .count(),
-        )?,
+        ),
     );
     put_u64(
         &mut record,
@@ -1202,7 +1204,7 @@ fn projection_record(
                         || gap.missing_mcdc_conditions > 0
                 })
                 .count(),
-        )?,
+        ),
     );
 
     let selected_tests = view
@@ -1218,7 +1220,7 @@ fn projection_record(
                 .iter()
                 .filter(|test| test.role == "test")
                 .count(),
-        )?,
+        ),
     );
     put_u64(
         &mut record,
@@ -1228,7 +1230,7 @@ fn projection_record(
                 .iter()
                 .filter(|test| test.role == "setup")
                 .count(),
-        )?,
+        ),
     );
     for (index, outcome) in [
         "passed",
@@ -1250,7 +1252,7 @@ fn projection_record(
                     .iter()
                     .filter(|test| test.role == "test" && test.outcome == outcome)
                     .count(),
-            )?,
+            ),
         );
     }
     put_u64(
@@ -1261,7 +1263,7 @@ fn projection_record(
                 .iter()
                 .filter(|test| test.role == "test" && test.outcome == "unstarted")
                 .count(),
-        )?,
+        ),
     );
 
     if let Some(transport) = &view.transport {
@@ -1279,9 +1281,9 @@ fn projection_record(
         .into_iter()
         .enumerate()
         {
-            put_u64(&mut record, 408 + index * 8, usize_u64(value)?);
+            put_u64(&mut record, 408 + index * 8, usize_u64(value));
         }
-        put_u64(&mut record, 536, usize_u64(transport.guest_processes)?);
+        put_u64(&mut record, 536, usize_u64(transport.guest_processes));
     }
 
     let phase_tests = view
@@ -1302,13 +1304,13 @@ fn projection_record(
                 && phase_tests.contains(test.id.as_str())
         })
         .collect::<Vec<_>>();
-    put_u64(&mut record, 472, usize_u64(empty_tests.len())?);
+    put_u64(&mut record, 472, usize_u64(empty_tests.len()));
     put_u32(
         &mut record,
         20,
         empty_tests
             .first()
-            .map_or(Ok(NO_STRING), |test| strings.intern(&test.name))?,
+            .map_or(NO_STRING, |test| strings.intern(&test.name)),
     );
 
     let entries = scope.as_ref().map(|scope| scope.entries);
@@ -1326,7 +1328,7 @@ fn projection_record(
                         entry.get("status").and_then(serde_json::Value::as_str) == Some(status)
                     })
                     .count()
-            }))?,
+            })),
         );
     }
     put_u32(
@@ -1334,14 +1336,14 @@ fn projection_record(
         504,
         scope
             .as_ref()
-            .map_or(Ok(NO_STRING), |scope| strings.intern(scope.language))?,
+            .map_or(NO_STRING, |scope| strings.intern(scope.language)),
     );
     put_u32(
         &mut record,
         508,
         scope
             .as_ref()
-            .map_or(Ok(NO_STRING), |scope| strings.intern(scope.model))?,
+            .map_or(NO_STRING, |scope| strings.intern(scope.model)),
     );
     // 512..518 held a compiler scope's unit and completeness; reserved.
     put_u32(&mut record, 512, NO_STRING);
@@ -1412,26 +1414,23 @@ fn scope_entry_records(
                 "ambiguous" => 2,
                 _ => return Err(CoverageIndexError::InvalidRecord("source-scope status")),
             };
-            put_u32(&mut record, 4, strings.intern(file)?);
-            put_u32(&mut record, 8, strings.intern(reason)?);
+            put_u32(&mut record, 4, strings.intern(file));
+            put_u32(&mut record, 8, strings.intern(reason));
             put_u32(
                 &mut record,
                 12,
-                package_root.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+                package_root.map_or(NO_STRING, |value| strings.intern(value)),
             );
             let (count, mask) = limitations.get(file).copied().unwrap_or_default();
-            put_u64(&mut record, 16, usize_u64(count)?);
+            put_u64(&mut record, 16, usize_u64(count));
             put_u32(&mut record, 24, mask);
             Ok(record)
         })
         .collect()
 }
 
-fn optional_string_id(
-    value: Option<&str>,
-    strings: &mut StringTable,
-) -> Result<u32, CoverageIndexError> {
-    value.map_or(Ok(NO_STRING), |value| strings.intern(value))
+fn optional_string_id(value: Option<&str>, strings: &mut StringTable) -> u32 {
+    value.map_or(NO_STRING, |value| strings.intern(value))
 }
 
 fn confidence_record(
@@ -1451,14 +1450,14 @@ fn confidence_record(
     record[1] = u8::from(confidence.setup_only)
         | (u8::from(confidence.background_only) << 1)
         | (u8::from(confidence.e2e) << 3);
-    let (offset, count) = relations.push_ids(&confidence.tests, strings)?;
+    let (offset, count) = relations.push_ids(&confidence.tests, strings);
     put_u64(&mut record, 8, offset);
     put_u64(&mut record, 16, count);
     for (index, values) in [&confidence.runners, &confidence.kinds]
         .into_iter()
         .enumerate()
     {
-        let (offset, count) = relations.push(values, strings)?;
+        let (offset, count) = relations.push(values, strings);
         put_u64(&mut record, 40 + index * 16, offset);
         put_u64(&mut record, 48 + index * 16, count);
     }
@@ -1471,23 +1470,23 @@ fn line_record(
     confidence_index: usize,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; LINE_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; LINE_RECORD_SIZE] {
     let mut record = [0_u8; LINE_RECORD_SIZE];
     record[0] = view_id as u8;
     record[1] = u8::from(line.covered);
     // Inverted: a line every frontend declined is the exception, and a zeroed
     // byte then still reads as measured.
     record[2] = u8::from(!line.measured);
-    put_u32(&mut record, 4, strings.intern(&line.file)?);
-    put_u64(&mut record, 8, usize_u64(line.line)?);
-    let (tests_offset, tests_count) = relations.push_ids(&line.tests, strings)?;
+    put_u32(&mut record, 4, strings.intern(&line.file));
+    put_u64(&mut record, 8, usize_u64(line.line));
+    let (tests_offset, tests_count) = relations.push_ids(&line.tests, strings);
     put_u64(&mut record, 16, tests_offset);
     put_u64(&mut record, 24, tests_count);
-    let (phases_offset, phases_count) = relations.push_ids(&line.phases, strings)?;
+    let (phases_offset, phases_count) = relations.push_ids(&line.phases, strings);
     put_u64(&mut record, 32, phases_offset);
     put_u64(&mut record, 40, phases_count);
-    put_u64(&mut record, 48, usize_u64(confidence_index)?);
-    Ok(record)
+    put_u64(&mut record, 48, usize_u64(confidence_index));
+    record
 }
 
 fn test_summary_record(
@@ -1526,34 +1525,30 @@ fn test_summary_record(
         "todo" => 8,
         _ => return Err(CoverageIndexError::InvalidRecord("test outcome")),
     };
-    put_u32(&mut record, 4, strings.intern(&test.id)?);
-    put_u32(&mut record, 8, strings.intern(&test.name)?);
+    put_u32(&mut record, 4, strings.intern(&test.id));
+    put_u32(&mut record, 8, strings.intern(&test.name));
     put_u32(
         &mut record,
         12,
-        optional_string_id(test.file.as_deref(), strings)?,
+        optional_string_id(test.file.as_deref(), strings),
     );
     put_u32(
         &mut record,
         16,
-        optional_string_id(test.title.as_deref(), strings)?,
+        optional_string_id(test.title.as_deref(), strings),
     );
-    put_u32(&mut record, 20, strings.intern(&test.provenance.runner)?);
-    put_u32(&mut record, 24, strings.intern(&test.provenance.kind)?);
+    put_u32(&mut record, 20, strings.intern(&test.provenance.runner));
+    put_u32(&mut record, 24, strings.intern(&test.provenance.kind));
     put_u32(
         &mut record,
         28,
-        optional_string_id(test.provenance.project.as_deref(), strings)?,
+        optional_string_id(test.provenance.project.as_deref(), strings),
     );
-    put_u32(&mut record, 32, strings.intern(&test.provenance.source)?);
+    put_u32(&mut record, 32, strings.intern(&test.provenance.source));
     // The test's tags, as a run of strings: bytes 40..52 were reserved.
-    let (tags_offset, tags_count) = relations.push(&test.provenance.tags, strings)?;
+    let (tags_offset, tags_count) = relations.push(&test.provenance.tags, strings);
     put_u64(&mut record, 40, tags_offset);
-    put_u32(
-        &mut record,
-        48,
-        u32::try_from(tags_count).map_err(|_| CoverageIndexError::SizeOverflow)?,
-    );
+    put_u32(&mut record, 48, u64_u32(tags_count));
     Ok(record)
 }
 
@@ -1561,29 +1556,29 @@ fn phase_summary_record(
     view_id: CoverageViewId,
     phase: &crate::coverage_report::PhaseResult,
     strings: &mut StringTable,
-) -> Result<[u8; PHASE_SUMMARY_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; PHASE_SUMMARY_RECORD_SIZE] {
     let mut record = [0_u8; PHASE_SUMMARY_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(&phase.phase.id)?);
-    put_u32(&mut record, 8, strings.intern(&phase.phase.kind)?);
-    put_u32(&mut record, 12, strings.intern(&phase.phase.operation)?);
+    put_u32(&mut record, 4, strings.intern(&phase.phase.id));
+    put_u32(&mut record, 8, strings.intern(&phase.phase.kind));
+    put_u32(&mut record, 12, strings.intern(&phase.phase.operation));
     put_u32(
         &mut record,
         16,
-        optional_string_id(phase.phase.source.as_deref(), strings)?,
+        optional_string_id(phase.phase.source.as_deref(), strings),
     );
-    put_u32(&mut record, 20, strings.intern(&phase.test)?);
+    put_u32(&mut record, 20, strings.intern(&phase.test));
     put_u32(
         &mut record,
         24,
-        optional_string_id(phase.phase.status.as_deref(), strings)?,
+        optional_string_id(phase.phase.status.as_deref(), strings),
     );
     put_u32(
         &mut record,
         28,
-        optional_string_id(phase.phase.caused_by_phase_id.as_deref(), strings)?,
+        optional_string_id(phase.phase.caused_by_phase_id.as_deref(), strings),
     );
-    put_u64(&mut record, 32, usize_u64(phase.lines.len())?);
+    put_u64(&mut record, 32, usize_u64(phase.lines.len()));
     put_u64(
         &mut record,
         40,
@@ -1593,9 +1588,9 @@ fn phase_summary_record(
                 .iter()
                 .map(|decision| decision.vectors.len())
                 .sum(),
-        )?,
+        ),
     );
-    Ok(record)
+    record
 }
 
 struct AnchorInput<'a> {
@@ -1614,23 +1609,23 @@ fn anchor_record(
     input: AnchorInput<'_>,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; ANCHOR_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; ANCHOR_RECORD_SIZE] {
     let mut record = [0_u8; ANCHOR_RECORD_SIZE];
     record[0] = input.view_id as u8;
     record[1] = input.kind;
     record[2] = u8::from(input.covered);
-    put_u32(&mut record, 4, strings.intern(input.id)?);
-    put_u32(&mut record, 8, strings.intern(input.file)?);
-    put_u64(&mut record, 16, usize_u64(input.line)?);
-    put_u64(&mut record, 24, usize_u64(input.column)?);
+    put_u32(&mut record, 4, strings.intern(input.id));
+    put_u32(&mut record, 8, strings.intern(input.file));
+    put_u64(&mut record, 16, usize_u64(input.line));
+    put_u64(&mut record, 24, usize_u64(input.column));
     if let Some((covered, total)) = input.conditions {
-        put_u64(&mut record, 32, usize_u64(total)?);
-        put_u64(&mut record, 40, usize_u64(covered)?);
+        put_u64(&mut record, 32, usize_u64(total));
+        put_u64(&mut record, 40, usize_u64(covered));
     }
-    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings);
     put_u64(&mut record, 48, tests_offset);
     put_u64(&mut record, 56, tests_count);
-    Ok(record)
+    record
 }
 
 fn test_retry_record(
@@ -1638,12 +1633,12 @@ fn test_retry_record(
     test_id: &str,
     retry: usize,
     strings: &mut StringTable,
-) -> Result<[u8; TEST_RETRY_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; TEST_RETRY_RECORD_SIZE] {
     let mut record = [0_u8; TEST_RETRY_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id)?);
-    put_u64(&mut record, 8, usize_u64(retry)?);
-    Ok(record)
+    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u64(&mut record, 8, usize_u64(retry));
+    record
 }
 
 fn test_attempt_record(
@@ -1651,18 +1646,18 @@ fn test_attempt_record(
     test_id: &str,
     attempt: &crate::coverage_report::TestAttempt,
     strings: &mut StringTable,
-) -> Result<[u8; TEST_ATTEMPT_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; TEST_ATTEMPT_RECORD_SIZE] {
     let mut record = [0_u8; TEST_ATTEMPT_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id)?);
-    put_u64(&mut record, 8, usize_u64(attempt.retry)?);
-    put_u32(&mut record, 16, strings.intern(&attempt.status)?);
+    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u64(&mut record, 8, usize_u64(attempt.retry));
+    put_u32(&mut record, 16, strings.intern(&attempt.status));
     put_u32(
         &mut record,
         20,
-        optional_string_id(attempt.expected_status.as_deref(), strings)?,
+        optional_string_id(attempt.expected_status.as_deref(), strings),
     );
-    Ok(record)
+    record
 }
 
 fn test_line_record(
@@ -1670,13 +1665,13 @@ fn test_line_record(
     test_id: &str,
     line: &crate::coverage_report::SourceLine,
     strings: &mut StringTable,
-) -> Result<[u8; TEST_LINE_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; TEST_LINE_RECORD_SIZE] {
     let mut record = [0_u8; TEST_LINE_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id)?);
-    put_u32(&mut record, 8, strings.intern(&line.file)?);
-    put_u64(&mut record, 16, usize_u64(line.line)?);
-    Ok(record)
+    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 8, strings.intern(&line.file));
+    put_u64(&mut record, 16, usize_u64(line.line));
+    record
 }
 
 fn test_hit_record(
@@ -1684,28 +1679,25 @@ fn test_hit_record(
     test_id: &str,
     hit: &str,
     strings: &mut StringTable,
-) -> Result<[u8; TEST_HIT_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; TEST_HIT_RECORD_SIZE] {
     let mut record = [0_u8; TEST_HIT_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id)?);
-    put_u32(&mut record, 8, strings.intern(hit)?);
-    Ok(record)
+    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 8, strings.intern(hit));
+    record
 }
 
-fn test_vector_record(
-    vector: &McdcVector,
-    values: &mut Vec<u8>,
-) -> Result<[u8; TEST_VECTOR_RECORD_SIZE], CoverageIndexError> {
+fn test_vector_record(vector: &McdcVector, values: &mut Vec<u8>) -> [u8; TEST_VECTOR_RECORD_SIZE] {
     let mut record = [0_u8; TEST_VECTOR_RECORD_SIZE];
     record[0] = u8::from(vector.outcome);
-    put_u64(&mut record, 8, usize_u64(values.len())?);
-    put_u64(&mut record, 16, usize_u64(vector.values.len())?);
+    put_u64(&mut record, 8, usize_u64(values.len()));
+    put_u64(&mut record, 16, usize_u64(vector.values.len()));
     values.extend(vector.values.iter().map(|value| match value {
         None => 0,
         Some(false) => 1,
         Some(true) => 2,
     }));
-    Ok(record)
+    record
 }
 
 fn test_decision_record(
@@ -1715,14 +1707,14 @@ fn test_decision_record(
     vectors_offset: usize,
     vectors_count: usize,
     strings: &mut StringTable,
-) -> Result<[u8; TEST_DECISION_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; TEST_DECISION_RECORD_SIZE] {
     let mut record = [0_u8; TEST_DECISION_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id)?);
-    put_u32(&mut record, 8, strings.intern(decision_id)?);
-    put_u64(&mut record, 16, usize_u64(vectors_offset)?);
-    put_u64(&mut record, 24, usize_u64(vectors_count)?);
-    Ok(record)
+    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 8, strings.intern(decision_id));
+    put_u64(&mut record, 16, usize_u64(vectors_offset));
+    put_u64(&mut record, 24, usize_u64(vectors_count));
+    record
 }
 
 struct HitMetadataInput<'a> {
@@ -1743,30 +1735,30 @@ fn hit_metadata_record(
     input: HitMetadataInput<'_>,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; HIT_METADATA_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; HIT_METADATA_RECORD_SIZE] {
     let mut record = [0_u8; HIT_METADATA_RECORD_SIZE];
     record[0] = input.view_id as u8;
     record[1] = input.kind;
-    put_u32(&mut record, 4, strings.intern(input.id)?);
-    put_u32(&mut record, 8, strings.intern(input.file)?);
-    put_u64(&mut record, 16, usize_u64(input.line)?);
-    put_u64(&mut record, 24, usize_u64(input.column)?);
+    put_u32(&mut record, 4, strings.intern(input.id));
+    put_u32(&mut record, 8, strings.intern(input.file));
+    put_u64(&mut record, 16, usize_u64(input.line));
+    put_u64(&mut record, 24, usize_u64(input.column));
     put_u32(
         &mut record,
         32,
-        optional_string_id(input.branch_kind, strings)?,
+        optional_string_id(input.branch_kind, strings),
     );
-    put_u32(&mut record, 36, optional_string_id(input.label, strings)?);
+    put_u32(&mut record, 36, optional_string_id(input.label, strings));
     put_u32(
         &mut record,
         40,
-        optional_string_id(input.alternative, strings)?,
+        optional_string_id(input.alternative, strings),
     );
-    put_u32(&mut record, 44, strings.intern(input.source)?);
-    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings)?;
+    put_u32(&mut record, 44, strings.intern(input.source));
+    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings);
     put_u64(&mut record, 48, tests_offset);
     put_u64(&mut record, 56, tests_count);
-    Ok(record)
+    record
 }
 
 fn limitation_record(
@@ -1789,11 +1781,11 @@ fn limitation_record(
     let mut record = [0_u8; LIMITATION_RECORD_SIZE];
     record[0] = view_id as u8;
     record[1] = u8::from(crate::coverage_report::blocking_limitation(limitation));
-    put_u32(&mut record, 4, strings.intern(field("id")?)?);
-    put_u32(&mut record, 8, strings.intern(field("kind")?)?);
-    put_u32(&mut record, 12, strings.intern(field("file")?)?);
-    put_u32(&mut record, 16, strings.intern(field("source")?)?);
-    put_u32(&mut record, 20, strings.intern(field("reason")?)?);
+    put_u32(&mut record, 4, strings.intern(field("id")?));
+    put_u32(&mut record, 8, strings.intern(field("kind")?));
+    put_u32(&mut record, 12, strings.intern(field("file")?));
+    put_u32(&mut record, 16, strings.intern(field("source")?));
+    put_u32(&mut record, 20, strings.intern(field("reason")?));
     put_u64(&mut record, 24, number("line")?);
     put_u64(&mut record, 32, number("column")?);
     Ok(record)
@@ -1804,20 +1796,20 @@ fn decision_metadata_record(
     decision: &crate::coverage_report::DecisionResult,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; DECISION_METADATA_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; DECISION_METADATA_RECORD_SIZE] {
     let mut record = [0_u8; DECISION_METADATA_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(&decision.meta.id)?);
-    put_u32(&mut record, 8, strings.intern(&decision.meta.file)?);
-    put_u32(&mut record, 12, strings.intern(&decision.meta.source)?);
-    put_u32(&mut record, 16, strings.intern(&decision.meta.kind)?);
-    put_u64(&mut record, 24, usize_u64(decision.meta.line)?);
-    put_u64(&mut record, 32, usize_u64(decision.meta.column)?);
+    put_u32(&mut record, 4, strings.intern(&decision.meta.id));
+    put_u32(&mut record, 8, strings.intern(&decision.meta.file));
+    put_u32(&mut record, 12, strings.intern(&decision.meta.source));
+    put_u32(&mut record, 16, strings.intern(&decision.meta.kind));
+    put_u64(&mut record, 24, usize_u64(decision.meta.line));
+    put_u64(&mut record, 32, usize_u64(decision.meta.column));
     let (conditions_offset, conditions_count) =
-        relations.push(decision.meta.conditions.clone(), strings)?;
+        relations.push(decision.meta.conditions.clone(), strings);
     put_u64(&mut record, 40, conditions_offset);
     put_u64(&mut record, 48, conditions_count);
-    Ok(record)
+    record
 }
 
 fn decision_vector_observation_record(
@@ -1826,20 +1818,20 @@ fn decision_vector_observation_record(
     vector_index: usize,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; DECISION_VECTOR_OBSERVATION_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; DECISION_VECTOR_OBSERVATION_RECORD_SIZE] {
     let mut record = [0_u8; DECISION_VECTOR_OBSERVATION_RECORD_SIZE];
-    put_u64(&mut record, 0, usize_u64(confidence_index)?);
-    put_u64(&mut record, 8, usize_u64(vector_index)?);
+    put_u64(&mut record, 0, usize_u64(confidence_index));
+    put_u64(&mut record, 8, usize_u64(vector_index));
     for (offset, values) in [
         (16, &observation.tests),
         (32, &observation.phases),
         (48, &observation.explicit_phases),
     ] {
-        let (relation_offset, relation_count) = relations.push_ids(values, strings)?;
+        let (relation_offset, relation_count) = relations.push_ids(values, strings);
         put_u64(&mut record, offset, relation_offset);
         put_u64(&mut record, offset + 8, relation_count);
     }
-    Ok(record)
+    record
 }
 
 fn decision_condition_record(
@@ -1847,24 +1839,24 @@ fn decision_condition_record(
     witness_vectors: Option<(usize, usize)>,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; DECISION_CONDITION_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; DECISION_CONDITION_RECORD_SIZE] {
     let mut record = [0_u8; DECISION_CONDITION_RECORD_SIZE];
     // Bit 1 held an assertion map's credit; reserved.
     record[0] = u8::from(condition.covered) | (u8::from(condition.witness.is_some()) << 2);
-    put_u32(&mut record, 4, strings.intern(&condition.source)?);
-    put_u64(&mut record, 8, usize_u64(condition.index)?);
+    put_u32(&mut record, 4, strings.intern(&condition.source));
+    put_u64(&mut record, 8, usize_u64(condition.index));
     if let Some((first, second)) = witness_vectors {
-        put_u64(&mut record, 16, usize_u64(first)?);
-        put_u64(&mut record, 24, usize_u64(second)?);
+        put_u64(&mut record, 16, usize_u64(first));
+        put_u64(&mut record, 24, usize_u64(second));
     }
     let empty = [Vec::new(), Vec::new()];
     let witness_tests = condition.witness_tests.as_ref().unwrap_or(&empty);
     for (offset, values) in [(32, &witness_tests[0]), (48, &witness_tests[1])] {
-        let (relation_offset, relation_count) = relations.push_ids(values, strings)?;
+        let (relation_offset, relation_count) = relations.push_ids(values, strings);
         put_u64(&mut record, offset, relation_offset);
         put_u64(&mut record, offset + 8, relation_count);
     }
-    Ok(record)
+    record
 }
 
 struct DecisionDetailInput<'a> {
@@ -1879,20 +1871,20 @@ fn decision_detail_record(
     input: DecisionDetailInput<'_>,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; DECISION_DETAIL_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; DECISION_DETAIL_RECORD_SIZE] {
     let mut record = [0_u8; DECISION_DETAIL_RECORD_SIZE];
     record[0] = input.view_id as u8;
     record[1] = u8::from(input.decision.executed) | (u8::from(input.decision.covered) << 1);
-    put_u32(&mut record, 4, strings.intern(&input.decision.meta.id)?);
-    put_u64(&mut record, 8, usize_u64(input.confidence_index)?);
-    let (tests_offset, tests_count) = relations.push_ids(&input.decision.tests, strings)?;
+    put_u32(&mut record, 4, strings.intern(&input.decision.meta.id));
+    put_u64(&mut record, 8, usize_u64(input.confidence_index));
+    let (tests_offset, tests_count) = relations.push_ids(&input.decision.tests, strings);
     put_u64(&mut record, 16, tests_offset);
     put_u64(&mut record, 24, tests_count);
-    put_u64(&mut record, 32, usize_u64(input.observations.0)?);
-    put_u64(&mut record, 40, usize_u64(input.observations.1)?);
-    put_u64(&mut record, 48, usize_u64(input.conditions.0)?);
-    put_u64(&mut record, 56, usize_u64(input.conditions.1)?);
-    Ok(record)
+    put_u64(&mut record, 32, usize_u64(input.observations.0));
+    put_u64(&mut record, 40, usize_u64(input.observations.1));
+    put_u64(&mut record, 48, usize_u64(input.conditions.0));
+    put_u64(&mut record, 56, usize_u64(input.conditions.1));
+    record
 }
 
 fn coverage_model_record(
@@ -1900,19 +1892,19 @@ fn coverage_model_record(
     model: &CoverageModel,
     strings: &mut StringTable,
     relations: &mut StringRelations,
-) -> Result<[u8; COVERAGE_MODEL_RECORD_SIZE], CoverageIndexError> {
+) -> [u8; COVERAGE_MODEL_RECORD_SIZE] {
     let mut record = [0_u8; COVERAGE_MODEL_RECORD_SIZE];
-    put_u32(&mut record, 0, strings.intern(variant)?);
-    put_u32(&mut record, 4, strings.intern(&model.name)?);
-    put_u32(&mut record, 8, strings.intern(&model.completeness_meaning)?);
-    let (measured_offset, measured_count) = relations.push(model.measured.clone(), strings)?;
+    put_u32(&mut record, 0, strings.intern(variant));
+    put_u32(&mut record, 4, strings.intern(&model.name));
+    put_u32(&mut record, 8, strings.intern(&model.completeness_meaning));
+    let (measured_offset, measured_count) = relations.push(model.measured.clone(), strings);
     put_u64(&mut record, 16, measured_offset);
     put_u64(&mut record, 24, measured_count);
     let (not_measured_offset, not_measured_count) =
-        relations.push(model.not_measured.clone(), strings)?;
+        relations.push(model.not_measured.clone(), strings);
     put_u64(&mut record, 32, not_measured_offset);
     put_u64(&mut record, 40, not_measured_count);
-    Ok(record)
+    record
 }
 
 pub fn coverage_index_sections(
@@ -1971,7 +1963,7 @@ where
         if id == CoverageViewId::All {
             model_of_all = Some((view.variant.clone(), view.model.clone()));
         }
-        summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
+        summaries.extend_from_slice(&summary_record(id, view, &mut strings));
         projection_records.extend_from_slice(&projection_record(
             id,
             view,
@@ -2000,7 +1992,7 @@ where
                 confidence_index,
                 &mut strings,
                 &mut relations,
-            )?);
+            ));
         }
         for test in &view.tests {
             test_summaries.extend_from_slice(&test_summary_record(
@@ -2015,7 +2007,7 @@ where
                     &test.id,
                     *retry,
                     &mut strings,
-                )?);
+                ));
             }
             for attempt in &test.attempts {
                 test_attempts.extend_from_slice(&test_attempt_record(
@@ -2023,19 +2015,18 @@ where
                     &test.id,
                     attempt,
                     &mut strings,
-                )?);
+                ));
             }
             for line in &test.lines {
-                test_lines.extend_from_slice(&test_line_record(id, &test.id, line, &mut strings)?);
+                test_lines.extend_from_slice(&test_line_record(id, &test.id, line, &mut strings));
             }
             for hit in &test.hits {
-                test_hits.extend_from_slice(&test_hit_record(id, &test.id, hit, &mut strings)?);
+                test_hits.extend_from_slice(&test_hit_record(id, &test.id, hit, &mut strings));
             }
             for decision in &test.decisions {
                 let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
                 for vector in &decision.vectors {
-                    test_vectors
-                        .extend_from_slice(&test_vector_record(vector, &mut vector_values)?);
+                    test_vectors.extend_from_slice(&test_vector_record(vector, &mut vector_values));
                 }
                 test_decisions.extend_from_slice(&test_decision_record(
                     id,
@@ -2044,11 +2035,11 @@ where
                     vectors_offset,
                     decision.vectors.len(),
                     &mut strings,
-                )?);
+                ));
             }
         }
         for phase in &view.phases {
-            phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings)?);
+            phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings));
         }
         for decision in &view.decisions {
             let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
@@ -2070,7 +2061,7 @@ where
                 test_vectors.extend_from_slice(&test_vector_record(
                     &observation.vector,
                     &mut vector_values,
-                )?);
+                ));
                 decision_vector_observations.extend_from_slice(
                     &decision_vector_observation_record(
                         observation,
@@ -2078,7 +2069,7 @@ where
                         vector_index,
                         &mut strings,
                         &mut relations,
-                    )?,
+                    ),
                 );
             }
             let conditions_offset = decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE;
@@ -2086,10 +2077,10 @@ where
                 let witness_vectors = if let Some(witness) = &condition.witness {
                     let first = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
                     test_vectors
-                        .extend_from_slice(&test_vector_record(&witness[0], &mut vector_values)?);
+                        .extend_from_slice(&test_vector_record(&witness[0], &mut vector_values));
                     let second = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
                     test_vectors
-                        .extend_from_slice(&test_vector_record(&witness[1], &mut vector_values)?);
+                        .extend_from_slice(&test_vector_record(&witness[1], &mut vector_values));
                     Some((first, second))
                 } else {
                     None
@@ -2099,7 +2090,7 @@ where
                     witness_vectors,
                     &mut strings,
                     &mut relations,
-                )?);
+                ));
             }
             decision_details.extend_from_slice(&decision_detail_record(
                 DecisionDetailInput {
@@ -2111,13 +2102,13 @@ where
                 },
                 &mut strings,
                 &mut relations,
-            )?);
+            ));
             decision_metadata.extend_from_slice(&decision_metadata_record(
                 id,
                 decision,
                 &mut strings,
                 &mut relations,
-            )?);
+            ));
             anchors.extend_from_slice(&anchor_record(
                 AnchorInput {
                     view_id: id,
@@ -2139,7 +2130,7 @@ where
                 },
                 &mut strings,
                 &mut relations,
-            )?);
+            ));
         }
         for branch in &view.branches {
             anchors.extend_from_slice(&anchor_record(
@@ -2156,7 +2147,7 @@ where
                 },
                 &mut strings,
                 &mut relations,
-            )?);
+            ));
             for alternative in &branch.alternatives {
                 hit_metadata.extend_from_slice(&hit_metadata_record(
                     HitMetadataInput {
@@ -2174,7 +2165,7 @@ where
                     },
                     &mut strings,
                     &mut relations,
-                )?);
+                ));
             }
         }
         for point in &view.points {
@@ -2195,7 +2186,7 @@ where
                 },
                 &mut strings,
                 &mut relations,
-            )?);
+            ));
             hit_metadata.extend_from_slice(&hit_metadata_record(
                 HitMetadataInput {
                     view_id: id,
@@ -2215,7 +2206,7 @@ where
                 },
                 &mut strings,
                 &mut relations,
-            )?);
+            ));
         }
         for value in &view.coverage_by_kind {
             dimensions.extend_from_slice(&dimension_record(
@@ -2266,7 +2257,7 @@ where
             )?);
         }
         for (file, gap) in file_gaps(view, None)? {
-            gaps.extend_from_slice(&file_gap_record(id, &file, &gap, None, None, &mut strings)?);
+            gaps.extend_from_slice(&file_gap_record(id, &file, &gap, None, None, &mut strings));
         }
         for (kind, runner, selected) in projections(view) {
             projection_records.extend_from_slice(&projection_record(
@@ -2296,7 +2287,7 @@ where
                     kind.as_deref(),
                     runner.as_deref(),
                     &mut strings,
-                )?);
+                ));
             }
         }
         // What the tests cover of each file, all kinds together: a directory
@@ -2315,15 +2306,15 @@ where
                     Some(ALL_TESTS),
                     None,
                     &mut strings,
-                )?);
+                ));
             }
         }
     }
     let (variant, model) =
         model_of_all.ok_or(CoverageIndexError::InvalidRecord("no view of every test"))?;
-    let model = coverage_model_record(&variant, &model, &mut strings, &mut relations)?;
-    let [blob, string_records] = strings.sections()?;
-    let string_relations = relations.section()?;
+    let model = coverage_model_record(&variant, &model, &mut strings, &mut relations);
+    let [blob, string_records] = strings.sections();
+    let string_relations = relations.section();
     Ok(vec![
         blob,
         string_records,
@@ -2331,127 +2322,127 @@ where
         QueryIndexSection {
             kind: SECTION_VIEW_SUMMARIES,
             record_size: SUMMARY_RECORD_SIZE as u32,
-            count: usize_u64(summaries.len() / SUMMARY_RECORD_SIZE)?,
+            count: usize_u64(summaries.len() / SUMMARY_RECORD_SIZE),
             bytes: summaries,
         },
         QueryIndexSection {
             kind: SECTION_FILE_GAPS,
             record_size: FILE_GAP_RECORD_SIZE as u32,
-            count: usize_u64(gaps.len() / FILE_GAP_RECORD_SIZE)?,
+            count: usize_u64(gaps.len() / FILE_GAP_RECORD_SIZE),
             bytes: gaps,
         },
         QueryIndexSection {
             kind: SECTION_DECISION_GAPS,
             record_size: DECISION_GAP_RECORD_SIZE as u32,
-            count: usize_u64(decision_gaps.len() / DECISION_GAP_RECORD_SIZE)?,
+            count: usize_u64(decision_gaps.len() / DECISION_GAP_RECORD_SIZE),
             bytes: decision_gaps,
         },
         QueryIndexSection {
             kind: SECTION_DIMENSIONS,
             record_size: DIMENSION_RECORD_SIZE as u32,
-            count: usize_u64(dimensions.len() / DIMENSION_RECORD_SIZE)?,
+            count: usize_u64(dimensions.len() / DIMENSION_RECORD_SIZE),
             bytes: dimensions,
         },
         QueryIndexSection {
             kind: SECTION_PROJECTIONS,
             record_size: PROJECTION_RECORD_SIZE as u32,
-            count: usize_u64(projection_records.len() / PROJECTION_RECORD_SIZE)?,
+            count: usize_u64(projection_records.len() / PROJECTION_RECORD_SIZE),
             bytes: projection_records,
         },
         QueryIndexSection {
             kind: SECTION_SCOPE_ENTRIES,
             record_size: SCOPE_ENTRY_RECORD_SIZE as u32,
-            count: usize_u64(scope_entries.len() / SCOPE_ENTRY_RECORD_SIZE)?,
+            count: usize_u64(scope_entries.len() / SCOPE_ENTRY_RECORD_SIZE),
             bytes: scope_entries,
         },
         QueryIndexSection {
             kind: SECTION_CONFIDENCE,
             record_size: CONFIDENCE_RECORD_SIZE as u32,
-            count: usize_u64(confidence_records.len() / CONFIDENCE_RECORD_SIZE)?,
+            count: usize_u64(confidence_records.len() / CONFIDENCE_RECORD_SIZE),
             bytes: confidence_records,
         },
         QueryIndexSection {
             kind: SECTION_LINES,
             record_size: LINE_RECORD_SIZE as u32,
-            count: usize_u64(line_records.len() / LINE_RECORD_SIZE)?,
+            count: usize_u64(line_records.len() / LINE_RECORD_SIZE),
             bytes: line_records,
         },
         QueryIndexSection {
             kind: SECTION_TEST_SUMMARIES,
             record_size: TEST_SUMMARY_RECORD_SIZE as u32,
-            count: usize_u64(test_summaries.len() / TEST_SUMMARY_RECORD_SIZE)?,
+            count: usize_u64(test_summaries.len() / TEST_SUMMARY_RECORD_SIZE),
             bytes: test_summaries,
         },
         QueryIndexSection {
             kind: SECTION_PHASE_SUMMARIES,
             record_size: PHASE_SUMMARY_RECORD_SIZE as u32,
-            count: usize_u64(phase_summaries.len() / PHASE_SUMMARY_RECORD_SIZE)?,
+            count: usize_u64(phase_summaries.len() / PHASE_SUMMARY_RECORD_SIZE),
             bytes: phase_summaries,
         },
         QueryIndexSection {
             kind: SECTION_ANCHORS,
             record_size: ANCHOR_RECORD_SIZE as u32,
-            count: usize_u64(anchors.len() / ANCHOR_RECORD_SIZE)?,
+            count: usize_u64(anchors.len() / ANCHOR_RECORD_SIZE),
             bytes: anchors,
         },
         QueryIndexSection {
             kind: SECTION_TEST_RETRIES,
             record_size: TEST_RETRY_RECORD_SIZE as u32,
-            count: usize_u64(test_retries.len() / TEST_RETRY_RECORD_SIZE)?,
+            count: usize_u64(test_retries.len() / TEST_RETRY_RECORD_SIZE),
             bytes: test_retries,
         },
         QueryIndexSection {
             kind: SECTION_TEST_ATTEMPTS,
             record_size: TEST_ATTEMPT_RECORD_SIZE as u32,
-            count: usize_u64(test_attempts.len() / TEST_ATTEMPT_RECORD_SIZE)?,
+            count: usize_u64(test_attempts.len() / TEST_ATTEMPT_RECORD_SIZE),
             bytes: test_attempts,
         },
         QueryIndexSection {
             kind: SECTION_TEST_LINES,
             record_size: TEST_LINE_RECORD_SIZE as u32,
-            count: usize_u64(test_lines.len() / TEST_LINE_RECORD_SIZE)?,
+            count: usize_u64(test_lines.len() / TEST_LINE_RECORD_SIZE),
             bytes: test_lines,
         },
         QueryIndexSection {
             kind: SECTION_TEST_HITS,
             record_size: TEST_HIT_RECORD_SIZE as u32,
-            count: usize_u64(test_hits.len() / TEST_HIT_RECORD_SIZE)?,
+            count: usize_u64(test_hits.len() / TEST_HIT_RECORD_SIZE),
             bytes: test_hits,
         },
         QueryIndexSection {
             kind: SECTION_TEST_DECISIONS,
             record_size: TEST_DECISION_RECORD_SIZE as u32,
-            count: usize_u64(test_decisions.len() / TEST_DECISION_RECORD_SIZE)?,
+            count: usize_u64(test_decisions.len() / TEST_DECISION_RECORD_SIZE),
             bytes: test_decisions,
         },
         QueryIndexSection {
             kind: SECTION_TEST_VECTORS,
             record_size: TEST_VECTOR_RECORD_SIZE as u32,
-            count: usize_u64(test_vectors.len() / TEST_VECTOR_RECORD_SIZE)?,
+            count: usize_u64(test_vectors.len() / TEST_VECTOR_RECORD_SIZE),
             bytes: test_vectors,
         },
         QueryIndexSection {
             kind: SECTION_VECTOR_VALUES,
             record_size: 1,
-            count: usize_u64(vector_values.len())?,
+            count: usize_u64(vector_values.len()),
             bytes: vector_values,
         },
         QueryIndexSection {
             kind: SECTION_HIT_METADATA,
             record_size: HIT_METADATA_RECORD_SIZE as u32,
-            count: usize_u64(hit_metadata.len() / HIT_METADATA_RECORD_SIZE)?,
+            count: usize_u64(hit_metadata.len() / HIT_METADATA_RECORD_SIZE),
             bytes: hit_metadata,
         },
         QueryIndexSection {
             kind: SECTION_DECISION_METADATA,
             record_size: DECISION_METADATA_RECORD_SIZE as u32,
-            count: usize_u64(decision_metadata.len() / DECISION_METADATA_RECORD_SIZE)?,
+            count: usize_u64(decision_metadata.len() / DECISION_METADATA_RECORD_SIZE),
             bytes: decision_metadata,
         },
         QueryIndexSection {
             kind: SECTION_DECISION_DETAILS,
             record_size: DECISION_DETAIL_RECORD_SIZE as u32,
-            count: usize_u64(decision_details.len() / DECISION_DETAIL_RECORD_SIZE)?,
+            count: usize_u64(decision_details.len() / DECISION_DETAIL_RECORD_SIZE),
             bytes: decision_details,
         },
         QueryIndexSection {
@@ -2459,19 +2450,19 @@ where
             record_size: DECISION_VECTOR_OBSERVATION_RECORD_SIZE as u32,
             count: usize_u64(
                 decision_vector_observations.len() / DECISION_VECTOR_OBSERVATION_RECORD_SIZE,
-            )?,
+            ),
             bytes: decision_vector_observations,
         },
         QueryIndexSection {
             kind: SECTION_DECISION_CONDITIONS,
             record_size: DECISION_CONDITION_RECORD_SIZE as u32,
-            count: usize_u64(decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE)?,
+            count: usize_u64(decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE),
             bytes: decision_conditions,
         },
         QueryIndexSection {
             kind: SECTION_LIMITATIONS,
             record_size: LIMITATION_RECORD_SIZE as u32,
-            count: usize_u64(limitations.len() / LIMITATION_RECORD_SIZE)?,
+            count: usize_u64(limitations.len() / LIMITATION_RECORD_SIZE),
             bytes: limitations,
         },
         QueryIndexSection {
@@ -2601,10 +2592,8 @@ impl<'a> CoverageIndex<'a> {
             self.string(get_u32(record, 4))?;
             self.string(get_u32(record, 8))?;
             let count = |offset: usize| -> Result<CoverageCount, CoverageIndexError> {
-                let covered = usize::try_from(get_u64(record, offset))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?;
-                let total = usize::try_from(get_u64(record, offset + 8))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?;
+                let covered = get_usize(record, offset);
+                let total = get_usize(record, offset + 8);
                 if covered > total {
                     return Err(CoverageIndexError::InvalidRecord("covered exceeds total"));
                 }
@@ -2615,8 +2604,7 @@ impl<'a> CoverageIndex<'a> {
                 })
             };
             let value = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)
+                Ok(get_usize(record, offset))
             };
             let conditions = value(40)?;
             let covered_conditions = value(48)?;
@@ -2681,8 +2669,7 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("file-gap reserved bytes"));
             }
             let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)
+                Ok(get_usize(record, offset))
             };
             let mask = get_u32(record, 56);
             if mask & !15 != 0 {
@@ -2852,8 +2839,7 @@ impl<'a> CoverageIndex<'a> {
                 ));
             }
             let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)
+                Ok(get_usize(record, offset))
             };
             let limitations = number(192)?;
             let evidence_corruptions = number(200)?;
@@ -3053,8 +3039,7 @@ impl<'a> CoverageIndex<'a> {
                 continue;
             }
             let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)
+                Ok(get_usize(record, offset))
             };
             let conditions = number(48)?;
             let missing_conditions = number(56)?;
@@ -3108,12 +3093,9 @@ impl<'a> CoverageIndex<'a> {
             values.push(IndexedDimensionCoverage {
                 kind: (dimension == CoverageDimension::Kind).then(|| name.clone()),
                 runner: (dimension == CoverageDimension::Runner).then_some(name),
-                tests: usize::try_from(get_u64(record, 8))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                setups: usize::try_from(get_u64(record, 16))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                attributed: usize::try_from(get_u64(record, 184))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                tests: get_usize(record, 8),
+                setups: get_usize(record, 16),
+                attributed: get_usize(record, 184),
                 summary: decode_summary(record, 24, 32)?,
             });
         }
@@ -3144,8 +3126,7 @@ impl<'a> CoverageIndex<'a> {
                 2 => "ambiguous",
                 _ => return Err(CoverageIndexError::InvalidRecord("source-scope status")),
             };
-            let measurement_limitations = usize::try_from(get_u64(record, 16))
-                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let measurement_limitations = get_usize(record, 16);
             let mask = get_u32(record, 24);
             if mask & !15 != 0 || (measurement_limitations == 0) != (mask == 0) {
                 return Err(CoverageIndexError::InvalidRecord(
@@ -3230,8 +3211,7 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("line record"));
             }
             let record_file = self.string(get_u32(record, 4))?;
-            let record_line = usize::try_from(get_u64(record, 8))
-                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let record_line = get_usize(record, 8);
             if record_file != file || record_line != line {
                 continue;
             }
@@ -3286,8 +3266,7 @@ impl<'a> CoverageIndex<'a> {
             }
             lines.push(IndexedLine {
                 file: self.string(get_u32(record, 4))?,
-                line: usize::try_from(get_u64(record, 8))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                line: get_usize(record, 8),
                 covered: bool_field(record[1])?,
                 measured: !bool_field(record[2])?,
                 tests: self.relation_strings(get_u64(record, 16), get_u64(record, 24))?,
@@ -3376,9 +3355,7 @@ impl<'a> CoverageIndex<'a> {
         if end > descriptor.count {
             return Err(CoverageIndexError::InvalidRecord("vector value range"));
         }
-        let mut values = Vec::with_capacity(
-            usize::try_from(count).map_err(|_| CoverageIndexError::SizeOverflow)?,
-        );
+        let mut values = Vec::with_capacity(count as usize);
         for index in offset..end {
             values.push(match self.index.record(SECTION_VECTOR_VALUES, index)?[0] {
                 0 => None,
@@ -3435,10 +3412,7 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("test retry record"));
             }
             if let Some(position) = position(record)? {
-                details[position].retries.push(
-                    usize::try_from(get_u64(record, 8))
-                        .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                );
+                details[position].retries.push(get_usize(record, 8));
             }
         }
         let descriptor = self.index.descriptor(SECTION_TEST_ATTEMPTS)?;
@@ -3451,8 +3425,7 @@ impl<'a> CoverageIndex<'a> {
                 details[position]
                     .attempts
                     .push(crate::coverage_report::TestAttempt {
-                        retry: usize::try_from(get_u64(record, 8))
-                            .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                        retry: get_usize(record, 8),
                         status: self.string(get_u32(record, 16))?,
                         expected_status: self.optional_string(get_u32(record, 20))?,
                     });
@@ -3471,8 +3444,7 @@ impl<'a> CoverageIndex<'a> {
                     .lines
                     .push(crate::coverage_report::SourceLine {
                         file: self.string(get_u32(record, 8))?.into(),
-                        line: usize::try_from(get_u64(record, 16))
-                            .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                        line: get_usize(record, 16),
                     });
             }
         }
@@ -3508,9 +3480,7 @@ impl<'a> CoverageIndex<'a> {
                 if end > vectors {
                     return Err(CoverageIndexError::InvalidRecord("test vector range"));
                 }
-                let mut observed = Vec::with_capacity(
-                    usize::try_from(count).map_err(|_| CoverageIndexError::SizeOverflow)?,
-                );
+                let mut observed = Vec::with_capacity(count as usize);
                 for vector in offset..end {
                     observed.push(self.test_vector(vector)?);
                 }
@@ -3574,10 +3544,8 @@ impl<'a> CoverageIndex<'a> {
                 id: self.string(get_u32(record, 4))?,
                 obligation: obligation.into(),
                 file: self.string(get_u32(record, 8))?,
-                line: usize::try_from(get_u64(record, 16))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                column: usize::try_from(get_u64(record, 24))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                line: get_usize(record, 16),
+                column: get_usize(record, 24),
                 branch_kind: self.optional_string(get_u32(record, 32))?,
                 label: (obligation != "branch")
                     .then_some(metadata_label.clone())
@@ -3635,10 +3603,8 @@ impl<'a> CoverageIndex<'a> {
                 file: self.string(get_u32(record, 12))?,
                 source: self.string(get_u32(record, 16))?,
                 reason: self.string(get_u32(record, 20))?,
-                line: usize::try_from(get_u64(record, 24))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                column: usize::try_from(get_u64(record, 32))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                line: get_usize(record, 24),
+                column: get_usize(record, 32),
                 blocking: bool_field(record[1])?,
             });
         }
@@ -3669,10 +3635,8 @@ impl<'a> CoverageIndex<'a> {
                 file: self.string(get_u32(record, 8))?,
                 source: self.string(get_u32(record, 12))?,
                 kind: self.string(get_u32(record, 16))?,
-                line: usize::try_from(get_u64(record, 24))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                column: usize::try_from(get_u64(record, 32))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                line: get_usize(record, 24),
+                column: get_usize(record, 32),
                 conditions: self.relation_strings(get_u64(record, 40), get_u64(record, 48))?,
             });
         }
@@ -3722,8 +3686,7 @@ impl<'a> CoverageIndex<'a> {
             ));
         }
         Ok(crate::coverage_report::ConditionResult {
-            index: usize::try_from(get_u64(record, 8))
-                .map_err(|_| CoverageIndexError::SizeOverflow)?,
+            index: get_usize(record, 8),
             source: self.string(get_u32(record, 4))?,
             covered: record[0] & 1 != 0,
             witness,
@@ -3867,10 +3830,8 @@ impl<'a> CoverageIndex<'a> {
                 test: self.string(get_u32(record, 20))?,
                 status: self.optional_string(get_u32(record, 24))?,
                 caused_by_phase_id: self.optional_string(get_u32(record, 28))?,
-                lines: usize::try_from(get_u64(record, 32))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                decisions: usize::try_from(get_u64(record, 40))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                lines: get_usize(record, 32),
+                decisions: get_usize(record, 40),
             });
         }
         Ok(phases)
@@ -3893,15 +3854,12 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("anchor record"));
             }
             let record_file = self.string(get_u32(record, 8))?;
-            let record_line = usize::try_from(get_u64(record, 16))
-                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let record_line = get_usize(record, 16);
             if record_file != file || record_line != line {
                 continue;
             }
-            let total = usize::try_from(get_u64(record, 32))
-                .map_err(|_| CoverageIndexError::SizeOverflow)?;
-            let covered_conditions = usize::try_from(get_u64(record, 40))
-                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let total = get_usize(record, 32);
+            let covered_conditions = get_usize(record, 40);
             let counted = total != 0 || covered_conditions != 0;
             let (kind, conditions, covered_conditions) = match record[1] {
                 0 => {
@@ -3925,8 +3883,7 @@ impl<'a> CoverageIndex<'a> {
                 id: self.string(get_u32(record, 4))?,
                 file: record_file,
                 line: record_line,
-                column: usize::try_from(get_u64(record, 24))
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                column: get_usize(record, 24),
                 covered: bool_field(record[2])?,
                 conditions,
                 covered_conditions,
@@ -3962,9 +3919,8 @@ fn decode_summary(
     flags_offset: usize,
     base: usize,
 ) -> Result<CoverageSummary, CoverageIndexError> {
-    let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-        usize::try_from(get_u64(record, offset)).map_err(|_| CoverageIndexError::SizeOverflow)
-    };
+    let number =
+        |offset: usize| -> Result<usize, CoverageIndexError> { Ok(get_usize(record, offset)) };
     let count = |offset: usize| -> Result<CoverageCount, CoverageIndexError> {
         let covered = number(offset)?;
         let total = number(offset + 8)?;
@@ -4254,23 +4210,21 @@ mod tests {
         let mut relations = StringRelations::default();
         let run = || ["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
 
-        let first = relations.push(run(), &mut strings).unwrap();
-        let second = relations.push(run(), &mut strings).unwrap();
+        let first = relations.push(run(), &mut strings);
+        let second = relations.push(run(), &mut strings);
         assert_eq!(first, second, "the second naming points at the first run");
         assert_eq!(relations.values.len(), 3, "and nothing was appended for it");
 
         // A different run still gets its own storage, after the one already
         // there -- readers reach a run only by (offset, count), so the
         // existing pair must keep meaning what it meant.
-        let other = relations
-            .push(["alpha".to_string(), "delta".to_string()], &mut strings)
-            .unwrap();
+        let other = relations.push(["alpha".to_string(), "delta".to_string()], &mut strings);
         assert_eq!(other, (3, 2));
         assert_eq!(relations.values.len(), 5);
 
         // A prefix of a stored run is a different run, and is stored as one
         // rather than aliasing into the middle of another.
-        let prefix = relations.push(["alpha".to_string()], &mut strings).unwrap();
+        let prefix = relations.push(["alpha".to_string()], &mut strings);
         assert_eq!(prefix, (5, 1));
 
         // What each pair resolves to is what was pushed.
@@ -4296,10 +4250,8 @@ mod tests {
         let separate: Vec<Id> = original.iter().map(|id| Id::from(id.as_str())).collect();
         for values in [&original[..], &copies, &separate, &separate[1..], &[]] {
             assert_eq!(
-                shared_relations
-                    .push_ids(values, &mut shared_strings)
-                    .unwrap(),
-                text_relations.push(values, &mut text_strings).unwrap(),
+                shared_relations.push_ids(values, &mut shared_strings),
+                text_relations.push(values, &mut text_strings),
             );
         }
         // The table owns references to cached allocations even after callers
@@ -4310,8 +4262,8 @@ mod tests {
         for value in ["new", "test::a[1]", ""] {
             let id = Id::from(value);
             assert_eq!(
-                shared_strings.intern_shared(&id).unwrap(),
-                text_strings.intern(value).unwrap(),
+                shared_strings.intern_shared(&id),
+                text_strings.intern(value),
             );
         }
         assert_eq!(shared_relations.values, text_relations.values);

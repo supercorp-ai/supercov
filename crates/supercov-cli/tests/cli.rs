@@ -991,6 +991,43 @@ fn mistakes_are_named_and_end_with_two() {
     assert_ne!(json.code(), 0);
 }
 
+/// A command started in a directory deleted under the shell has no project
+/// to work in, and each says so instead of acting somewhere else. Linux's
+/// `getcwd` refuses a removed directory; macOS may still name it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_command_whose_directory_is_gone_says_so() {
+    let parent = std::env::temp_dir().join(format!("supercov-gone-{}", std::process::id()));
+    std::fs::create_dir_all(&parent).unwrap();
+    for arguments in [
+        &["merge"][..],
+        &["import", "evidence.lcov", "--background"],
+        &["--", "true"],
+        &["runs", "clean"],
+        &["__supervise", "--", "true"],
+    ] {
+        let gone = parent.join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        // `cd` into it, remove it, then become Supercov there.
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(r#"cd "$1" && rmdir "$1" && shift && exec "$@""#)
+            .arg("sh")
+            .arg(&gone)
+            .arg(env!("CARGO_BIN_EXE_supercov"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {stderr}");
+        assert!(
+            stderr.contains("could not resolve the current directory"),
+            "{arguments:?}: {stderr}"
+        );
+    }
+    std::fs::remove_dir_all(parent).unwrap();
+}
+
 #[test]
 fn help_and_bundled_guides_need_no_project() {
     let project = Project::empty("help");

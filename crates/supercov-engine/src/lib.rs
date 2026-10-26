@@ -2,6 +2,12 @@
 //! thin generated shims; instrumentation, orchestration, analysis and queries
 //! are owned here.
 
+// Stored indexes and evidence address lengths and offsets in 64 bits, read
+// back as `usize` without a check that could only fail on a narrower target.
+// Every target Supercov ships is 64-bit.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("Supercov builds for 64-bit targets only");
+
 pub mod agent_json;
 pub mod assertion_coverage;
 pub mod child_signal_guard;

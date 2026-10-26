@@ -516,13 +516,7 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
         vec![run_ids]
     };
     for run_ids in groups {
-        let (run_id, started_at) = match public_run_identity() {
-            Ok(identity) => identity,
-            Err(error) => {
-                eprintln!("[supercov] {error}");
-                return ExitCode::from(2);
-            }
-        };
+        let (run_id, started_at) = public_run_identity();
         match supercov_engine::run_merge::merge_coverage_runs(
             &root,
             &run_ids,
@@ -619,13 +613,7 @@ fn import_command(arguments: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (run_id, started_at) = match public_run_identity() {
-        Ok(identity) => identity,
-        Err(error) => {
-            eprintln!("[supercov] {error}");
-            return ExitCode::from(2);
-        }
-    };
+    let (run_id, started_at) = public_run_identity();
     match supercov_engine::outside_evidence::import_line_evidence(
         &supercov_engine::outside_evidence::ImportRequest {
             root: &root,
@@ -1057,10 +1045,11 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
 const PUBLIC_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
 
-fn public_run_identity() -> Result<(String, String), String> {
+fn public_run_identity() -> (String, String) {
+    // A fixed format of the current time: only a year past 9999 fails it.
     let started_at = OffsetDateTime::now_utc()
         .format(PUBLIC_TIMESTAMP_FORMAT)
-        .map_err(|error| format!("could not generate the run identity: {error}"))?;
+        .expect("the run timestamp formats any current time");
     let identity = format!(
         "{started_at}\0{}\0{}",
         std::process::id(),
@@ -1071,7 +1060,7 @@ fn public_run_identity() -> Result<(String, String), String> {
     );
     let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
     let run_id = format!("run_{}", &digest[..16]);
-    Ok((run_id, started_at))
+    (run_id, started_at)
 }
 
 /// The warning for a run the checkout no longer matches, naming the first
@@ -2153,13 +2142,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (run_id, started_at) = match public_run_identity() {
-        Ok(timestamp) => timestamp,
-        Err(error) => {
-            eprintln!("[supercov] {error}");
-            return ExitCode::from(2);
-        }
-    };
+    let (run_id, started_at) = public_run_identity();
     // A run that is not recorded must not leave the last one's id for a
     // script to read as its own.
     if let Some(file) = std::env::var_os(RUN_ID_FILE).filter(|file| !file.is_empty())
@@ -4102,8 +4085,8 @@ mod tests {
 
     #[test]
     fn public_run_ids_are_short_opaque_and_unique() {
-        let (first, first_started_at) = public_run_identity().unwrap();
-        let (second, second_started_at) = public_run_identity().unwrap();
+        let (first, first_started_at) = public_run_identity();
+        let (second, second_started_at) = public_run_identity();
         assert!(first.starts_with("run_"));
         assert_eq!(first.len(), 20);
         assert!(public_run_id(&first));
