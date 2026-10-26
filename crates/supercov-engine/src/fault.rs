@@ -114,34 +114,11 @@ pub fn fail_each_call<Fixture, E: std::fmt::Debug>(
     scenario: impl Fn(&Fixture) -> Result<(), E>,
     cleanup: impl Fn(Fixture),
 ) -> usize {
-    fail_each(&format!("{site}@"), setup, scenario, cleanup)
-}
-
-/// [`fail_each_call`], failing instead the first call from each place in the
-/// code that calls `site` (`site#1`, `site#2`, ...): one run per place, where
-/// a loop over many files would take one per file. The number of places.
-#[cfg(any(test, debug_assertions))]
-pub fn fail_each_place<Fixture, E: std::fmt::Debug>(
-    site: &str,
-    setup: impl Fn() -> Fixture,
-    scenario: impl Fn(&Fixture) -> Result<(), E>,
-    cleanup: impl Fn(Fixture),
-) -> usize {
-    fail_each(&format!("{site}#"), setup, scenario, cleanup)
-}
-
-#[cfg(any(test, debug_assertions))]
-fn fail_each<Fixture, E: std::fmt::Debug>(
-    fault: &str,
-    setup: impl Fn() -> Fixture,
-    scenario: impl Fn(&Fixture) -> Result<(), E>,
-    cleanup: impl Fn(Fixture),
-) -> usize {
     let mut nth = 0;
     loop {
         nth += 1;
         let fixture = setup();
-        let (result, reached) = during_reaching(&format!("{fault}{nth}"), || scenario(&fixture));
+        let (result, reached) = during_reaching(&format!("{site}@{nth}"), || scenario(&fixture));
         cleanup(fixture);
         if !reached {
             result.expect("the run no fault reached succeeds");
