@@ -1808,7 +1808,7 @@ fn a_source_file_that_does_not_parse_runs_as_written_and_is_declared() {
         &line,
         &[
             "NOT MEASURED",
-            "Supercov could not parse this file (Expected `:` but found `decimal` at line 2, column 11)",
+            "Supercov could not parse this file (Expected `:` but found `decimal` at line 2, column 10)",
             "(read from the current working tree)",
         ],
     );

@@ -7,7 +7,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Write,
     path::Path,
     sync::Arc,
 };
@@ -119,7 +118,9 @@ fn restore_comment_text(
         return Ok((generated.to_string(), map));
     }
     let allocator = Allocator::default();
-    let reparsed = Parser::new(&allocator, generated, program.source_type).parse();
+    // A fault prints text that does not parse, as a printer bug would.
+    let printed = crate::fault::or("reprinted-parse", || "(", || generated);
+    let reparsed = Parser::new(&allocator, printed, program.source_type).parse();
     if !reparsed.errors.is_empty() {
         return Err(CandidateError::Parse(
             reparsed
@@ -194,28 +195,33 @@ fn restore_comment_text(
         .collect::<Vec<_>>();
     mappings.sort_unstable_by_key(|(source, destination)| (*source, *destination));
     let statements = statement_spans(&reparsed.program);
-    for (index, original) in program.comments.iter().enumerate() {
-        if matched[index] {
-            continue;
-        }
-        let anchor = if original.attached_to > 0 {
-            original.attached_to as usize
-        } else {
-            original.span.end as usize
-        };
-        let mapping_index = mappings.partition_point(|(source, _)| *source < anchor);
-        let mapped = mappings
-            .get(mapping_index)
-            .map_or(generated.len(), |(_, destination)| *destination);
-        let (destination, text) = place_restored_comment(
-            generated,
-            &statements,
-            mapped,
-            original,
-            original.span.source_text(program.source_text),
-        );
-        edits.push((destination, destination, text));
-    }
+    // The file has comments here, so this runs at least once.
+    program
+        .comments
+        .iter()
+        .enumerate()
+        .for_each(|(index, original)| {
+            if matched[index] {
+                return;
+            }
+            let anchor = if original.attached_to > 0 {
+                original.attached_to as usize
+            } else {
+                original.span.end as usize
+            };
+            let mapping_index = mappings.partition_point(|(source, _)| *source < anchor);
+            let mapped = mappings
+                .get(mapping_index)
+                .map_or(generated.len(), |(_, destination)| *destination);
+            let (destination, text) = place_restored_comment(
+                generated,
+                &statements,
+                mapped,
+                original,
+                original.span.source_text(program.source_text),
+            );
+            edits.push((destination, destination, text));
+        });
     edits.sort_by_key(|(start, end, _)| (*start, *end));
     let restored_len = edits
         .iter()
@@ -392,12 +398,13 @@ impl<'s> Utf16LineIndex<'s> {
                 }
                 let mut marks = vec![(0, 0)];
                 let mut column = 0;
-                for (offset, character) in text.char_indices() {
+                // A line that is not ASCII has characters.
+                text.char_indices().for_each(|(offset, character)| {
                     if column >= marks.last().expect("a first mark").0 + CHECKPOINT {
                         marks.push((column, offset));
                     }
                     column += character.len_utf16();
-                }
+                });
                 Some(marks)
             })
             .collect();
@@ -540,7 +547,9 @@ fn restore_function_source(
         return Ok((generated.to_string(), map));
     }
     let allocator = Allocator::default();
-    let reparsed = Parser::new(&allocator, generated, program.source_type).parse();
+    // A fault prints text that does not parse, as a printer bug would.
+    let printed = crate::fault::or("reprinted-parse", || "(", || generated);
+    let reparsed = Parser::new(&allocator, printed, program.source_type).parse();
     if !reparsed.errors.is_empty() {
         return Err(CandidateError::Parse(
             reparsed
@@ -583,17 +592,18 @@ fn restore_function_source(
     let mut used = HashSet::new();
     // (generated start, generated end, source start, source end)
     let mut edits = Vec::<(usize, usize, usize, usize)>::new();
-    for span in &functions.0 {
+    // The output holds the functions whose source is read.
+    functions.0.iter().for_each(|span| {
         let (start, end) = (span.start as usize, span.end as usize);
         if edits.last().is_some_and(|edit| start < edit.1) {
-            continue;
+            return;
         }
         let first = printed_from.partition_point(|(generated, _)| *generated < start);
         let Some(&(_, source)) = printed_from
             .get(first)
             .filter(|(generated, _)| *generated < end)
         else {
-            continue;
+            return;
         };
         // The innermost source-read function holding that position.
         let Some(&(source_start, source_end)) = sensitive
@@ -601,13 +611,13 @@ fn restore_function_source(
             .filter(|(from, to)| *from as usize <= source && source < *to as usize)
             .min_by_key(|(from, to)| to - from)
         else {
-            continue;
+            return;
         };
         if !used.insert((source_start, source_end)) {
-            continue;
+            return;
         }
         edits.push((start, end, source_start as usize, source_end as usize));
-    }
+    });
     if edits.is_empty() {
         return Ok((generated.to_string(), map));
     }
@@ -616,12 +626,14 @@ fn restore_function_source(
     let mut cursor = 0;
     // Where each edit landed in the restored text.
     let mut placed = Vec::with_capacity(edits.len());
-    for (start, end, source_start, source_end) in &edits {
-        restored.push_str(&generated[cursor..*start]);
-        placed.push(restored.len());
-        restored.push_str(&program.source_text[*source_start..*source_end]);
-        cursor = *end;
-    }
+    edits
+        .iter()
+        .for_each(|(start, end, source_start, source_end)| {
+            restored.push_str(&generated[cursor..*start]);
+            placed.push(restored.len());
+            restored.push_str(&program.source_text[*source_start..*source_end]);
+            cursor = *end;
+        });
     restored.push_str(&generated[cursor..]);
 
     let restored_lines = Utf16LineIndex::new(&restored);
@@ -636,7 +648,7 @@ fn restore_function_source(
         offset.saturating_add_signed(shift)
     };
     let mut tokens = Vec::new();
-    for token in map.get_tokens() {
+    map.get_tokens().for_each(|token| {
         let offset = generated_lines
             .byte_offset(token.get_dst_line() as usize, token.get_dst_col() as usize);
         // What the printer wrote inside a restored function is gone.
@@ -644,7 +656,7 @@ fn restore_function_source(
             .iter()
             .any(|(start, end, _, _)| *start < offset && offset < *end)
         {
-            continue;
+            return;
         }
         let (dst_line, dst_col) = restored_lines.line_col(shifted(offset));
         tokens.push(oxc_sourcemap::Token::new(
@@ -655,23 +667,28 @@ fn restore_function_source(
             token.get_source_id(),
             token.get_name_id(),
         ));
-    }
+    });
     let source_id = map.get_tokens().find_map(|token| token.get_source_id());
-    for ((_, _, source_start, source_end), at) in edits.iter().zip(&placed) {
-        let text = &program.source_text[*source_start..*source_end];
-        let mut line_start = 0;
-        for line in text.split_inclusive('\n') {
-            if line_start > 0 {
-                let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-                let (dst_line, dst_col) = restored_lines.line_col(at + line_start + indent);
-                let (src_line, src_col) = source_lines.line_col(source_start + line_start + indent);
-                tokens.push(oxc_sourcemap::Token::new(
-                    dst_line, dst_col, src_line, src_col, source_id, None,
-                ));
-            }
-            line_start += line.len();
-        }
-    }
+    edits
+        .iter()
+        .zip(&placed)
+        .for_each(|((_, _, source_start, source_end), at)| {
+            let text = &program.source_text[*source_start..*source_end];
+            let mut line_start = 0;
+            // A function's text has at least one line.
+            text.split_inclusive('\n').for_each(|line| {
+                if line_start > 0 {
+                    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+                    let (dst_line, dst_col) = restored_lines.line_col(at + line_start + indent);
+                    let (src_line, src_col) =
+                        source_lines.line_col(source_start + line_start + indent);
+                    tokens.push(oxc_sourcemap::Token::new(
+                        dst_line, dst_col, src_line, src_col, source_id, None,
+                    ));
+                }
+                line_start += line.len();
+            });
+        });
     tokens.sort_by_key(|token| (token.get_dst_line(), token.get_dst_col()));
     let map = oxc_sourcemap::SourceMap::new(
         map.get_file().cloned(),
@@ -696,8 +713,8 @@ fn restore_function_source(
 /// those files keep the generated statements unmapped-by-omission, as before.
 fn generated_statement_span(source: &str) -> Option<Span> {
     let last_line = source.rfind('\n').map_or(0, |newline| newline + 1);
-    let length = u32::try_from(source.len()).ok()?;
-    // Saturating only for a source of 4 GiB, which oxc does not parse.
+    // oxc parses no source of 4 GiB, so the length fits.
+    let length = source.len() as u32;
     source[last_line..]
         .is_ascii()
         .then(|| Span::new(length.saturating_add(1), length.saturating_add(2)))
@@ -1104,7 +1121,7 @@ fn parse_message(source: &str, message: &str, offset: Option<usize>) -> String {
     match offset.filter(|offset| *offset <= source.len()) {
         Some(offset) => {
             let (line, column) = line_and_utf16_column(source, offset);
-            format!("{message} at line {line}, column {}", column + 1)
+            format!("{message} at line {line}, column {column}")
         }
         None => message.to_owned(),
     }
@@ -1390,9 +1407,15 @@ fn names_something(word: &str) -> bool {
 
 fn apply_text_edits(
     source: &str,
-    mut edits: Vec<TextEdit>,
+    edits: Vec<TextEdit>,
     file: &str,
 ) -> Result<(String, oxc_sourcemap::SourceMap), CandidateError> {
+    // A fault adds an edit past the end, as an instrumenter bug would.
+    let mut edits = crate::fault::or(
+        "text-edits",
+        || vec![TextEdit::insert(source.len() + 1, 0, String::new())],
+        || edits,
+    );
     edits.sort_by_key(|edit| (edit.start, edit.end > edit.start, edit.rank));
     let mut builder = oxc_sourcemap::SourceMapBuilder::default();
     let source_id = builder.set_source_and_content(file, source);
@@ -1444,7 +1467,8 @@ fn apply_text_edits(
                 // map it reads has one, and Jest names a frame by it. With
                 // @swc/jest `at toBe (a.test.ts:12:35)` lost its `toBe`.
                 let (mut offset, mut before) = (0u32, TokenClass::Space);
-                for (index, unit) in piece.char_indices() {
+                // A piece written out is not empty.
+                piece.char_indices().for_each(|(index, unit)| {
                     let class = TokenClass::of(unit);
                     if offset > 0
                         && class != TokenClass::Space
@@ -1471,7 +1495,7 @@ fn apply_text_edits(
                     }
                     before = class;
                     offset += unit.len_utf16() as u32;
-                }
+                });
                 code.push_str(piece);
                 *column += offset;
                 *source_column += offset;
@@ -1605,13 +1629,11 @@ impl AssertionEdits<'_> {
     /// call typed `never` leaves nothing after it unreachable.
     fn wrap_statement(
         &mut self,
+        (phase, error): &(String, String),
         statement: &ExpressionStatement<'_>,
         operation: &str,
         source: &str,
     ) {
-        let Some((phase, error)) = &self.in_place else {
-            return;
-        };
         let (start, end) = (statement.span.start as usize, statement.span.end as usize);
         let width = (end - start) as i64;
         let opening = format!(
@@ -1633,15 +1655,13 @@ impl AssertionEdits<'_> {
     /// operands, as with any bound call.
     fn bind_statement(
         &mut self,
+        local: &str,
         statement: &ExpressionStatement<'_>,
         call: &CallExpression<'_>,
         callee: &str,
         operation: &str,
         source: &str,
     ) {
-        let Some((local, _)) = self.in_place.clone() else {
-            return;
-        };
         let (start, end) = (statement.span.start as usize, statement.span.end as usize);
         let width = (end - start) as i64;
         self.edits.push(TextEdit::insert(
@@ -1721,7 +1741,7 @@ impl<'a> Visit<'a> for AssertionEdits<'_> {
     }
 
     fn visit_expression_statement(&mut self, statement: &ExpressionStatement<'a>) {
-        if self.in_place.is_some()
+        if let Some(in_place) = self.in_place.clone()
             && self.arrow_body != Some(span_key(statement.span))
             && let Expression::CallExpression(call) = &statement.expression
             && let Some(&(_, _, bound)) = self.sites.get(&span_key(call.span))
@@ -1733,10 +1753,15 @@ impl<'a> Visit<'a> for AssertionEdits<'_> {
                     .remove(&span_key(call.span))
                     .expect("the site was just found");
                 match entity {
-                    Some(callee) if bound => {
-                        self.bind_statement(statement, call, &callee, &operation, &source)
-                    }
-                    _ => self.wrap_statement(statement, &operation, &source),
+                    Some(callee) if bound => self.bind_statement(
+                        &in_place.0,
+                        statement,
+                        call,
+                        &callee,
+                        &operation,
+                        &source,
+                    ),
+                    _ => self.wrap_statement(&in_place, statement, &operation, &source),
                 }
             }
         }
@@ -1788,14 +1813,15 @@ fn capability_import_edits(
     let wrapper_local = names.allocate("__supercovImportedCapability");
     let mut edits = Vec::new();
     let mut wrapped = 0;
-    for statement in &program.body {
+    // A capability call names an import, so the program has statements.
+    program.body.iter().for_each(|statement| {
         let Statement::ImportDeclaration(declaration) = statement else {
-            continue;
+            return;
         };
         if declaration.import_kind == ImportOrExportKind::Type
             || excluded_capability_import(declaration.source.value.as_str(), wrapper)
         {
-            continue;
+            return;
         }
         let mut declarators = Vec::new();
         for specifier in declaration.specifiers.iter().flatten() {
@@ -1844,7 +1870,7 @@ fn capability_import_edits(
                 format!("; const {};", declarators.join(", ")),
             ));
         }
-    }
+    });
     if wrapped > 0 {
         // First among the imports, as the syntax-tree transform put it, on the
         // first statement's own line.
@@ -1885,71 +1911,76 @@ fn transform_capability_imports<'a>(
     let wrapper_local = names.allocate("__supercovImportedCapability");
     let mut wrapped = 0;
     let mut output = ast.vec();
-    for statement in program.body.take_in(allocator) {
-        let Statement::ImportDeclaration(mut declaration) = statement else {
-            output.push(statement);
-            continue;
-        };
-        let module_name = declaration.source.value.as_str();
-        if declaration.import_kind == ImportOrExportKind::Type
-            || excluded_capability_import(module_name, wrapper)
-        {
-            output.push(Statement::ImportDeclaration(declaration));
-            continue;
-        }
-        let mut declarations = ast.vec();
-        for specifier in declaration.specifiers.iter_mut().flatten() {
-            let local = match specifier {
-                ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                    if specifier.import_kind == ImportOrExportKind::Type =>
-                {
+    // A capability call names an import, so the program has statements.
+    program
+        .body
+        .take_in(allocator)
+        .into_iter()
+        .for_each(|statement| {
+            let Statement::ImportDeclaration(mut declaration) = statement else {
+                output.push(statement);
+                return;
+            };
+            let module_name = declaration.source.value.as_str();
+            if declaration.import_kind == ImportOrExportKind::Type
+                || excluded_capability_import(module_name, wrapper)
+            {
+                output.push(Statement::ImportDeclaration(declaration));
+                return;
+            }
+            let mut declarations = ast.vec();
+            for specifier in declaration.specifiers.iter_mut().flatten() {
+                let local = match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                        if specifier.import_kind == ImportOrExportKind::Type =>
+                    {
+                        continue;
+                    }
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => &mut specifier.local,
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        &mut specifier.local
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        &mut specifier.local
+                    }
+                };
+                let original = local.name.to_string();
+                if !capability_roots.contains(&original) {
                     continue;
                 }
-                ImportDeclarationSpecifier::ImportSpecifier(specifier) => &mut specifier.local,
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                    &mut specifier.local
-                }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                    &mut specifier.local
-                }
-            };
-            let original = local.name.to_string();
-            if !capability_roots.contains(&original) {
-                continue;
-            }
-            let raw = names.allocate(&format!("__supercovRaw{original}"));
-            local.name = ast.ident(&raw);
-            let wrapped_value = ast.expression_call(
-                Span::default(),
-                ast.expression_identifier(Span::default(), ast.ident(&wrapper_local)),
-                NONE,
-                ast.vec1(Argument::from(
-                    ast.expression_identifier(Span::default(), ast.ident(&raw)),
-                )),
-                false,
-            );
-            declarations.push(ast.variable_declarator(
-                Span::default(),
-                VariableDeclarationKind::Const,
-                ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&original)),
-                NONE,
-                Some(wrapped_value),
-                false,
-            ));
-            wrapped += 1;
-        }
-        output.push(Statement::ImportDeclaration(declaration));
-        if !declarations.is_empty() {
-            output.push(Statement::VariableDeclaration(
-                ast.alloc_variable_declaration(
+                let raw = names.allocate(&format!("__supercovRaw{original}"));
+                local.name = ast.ident(&raw);
+                let wrapped_value = ast.expression_call(
+                    Span::default(),
+                    ast.expression_identifier(Span::default(), ast.ident(&wrapper_local)),
+                    NONE,
+                    ast.vec1(Argument::from(
+                        ast.expression_identifier(Span::default(), ast.ident(&raw)),
+                    )),
+                    false,
+                );
+                declarations.push(ast.variable_declarator(
                     Span::default(),
                     VariableDeclarationKind::Const,
-                    declarations,
+                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&original)),
+                    NONE,
+                    Some(wrapped_value),
                     false,
-                ),
-            ));
-        }
-    }
+                ));
+                wrapped += 1;
+            }
+            output.push(Statement::ImportDeclaration(declaration));
+            if !declarations.is_empty() {
+                output.push(Statement::VariableDeclaration(
+                    ast.alloc_variable_declaration(
+                        Span::default(),
+                        VariableDeclarationKind::Const,
+                        declarations,
+                        false,
+                    ),
+                ));
+            }
+        });
     if wrapped > 0 {
         output.insert(
             0,
@@ -2211,21 +2242,17 @@ fn referenced_symbol(
         .and_then(|reference| scoping.get_reference(reference).symbol_id())
 }
 
-fn assertion_member_name<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+/// A member read by a name written out (`a.equal`, `a["equal"]`): the name
+/// and what it is read from.
+fn assertion_member<'a>(expression: &'a Expression<'a>) -> Option<(&'a str, &'a Expression<'a>)> {
     match expression {
-        Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+        Expression::StaticMemberExpression(member) => {
+            Some((member.property.name.as_str(), &member.object))
+        }
         Expression::ComputedMemberExpression(member) => match &member.expression {
-            Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+            Expression::StringLiteral(literal) => Some((literal.value.as_str(), &member.object)),
             _ => None,
         },
-        _ => None,
-    }
-}
-
-fn assertion_member_object<'a>(expression: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
-    match expression {
-        Expression::StaticMemberExpression(member) => Some(&member.object),
-        Expression::ComputedMemberExpression(member) => Some(&member.object),
         _ => None,
     }
 }
@@ -2237,9 +2264,9 @@ fn expect_operation(
 ) -> Option<String> {
     let mut current = callee;
     let mut matchers = Vec::new();
-    while let Some(name) = assertion_member_name(current) {
+    while let Some((name, object)) = assertion_member(current) {
         matchers.push(name.to_owned());
-        current = assertion_member_object(current)?;
+        current = object;
     }
     matchers.reverse();
     let matcher = matchers.last()?;
@@ -2257,9 +2284,9 @@ fn expect_operation(
     // cannot see can never be mapped or earn credit.
     let mut root = &expect_call.callee;
     let mut prefix = Vec::new();
-    while let Some(name) = assertion_member_name(root) {
+    while let Some((name, object)) = assertion_member(root) {
         prefix.push(name.to_owned());
-        root = assertion_member_object(root)?;
+        root = object;
     }
     prefix.reverse();
     let Expression::Identifier(identifier) = root else {
@@ -2308,7 +2335,7 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                     })
                 }),
             callee => {
-                let member_operation = assertion_member_object(callee).and_then(|object| {
+                let member_operation = assertion_member(callee).and_then(|(method, object)| {
                     // `assert.strict.equal(...)`: the strict namespace of the
                     // module the binding holds.
                     let (identifier, strict) = match object {
@@ -2324,7 +2351,6 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                         _ => return None,
                     };
                     let symbol = referenced_symbol(identifier, self.scoping)?;
-                    let method = assertion_member_name(callee)?;
                     self.bindings
                         .objects
                         .get(&symbol)
@@ -2847,9 +2873,9 @@ fn function_label<State>(
     if let Some(name) = own_name {
         return Some(name.to_string());
     }
-    match context.ancestors().next()? {
+    // A method's point is its whole definition, never labelled here.
+    match context.parent() {
         Ancestor::ObjectPropertyValue(parent) => property_label(parent.key()),
-        Ancestor::MethodDefinitionValue(parent) => property_label(parent.key()),
         Ancestor::VariableDeclaratorInit(parent) => parent
             .id()
             .get_binding_identifier()
@@ -2859,12 +2885,7 @@ fn function_label<State>(
 }
 
 fn property_label(key: &PropertyKey<'_>) -> Option<String> {
-    key.static_name()
-        .map(|name| name.into_owned())
-        .or_else(|| match key {
-            PropertyKey::Identifier(identifier) => Some(identifier.name.to_string()),
-            _ => None,
-        })
+    key.static_name().map(|name| name.into_owned())
 }
 
 fn function_point_span<State>(span: Span, context: &TraverseCtx<'_, State>) -> Span {
@@ -3471,21 +3492,13 @@ struct AssertedTargetTransformer<'a> {
 }
 
 impl<'a> AssertedTargetTransformer<'a> {
-    fn target(
-        expression: Expression<'a>,
-    ) -> Result<oxc_ast::ast::SimpleAssignmentTarget<'a>, Expression<'a>> {
-        Ok(match expression {
+    /// The target an assertion wraps. The parser allows only targets there
+    /// (`(f() as T) = v` is a syntax error): a name, a member, a wrapper or
+    /// parentheses.
+    fn target(expression: Expression<'a>) -> oxc_ast::ast::SimpleAssignmentTarget<'a> {
+        match expression {
             Expression::Identifier(identifier) => {
                 oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier)
-            }
-            Expression::ComputedMemberExpression(member) => {
-                oxc_ast::ast::SimpleAssignmentTarget::ComputedMemberExpression(member)
-            }
-            Expression::StaticMemberExpression(member) => {
-                oxc_ast::ast::SimpleAssignmentTarget::StaticMemberExpression(member)
-            }
-            Expression::PrivateFieldExpression(member) => {
-                oxc_ast::ast::SimpleAssignmentTarget::PrivateFieldExpression(member)
             }
             Expression::TSAsExpression(asserted) => {
                 oxc_ast::ast::SimpleAssignmentTarget::TSAsExpression(asserted)
@@ -3500,10 +3513,10 @@ impl<'a> AssertedTargetTransformer<'a> {
                 oxc_ast::ast::SimpleAssignmentTarget::TSTypeAssertion(asserted)
             }
             Expression::ParenthesizedExpression(parenthesized) => {
-                return Self::target(parenthesized.unbox().expression);
+                Self::target(parenthesized.unbox().expression)
             }
-            other => return Err(other),
-        })
+            member => member.into_member_expression().into(),
+        }
     }
 }
 
@@ -3522,22 +3535,7 @@ impl<'a> VisitMut<'a> for AssertedTargetTransformer<'a> {
                 }
                 _ => break,
             };
-            match Self::target(inner.take_in(self.ast.allocator)) {
-                Ok(bare) => *target = bare,
-                Err(kept) => {
-                    // Not a target the grammar allows; print it as it came.
-                    match target {
-                        oxc_ast::ast::SimpleAssignmentTarget::TSAsExpression(asserted) => {
-                            asserted.expression = kept;
-                        }
-                        oxc_ast::ast::SimpleAssignmentTarget::TSSatisfiesExpression(asserted) => {
-                            asserted.expression = kept;
-                        }
-                        _ => unreachable!("the target was matched above"),
-                    }
-                    break;
-                }
-            }
+            *target = Self::target(inner.take_in(self.ast.allocator));
         }
         walk_mut::walk_simple_assignment_target(self, target);
     }
@@ -3558,12 +3556,9 @@ fn runtime_helper_type<'a>(
         "var helper: typeof import(\"{RUNTIME_TYPES_MODULE}\").{helper};"
     ));
     let mut parsed = Parser::new(allocator, text, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return None;
-    }
-    match parsed.program.body.first_mut()? {
-        Statement::VariableDeclaration(declaration) => {
-            declaration.declarations.first_mut()?.type_annotation.take()
+    match (parsed.errors.is_empty(), parsed.program.body.as_mut_slice()) {
+        (true, [Statement::VariableDeclaration(declaration)]) => {
+            declaration.declarations[0].type_annotation.take()
         }
         _ => None,
     }
@@ -3640,64 +3635,70 @@ fn compile_time_macro_argument<State>(context: &TraverseCtx<'_, State>) -> bool 
 
 fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>) -> bool {
     let mut child_end = span.end;
-    for ancestor in context.ancestors() {
-        match ancestor {
-            Ancestor::ParenthesizedExpressionExpression(parent) => child_end = parent.span().end,
-            Ancestor::TSAsExpressionExpression(parent) => child_end = parent.span().end,
-            Ancestor::TSSatisfiesExpressionExpression(parent) => child_end = parent.span().end,
-            Ancestor::TSTypeAssertionExpression(parent) => child_end = parent.span().end,
-            Ancestor::TSNonNullExpressionExpression(parent) => child_end = parent.span().end,
-            Ancestor::ConditionalExpressionConsequent(parent) => child_end = parent.span().end,
-            Ancestor::ConditionalExpressionAlternate(parent) => child_end = parent.span().end,
-            Ancestor::LogicalExpressionLeft(parent) => {
-                child_end = parent.span().end;
-            }
-            Ancestor::LogicalExpressionRight(parent) => {
-                child_end = parent.span().end;
-            }
-            Ancestor::SequenceExpressionExpressions(parent) => {
-                if child_end != parent.span().end {
-                    return false;
+    // The walk ends at the program at the latest, which answers no.
+    context
+        .ancestors()
+        .find_map(|ancestor| {
+            match ancestor {
+                Ancestor::ParenthesizedExpressionExpression(parent) => {
+                    child_end = parent.span().end
                 }
-                child_end = parent.span().end;
+                Ancestor::TSAsExpressionExpression(parent) => child_end = parent.span().end,
+                Ancestor::TSSatisfiesExpressionExpression(parent) => child_end = parent.span().end,
+                Ancestor::TSTypeAssertionExpression(parent) => child_end = parent.span().end,
+                Ancestor::TSNonNullExpressionExpression(parent) => child_end = parent.span().end,
+                Ancestor::ConditionalExpressionConsequent(parent) => child_end = parent.span().end,
+                Ancestor::ConditionalExpressionAlternate(parent) => child_end = parent.span().end,
+                Ancestor::LogicalExpressionLeft(parent) => {
+                    child_end = parent.span().end;
+                }
+                Ancestor::LogicalExpressionRight(parent) => {
+                    child_end = parent.span().end;
+                }
+                Ancestor::SequenceExpressionExpressions(parent) => {
+                    if child_end != parent.span().end {
+                        return Some(false);
+                    }
+                    child_end = parent.span().end;
+                }
+                Ancestor::AssignmentExpressionRight(parent) => child_end = parent.span().end,
+                Ancestor::ObjectPropertyKey(parent) => return Some(*parent.computed()),
+                Ancestor::MethodDefinitionKey(parent) => return Some(*parent.computed()),
+                Ancestor::PropertyDefinitionKey(parent) => return Some(*parent.computed()),
+                Ancestor::AccessorPropertyKey(parent) => return Some(*parent.computed()),
+                Ancestor::ComputedMemberExpressionExpression(_) => return Some(true),
+                Ancestor::StaticMemberExpressionObject(parent) => {
+                    return Some(parent.property().name == "toString");
+                }
+                Ancestor::CallExpressionArguments(parent) => {
+                    return Some(expression_is_identifier(parent.callee(), "String"));
+                }
+                Ancestor::TemplateLiteralExpressions(_) => return Some(true),
+                Ancestor::BinaryExpressionLeft(parent) => {
+                    return Some(matches!(
+                        parent.operator(),
+                        BinaryOperator::Addition
+                            | BinaryOperator::LessThan
+                            | BinaryOperator::LessEqualThan
+                            | BinaryOperator::GreaterThan
+                            | BinaryOperator::GreaterEqualThan
+                    ));
+                }
+                Ancestor::BinaryExpressionRight(parent) => {
+                    return Some(matches!(
+                        parent.operator(),
+                        BinaryOperator::Addition
+                            | BinaryOperator::LessThan
+                            | BinaryOperator::LessEqualThan
+                            | BinaryOperator::GreaterThan
+                            | BinaryOperator::GreaterEqualThan
+                    ));
+                }
+                _ => return Some(false),
             }
-            Ancestor::AssignmentExpressionRight(parent) => child_end = parent.span().end,
-            Ancestor::ObjectPropertyKey(parent) => return *parent.computed(),
-            Ancestor::MethodDefinitionKey(parent) => return *parent.computed(),
-            Ancestor::PropertyDefinitionKey(parent) => return *parent.computed(),
-            Ancestor::AccessorPropertyKey(parent) => return *parent.computed(),
-            Ancestor::ComputedMemberExpressionExpression(_) => return true,
-            Ancestor::StaticMemberExpressionObject(parent) => {
-                return parent.property().name == "toString";
-            }
-            Ancestor::CallExpressionArguments(parent) => {
-                return expression_is_identifier(parent.callee(), "String");
-            }
-            Ancestor::TemplateLiteralExpressions(_) => return true,
-            Ancestor::BinaryExpressionLeft(parent) => {
-                return matches!(
-                    parent.operator(),
-                    BinaryOperator::Addition
-                        | BinaryOperator::LessThan
-                        | BinaryOperator::LessEqualThan
-                        | BinaryOperator::GreaterThan
-                        | BinaryOperator::GreaterEqualThan
-                );
-            }
-            Ancestor::BinaryExpressionRight(parent) => {
-                return matches!(
-                    parent.operator(),
-                    BinaryOperator::Addition
-                        | BinaryOperator::LessThan
-                        | BinaryOperator::LessEqualThan
-                        | BinaryOperator::GreaterThan
-                        | BinaryOperator::GreaterEqualThan
-                );
-            }
-            _ => return false,
-        }
-    }
-    false
+            None
+        })
+        .unwrap_or(false)
 }
 
 pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
@@ -4964,23 +4965,20 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
         }
         if let Some(target) = self.targets.remove(&span_key(function.span)) {
             let probe = self.probe(&target);
-            if function.expression {
-                let original = function
-                    .body
-                    .statements
-                    .pop()
-                    .expect("expression arrow must contain its expression statement");
-                let Statement::ExpressionStatement(expression) = original else {
-                    panic!("expression arrow body must be represented as an expression statement");
-                };
-                function.expression = false;
-                function.body.statements.push(probe);
-                function.body.statements.push(
-                    self.ast
-                        .statement_return(Span::default(), Some(expression.unbox().expression)),
-                );
-            } else {
-                function.body.statements.insert(0, probe);
+            // An expression body is one expression statement: it becomes the
+            // probe and a return of that expression.
+            match (function.expression, function.body.statements.as_mut_slice()) {
+                (true, [Statement::ExpressionStatement(statement)]) => {
+                    let expression = statement.expression.take_in(self.ast.allocator);
+                    function.expression = false;
+                    function.body.statements.clear();
+                    function.body.statements.push(probe);
+                    function
+                        .body
+                        .statements
+                        .push(self.ast.statement_return(Span::default(), Some(expression)));
+                }
+                _ => function.body.statements.insert(0, probe),
             }
         }
         walk_mut::walk_arrow_function_expression(self, function);
@@ -5364,9 +5362,8 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
         // `optionalCallEndV2(file, first, chain, T)` reads T after the chain,
         // so it sees what that evaluation did.
         let original = expression.take_in(self.ast.allocator);
-        let mut measured = original;
-        for site in sites.iter().rev() {
-            measured = self.call(
+        let measured = sites.iter().rev().fold(original, |measured, site| {
+            self.call(
                 &self.optional_call_end_v2,
                 self.ast.vec_from_array([
                     Argument::from(self.identifier(&self.probe_file_v2)),
@@ -5374,16 +5371,14 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
                     Argument::from(measured),
                     Argument::from(self.identifier(&site.frame)),
                 ]),
-            );
-        }
+            )
+        });
         let mut sequence = self.ast.vec_with_capacity(sites.len() + 1);
-        for site in &sites {
-            sequence.push(assign_temporary(
-                self.ast,
-                &site.frame,
-                numeric(self.ast, 0),
-            ));
-        }
+        sequence.extend(
+            sites
+                .iter()
+                .map(|site| assign_temporary(self.ast, &site.frame, numeric(self.ast, 0))),
+        );
         sequence.push(measured);
         *expression = self.ast.expression_sequence(Span::default(), sequence);
     }
@@ -5600,9 +5595,10 @@ impl<'a> DefaultTransformer<'a> {
     /// pushed.
     fn prepend_entries(&self, body: &mut Statement<'a>, entries: Vec<Statement<'a>>) {
         if let Statement::BlockStatement(block) = body {
-            for (index, entry) in entries.into_iter().enumerate() {
-                block.body.insert(index, entry);
-            }
+            entries
+                .into_iter()
+                .enumerate()
+                .for_each(|(index, entry)| block.body.insert(index, entry));
             return;
         }
         let span = body.span();
@@ -6075,16 +6071,21 @@ impl SelectionShape {
                     1 => !truthy,
                     _ => !nullish,
                 };
+                // A side's deciders are never empty: a leaf decides itself.
                 if short {
-                    for (leaf, mut hits) in left.deciders(truthy, nullish) {
-                        hits.push(first + usize::from(truthy));
-                        deciders.push((leaf, hits));
-                    }
+                    deciders.extend(left.deciders(truthy, nullish).into_iter().map(
+                        |(leaf, mut hits)| {
+                            hits.push(first + usize::from(truthy));
+                            (leaf, hits)
+                        },
+                    ));
                 }
-                for (leaf, mut hits) in right.deciders(truthy, nullish) {
-                    hits.push(first + 2 + usize::from(truthy));
-                    deciders.push((leaf, hits));
-                }
+                deciders.extend(right.deciders(truthy, nullish).into_iter().map(
+                    |(leaf, mut hits)| {
+                        hits.push(first + 2 + usize::from(truthy));
+                        (leaf, hits)
+                    },
+                ));
                 deciders
             }
         }
@@ -6235,15 +6236,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
     /// its logical children only, and a call around `a && b` made two branches
     /// of its one. A leaf deeper than one selection records, through
     /// `selectPathV2`, every selection above it that its value decides.
-    fn instrument_tree(&mut self, expression: &mut Expression<'a>, path: &[usize]) {
-        let key = span_key(expression.span());
+    fn instrument_tree(&mut self, logical: &mut LogicalExpression<'a>, path: &[usize]) {
         let first = self
             .logical_targets
-            .remove(&key)
+            .remove(&span_key(logical.span))
             .expect("a selection tree starts at a selection");
-        let Expression::LogicalExpression(logical) = expression else {
-            panic!("logical-value target must remain a logical expression");
-        };
         let kind = match logical.operator {
             LogicalOperator::Or => 0,
             LogicalOperator::And => 1,
@@ -6266,8 +6263,8 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         // leaves out only trees in a decision, a `with` body or a function
         // whose source is read, and an operand shares its tree's context.
         // `instrument_tree` holds it to that.
-        if matches!(inner, Expression::LogicalExpression(_)) {
-            self.instrument_tree(inner, path);
+        if let Expression::LogicalExpression(logical) = inner {
+            self.instrument_tree(logical, path);
             return;
         }
         self.visit_expression(operand);
@@ -6322,30 +6319,39 @@ impl<'a> LogicalValueTransformer<'a, '_> {
             inner = &parenthesized.expression;
         }
         if let Expression::LogicalExpression(logical) = inner {
-            let first = self
-                .logical_targets
-                .remove(&span_key(logical.span))
-                .expect("every logical operand of a planned tree is planned: the plan leaves out only trees in a decision, a `with` body or a function whose source is read, and an operand shares its tree's context");
-            let kind = match logical.operator {
-                LogicalOperator::Or => 0,
-                LogicalOperator::And => 1,
-                LogicalOperator::Coalesce => 2,
-            };
-            let mut left_path = vec![first * 4 + kind];
-            left_path.extend_from_slice(path);
-            let mut right_path = vec![first * 4 + 3];
-            right_path.extend_from_slice(path);
-            let left = Box::new(self.shape(&logical.left, &left_path, leaves));
-            let right = Box::new(self.shape(&logical.right, &right_path, leaves));
-            return SelectionShape::Selection {
-                first,
-                kind,
-                left,
-                right,
-            };
+            return self.selection_shape(logical, path, leaves);
         }
         leaves.push(path.to_vec());
         SelectionShape::Leaf(leaves.len() - 1)
+    }
+
+    fn selection_shape(
+        &mut self,
+        logical: &LogicalExpression<'a>,
+        path: &[usize],
+        leaves: &mut Vec<Vec<usize>>,
+    ) -> SelectionShape {
+        let first = self
+            .logical_targets
+            .remove(&span_key(logical.span))
+            .expect("every logical operand of a planned tree is planned: the plan leaves out only trees in a decision, a `with` body or a function whose source is read, and an operand shares its tree's context");
+        let kind = match logical.operator {
+            LogicalOperator::Or => 0,
+            LogicalOperator::And => 1,
+            LogicalOperator::Coalesce => 2,
+        };
+        let mut left_path = vec![first * 4 + kind];
+        left_path.extend_from_slice(path);
+        let mut right_path = vec![first * 4 + 3];
+        right_path.extend_from_slice(path);
+        let left = Box::new(self.shape(&logical.left, &left_path, leaves));
+        let right = Box::new(self.shape(&logical.right, &right_path, leaves));
+        SelectionShape::Selection {
+            first,
+            kind,
+            left,
+            right,
+        }
     }
 
     fn hits(&self, points: &[usize]) -> Option<Expression<'a>> {
@@ -6395,29 +6401,26 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         ))
     }
 
+    /// Leaves are numbered left to right, as `shape` numbered them.
     fn name_leaves(
         &mut self,
         expression: &mut Expression<'a>,
-        shape: &SelectionShape,
+        next_leaf: &mut usize,
         frame: &str,
         tree: Option<usize>,
         before: &[Vec<(usize, Vec<usize>)>],
     ) {
-        let leaf = match shape {
-            SelectionShape::Leaf(leaf) => *leaf,
-            SelectionShape::Selection { left, right, .. } => {
-                let mut inner = expression;
-                while let Expression::ParenthesizedExpression(parenthesized) = inner {
-                    inner = &mut parenthesized.expression;
-                }
-                let Expression::LogicalExpression(logical) = inner else {
-                    panic!("a selection must remain a logical expression");
-                };
-                self.name_leaves(&mut logical.left, left, frame, tree, before);
-                self.name_leaves(&mut logical.right, right, frame, tree, before);
-                return;
-            }
-        };
+        let mut inner = &mut *expression;
+        while let Expression::ParenthesizedExpression(parenthesized) = inner {
+            inner = &mut parenthesized.expression;
+        }
+        if let Expression::LogicalExpression(logical) = inner {
+            self.name_leaves(&mut logical.left, next_leaf, frame, tree, before);
+            self.name_leaves(&mut logical.right, next_leaf, frame, tree, before);
+            return;
+        }
+        let leaf = *next_leaf;
+        *next_leaf += 1;
         self.visit_expression(expression);
         let value = expression.take_in(self.ast.allocator);
         let mut steps = self.ast.vec_with_capacity(3);
@@ -6446,12 +6449,6 @@ impl<'a> LogicalValueTransformer<'a, '_> {
     /// earlier leaf decided is known from where evaluation went next, and is
     /// recorded there: the same points, in the same order, as before, a tree
     /// that throws half-way included.
-    fn instrument_value_tree(&mut self, expression: &mut Expression<'a>) {
-        let site = self.name_tree(expression);
-        let tree = expression.take_in(self.ast.allocator);
-        *expression = self.record_tree(&site, tree);
-    }
-
     /// The call that records a named tree's value, around that value.
     fn record_tree(&self, site: &SelectionSite, value: Expression<'a>) -> Expression<'a> {
         self.call(
@@ -6465,13 +6462,11 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         )
     }
 
-    /// Name the leaves of the tree at `expression`.
-    fn name_tree(&mut self, expression: &mut Expression<'a>) -> SelectionSite {
+    /// Name the leaves of the tree `logical` starts.
+    fn name_tree(&mut self, logical: &mut LogicalExpression<'a>) -> SelectionSite {
         let mut leaves = Vec::new();
-        let shape = self.shape(expression, &[], &mut leaves);
-        let SelectionShape::Selection { first, .. } = shape else {
-            panic!("a selection tree starts at a selection");
-        };
+        let first = self.logical_targets[&span_key(logical.span)];
+        let shape = self.selection_shape(logical, &[], &mut leaves);
         let mut before = vec![Vec::new(); leaves.len()];
         shape.before(&mut before);
         let frame = self.scratch("_supercovSelected");
@@ -6497,7 +6492,9 @@ impl<'a> LogicalValueTransformer<'a, '_> {
             self.trees.push((leaves, choices));
             self.trees.len() - 1
         });
-        self.name_leaves(expression, &shape, &frame, tree, &before);
+        let mut next_leaf = 0;
+        self.name_leaves(&mut logical.left, &mut next_leaf, &frame, tree, &before);
+        self.name_leaves(&mut logical.right, &mut next_leaf, &frame, tree, &before);
         let (helper, index) = match tree {
             Some(tree) => (self.select_end_v2.clone(), tree),
             None => (self.select_end2_v2.clone(), first),
@@ -6511,10 +6508,9 @@ impl<'a> LogicalValueTransformer<'a, '_> {
 
     fn instrument_assignment(
         &mut self,
-        assignment: oxc_allocator::Box<'a, AssignmentExpression<'a>>,
+        assignment: AssignmentExpression<'a>,
         first: usize,
     ) -> Expression<'a> {
-        let assignment = assignment.unbox();
         let inferred_name = match &assignment.left {
             AssignmentTarget::AssignmentTargetIdentifier(identifier)
                 if assignment.span.start == identifier.span.start
@@ -6628,9 +6624,9 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
             // An initializer's tree is planned: it is in no decision, and a
             // declarator in a `with` body or a source-read function is not
             // visited.
-            if matches!(tree, Expression::LogicalExpression(_)) {
-                assert_planned(&self.logical_targets, tree.span());
-                let site = self.name_tree(tree);
+            if let Expression::LogicalExpression(logical) = tree {
+                assert_planned(&self.logical_targets, logical.span);
+                let site = self.name_tree(logical);
                 let recorded = self.record_tree(&site, self.identifier(&name.name));
                 self.after_declaration.push(recorded);
                 self.aliasing = aliasing;
@@ -6685,22 +6681,25 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
-        if matches!(expression, Expression::LogicalExpression(_))
+        if let Expression::LogicalExpression(logical) = expression
             && self.logical_targets.contains_key(&key)
         {
             if self.frameless > 0 {
-                self.instrument_tree(expression, &[]);
+                self.instrument_tree(logical, &[]);
             } else {
-                self.instrument_value_tree(expression);
+                // The tree's value, recorded by a call around it; see
+                // `name_leaves`.
+                let site = self.name_tree(logical);
+                let tree = expression.take_in(self.ast.allocator);
+                *expression = self.record_tree(&site, tree);
             }
             return;
         }
         walk_mut::walk_expression(self, expression);
-        if let Some(first) = self.assignment_targets.remove(&key) {
-            let original = expression.take_in(self.ast.allocator);
-            let Expression::AssignmentExpression(assignment) = original else {
-                panic!("logical-assignment target must remain an assignment expression");
-            };
+        if let Expression::AssignmentExpression(assignment) = expression
+            && let Some(first) = self.assignment_targets.remove(&key)
+        {
+            let assignment = assignment.take_in(self.ast.allocator);
             *expression = self.instrument_assignment(assignment, first);
         }
     }
@@ -6895,9 +6894,10 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
 
     fn is_next_route(&self) -> bool {
         let path = Path::new(self.file);
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
         let is_route_module = [
             "route.js",
             "route.jsx",
@@ -6994,20 +6994,14 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
             return;
         }
 
-        if matches!(
-            export.declaration,
-            Some(Declaration::FunctionDeclaration(_))
-        ) {
-            let Some(Declaration::FunctionDeclaration(mut function)) = export.declaration.take()
-            else {
-                unreachable!();
-            };
-            let Some(exported_name) = function.id.as_ref().map(|id| id.name.to_string()) else {
-                output.push(Statement::FunctionDeclaration(function));
-                return;
-            };
+        if let Some(Declaration::FunctionDeclaration(function)) = &mut export.declaration {
+            let exported_name = function
+                .id
+                .as_ref()
+                .expect("an exported function declaration is named")
+                .name
+                .to_string();
             if !self.is_handler_name(&exported_name) {
-                export.declaration = Some(Declaration::FunctionDeclaration(function));
                 output.push(Statement::ExportNamedDeclaration(export));
                 return;
             }
@@ -7018,6 +7012,7 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
                 self.ast
                     .binding_identifier(Span::default(), self.ast.ident(&original_name)),
             );
+            let function = self.ast.alloc(function.take_in(self.ast.allocator));
             output.push(Statement::FunctionDeclaration(function));
             output.push(self.wrapped_named_export(&exported_name, &original_name));
             self.used = true;
@@ -7104,15 +7099,8 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
         // Looked at before it is taken: taking it leaves a placeholder `null`,
         // and a server entry that exported its handler by name (`export
         // default handleRequest;`) exported `withRequestPhase(null)`.
-        if matches!(
-            export.declaration,
-            ExportDefaultDeclarationKind::FunctionDeclaration(_)
-        ) {
-            let ExportDefaultDeclarationKind::FunctionDeclaration(mut function) =
-                export.declaration.take_in(self.ast.allocator)
-            else {
-                unreachable!();
-            };
+        if let ExportDefaultDeclarationKind::FunctionDeclaration(function) = &mut export.declaration
+        {
             let original_name = self
                 .names
                 .allocate("__supercovHandleRequestCoverageOriginal");
@@ -7120,6 +7108,7 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
                 self.ast
                     .binding_identifier(Span::default(), self.ast.ident(&original_name)),
             );
+            let function = self.ast.alloc(function.take_in(self.ast.allocator));
             output.push(Statement::FunctionDeclaration(function));
             output.push(Statement::ExportDefaultDeclaration(
                 self.ast.alloc_export_default_declaration(
@@ -8559,20 +8548,21 @@ fn optional_link_below(object: &Expression<'_>) -> LinkBelow {
 /// The same walk outward: whether this member is the object, through the
 /// same plain links, of a later optional member of its chain.
 fn optional_link_above<State>(context: &TraverseCtx<'_, State>) -> bool {
-    for ancestor in context.ancestors() {
-        match ancestor {
-            Ancestor::StaticMemberExpressionObject(parent) if *parent.optional() => return true,
-            Ancestor::ComputedMemberExpressionObject(parent) if *parent.optional() => return true,
-            Ancestor::PrivateFieldExpressionObject(parent) if *parent.optional() => return true,
+    // The walk ends at the program at the latest, which answers no.
+    context
+        .ancestors()
+        .find_map(|ancestor| match ancestor {
+            Ancestor::StaticMemberExpressionObject(parent) if *parent.optional() => Some(true),
+            Ancestor::ComputedMemberExpressionObject(parent) if *parent.optional() => Some(true),
+            Ancestor::PrivateFieldExpressionObject(parent) if *parent.optional() => Some(true),
             Ancestor::StaticMemberExpressionObject(_)
             | Ancestor::ComputedMemberExpressionObject(_)
             | Ancestor::PrivateFieldExpressionObject(_)
-            | Ancestor::TSNonNullExpressionExpression(_) => {}
-            Ancestor::CallExpressionCallee(parent) if !*parent.optional() => {}
-            _ => return false,
-        }
-    }
-    false
+            | Ancestor::TSNonNullExpressionExpression(_) => None,
+            Ancestor::CallExpressionCallee(parent) if !*parent.optional() => None,
+            _ => Some(false),
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Default)]
@@ -10284,11 +10274,10 @@ fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> 
     let start = utf16_offset(source, span.start as usize);
     let end = utf16_offset(source, span.end as usize);
     let digest = Sha256::digest(format!("{file}:{kind}:{start}:{end}:{suffix}").as_bytes());
-    let mut id = String::with_capacity(16);
-    for byte in &digest[..8] {
-        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    id
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -10791,6 +10780,294 @@ mod tests {
     /// assignment target, a property read, an anonymous definition, an
     /// optional chain -- and labelled statements, logical assignments and
     /// methods: each is instrumented to TypeScript that parses again.
+    /// A TypeScript wrapper (`as`, `satisfies`, `!`, `<T>`) says nothing at
+    /// run time: what it wraps is read, called, assigned or imported as if it
+    /// were written bare.
+    #[test]
+    fn typescript_wrappers_are_seen_through_wherever_they_sit() {
+        // Capability calls: the import a builder chain starts from.
+        let source = concat!(
+            "import { A, B, C, D, E, F } from './sdk';\nimport './setup.js';\n",
+            "await A['build']({ mounts: [{ source: process.cwd(), target: '/workspace' }] });\n",
+            "await B.make().build({ mounts: [{ source: process.cwd(), target: '/workspace' }] });\n",
+            "await (C as any).build({ mounts: [{ source: process.cwd(), target: '/workspace' }] });\n",
+            "await (D satisfies object).build({ mounts: [{ source: process.cwd(), target: '/workspace' }] });\n",
+            "await E!.build({ mounts: [{ source: process.cwd(), target: '/workspace' }] });\n",
+            "await (<any>F).build({ mounts: [{ source: process.cwd(), target: '/workspace' }] });\n",
+            "await (() => 1)({ mounts: [{ source: process.cwd(), target: '/workspace' }] });\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.ts",
+            &[],
+            Some("../.supercov/launchSupervisor.mjs"),
+        )
+        .unwrap();
+        assert_eq!(output.capability_imports, 6, "{}", output.code);
+
+        // Function source reads through a wrapper keep the function's text.
+        let source = concat!(
+            "declare const c: boolean;\n",
+            "export function f1() {  return 1; }\n",
+            "export function f2() {  return 2; }\n",
+            "export function f3() {  return 3; }\n",
+            "export function f4() {  return 4; }\n",
+            "export const box = { m1() {  return 1; }, m2() {  return 2; }, m3() {  return 3; }, m4() {  return 4; }, m5() {  return 5; }, m6() {  return 6; } };\n",
+            "export const texts = [String(f1 as any), String(f2 satisfies Function), String(<any>f3), String(f4!), (box.m1 as any).toString(), box.m2!.toString(), (c ? box.m3 : box.m4).toString(), (box.m5 || box.m6).toString()];\n",
+        );
+        let output = instrument_direct_candidate(source, "src/reads.ts").unwrap();
+        for text in [
+            "f1() {  return 1; }",
+            "f2() {  return 2; }",
+            "f3() {  return 3; }",
+            "f4() {  return 4; }",
+            "m1() {  return 1; }",
+            "m2() {  return 2; }",
+            "m3() {  return 3; }",
+            "m4() {  return 4; }",
+            "m5() {  return 5; }",
+            "m6() {  return 6; }",
+        ] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+
+        // An asserted assignment target is printed without its assertion.
+        let source = concat!(
+            "declare let x: any; declare const o: any;\n",
+            "(x as any) += 1;\n",
+            "((x as any) as number) = 2;\n",
+            "(x satisfies any) = 3;\n",
+            "((x satisfies any) satisfies any) = 3;\n",
+            "(x! as any) = 4;\n",
+            "(<any>x as any) = 5;\n",
+            "((x) as any) = 6;\n",
+            "(o[0] as string) += 'a';\n",
+        );
+        let output = instrument_direct_candidate(source, "src/targets.ts").unwrap();
+        assert!(!output.code.contains(" as any) +="), "{}", output.code);
+        assert!(!output.code.contains("satisfies any) ="), "{}", output.code);
+
+        // An assertion read by a written-out name is bound like a dotted one
+        // when its operands wait.
+        let source = "import assert from 'node:assert';\nimport test from 'node:test';\ntest('a', async () => { assert['equal'](await Promise.resolve(1), 1); });\n";
+        let output = instrument_node_assertion_phases(source, "test/a.test.js").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+        assert!(
+            output.code.contains("bindNodeAssertionPhase"),
+            "{}",
+            output.code
+        );
+
+        // A type-only import is erased, and the analysis says so.
+        let output = analyze_candidate(
+            "import type { A } from './a';\nexport const x: A = 1;\n",
+            "src/x.ts",
+        )
+        .unwrap();
+        assert_eq!(
+            output.excluded_statements[0].label.as_deref(),
+            Some("typescript-import-erasure")
+        );
+    }
+
+    /// Shapes each of which reaches one way the instrumenter places a probe
+    /// or reads the source; each must instrument to source that parses.
+    #[test]
+    fn rarer_shapes_instrument_to_source_that_parses() {
+        for (file, source) in [
+            // A last line that is not ASCII: no generated-statement marker.
+            ("src/u.js", "export const s = 'é';"),
+            // A labelled try and loop are measured as unlabelled ones are.
+            (
+                "src/labels.js",
+                "export function f(o) {\n  outer: try { o(); } catch { o(); }\n  each: for (const k in o) { if (k) continue each; }\n}\n",
+            ),
+            // A function read through a wrapper, a branch or a logical side.
+            (
+                "src/observed.ts",
+                "declare const c: boolean;\nexport const texts = [String((() =>  1) as any), String(c ? () =>  2 : 0), String((() =>  3) || 0), String(0 || (() =>  4))];\n",
+            ),
+            // An anonymous definition assigned through a wrapper takes the name.
+            (
+                "src/named.ts",
+                "let f: any;\nf = (() => 1) satisfies any;\nf = <any>(() => 2);\nf = (() => 3)!;\nf = (function () { return 4; }) as any;\nexport { f };\n",
+            ),
+            // Conditions holding a function, a class or a yield.
+            (
+                "src/surface.js",
+                "export function* g(a, b) {\n  if ((() => a)() && b) {}\n  if (new (class {})() && b) {}\n  if ((function () { return a; })() || b) {}\n  if ((yield a) && b) {}\n}\n",
+            ),
+            // Optional calls whose callee is a parenthesized chain or a wrapper.
+            (
+                "src/calls.ts",
+                "declare const o: any, k: string, f: any;\nexport class K { #p: any; m(q: K | undefined) { (q?.#p)?.(); } }\n(o?.[k])?.();\n(o?.make())?.();\n(o?.x!)?.();\n(<any>f)?.();\n",
+            ),
+            // A parameter default asserted to a type.
+            (
+                "src/defaults.ts",
+                "declare const x: any;\nexport function f(a = <number>x, b = x as const, c = <const>'k') { return [a, b, c]; }\n",
+            ),
+        ] {
+            let output = instrument_direct_candidate(source, file)
+                .unwrap_or_else(|error| panic!("{file}: {error:?}\n{source}"));
+            let allocator = Allocator::default();
+            let source_type = project_source_type(Path::new(file)).unwrap();
+            let reparsed = Parser::new(&allocator, &output.code, source_type).parse();
+            assert!(reparsed.errors.is_empty(), "{file}:\n{}", output.code);
+        }
+        // A function read through a wrapper keeps its text.
+        let output = instrument_direct_candidate(
+            "declare const c: boolean;\nexport const texts = [String((() =>  1) as any), String(c ? () =>  2 : 0), String((() =>  3) || 0), String(0 || (() =>  4))];\n",
+            "src/observed.ts",
+        )
+        .unwrap();
+        for text in ["() =>  1", "() =>  2", "() =>  3", "() =>  4"] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+        // Assertions whose operands yield, and CommonJS bindings the
+        // destructuring names in ways no assertion is.
+        let source = "const { [name]: a, strict: { ok }, equal } = require('node:assert');\nconst test = require('node:test');\ntest('a', function* () { equal(yield 1, 1); });\n";
+        let output = instrument_node_assertion_phases(source, "test/a.test.js").unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+    }
+
+    /// Nothing to walk: an empty file, an import that names nothing, a
+    /// destructuring that takes nothing, an edit list with no edits.
+    #[test]
+    fn empty_inputs_instrument_to_what_they_were() {
+        assert!(instrument_direct_candidate("", "src/empty.js").is_ok());
+        assert!(instrument_direct_candidate("// only a comment\n", "src/comment.js").is_ok());
+        for source in [
+            "",
+            "import './setup.js';\nconst {} = require('node:assert');\nconst {} = require('expect');\n",
+        ] {
+            let output = instrument_node_assertion_phases_with_runtime_hooks(
+                source,
+                "test/empty.test.js",
+                &["expect".to_owned()],
+                Some("../.supercov/launchSupervisor.mjs"),
+            )
+            .unwrap();
+            assert_eq!(output.assertions, 0);
+            assert_eq!(output.capability_imports, 0);
+        }
+        let (code, _) = apply_text_edits("abc", Vec::new(), "src/a.js").unwrap();
+        assert_eq!(code, "abc");
+        assert_eq!(utf16_col_to_byte("", 3), 0);
+        assert_eq!(utf16_col_to_byte("aé", 2), 3);
+    }
+
+    #[test]
+    fn more_rare_shapes_are_read_as_they_are_written() {
+        // A route module exporting a destructured binding: no handler name.
+        let output = instrument_direct_candidate(
+            "declare const handlers: any;\nexport const { GET } = handlers;\nexport async function POST() { return 1; }\n",
+            "app/api/route.ts",
+        )
+        .unwrap();
+        assert!(
+            output.code.contains("POSTCoverageOriginal"),
+            "{}",
+            output.code
+        );
+        // An accessor field's value is measured like any field's.
+        assert!(
+            instrument_direct_candidate(
+                "declare const a: any, b: any;\nexport class C { accessor x = a && b; }\n",
+                "src/accessor.ts",
+            )
+            .is_ok()
+        );
+        // A matcher on what a call returned, and `strict` read off a member,
+        // are not assertions Supercov knows.
+        let output = instrument_node_assertion_phases(
+            "import assert from 'node:assert';\nimport test from 'node:test';\ndeclare const make: any, a: any;\ntest('a', () => { make()(1).toBe(1); a.b.strict.equal(1, 1); assert.ok(1); });\n",
+            "test/a.test.ts",
+        )
+        .unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+        // A file of no JavaScript kind is refused.
+        assert!(matches!(
+            instrument_node_assertion_phases("assert(1);", "test/a.txt"),
+            Err(CandidateError::UnknownSourceType(_))
+        ));
+        // Defaults asserted to a function type take the parameter's name.
+        assert!(
+            instrument_direct_candidate(
+                "export function g(h = (() => 1) satisfies any, k = (() => 2)!) { return [h, k]; }\n",
+                "src/defaults.ts",
+            )
+            .is_ok()
+        );
+        let allocator = Allocator::default();
+        let ast = AstBuilder::new(&allocator);
+        assert!(matches!(
+            json_expression(ast, &serde_json::json!(null)),
+            Expression::NullLiteral(_)
+        ));
+        assert!(matches!(
+            json_expression(ast, &serde_json::json!(true)),
+            Expression::BooleanLiteral(literal) if literal.value
+        ));
+    }
+
+    /// Each step after the first can fail only by a bug of Supercov's own:
+    /// its output does not parse again, or its edits overlap. The file is
+    /// then refused, not measured wrong.
+    #[test]
+    fn a_step_that_fails_refuses_the_file() {
+        crate::fault::during("reprinted-parse", || {
+            for (file, source) in [
+                ("src/comments.js", "// c\nexport const a = 1;\n"),
+                (
+                    "src/read.js",
+                    "export function f() { return 1; }\nexport const t = f.toString();\n",
+                ),
+            ] {
+                assert!(
+                    matches!(
+                        instrument_direct_candidate(source, file),
+                        Err(CandidateError::Parse(_))
+                    ),
+                    "{file}"
+                );
+                assert!(
+                    matches!(
+                        analyze_candidate(source, file),
+                        Err(CandidateError::Parse(_))
+                    ),
+                    "{file}"
+                );
+            }
+        });
+        crate::fault::during("text-edits", || {
+            let error = instrument_node_assertion_phases(
+                "import assert from 'node:assert';\nassert.ok(1);\n",
+                "test/a.test.js",
+            )
+            .unwrap_err();
+            assert!(matches!(error, CandidateError::Parse(_)), "{error:?}");
+        });
+        assert!(matches!(
+            instrument_direct_candidate("x", "src/a.txt"),
+            Err(CandidateError::UnknownSourceType(_))
+        ));
+    }
+
+    #[test]
+    fn a_parse_error_is_placed_only_where_the_source_has_a_place() {
+        // `d`, the second character of the second line.
+        assert_eq!(
+            parse_message("ab\ncd", "bad", Some(4)),
+            "bad at line 2, column 2"
+        );
+        assert_eq!(parse_message("ab", "bad", Some(9)), "bad");
+        assert_eq!(parse_message("ab", "bad", None), "bad");
+        let allocator = Allocator::default();
+        assert!(runtime_helper_type(&allocator, SourceType::ts(), "markLine").is_some());
+        assert!(runtime_helper_type(&allocator, SourceType::ts(), "0").is_none());
+    }
+
     #[test]
     fn typescript_wrappers_and_labels_instrument_to_source_that_parses() {
         let source = r#"declare const fetcher: any, obj: any, key: string, flag: boolean, maybe: any;
