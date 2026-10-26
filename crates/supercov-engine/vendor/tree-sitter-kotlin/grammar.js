@@ -59,6 +59,8 @@ module.exports = grammar({
     [$.platform_modifier, $._reserved_identifier],
     [$.property_modifier, $._reserved_identifier],
     [$.context_parameters, $._reserved_identifier],
+    [$.secondary_constructor, $._reserved_identifier],
+    [$.parenthesized_type],
     [$.type, $._receiver_type, $._reserved_identifier],
     [$.type, $._reserved_identifier],
     [$._receiver_type, $._reserved_identifier],
@@ -139,8 +141,8 @@ module.exports = grammar({
         seq('[', repeat1($._unescaped_annotation), ']'),
         $._unescaped_annotation,
       ),
-      $._semi,
-
+      // `@file:JvmMultifileClass @file:JvmName("FlowKt")` puts two on one line.
+      optional($._semi),
     ),
 
     package_header: $ => seq(
@@ -430,7 +432,8 @@ module.exports = grammar({
 
     enum_entry: $ => seq(
       optional($.modifiers),
-      $.identifier,
+      // soft keywords name entries too (`enum`, `value`)
+      $._identifier,
       optional($.value_arguments),
       optional($.class_body),
     ),
@@ -618,7 +621,8 @@ module.exports = grammar({
     ),
 
     function_type: $ => seq(
-      optional($.context_parameters),
+      // either order: `context(A) suspend () -> Unit`, `suspend context(A) R.() -> Unit`
+      optional(seq(optional($.type_modifiers), $.context_parameters)),
       optional($.type_modifiers),
       optional(seq($._receiver_type, '.')),
       $.function_type_parameters,
@@ -632,7 +636,8 @@ module.exports = grammar({
       ')',
     ),
 
-    parenthesized_type: $ => seq('(', $.type, ')'),
+    // `suspend ((Header) -> Verifier?)`: modifiers apply to a parenthesized type as to any other.
+    parenthesized_type: $ => seq(optional($.type_modifiers), '(', $.type, ')'),
 
     assignment: $ => seq(
       field('left', $.expression),

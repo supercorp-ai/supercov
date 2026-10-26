@@ -1,10 +1,3 @@
 Exposed/exposed-maven-plugin/src/test/resources/template/sourceFiles/Cities.kt
 Exposed/exposed-maven-plugin/src/test/resources/template/sourceFiles/Users.kt
-kotlinx.coroutines/kotlinx-coroutines-core/common/src/flow/terminal/Collection.kt
-kotlinx.coroutines/kotlinx-coroutines-core/common/test/CoroutineScopeTest.kt
-ktor/ktor-client/ktor-client-darwin-legacy/darwin/src/io/ktor/client/engine/darwin/DarwinLegacyClientEngineConfig.kt
-ktor/ktor-client/ktor-client-darwin/darwin/src/io/ktor/client/engine/darwin/DarwinClientEngineConfig.kt
-ktor/ktor-compiler-plugin/src/io/ktor/openapi/model/Attributes.kt
-ktor/ktor-server/ktor-server-plugins/ktor-server-auth-jwt/jvm/src/io/ktor/server/auth/jwt/JWTAuth.kt
 ktor/ktor-server/ktor-server-plugins/ktor-server-auth/common/src/io/ktor/server/auth/FormAuth.kt
-ktor/ktor-server/ktor-server-plugins/ktor-server-auth/common/src/io/ktor/server/auth/OAuthFlow.kt

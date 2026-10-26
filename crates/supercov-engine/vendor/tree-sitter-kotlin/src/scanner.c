@@ -280,9 +280,12 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
         bool after_annotation = false;
     _switch:
         switch (lexer->lookahead) {
+            // A callable reference starts a statement (`::start.invoke()`); a `:` alone continues one.
+            case ':':
+                skip(lexer);
+                return lexer->lookahead == ':';
             case ',':
             case '.':
-            case ':':
             case '*':
             case '%':
             case '>':
@@ -462,18 +465,27 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                 // decides. Bailing to a semi here orphans `@OptIn(...) get()` accessors and
                 // `@X internal constructor` headers.
                 if (valid_symbols[CONSTRUCTOR] || valid_symbols[GET] || valid_symbols[SET]) {
-                    bool saw_paren = false;
-                    // Same EOF guard as above: at end of input lookahead is neither '\n' nor
-                    // whitespace, so neither arm of this condition can end the loop.
-                    while (!lexer->eof(lexer) &&
-                           (saw_paren ? lexer->lookahead != '\n' : !iswspace(lexer->lookahead))) {
+                    // The annotation runs to the first whitespace outside its arguments, which may
+                    // span lines (`@Deprecated(\n message = "...",\n)`) and hold parentheses in strings.
+                    // The EOF guard matters: at end of input the lookahead is not whitespace.
+                    unsigned depth = 0;
+                    bool in_string = false;
+                    skip(lexer);
+                    while (!lexer->eof(lexer) && (depth > 0 || in_string || !iswspace(lexer->lookahead))) {
+                        if (in_string) {
+                            if (lexer->lookahead == '\\') {
+                                skip(lexer);
+                            } else if (lexer->lookahead == '"') {
+                                in_string = false;
+                            }
+                        } else if (lexer->lookahead == '"') {
+                            in_string = true;
+                        } else if (lexer->lookahead == '(') {
+                            depth++;
+                        } else if (lexer->lookahead == ')' && depth > 0) {
+                            depth--;
+                        }
                         skip(lexer);
-                        if (lexer->lookahead == '(') {
-                            saw_paren = true;
-                        }
-                        if (lexer->lookahead == ')') {
-                            saw_paren = false;
-                        }
                     }
                     while (iswspace(lexer->lookahead)) {
                         skip(lexer);

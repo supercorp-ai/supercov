@@ -1223,7 +1223,8 @@ mod tests {
 class Outer {
   public class Options(
     internal val strings: Array<out String>,
-  {
+  ) {
+    fun x( {
   }
 }
 "#;
@@ -1246,6 +1247,39 @@ class Outer {
             .expect_err("does not parse")
             .to_string();
         assert!(message.contains("line 3"), "{message}");
+    }
+
+    /// Kotlin the grammar Supercov started from could not read, each found in
+    /// a real project (`scripts/kotlin-corpus.mjs` keeps the whole corpus): a
+    /// file with any of it was left unmeasured.
+    #[test]
+    fn newer_and_rarer_kotlin_parses() {
+        let sources = [
+            "fun f(x: Any) = when (x) {\n    is String if x.isEmpty() -> 0\n    else -> 1\n}\n",
+            "val s = $$\"price: $${amount} and $plain\"\n",
+            "val a = \"\"\"file; k=\"v\"\"\"\"\"\n",
+            "fun f() {\n    where?.let { println(it) }\n}\n",
+            "fun f() = insert { } get Tasks.id\n",
+            "context(scope: Scope, _: Logger)\nfun f() {}\nfun g(block: context(A, B) () -> Unit) {}\n",
+            "typealias H<P> =\n    suspend context(PrincipalContext<P>)\n    RoutingContext.() -> Unit\n",
+            "fun f() {\n    val lambda = suspend { 42 }\n}\n",
+            "fun validate(v: suspend ApplicationCall.(C) -> Any?, w: suspend ((H) -> J?)) {}\n",
+            "val list = flow.combineLatest(flow2, String?::plus)\n",
+            "fun interface Handler {\n    fun handle(): Int\n}\nsealed interface Ref\n",
+            "public actual open class Pool<T : Any>\nactual constructor(val capacity: Int)\nclass Config internal constructor() : Base()\n",
+            "class A {\n    var y: Int\n        get() = 1\n        @Suppress(\"X\") // why\n        set(value) {\n            f = value\n        }\n    var z: Int = 0\n        @Deprecated(\n            \"(no)\",\n            level = DeprecationLevel.ERROR,\n        )\n        set(value) {\n            field = value\n        }\n}\n",
+            "fun f() {\n    for (n in names) {\n        val k = n ?: D\n        set(k, scopesFor(k))\n    }\n    get()\n}\n",
+            "fun f() {\n    when (e) {\n        \"d\" -> dynamic++\n    }\n    x.apply { open(c) }\n}\n",
+            "enum class A {\n    enum,\n    value,\n}\n",
+            "@file:JvmMultifileClass @file:JvmName(\"FlowKt\")\n\npackage a\n",
+            "fun t() {\n    suspend fun a() {}\n    ::a.startCoroutine(c)\n}\n",
+            "class Outer {\n    class B\n    @JvmOverloads\n    constructor(x: Int)\n}\n",
+        ];
+        for source in sources {
+            if let Err(error) = parse(source, JvmLanguage::Kotlin) {
+                panic!("{error}\n{source}");
+            }
+        }
     }
 
     /// square/moshi's JsonReader.kt: a nested class whose primary
