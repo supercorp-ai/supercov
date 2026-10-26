@@ -4,9 +4,18 @@
 # run alongside each other (on Windows they stop). Their lock is per process
 # (`tests/common/mod.rs`, `building`), so here they take one slot between
 # them.
+#
+# The fault sweeps run a measured suite once for each place a file operation
+# fails, several at a time: one sweep at a time keeps them from crowding the
+# tests that wait on a terminal or a clock.
 [test-groups]
 jvm-builds = { max-threads = 1 }
+fault-sweeps = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = "binary(jvm_frontend) | binary(jvm_run)"
 test-group = "jvm-builds"
+
+[[profile.default.overrides]]
+filter = "binary(cli) & test(/_file_operation_fails/)"
+test-group = "fault-sweeps"

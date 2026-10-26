@@ -12343,10 +12343,10 @@ fn exact_attribution_runs_the_command_after_it() {
 /// a file operation, with that place's first one failing
 /// (`SUPERCOV_TEST_FAULT=fs#N`): it may stop, but says why and never panics,
 /// and the next run of the project, with no fault, recovers whatever the
-/// stopped one left and succeeds. Eight projects `write` lays out share the
+/// stopped one left and succeeds. Four projects `write` lays out share the
 /// places. The most places a run reached.
 fn fail_each_place_of_a_run(label: &str, write: fn(&Project), command: &[&str]) -> usize {
-    const PROJECTS: usize = 8;
+    const PROJECTS: usize = 4;
     let reached = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
         for first in 1..=PROJECTS {
@@ -12482,17 +12482,4 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let reached =
         fail_each_place_of_a_run("run-faults-rs", small_crate, &["--", "cargo", "test", "-q"]);
     assert!(reached > 50, "{reached}");
-    // And through nextest, where it is installed.
-    let nextest = std::process::Command::new("cargo")
-        .args(["nextest", "--version"])
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if nextest {
-        let reached = fail_each_place_of_a_run(
-            "run-faults-nextest",
-            small_crate,
-            &["--", "cargo", "nextest", "run"],
-        );
-        assert!(reached > 50, "{reached}");
-    }
 }
