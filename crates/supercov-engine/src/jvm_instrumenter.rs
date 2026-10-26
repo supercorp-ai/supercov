@@ -1222,9 +1222,8 @@ mod tests {
 
 class Outer {
   public class Options(
-    internal val strings: Array<out String>
-    internal val more: Int,
-  ) {
+    internal val strings: Array<out String>,
+  {
   }
 }
 "#;
