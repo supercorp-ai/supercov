@@ -12439,3 +12439,47 @@ fn a_ruby_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     );
     assert!(reached > 50, "{reached}");
 }
+
+#[test]
+fn a_go_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let reached = fail_each_place_of_a_run(
+        "run-faults-go",
+        |project| {
+            project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+            project.write(
+                "w.go",
+                "package w\n\nfunc Double(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n",
+            );
+            project.write(
+                "w_test.go",
+                "package w\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+            );
+        },
+        &["--", go, "test", "./..."],
+    );
+    assert!(reached > 50, "{reached}");
+}
+
+#[test]
+fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
+    let reached = fail_each_place_of_a_run(
+        "run-faults-rs",
+        |project| {
+            project.write(
+                "Cargo.toml",
+                "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+            );
+            project.write(
+                "src/lib.rs",
+                "pub fn double(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+            );
+            project.write(".gitignore", "target/\n");
+        },
+        &["--", "cargo", "test", "-q"],
+    );
+    assert!(reached > 50, "{reached}");
+}
