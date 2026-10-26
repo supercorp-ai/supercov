@@ -1318,6 +1318,8 @@ mod tests {
     /// directory name no run has, and evidence metadata that does not
     /// describe the archive beside it; a store that is not a directory is
     /// refused whole.
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_stored_run_is_refused_for_what_does_not_describe_it() {
         let root = temporary_directory("refusals");

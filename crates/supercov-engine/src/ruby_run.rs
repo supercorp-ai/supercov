@@ -948,6 +948,8 @@ mod tests {
 
     /// The suite's own `RUBYOPT` follows the runtime, in the test command
     /// and in a server's environment alike.
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_suite_s_own_rubyopt_is_kept_after_the_runtime() {
         let variables = environment(

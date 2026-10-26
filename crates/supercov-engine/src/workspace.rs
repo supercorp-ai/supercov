@@ -3682,6 +3682,8 @@ mod tests {
     /// The workspace container is Supercov's only where it holds the marker
     /// with its contents and its own ignore file: made fresh, found again,
     /// and refused when anything else is there.
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn the_workspace_container_is_made_once_and_refused_when_not_ours() {
         static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -4131,6 +4133,8 @@ mod tests {
 
     /// A copy that is the project, or has no name, names nothing; one that
     /// does not exist is named as it is spelled.
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn only_a_copy_apart_from_the_project_is_renamed() {
         let root = project();
@@ -4285,6 +4289,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn node_modules_that_cannot_be_looked_at_is_an_error() {
         // A project root that is a file: its node_modules is a path below a

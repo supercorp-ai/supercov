@@ -2781,6 +2781,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_stored_tree_under_a_file_is_an_error_not_already_gone() {
         let root = project();

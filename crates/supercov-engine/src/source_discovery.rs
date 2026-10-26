@@ -1654,6 +1654,8 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_root_that_is_no_directory_or_no_source_is_refused_by_name() {
         let root = repository(
@@ -2323,6 +2325,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn declared_workspace_patterns_name_only_real_package_directories() {
         let root = repository(

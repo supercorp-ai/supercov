@@ -1132,6 +1132,8 @@ mod tests {
     /// A runner path is relative to the workspace when inside it, absolute
     /// when outside, a name to search for when bare, and refused when it is
     /// the workspace itself, climbs out of it, or is left relative.
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_runner_path_is_read_against_the_workspace() {
         let root = Path::new("/w");

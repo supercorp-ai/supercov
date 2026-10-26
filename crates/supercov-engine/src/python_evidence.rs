@@ -4069,6 +4069,8 @@ pub(crate) mod tests {
     /// empty, a cut-short layout and an unsized slot are passed over, and
     /// anything else -- a directory, an unknown name, a bad shared-memory
     /// marker -- is refused by name.
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn evidence_entries_and_paths_are_read_or_refused_by_name() {
         let root = Path::new("/project");

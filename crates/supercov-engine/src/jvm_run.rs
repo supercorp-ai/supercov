@@ -3304,6 +3304,8 @@ mod tests {
         bytes
     }
 
+    // Written to Unix paths and filesystem behaviour.
+    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn evidence_measured_and_then_not_published_is_kept() {
         let root = temporary_root("jvm-kept");
