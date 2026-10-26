@@ -11826,6 +11826,7 @@ fn a_crate_builds_with_the_rustflags_its_cargo_configuration_sets() {
 }
 
 /// A Ruby new enough for Supercov's Ruby frontend (3.3 or newer).
+#[cfg(unix)]
 fn ruby() -> Option<String> {
     let candidates = std::env::var("SUPERCOV_RUBY").ok().into_iter().chain(
         [
