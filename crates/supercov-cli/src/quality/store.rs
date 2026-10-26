@@ -136,7 +136,7 @@ pub fn write(
         })
     })?;
     for (name, document) in [("manifest.json", manifest), ("files.json", files)] {
-        let bytes = serde_json::to_vec(document).map_err(|e| not_saved(e.to_string()))?;
+        let bytes = serde_json::to_vec(document).expect("plain data serializes");
         write_atomic(&directory.join(name), &bytes).map_err(not_saved)?;
     }
     // Last, so `latest` never names a snapshot that is still being written.

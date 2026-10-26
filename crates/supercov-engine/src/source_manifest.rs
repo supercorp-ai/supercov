@@ -441,7 +441,7 @@ fn write_json(
     name: &str,
     value: &impl serde::Serialize,
 ) -> Result<(), String> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    let mut bytes = serde_json::to_vec_pretty(value).expect("plain data serializes");
     bytes.push(b'\n');
     atomic_write(root, &run.directory.join(name), &bytes).map_err(|e| e.to_string())
 }

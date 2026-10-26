@@ -342,7 +342,7 @@ fn prepare(
             },
             entries,
         })
-        .map_err(|error| error.to_string())?,
+        .expect("plain data serializes"),
     );
     Ok(Some(PreparedPythonProject {
         root: root.to_owned(),

@@ -867,13 +867,13 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     if !selected_merged.is_empty() {
         fs::write(
             package_dir.join("merged-order.json"),
-            serde_json::to_vec(&merged_sorted)?,
+            serde_json::to_vec(&merged_sorted).expect("plain data serializes"),
         )
         .map_err(io_error)?;
         // What a quiet harness leaves unnamed is named from these.
         fs::write(
             package_dir.join("merged-selected.json"),
-            serde_json::to_vec(&selected_merged)?,
+            serde_json::to_vec(&selected_merged).expect("plain data serializes"),
         )
         .map_err(io_error)?;
         fs::write(
@@ -1060,7 +1060,7 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     };
     fs::write(
         root.join("packages").join(format!("{sequence:08}.json")),
-        serde_json::to_vec(&record)?,
+        serde_json::to_vec(&record).expect("plain data serializes"),
     )
     .map_err(io_error)?;
     Ok(exit_code)
@@ -1148,7 +1148,11 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
         .join("invocations")
         .join(format!("{index:08}.json"));
     let write_record = |record: &Invocation| -> Result<(), RustTestRunnerError> {
-        fs::write(&record_path, serde_json::to_vec(record)?).map_err(io_error)
+        fs::write(
+            &record_path,
+            serde_json::to_vec(record).expect("plain data serializes"),
+        )
+        .map_err(io_error)
     };
 
     match mode.as_str() {
@@ -1329,7 +1333,8 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
             index,
             exit_code: exit,
             evidence,
-        })?,
+        })
+        .expect("plain data serializes"),
     )
     .map_err(io_error)?;
     relay(&output);

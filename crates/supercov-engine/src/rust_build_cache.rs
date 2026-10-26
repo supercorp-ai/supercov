@@ -79,7 +79,7 @@ pub fn rust_build_cache_key(
     };
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&identity)?)
+        Sha256::digest(serde_json::to_vec(&identity).expect("plain data serializes"))
     ))
 }
 
@@ -234,7 +234,7 @@ pub fn write_rust_build_cache(
         manifest: manifest.clone(),
         probes: probes.clone(),
     };
-    let mut bytes = serde_json::to_vec_pretty(&metadata).map_err(|error| error.to_string())?;
+    let mut bytes = serde_json::to_vec_pretty(&metadata).expect("plain data serializes");
     bytes.push(b'\n');
     atomic_write(project_root, &workspace.join(CACHE_FILE), &bytes)
         .map_err(|error| error.to_string())?;

@@ -261,7 +261,7 @@ fn javascript_archive_entries(
         };
         entries.push(EvidenceArchiveEntry {
             path: "results/command/mcdc.json".into(),
-            contents: serde_json::to_vec(&command_result).map_err(|error| error.to_string())?,
+            contents: serde_json::to_vec(&command_result).expect("plain data serializes"),
         });
         results.push(command_result);
     }
@@ -300,11 +300,11 @@ fn javascript_archive_entries(
             &PersistedCoverageModel::from_declaration(&javascript_coverage_model())
                 .expect("JavaScript coverage model is contract-valid"),
         )
-        .map_err(|error| error.to_string())?,
+        .expect("plain data serializes"),
     });
     entries.push(EvidenceArchiveEntry {
         path: "frontend.json".into(),
-        contents: serde_json::to_vec(&declaration).map_err(|error| error.to_string())?,
+        contents: serde_json::to_vec(&declaration).expect("plain data serializes"),
     });
     Ok(entries)
 }
@@ -952,7 +952,7 @@ pub fn run_direct_javascript(
     let settings_path = frontend.preload_path.with_file_name("run.json");
     crate::fault_fs::write(
         &settings_path,
-        serde_json::to_vec(&settings).map_err(|error| error.to_string())?,
+        serde_json::to_vec(&settings).expect("plain data serializes"),
     )
     .map_err(|error| format!("{}: {error}", settings_path.display()))?;
     // What the tools of a command before this one changed in the source has
@@ -1331,7 +1331,7 @@ pub fn run_direct_javascript(
     if let Some(support) = &support {
         entries.push(EvidenceArchiveEntry {
             path: crate::support_reach::ARCHIVE_PATH.into(),
-            contents: serde_json::to_vec(support).map_err(|error| error.to_string())?,
+            contents: serde_json::to_vec(support).expect("plain data serializes"),
         });
     }
     // The files the run's servers loaded and read are recorded with the

@@ -317,7 +317,7 @@ fn rewrite_config(config: &WorkerConfig, entry: &str, port: Option<u16>) -> Resu
             }
             document["dev"]["inspector_port"] = json!(port);
         }
-        serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?
+        serde_json::to_string_pretty(&document).expect("plain data serializes")
     };
     fs::write(path, rewritten).map_err(|error| format!("{}: {error}", path.display()))
 }

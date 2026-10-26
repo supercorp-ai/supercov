@@ -459,7 +459,7 @@ fn build_run(
         .map_err(|error| format!("could not read {} in run {}: {error:?}", file.file, run.id))?;
         file_details.insert(
             file.file.clone(),
-            serde_json::to_value(detail).map_err(|error| error.to_string())?,
+            serde_json::to_value(detail).expect("plain data serializes"),
         );
     }
 
@@ -497,9 +497,8 @@ fn build_run(
                 kind: test.summary.provenance.kind.clone(),
                 project: test.summary.provenance.project.clone(),
                 retries: test.retries.clone(),
-                attempts: serde_json::to_value(&test.attempts)
-                    .map_err(|error| error.to_string())?,
-                lines: serde_json::to_value(&test.lines).map_err(|error| error.to_string())?,
+                attempts: serde_json::to_value(&test.attempts).expect("plain data serializes"),
+                lines: serde_json::to_value(&test.lines).expect("plain data serializes"),
                 total_lines,
                 total_hits,
                 total_decisions,
@@ -528,7 +527,7 @@ fn build_run(
             limit: usize::MAX,
         },
     ) {
-        Ok((scope, _)) => Some(serde_json::to_value(scope).map_err(|error| error.to_string())?),
+        Ok((scope, _)) => Some(serde_json::to_value(scope).expect("plain data serializes")),
         Err(supercov_engine::coverage_query::QueryError::ScopeUnavailable) => None,
         Err(error) => {
             return Err(format!(
@@ -551,11 +550,11 @@ fn build_run(
         source_fingerprint: Some(run.metadata.integrity.fingerprint.source.clone()),
         source_mode: if source_exact { "exact" } else { "snippets" },
         omitted_sources,
-        summary: serde_json::to_value(summary).map_err(|error| error.to_string())?,
+        summary: serde_json::to_value(summary).expect("plain data serializes"),
         files,
         file_details,
         file_totals,
-        decisions: serde_json::to_value(decisions).map_err(|error| error.to_string())?,
+        decisions: serde_json::to_value(decisions).expect("plain data serializes"),
         assertions: build_assertions(run),
         statement_spans: statement_spans(run),
         tests,
@@ -891,17 +890,17 @@ fn attach_security(
     timeline.sort_by(|left, right| right.at.cmp(&left.at).then_with(|| right.id.cmp(&left.id)));
 }
 
-fn render_html(bundle: &ReportBundle) -> Result<Vec<u8>, String> {
-    let payload = serde_json::to_vec(bundle).map_err(|error| error.to_string())?;
+fn render_html(bundle: &ReportBundle) -> Vec<u8> {
+    let payload = serde_json::to_vec(bundle).expect("plain data serializes");
+    // Compressed in memory, where writing cannot fail.
     let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
-    gzip.write_all(&payload)
-        .map_err(|error| error.to_string())?;
-    let compressed = gzip.finish().map_err(|error| error.to_string())?;
+    gzip.write_all(&payload).expect("writing to memory");
+    let compressed = gzip.finish().expect("writing to memory");
     let encoded = STANDARD.encode(compressed);
     // The template holds one marker, which a unit test checks.
-    Ok(REPORT_TEMPLATE
+    REPORT_TEMPLATE
         .replacen(PAYLOAD_MARKER, &encoded, 1)
-        .into_bytes())
+        .into_bytes()
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -1072,7 +1071,7 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
         };
         // No size cap: a report is a local file, and refusing one after
         // preparing every run cost a large project three minutes.
-        let html = render_html(&bundle)?;
+        let html = render_html(&bundle);
         // The default lives inside the store, which carries its own
         // `.gitignore`, so a report cannot be committed by accident. An
         // explicit path is the user's and resolves against where they ran

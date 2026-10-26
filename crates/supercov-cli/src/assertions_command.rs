@@ -401,7 +401,7 @@ impl Cache {
             .expect("answers.json sits in .supercov/assertions");
         supercov_engine::fault_fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec(&json!({"version": CACHE_VERSION, "answers": self.answers}))
-            .map_err(|e| e.to_string())?;
+            .expect("plain data serializes");
         let temp = self.path.with_extension("json.tmp");
         supercov_engine::fault_fs::write(&temp, bytes).map_err(|e| e.to_string())?;
         supercov_engine::fault_fs::rename(&temp, &self.path).map_err(|e| e.to_string())

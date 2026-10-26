@@ -486,8 +486,7 @@ fn write_javascript_frontend_cache(
         assertion_calls,
         artifacts,
     };
-    let mut encoded =
-        serde_json::to_vec_pretty(&cache).map_err(JavascriptFrontendError::Serialize)?;
+    let mut encoded = serde_json::to_vec_pretty(&cache).expect("plain data serializes");
     encoded.push(b'\n');
     atomic_write(&workspace.join(FRONTEND_CACHE_FILE), &encoded)
 }
@@ -1286,7 +1285,7 @@ fn write_vitest_config(
     let path = generated.join("vitest.config.mjs");
     let original = relocated_project_file(workspace, project, project.vitest_config.as_ref())
         .map(|path| path.display().to_string());
-    let original = serde_json::to_string(&original).map_err(JavascriptFrontendError::Serialize)?;
+    let original = serde_json::to_string(&original).expect("plain data serializes");
     let source = format!(
         "import {{ createRequire }} from 'node:module';\n\
          import {{ pathToFileURL }} from 'node:url';\n\
@@ -1510,8 +1509,8 @@ fn write_playwright_config(
             .map_err(|_| JavascriptFrontendError::UnsafeSourcePath(original.display().to_string()))?
             .to_string_lossy()
             .replace('\\', "/");
-        let specifier = serde_json::to_string(&format!("../{relative}"))
-            .map_err(JavascriptFrontendError::Serialize)?;
+        let specifier =
+            serde_json::to_string(&format!("../{relative}")).expect("plain data serializes");
         // Playwright requires a config that is CommonJS and imports one that
         // is a module. Importing a TypeScript config of a package without
         // `"type": "module"` left its `import` statements in a module Node
@@ -1609,8 +1608,7 @@ fn write_playwright_config(
                 .unwrap_or(workspace)
                 .display()
                 .to_string()
-        )
-        .map_err(JavascriptFrontendError::Serialize)?
+        ).expect("plain data serializes")
     );
     atomic_write(&path, source.as_bytes())?;
     Ok(path)
@@ -1905,15 +1903,14 @@ pub fn prepare_javascript_frontend(
 
     atomic_write(
         &workspace.join(AUTHORED_LIST),
-        &serde_json::to_vec(&authored).map_err(JavascriptFrontendError::Serialize)?,
+        &serde_json::to_vec(&authored).expect("plain data serializes"),
     )?;
     atomic_write(
         &generated.join("statement-exclusions.json"),
-        &serde_json::to_vec(&exclusions).map_err(JavascriptFrontendError::Serialize)?,
+        &serde_json::to_vec(&exclusions).expect("plain data serializes"),
     )?;
     let manifest_path = generated.join("manifest.json");
-    let mut encoded =
-        serde_json::to_vec_pretty(&manifest).map_err(JavascriptFrontendError::Serialize)?;
+    let mut encoded = serde_json::to_vec_pretty(&manifest).expect("plain data serializes");
     encoded.push(b'\n');
     atomic_write(&manifest_path, &encoded)?;
     atomic_write(

@@ -395,7 +395,7 @@ pub fn prepare_jvm_project(
                 )
             }
         };
-    manifest.scope = Some(serde_json::to_value(scope).map_err(|error| error.to_string())?);
+    manifest.scope = Some(serde_json::to_value(scope).expect("plain data serializes"));
     Ok(PreparedJvmProject {
         root: root.to_owned(),
         files,

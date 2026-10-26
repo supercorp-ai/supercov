@@ -61,7 +61,7 @@ struct FailureEnvelope<'a> {
 }
 
 fn newline_json<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
-    let mut json = serde_json::to_string(value)?;
+    let mut json = serde_json::to_string(value).expect("plain data serializes");
     json.push('\n');
     Ok(json)
 }

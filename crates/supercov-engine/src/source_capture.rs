@@ -71,7 +71,7 @@ pub fn append(
     }
     entries.push(EvidenceArchiveEntry {
         path: ARCHIVE_PATH.into(),
-        contents: serde_json::to_vec(&inputs.manifest()).map_err(|e| e.to_string())?,
+        contents: serde_json::to_vec(&inputs.manifest()).expect("plain data serializes"),
     });
     Ok(entries)
 }

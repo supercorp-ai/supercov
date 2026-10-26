@@ -172,7 +172,11 @@ pub(crate) fn run_nextest(
             })
             .collect(),
     };
-    fs::write(root.join(PLAN_FILE), serde_json::to_vec(&runner_plan)?).map_err(io_error)?;
+    fs::write(
+        root.join(PLAN_FILE),
+        serde_json::to_vec(&runner_plan).expect("plain data serializes"),
+    )
+    .map_err(io_error)?;
     let runner_configuration = runner_configuration_arguments(&program, root, &runner_plan)?;
 
     // The listing: every test nextest selected, per binary, before any runs.

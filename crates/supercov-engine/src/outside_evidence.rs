@@ -637,7 +637,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             };
             archive.push(EvidenceArchiveEntry {
                 path: format!("imported-{imports}/mcdc.json"),
-                contents: serde_json::to_vec(&record).map_err(|error| error.to_string())?,
+                contents: serde_json::to_vec(&record).expect("plain data serializes"),
             });
             if !declaration
                 .runners
@@ -675,16 +675,16 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
     let mut entries = Vec::with_capacity(archive.len() + 4);
     entries.push(EvidenceArchiveEntry {
         path: "frontend.json".into(),
-        contents: serde_json::to_vec(&declaration).map_err(|error| error.to_string())?,
+        contents: serde_json::to_vec(&declaration).expect("plain data serializes"),
     });
     entries.push(EvidenceArchiveEntry {
         path: "manifest.json".into(),
-        contents: serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+        contents: serde_json::to_vec(&manifest).expect("plain data serializes"),
     });
     if let Some(sources) = &sources {
         entries.push(EvidenceArchiveEntry {
             path: crate::source_capture::ARCHIVE_PATH.into(),
-            contents: serde_json::to_vec(sources).map_err(|error| error.to_string())?,
+            contents: serde_json::to_vec(sources).expect("plain data serializes"),
         });
     }
     for entry in archive {

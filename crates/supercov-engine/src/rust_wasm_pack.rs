@@ -136,7 +136,7 @@ fn parse_record(root: &Path, text: &str) -> Result<WasmPackTest, String> {
             // could not be merged with a `.cargo/config.toml` string one.
             command.push(format!(
                 "target.{triple}.runner={}",
-                serde_json::to_string(&value).map_err(|error| error.to_string())?
+                serde_json::to_string(&value).expect("plain data serializes")
             ));
         } else if RUNNER_VARIABLES.contains(&name.as_str()) {
             runner_environment.push((name, value));

@@ -400,7 +400,7 @@ fn run_direct_python_in(
         };
         fs::write(
             &plan_path,
-            serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
+            serde_json::to_vec(&plan).expect("plain data serializes"),
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
         writeln!(
@@ -678,7 +678,7 @@ impl PythonServer {
         let plan_path = directory.join("plan.json");
         fs::write(
             &plan_path,
-            serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
+            serde_json::to_vec(&plan).expect("plain data serializes"),
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
         Ok(Some(Self {

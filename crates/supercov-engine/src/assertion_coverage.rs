@@ -2144,7 +2144,7 @@ fn rust_question(line: &str, change: Change, replacement: &str) -> String {
 /// Write files' text, compressed, to `path`.
 pub fn save_snapshot(path: &Path, files: &BTreeMap<String, String>) -> Result<(), String> {
     use std::io::Write;
-    let bytes = serde_json::to_vec(files).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(files).expect("plain data serializes");
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&bytes).map_err(|e| e.to_string())?;
     let compressed = encoder.finish().map_err(|e| e.to_string())?;

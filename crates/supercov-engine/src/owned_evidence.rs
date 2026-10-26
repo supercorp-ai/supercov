@@ -575,21 +575,22 @@ impl OwnedFrontendRun {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&model)?,
+                contents: serde_json::to_vec(&model).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&self.declaration)?,
+                contents: serde_json::to_vec(&self.declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
-                contents: serde_json::to_vec(&self.request.manifest)?,
+                contents: serde_json::to_vec(&self.request.manifest)
+                    .expect("plain data serializes"),
             },
         ];
         for (index, result) in self.request.raw_results.iter().enumerate() {
             entries.push(EvidenceArchiveEntry {
                 path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result)?,
+                contents: serde_json::to_vec(result).expect("plain data serializes"),
             });
         }
         Ok(entries)

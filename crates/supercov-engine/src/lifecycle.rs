@@ -474,7 +474,7 @@ fn state_path(root: &Path, id: &str) -> PathBuf {
 
 pub fn write_run_state(root: &Path, state: &RunState) -> Result<(), LifecycleError> {
     checked_id(&state.id)?;
-    let mut bytes = serde_json::to_vec_pretty(state).map_err(LifecycleError::Metadata)?;
+    let mut bytes = serde_json::to_vec_pretty(state).expect("plain data serializes");
     bytes.push(b'\n');
     atomic_write(root, &state_path(root, &state.id), &bytes)
 }
@@ -760,8 +760,7 @@ impl ProjectLock {
                 continue;
             }
             let path = locks.join(format!("{name}.json"));
-            let mut payload =
-                serde_json::to_vec_pretty(&owner).map_err(LifecycleError::Metadata)?;
+            let mut payload = serde_json::to_vec_pretty(&owner).expect("plain data serializes");
             payload.push(b'\n');
             fs::write(&path, payload).map_err(|source| io_error(&path, source))?;
             return Ok(Self {
@@ -955,7 +954,7 @@ pub(crate) fn publish_run_with_fault(
         remove_stored_tree_deferred(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
-    let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
+    let mut json = serde_json::to_vec_pretty(metadata).expect("plain data serializes");
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
     // Everything publication derives from the evidence -- the record of what

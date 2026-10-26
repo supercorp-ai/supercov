@@ -304,7 +304,7 @@ fn prepare(
             },
             entries,
         })
-        .map_err(|error| error.to_string())?,
+        .expect("plain data serializes"),
     );
     let mut plan = RubyProbePlan {
         version: RUBY_PROBE_PLAN_VERSION,

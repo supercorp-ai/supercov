@@ -378,7 +378,7 @@ fn write_framed_with_magic<W: Write>(
             // Lossless: `usize` is 64 bits on every target Supercov builds for.
             bytes: entry.contents.len() as u64,
         };
-        let mut encoded = serde_json::to_vec(&header)?;
+        let mut encoded = serde_json::to_vec(&header).expect("plain data serializes");
         encoded.push(b'\n');
         let header_size = u32::try_from(encoded.len())
             .expect("an entry header, a path and a size, is shorter than 4 GiB");

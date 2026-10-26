@@ -96,10 +96,7 @@ pub(crate) fn rewritten_contents(
                 }
                 kept = true;
                 rewrite_scope_run_ids(&mut value, merged_run_id);
-                rewritten.extend(
-                    serde_json::to_vec(&value)
-                        .map_err(|error| format!("failed to rewrite merged evidence: {error}"))?,
-                );
+                rewritten.extend(serde_json::to_vec(&value).expect("plain data serializes"));
             }
             Err(error) => {
                 return Err(format!(
@@ -360,7 +357,7 @@ fn judged_against_latest(
     }
     Ok(Some(Grown {
         latest,
-        files: Some(serde_json::to_vec(into).map_err(|error| error.to_string())?),
+        files: Some(serde_json::to_vec(into).expect("plain data serializes")),
         across: crate::run_currency::across(across),
         superseded,
     }))
@@ -678,8 +675,7 @@ pub fn merge_coverage_runs(
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&merged_declaration)
-                    .map_err(|error| format!("Could not encode merged frontend: {error}"))?,
+                contents: serde_json::to_vec(&merged_declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),

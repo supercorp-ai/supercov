@@ -275,7 +275,7 @@ fn run_direct_ruby_in(
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
         fs::write(
             &plan_path,
-            ruby_literal(&serde_json::to_value(&project.plan).map_err(|error| error.to_string())?)
+            ruby_literal(&serde_json::to_value(&project.plan).expect("plain data serializes"))
                 .into_bytes(),
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
@@ -509,7 +509,7 @@ impl RubyServer {
         let directory = root.join(".supercov/work").join(run_id).join("ruby");
         write_runtime(&directory.join("runtime"))?;
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
-        let mut plan = serde_json::to_value(&project.plan).map_err(|error| error.to_string())?;
+        let mut plan = serde_json::to_value(&project.plan).expect("plain data serializes");
         plan["root"] = workspace.display().to_string().into();
         let plan_path = directory.join("plan.rb");
         fs::write(&plan_path, ruby_literal(&plan).into_bytes())
