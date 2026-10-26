@@ -884,11 +884,10 @@ impl Shared {
             "service": context.service,
             "note": context.note,
         });
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.settings.state)
-        {
+        if let Ok(mut file) = fs::open_with(
+            fs::OpenOptions::new().create(true).append(true),
+            &self.settings.state,
+        ) {
             let _ = writeln!(file, "{line}");
         }
     }

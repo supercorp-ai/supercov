@@ -491,10 +491,7 @@ impl Drop for Poller {
 }
 
 fn poll(port: u16, path: &str, windows: &Path, stop: &AtomicBool) {
-    let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(windows)
+    let Ok(mut file) = fs::open_with(fs::OpenOptions::new().create(true).append(true), windows)
     else {
         return;
     };

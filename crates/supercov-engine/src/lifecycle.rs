@@ -188,7 +188,7 @@ fn unique_name() -> String {
 pub(crate) fn sync_directory_handle(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        File::open(path).and_then(|directory| directory.sync_all())
+        fs::open(path).and_then(|directory| directory.sync_all())
     }
     #[cfg(not(unix))]
     {
@@ -233,10 +233,7 @@ pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(),
         ));
         let mut file =
             match crate::fault::io("atomic-write-create", io::ErrorKind::AlreadyExists, || {
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary)
+                fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary)
             }) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -393,7 +390,7 @@ impl TrashLock {
         let path = trash.join(".deleter.lock");
         for _ in 0..2 {
             match crate::fault::io("trash-lock", io::ErrorKind::PermissionDenied, || {
-                OpenOptions::new().write(true).create_new(true).open(&path)
+                fs::open_with(OpenOptions::new().write(true).create_new(true), &path)
             }) {
                 Ok(mut file) => {
                     write!(file, "{}", std::process::id())
@@ -641,13 +638,15 @@ fn take_lock(
     shared: bool,
     alive: impl Fn() -> bool,
 ) -> Result<Option<Held>, LifecycleError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|source| io_error(path, source))?;
+    let file = fs::open_with(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|source| io_error(path, source))?;
     let taken = crate::fault::or(
         "lock-unsupported",
         || Err(fs::TryLockError::Error(io::ErrorKind::Unsupported.into())),
@@ -702,10 +701,7 @@ impl ProjectLock {
         // or following a pre-existing symlink.
         let ignore = root.join(".supercov/.gitignore");
         match crate::fault::io("store-ignore", io::ErrorKind::PermissionDenied, || {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&ignore)
+            fs::open_with(OpenOptions::new().write(true).create_new(true), &ignore)
         }) {
             Ok(mut file) => file
                 .write_all(b"*\n")
@@ -825,18 +821,15 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     // archive's blocks are shared, not copied -- 150 MB on a large run --
     // and the clone is the source as it was at that instant.
     if reflink_copy::reflink(source, destination).is_ok() {
-        File::open(destination)
+        fs::open(destination)
             .and_then(|file| file.sync_all())
             .map_err(|error| io_error(destination, error))?;
         return fs::symlink_metadata(destination)
             .map(|metadata| metadata.len())
             .map_err(|error| io_error(destination, error));
     }
-    let mut input = File::open(source).map_err(|error| io_error(source, error))?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
+    let mut input = fs::open(source).map_err(|error| io_error(source, error))?;
+    let mut output = fs::open_with(OpenOptions::new().write(true).create_new(true), destination)
         .map_err(|error| io_error(destination, error))?;
     let copied = io::copy(&mut input, &mut output).map_err(|error| io_error(destination, error))?;
     output
@@ -850,7 +843,7 @@ fn file_sha256(path: &Path) -> Result<[u8; 32], LifecycleError> {
     if !metadata.file_type().is_file() {
         return Err(LifecycleError::UnsafePath(path.into()));
     }
-    let mut file = File::open(path).map_err(|source| io_error(path, source))?;
+    let mut file = fs::open(path).map_err(|source| io_error(path, source))?;
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
     loop {

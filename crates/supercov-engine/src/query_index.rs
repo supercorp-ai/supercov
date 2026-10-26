@@ -6,7 +6,7 @@
 //! Reads validate the authenticated header, all checked layout invariants and
 //! the SHA-256 digest of every data page they touch.
 
-use crate::fault_fs::{self as fs, File, OpenOptions};
+use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::{BTreeSet, HashSet},
     io::{self, Read, Seek, SeekFrom, Write},
@@ -268,11 +268,7 @@ pub fn write_query_index(
     let (temporary, mut file) = loop {
         let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary = temporary_path(destination, sequence)?;
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
+        match fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary) {
             Ok(file) => break (temporary, file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -315,7 +311,7 @@ pub fn write_query_index(
 /// its checksum included, so a damaged one is refused there.
 pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError> {
     let mut header = [0_u8; QUERY_INDEX_HEADER_SIZE];
-    File::open(path)?.read_exact(&mut header)?;
+    fs::open(path)?.read_exact(&mut header)?;
     let sha256 = header[48..80].try_into().expect("a 32-byte slice");
     Ok((sha256, get_u64(&header, 24)?))
 }
@@ -332,7 +328,7 @@ impl QueryIndex {
         if !metadata.is_file() {
             return Err(QueryIndexError::NotRegularFile(path.to_owned()));
         }
-        let file = File::open(path)?;
+        let file = fs::open(path)?;
         // Supercov publishes a new immutable inode by rename and never mutates
         // the inode while it may be mapped. Readers retain this file handle.
         let mmap = unsafe { Mmap::map(&file)? };

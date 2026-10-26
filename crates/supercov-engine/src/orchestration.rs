@@ -4,7 +4,7 @@
 //! commands. This layer owns ordering, fail-fast behavior, timings and the
 //! single persistent signal guard across every external phase.
 
-use crate::fault_fs::{self as fs, File};
+use crate::fault_fs as fs;
 use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
@@ -98,7 +98,7 @@ fn publish_captured_output(
 ) {
     if failed || verbose {
         let result = (|| -> std::io::Result<()> {
-            let mut file = File::open(path)?;
+            let mut file = fs::open(path)?;
             let length = file.metadata()?.len();
             if length > CAPTURED_OUTPUT_LIMIT {
                 file.seek(SeekFrom::End(-(CAPTURED_OUTPUT_LIMIT as i64)))?;

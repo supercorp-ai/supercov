@@ -653,12 +653,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
         .ok_or_else(|| JavascriptFrontendError::UnsafeSourcePath(path.display().to_string()))?;
     let temporary = parent.join(format!(".supercov-write-{}", unique()));
     let result = (|| {
-        let open = || {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-        };
+        let open = || fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary);
         let opened = timed(&SETUP.create_ns, open);
         let mut output = match opened {
             Ok(output) => output,

@@ -618,11 +618,10 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
 fn claim_sequence(directory: &Path) -> Result<usize, RustTestRunnerError> {
     fs::create_dir_all(directory).map_err(io_error)?;
     for candidate in 0..1_000_000_usize {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(directory.join(format!("{candidate:08}.claim")))
-        {
+        match fs::open_with(
+            fs::OpenOptions::new().write(true).create_new(true),
+            directory.join(format!("{candidate:08}.claim")),
+        ) {
             Ok(_) => return Ok(candidate),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(io_error(error)),

@@ -468,7 +468,7 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
         ] {
             let path = container.join(name);
             match crate::fault::io("workspace-file", io::ErrorKind::PermissionDenied, || {
-                OpenOptions::new().write(true).create_new(true).open(&path)
+                fs::open_with(OpenOptions::new().write(true).create_new(true), &path)
             }) {
                 Ok(mut file) => file
                     .write_all(contents)

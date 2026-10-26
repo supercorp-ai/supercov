@@ -434,7 +434,7 @@ fn digest_paths(
         if let Some(bytes) = meaning {
             hash.update(&bytes);
         } else {
-            let mut file = fs::File::open(&path).map_err(|source| io_error(&path, source))?;
+            let mut file = fs::open(&path).map_err(|source| io_error(&path, source))?;
             loop {
                 let read = file
                     .read(&mut buffer)

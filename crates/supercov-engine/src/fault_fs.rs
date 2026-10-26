@@ -96,3 +96,18 @@ pub fn symlink_file<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io:
 pub fn symlink_dir<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
     checked(|| std::os::windows::fs::symlink_dir(original, link))
 }
+
+/// `File::open`.
+pub fn open<P: AsRef<Path>>(path: P) -> io::Result<File> {
+    checked(|| File::open(path))
+}
+
+/// `File::create`.
+pub fn create<P: AsRef<Path>>(path: P) -> io::Result<File> {
+    checked(|| File::create(path))
+}
+
+/// `options.open(path)`.
+pub fn open_with<P: AsRef<Path>>(options: &OpenOptions, path: P) -> io::Result<File> {
+    checked(|| options.open(path))
+}

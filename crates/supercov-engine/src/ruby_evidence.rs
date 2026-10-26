@@ -8,7 +8,7 @@
 //! kill remain readable while a torn tail stays inert. Rust joins those records
 //! into the shared frontend protocol; the runtime never computes a verdict.
 
-use crate::fault_fs::{self as fs, File};
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -364,7 +364,7 @@ fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, R
             return Err(RubyEvidenceError::UnsafeEntry(name));
         }
         let file =
-            File::open(entry.path()).map_err(|error| RubyEvidenceError::Io(error.to_string()))?;
+            fs::open(entry.path()).map_err(|error| RubyEvidenceError::Io(error.to_string()))?;
         // The file is immutable from Supercov's perspective after the wrapped
         // interpreter has exited. No mutable alias is created while this map
         // is alive.

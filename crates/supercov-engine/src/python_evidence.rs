@@ -589,7 +589,7 @@ fn shared_slot_bytes(_name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceErro
 /// process that closed after the directory was listed, and so already
 /// harvested into its transport.
 fn map_slot(path: &Path) -> Result<Option<Mmap>, PythonEvidenceError> {
-    match File::open(path) {
+    match fs::open(path) {
         Ok(file) => unsafe { MmapOptions::new().map(&file) }
             .map(Some)
             .map_err(|error| PythonEvidenceError::Io(error.to_string())),
@@ -599,7 +599,7 @@ fn map_slot(path: &Path) -> Result<Option<Mmap>, PythonEvidenceError> {
 }
 
 fn map_evidence(path: &Path) -> Result<Mmap, PythonEvidenceError> {
-    let file = File::open(path).map_err(|error| PythonEvidenceError::Io(error.to_string()))?;
+    let file = fs::open(path).map_err(|error| PythonEvidenceError::Io(error.to_string()))?;
     // The file is immutable from Supercov's perspective after the wrapped
     // interpreter has exited. No mutable alias is created while this map is
     // alive.

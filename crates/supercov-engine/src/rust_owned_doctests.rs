@@ -735,11 +735,7 @@ fn next_sequence(directory: &Path, prefix: &str) -> Result<usize, RustTestRunner
     fs::create_dir_all(directory).map_err(io_error)?;
     for candidate in 0..1_000_000_usize {
         let marker = directory.join(format!("{prefix}{candidate:08}.claim"));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-        {
+        match fs::open_with(fs::OpenOptions::new().write(true).create_new(true), &marker) {
             Ok(_) => return Ok(candidate),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(io_error(error)),

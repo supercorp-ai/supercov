@@ -4,7 +4,7 @@
 //! run, and never silently treats malformed metadata as a valid run. Callers
 //! receive accepted runs and rejected-entry diagnostics independently.
 
-use crate::fault_fs::{self as fs, File};
+use crate::fault_fs as fs;
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -565,7 +565,7 @@ fn read_metadata(path: &Path) -> Result<RunMetadata, RunStoreError> {
     let capacity =
         usize::try_from(metadata.len()).map_err(|_| RunStoreError::InvalidRun("metadata size"))?;
     let mut bytes = Vec::with_capacity(capacity);
-    File::open(path)?
+    fs::open(path)?
         .take(MAX_RUN_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)?;
     let metadata: RunMetadata = serde_json::from_slice(&bytes)
@@ -775,7 +775,7 @@ fn compare_run_integrity_to(
 
 pub(crate) fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError> {
     let metadata = regular_file(path)?;
-    let mut file = File::open(path)?;
+    let mut file = fs::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
     loop {
@@ -1269,7 +1269,7 @@ pub(crate) fn write_statement_spans(run: &StoredRun, report: &CoverageReport) ->
 pub fn read_assessment_input(
     run: &StoredRun,
 ) -> Option<crate::assertion_coverage::AssessmentInput> {
-    let file = fs::File::open(run.directory.join(ASSESSMENT_INPUT_FILE)).ok()?;
+    let file = fs::open(run.directory.join(ASSESSMENT_INPUT_FILE)).ok()?;
     serde_json::from_reader(flate2::read::GzDecoder::new(io::BufReader::new(file))).ok()
 }
 

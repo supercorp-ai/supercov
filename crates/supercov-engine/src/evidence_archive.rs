@@ -5,7 +5,7 @@
 //! paths must be canonical and sorted, headers must use the exact canonical
 //! JSON encoding, and a gzip member may not hide trailing data.
 
-use crate::fault_fs::{self as fs, File, OpenOptions};
+use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::BTreeSet,
     io::{self, BufReader, BufWriter, Read, Write},
@@ -399,7 +399,7 @@ fn temporary_path(destination: &Path, sequence: u64) -> Result<PathBuf, Evidence
 }
 
 fn sync_directory(directory: &Path) {
-    if let Ok(directory) = File::open(directory) {
+    if let Ok(directory) = fs::open(directory) {
         let _ = directory.sync_all();
     }
 }
@@ -468,11 +468,7 @@ fn write_archive_version(
     let (temporary, file) = loop {
         let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary = temporary_path(destination, sequence)?;
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
+        match fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary) {
             Ok(file) => break (temporary, file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -679,7 +675,7 @@ pub(crate) fn read_archive_each(
     let input = BufReader::with_capacity(
         128 * 1024,
         Hashing {
-            inner: File::open(path)?,
+            inner: fs::open(path)?,
             hash: sha2::Digest::new(),
             bytes: 0,
         },
@@ -710,7 +706,7 @@ fn schema_version_from_magic(magic: &[u8]) -> Result<u32, EvidenceArchiveError> 
 }
 
 pub fn read_archive_schema_version(path: &Path) -> Result<u32, EvidenceArchiveError> {
-    let input = BufReader::new(File::open(path)?);
+    let input = BufReader::new(fs::open(path)?);
     let mut decoder = GzDecoder::new(input);
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
