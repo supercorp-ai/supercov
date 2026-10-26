@@ -2479,6 +2479,14 @@ pub struct CoverageIndex<'a> {
 }
 
 impl<'a> CoverageIndex<'a> {
+    /// A section `new` found with its record size: every section a reader
+    /// asks for is one it checked, so the lookup cannot miss.
+    fn section(&self, kind: u32) -> crate::query_index::SectionDescriptor {
+        self.index
+            .descriptor(kind)
+            .expect("every section a reader asks for was found when the index was opened")
+    }
+
     pub fn new(index: &'a QueryIndex) -> Result<Self, CoverageIndexError> {
         for (kind, size) in [
             (SECTION_STRINGS, STRING_RECORD_SIZE),
@@ -2525,7 +2533,7 @@ impl<'a> CoverageIndex<'a> {
     }
 
     pub fn model(&self) -> Result<IndexedCoverageModel, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_COVERAGE_MODEL)?;
+        let descriptor = self.section(SECTION_COVERAGE_MODEL);
         if descriptor.count != 1 {
             return Err(CoverageIndexError::InvalidRecord(
                 "coverage model record count",
@@ -2576,7 +2584,7 @@ impl<'a> CoverageIndex<'a> {
     }
 
     pub fn summary(&self, view: CoverageViewId) -> Result<CoverageSummary, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_VIEW_SUMMARIES)?;
+        let descriptor = self.section(SECTION_VIEW_SUMMARIES);
         if descriptor.count != 3 {
             return Err(CoverageIndexError::InvalidRecord("summary view count"));
         }
@@ -2603,19 +2611,17 @@ impl<'a> CoverageIndex<'a> {
                     percentage: percentage(covered, total),
                 })
             };
-            let value = |offset: usize| -> Result<usize, CoverageIndexError> {
-                Ok(get_usize(record, offset))
-            };
-            let conditions = value(40)?;
-            let covered_conditions = value(48)?;
+            let value = |offset: usize| get_usize(record, offset);
+            let conditions = value(40);
+            let covered_conditions = value(48);
             if covered_conditions > conditions {
                 return Err(CoverageIndexError::InvalidRecord(
                     "covered conditions exceed total",
                 ));
             }
-            let decisions = value(16)?;
-            let executed_decisions = value(24)?;
-            let covered_decisions = value(32)?;
+            let decisions = value(16);
+            let executed_decisions = value(24);
+            let covered_decisions = value(32);
             if covered_decisions > executed_decisions || executed_decisions > decisions {
                 return Err(CoverageIndexError::InvalidRecord("decision count ordering"));
             }
@@ -2656,7 +2662,7 @@ impl<'a> CoverageIndex<'a> {
         kind: Option<&str>,
         runner: Option<&str>,
     ) -> Result<Vec<IndexedFileGap>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_FILE_GAPS)?;
+        let descriptor = self.section(SECTION_FILE_GAPS);
         let mut gaps = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_FILE_GAPS, index)?;
@@ -2668,25 +2674,23 @@ impl<'a> CoverageIndex<'a> {
             {
                 return Err(CoverageIndexError::InvalidRecord("file-gap reserved bytes"));
             }
-            let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                Ok(get_usize(record, offset))
-            };
+            let number = |offset: usize| get_usize(record, offset);
             let mask = get_u32(record, 56);
             if mask & !15 != 0 {
                 return Err(CoverageIndexError::InvalidRecord("limitation mask"));
             }
-            let measurement_limitations = number(48)?;
+            let measurement_limitations = number(48);
             if (measurement_limitations == 0) != (mask == 0) {
                 return Err(CoverageIndexError::InvalidRecord(
                     "limitation count and kinds disagree",
                 ));
             }
-            let uncovered_lines = number(8)?;
-            let uncovered_statements = number(16)?;
-            let uncovered_functions = number(24)?;
-            let missing_branches = number(32)?;
-            let missing_mcdc_conditions = number(40)?;
-            let score = number(64)?;
+            let uncovered_lines = number(8);
+            let uncovered_statements = number(16);
+            let uncovered_functions = number(24);
+            let missing_branches = number(32);
+            let missing_mcdc_conditions = number(40);
+            let score = number(64);
             // Counts a damaged record could carry would overflow the sum.
             let expected_score = [
                 (uncovered_lines, 1),
@@ -2721,11 +2725,11 @@ impl<'a> CoverageIndex<'a> {
                 }
             }
             let totals = IndexedGapDimensions {
-                lines: number(160)?,
-                statements: number(168)?,
-                functions: number(176)?,
-                branches: number(184)?,
-                mcdc_conditions: number(192)?,
+                lines: number(160),
+                statements: number(168),
+                functions: number(176),
+                branches: number(184),
+                mcdc_conditions: number(192),
             };
             let covered = |total: usize, missing: usize| {
                 total
@@ -2743,18 +2747,18 @@ impl<'a> CoverageIndex<'a> {
                 measurement_limitations,
                 limitation_kinds,
                 covered_by_other_tests: IndexedGapDimensions {
-                    lines: number(80)?,
-                    statements: number(88)?,
-                    functions: number(96)?,
-                    branches: number(104)?,
-                    mcdc_conditions: number(112)?,
+                    lines: number(80),
+                    statements: number(88),
+                    functions: number(96),
+                    branches: number(104),
+                    mcdc_conditions: number(112),
                 },
                 uncovered_everywhere: IndexedGapDimensions {
-                    lines: number(120)?,
-                    statements: number(128)?,
-                    functions: number(136)?,
-                    branches: number(144)?,
-                    mcdc_conditions: number(152)?,
+                    lines: number(120),
+                    statements: number(128),
+                    functions: number(136),
+                    branches: number(144),
+                    mcdc_conditions: number(152),
                 },
                 totals: totals.clone(),
                 covered: IndexedGapDimensions {
@@ -2796,7 +2800,7 @@ impl<'a> CoverageIndex<'a> {
         let end = offset
             .checked_add(count)
             .ok_or(CoverageIndexError::SizeOverflow)?;
-        let descriptor = self.index.descriptor(SECTION_STRING_RELATIONS)?;
+        let descriptor = self.section(SECTION_STRING_RELATIONS);
         if end > descriptor.count {
             return Err(CoverageIndexError::InvalidRecord("string relation range"));
         }
@@ -2814,7 +2818,7 @@ impl<'a> CoverageIndex<'a> {
         kind: Option<&str>,
         runner: Option<&str>,
     ) -> Result<IndexedProjection, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_PROJECTIONS)?;
+        let descriptor = self.section(SECTION_PROJECTIONS);
         let mut found = None;
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_PROJECTIONS, index)?;
@@ -2838,13 +2842,11 @@ impl<'a> CoverageIndex<'a> {
                     "duplicate coverage projection",
                 ));
             }
-            let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                Ok(get_usize(record, offset))
-            };
-            let limitations = number(192)?;
-            let evidence_corruptions = number(200)?;
-            let blocking = number(208)?;
-            let declared = number(528)?;
+            let number = |offset: usize| get_usize(record, offset);
+            let limitations = number(192);
+            let evidence_corruptions = number(200);
+            let blocking = number(208);
+            let declared = number(528);
             if blocking + declared != limitations + evidence_corruptions {
                 return Err(CoverageIndexError::InvalidRecord(
                     "measurement blocking count",
@@ -2852,8 +2854,8 @@ impl<'a> CoverageIndex<'a> {
             }
             let mut transport_values = (0..8)
                 .map(|index| number(408 + index * 8))
-                .collect::<Result<Vec<_>, _>>()?;
-            transport_values.push(number(536)?);
+                .collect::<Vec<_>>();
+            transport_values.push(number(536));
             let transport = if bool_field(record[1])? {
                 Some(TransportStats {
                     processes: transport_values[0],
@@ -2884,8 +2886,8 @@ impl<'a> CoverageIndex<'a> {
             if get_u32(record, 512) != NO_STRING
                 || record[516] != 0
                 || record[517] != 0
-                || number(304)? != 0
-                || number(312)? != 0
+                || number(304) != 0
+                || number(312) != 0
             {
                 return Err(CoverageIndexError::InvalidRecord(
                     "projection reserved bytes",
@@ -2910,24 +2912,24 @@ impl<'a> CoverageIndex<'a> {
                     mode,
                     roots: self
                         .relation_strings(get_u64(record, 24), u64::from(get_u32(record, 32)))?,
-                    included: number(480)?,
-                    excluded: number(488)?,
-                    ambiguous: number(496)?,
+                    included: number(480),
+                    excluded: number(488),
+                    ambiguous: number(496),
                 })
             } else {
                 if get_u32(record, 32) != 0
                     || scope_mode.is_some()
                     || scope_language.is_some()
                     || scope_model.is_some()
-                    || number(480)? != 0
-                    || number(488)? != 0
-                    || number(496)? != 0
+                    || number(480) != 0
+                    || number(488) != 0
+                    || number(496) != 0
                 {
                     return Err(CoverageIndexError::InvalidRecord("absent scope data"));
                 }
                 None
             };
-            let empty_evidence_tests = number(472)?;
+            let empty_evidence_tests = number(472);
             let first_empty_evidence_test = self.optional_string(get_u32(record, 20))?;
             if (empty_evidence_tests == 0) != first_empty_evidence_test.is_none() {
                 return Err(CoverageIndexError::InvalidRecord(
@@ -2946,48 +2948,48 @@ impl<'a> CoverageIndex<'a> {
                     evidence_corruptions,
                     blocking,
                     declared,
-                    files: number(216)?,
+                    files: number(216),
                     by_kind: IndexedMeasurementKinds {
-                        dynamic_code: number(224)?,
-                        semantic_safety: number(232)?,
-                        source_scope: number(240)?,
+                        dynamic_code: number(224),
+                        semantic_safety: number(232),
+                        source_scope: number(240),
                     },
                 },
                 attribution: IndexedAttribution {
-                    browser_explicit: number(248)?,
-                    browser_fallback: number(256)?,
-                    server_explicit: number(264)?,
-                    server_fallback: number(272)?,
+                    browser_explicit: number(248),
+                    browser_fallback: number(256),
+                    server_explicit: number(264),
+                    server_fallback: number(272),
                 },
                 transport,
                 empty_evidence_tests,
                 first_empty_evidence_test,
                 confidence: IndexedSummaryConfidence {
                     lines: IndexedConfidenceLines {
-                        unexecuted: number(280)?,
-                        executed: number(288)?,
-                        action: number(296)?,
+                        unexecuted: number(280),
+                        executed: number(288),
+                        action: number(296),
                     },
                 },
-                files_with_gaps: number(320)?,
-                files_with_coverage_gaps: number(328)?,
-                tests: number(336)?,
-                setups: number(344)?,
+                files_with_gaps: number(320),
+                files_with_coverage_gaps: number(328),
+                tests: number(336),
+                setups: number(344),
                 test_outcomes: {
                     let mut outcomes = IndexedOutcomeCounts {
-                        passed: number(352)?,
-                        failed: number(360)?,
-                        flaky: number(368)?,
-                        skipped: number(376)?,
-                        timed_out: number(384)?,
-                        interrupted: number(392)?,
-                        unknown: number(400)?,
-                        unstarted: number(520)?,
+                        passed: number(352),
+                        failed: number(360),
+                        flaky: number(368),
+                        skipped: number(376),
+                        timed_out: number(384),
+                        interrupted: number(392),
+                        unknown: number(400),
+                        unstarted: number(520),
                         todo: 0,
                     };
                     // The projection record has no slot left, so todo is the
                     // tests no other outcome counts; zero in older indexes.
-                    outcomes.todo = number(336)?.saturating_sub(
+                    outcomes.todo = number(336).saturating_sub(
                         outcomes.passed
                             + outcomes.failed
                             + outcomes.flaky
@@ -3014,7 +3016,7 @@ impl<'a> CoverageIndex<'a> {
         runner: Option<&str>,
         file: &str,
     ) -> Result<Vec<IndexedDecisionGap>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_DECISION_GAPS)?;
+        let descriptor = self.section(SECTION_DECISION_GAPS);
         let mut decisions = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_DECISION_GAPS, index)?;
@@ -3038,11 +3040,9 @@ impl<'a> CoverageIndex<'a> {
             if record_file != file {
                 continue;
             }
-            let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                Ok(get_usize(record, offset))
-            };
-            let conditions = number(48)?;
-            let missing_conditions = number(56)?;
+            let number = |offset: usize| get_usize(record, offset);
+            let conditions = number(48);
+            let missing_conditions = number(56);
             if conditions == 0 || missing_conditions > conditions {
                 return Err(CoverageIndexError::InvalidRecord(
                     "decision condition counts",
@@ -3052,8 +3052,8 @@ impl<'a> CoverageIndex<'a> {
                 view,
                 file: record_file,
                 id: self.string(get_u32(record, 12))?,
-                line: number(32)?,
-                column: number(40)?,
+                line: number(32),
+                column: number(40),
                 kind: self.string(get_u32(record, 20))?,
                 conditions,
                 missing_conditions,
@@ -3068,7 +3068,7 @@ impl<'a> CoverageIndex<'a> {
         view: CoverageViewId,
         dimension: CoverageDimension,
     ) -> Result<Vec<IndexedDimensionCoverage>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_DIMENSIONS)?;
+        let descriptor = self.section(SECTION_DIMENSIONS);
         let mut values = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_DIMENSIONS, index)?;
@@ -3106,7 +3106,7 @@ impl<'a> CoverageIndex<'a> {
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedScopeEntry>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_SCOPE_ENTRIES)?;
+        let descriptor = self.section(SECTION_SCOPE_ENTRIES);
         let mut entries = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_SCOPE_ENTRIES, index)?;
@@ -3200,7 +3200,7 @@ impl<'a> CoverageIndex<'a> {
         file: &str,
         line: usize,
     ) -> Result<Option<IndexedLine>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_LINES)?;
+        let descriptor = self.section(SECTION_LINES);
         let mut found = None;
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_LINES, index)?;
@@ -3249,7 +3249,7 @@ impl<'a> CoverageIndex<'a> {
         view: CoverageViewId,
         file: Option<&str>,
     ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_LINES)?;
+        let descriptor = self.section(SECTION_LINES);
         let mut lines = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_LINES, index)?;
@@ -3281,7 +3281,7 @@ impl<'a> CoverageIndex<'a> {
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedTestSummary>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_TEST_SUMMARIES)?;
+        let descriptor = self.section(SECTION_TEST_SUMMARIES);
         let mut tests = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_SUMMARIES, index)?;
@@ -3348,7 +3348,7 @@ impl<'a> CoverageIndex<'a> {
         }
         let offset = get_u64(record, 8);
         let count = get_u64(record, 16);
-        let descriptor = self.index.descriptor(SECTION_VECTOR_VALUES)?;
+        let descriptor = self.section(SECTION_VECTOR_VALUES);
         let end = offset
             .checked_add(count)
             .ok_or(CoverageIndexError::InvalidRecord("vector value range"))?;
@@ -3405,7 +3405,7 @@ impl<'a> CoverageIndex<'a> {
                 .map(Some)
                 .ok_or(CoverageIndexError::InvalidRecord("unknown test relation"))
         };
-        let descriptor = self.index.descriptor(SECTION_TEST_RETRIES)?;
+        let descriptor = self.section(SECTION_TEST_RETRIES);
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_RETRIES, index)?;
             if record[1..4].iter().any(|byte| *byte != 0) {
@@ -3415,7 +3415,7 @@ impl<'a> CoverageIndex<'a> {
                 details[position].retries.push(get_usize(record, 8));
             }
         }
-        let descriptor = self.index.descriptor(SECTION_TEST_ATTEMPTS)?;
+        let descriptor = self.section(SECTION_TEST_ATTEMPTS);
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_ATTEMPTS, index)?;
             if record[1..4].iter().any(|byte| *byte != 0) {
@@ -3431,7 +3431,7 @@ impl<'a> CoverageIndex<'a> {
                     });
             }
         }
-        let descriptor = self.index.descriptor(SECTION_TEST_LINES)?;
+        let descriptor = self.section(SECTION_TEST_LINES);
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_LINES, index)?;
             if record[1..4].iter().any(|byte| *byte != 0)
@@ -3448,7 +3448,7 @@ impl<'a> CoverageIndex<'a> {
                     });
             }
         }
-        let descriptor = self.index.descriptor(SECTION_TEST_HITS)?;
+        let descriptor = self.section(SECTION_TEST_HITS);
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_HITS, index)?;
             if record[1..4].iter().any(|byte| *byte != 0)
@@ -3462,8 +3462,8 @@ impl<'a> CoverageIndex<'a> {
                     .push(self.string(get_u32(record, 8))?);
             }
         }
-        let descriptor = self.index.descriptor(SECTION_TEST_DECISIONS)?;
-        let vectors = self.index.descriptor(SECTION_TEST_VECTORS)?.count;
+        let descriptor = self.section(SECTION_TEST_DECISIONS);
+        let vectors = self.section(SECTION_TEST_VECTORS).count;
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_DECISIONS, index)?;
             if record[1..4].iter().any(|byte| *byte != 0)
@@ -3516,7 +3516,7 @@ impl<'a> CoverageIndex<'a> {
         view: CoverageViewId,
         file: Option<&str>,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_HIT_METADATA)?;
+        let descriptor = self.section(SECTION_HIT_METADATA);
         let mut metadata = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_HIT_METADATA, index)?;
@@ -3580,7 +3580,7 @@ impl<'a> CoverageIndex<'a> {
         view: CoverageViewId,
         file: Option<&str>,
     ) -> Result<Vec<IndexedLimitation>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_LIMITATIONS)?;
+        let descriptor = self.section(SECTION_LIMITATIONS);
         let mut limitations = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_LIMITATIONS, index)?;
@@ -3615,7 +3615,7 @@ impl<'a> CoverageIndex<'a> {
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<crate::coverage_report::DecisionMeta>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_DECISION_METADATA)?;
+        let descriptor = self.section(SECTION_DECISION_METADATA);
         let mut metadata = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_DECISION_METADATA, index)?;
@@ -3724,12 +3724,12 @@ impl<'a> CoverageIndex<'a> {
             .into_iter()
             .map(|meta| (meta.id.clone(), meta))
             .collect::<HashMap<_, _>>();
-        let descriptor = self.index.descriptor(SECTION_DECISION_DETAILS)?;
+        let descriptor = self.section(SECTION_DECISION_DETAILS);
         let observation_count = self
             .index
             .descriptor(SECTION_DECISION_VECTOR_OBSERVATIONS)?
             .count;
-        let condition_count = self.index.descriptor(SECTION_DECISION_CONDITIONS)?.count;
+        let condition_count = self.section(SECTION_DECISION_CONDITIONS).count;
         let mut decisions = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_DECISION_DETAILS, index)?;
@@ -3810,7 +3810,7 @@ impl<'a> CoverageIndex<'a> {
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedPhaseSummary>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_PHASE_SUMMARIES)?;
+        let descriptor = self.section(SECTION_PHASE_SUMMARIES);
         let mut phases = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_PHASE_SUMMARIES, index)?;
@@ -3843,7 +3843,7 @@ impl<'a> CoverageIndex<'a> {
         file: &str,
         line: usize,
     ) -> Result<Vec<IndexedAnchor>, CoverageIndexError> {
-        let descriptor = self.index.descriptor(SECTION_ANCHORS)?;
+        let descriptor = self.section(SECTION_ANCHORS);
         let mut anchors = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_ANCHORS, index)?;
@@ -3919,11 +3919,10 @@ fn decode_summary(
     flags_offset: usize,
     base: usize,
 ) -> Result<CoverageSummary, CoverageIndexError> {
-    let number =
-        |offset: usize| -> Result<usize, CoverageIndexError> { Ok(get_usize(record, offset)) };
+    let number = |offset: usize| get_usize(record, offset);
     let count = |offset: usize| -> Result<CoverageCount, CoverageIndexError> {
-        let covered = number(offset)?;
-        let total = number(offset + 8)?;
+        let covered = number(offset);
+        let total = number(offset + 8);
         if covered > total {
             return Err(CoverageIndexError::InvalidRecord("covered exceeds total"));
         }
@@ -3933,11 +3932,11 @@ fn decode_summary(
             percentage: percentage(covered, total),
         })
     };
-    let decisions = number(base)?;
-    let executed_decisions = number(base + 8)?;
-    let covered_decisions = number(base + 16)?;
-    let conditions = number(base + 24)?;
-    let covered_conditions = number(base + 32)?;
+    let decisions = number(base);
+    let executed_decisions = number(base + 8);
+    let covered_decisions = number(base + 16);
+    let conditions = number(base + 24);
+    let covered_conditions = number(base + 32);
     if covered_decisions > executed_decisions
         || executed_decisions > decisions
         || covered_conditions > conditions
@@ -5330,6 +5329,79 @@ mod tests {
             read += index.phase_summaries(view)?.len();
         }
         Ok(read)
+    }
+
+    /// Every reader, in every view, each on its own: one refusing does not
+    /// keep the others from reading.
+    fn read_each(index: &CoverageIndex<'_>) -> usize {
+        let mut refused = usize::from(index.model().is_err());
+        for view in [
+            CoverageViewId::All,
+            CoverageViewId::Passed,
+            CoverageViewId::Failed,
+        ] {
+            refused += usize::from(index.summary(view).is_err());
+            refused += usize::from(index.file_gaps(view, None, None).is_err());
+            for dimension in [
+                CoverageDimension::Kind,
+                CoverageDimension::Runner,
+                CoverageDimension::Tests,
+            ] {
+                refused += usize::from(index.dimensions(view, dimension).is_err());
+            }
+            refused += usize::from(index.scope_entries(view).is_err());
+            match index.lines(view) {
+                Ok(lines) => {
+                    for line in &lines {
+                        refused += usize::from(index.anchors(view, &line.file, line.line).is_err());
+                    }
+                }
+                Err(_) => refused += 1,
+            }
+            refused += usize::from(index.test_summaries(view).is_err());
+            refused += usize::from(index.test_details(view).is_err());
+            refused += usize::from(index.hit_metadata(view).is_err());
+            refused += usize::from(index.limitations(view).is_err());
+            refused += usize::from(index.decision_metadata(view).is_err());
+            refused += usize::from(index.decision_details(view).is_err());
+            refused += usize::from(index.phase_summaries(view).is_err());
+        }
+        refused
+    }
+
+    /// A page damaged on disk after the index was written and signed is
+    /// refused where it is first read, by each reader that reads it: pages
+    /// are authenticated as they are read, not when the index is opened.
+    #[test]
+    fn a_page_damaged_on_disk_is_refused_by_each_reader_that_reads_it() {
+        for report in [report(), scoped_report()] {
+            let kinds = coverage_index_sections(&report)
+                .unwrap()
+                .iter()
+                .map(|section| section.kind)
+                .collect::<Vec<_>>();
+            let (root, container) = index_of(&report, &|_| {});
+            let descriptors = kinds
+                .iter()
+                .map(|kind| container.descriptor(*kind).unwrap())
+                .filter(|descriptor| descriptor.length > 0)
+                .collect::<Vec<_>>();
+            drop(container);
+            let path = root.join("query-index.v1.bin");
+            let pristine = fs::read(&path).unwrap();
+            let mut refused = 0;
+            for descriptor in descriptors {
+                let mut bytes = pristine.clone();
+                bytes[descriptor.offset as usize] ^= 0xff;
+                fs::write(&path, &bytes).unwrap();
+                let container = QueryIndex::open(&path, &identity()).unwrap();
+                refused += match CoverageIndex::new(&container) {
+                    Ok(index) => read_each(&index),
+                    Err(_) => 1,
+                };
+            }
+            assert!(refused > 0);
+        }
     }
 
     /// Whatever one byte of a correctly signed index says, every reader
