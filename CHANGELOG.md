@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A Rust Worker that `cargo test` starts is measured whatever configuration the test gives `wrangler dev`, wherever it is and whatever its `main` imports: a test kit that writes its own configuration per test, with a module of its own that loads the built Worker, is measured as the crate's own configuration is. Supercov hands `wrangler dev` a copy of the configuration beside it, removed when wrangler exits, and leaves every configuration as it was written.
+- `SUPERCOV_RUN_ID` is set in every process a measured Rust, Go or Java/Kotlin command starts, as it already was for JavaScript, Python and Ruby, and is documented as the way a test knows it is measured.
+
+**Fixed**
+
+- A test that copied a Worker crate's `wrangler.toml` as a template for its own got a `main` naming Supercov's entry, which wrangler could not find beside the copy; the crate's configuration is no longer rewritten.
+- Where tests started `wrangler dev` and no measured build of a Worker crate ran in it, its files name each `wrangler dev -c <path>` the tests started and why one was not measured, instead of saying no test started a Worker.
+- wrangler's `.wrangler/` state in the copy was synced back into the project; it stays in the copy.
+- `cargo test -- --nocapture` under Supercov showed nothing a test printed; each test runs without capture and its output is shown as it is written.
+
 ## 4.20.0
 
 **Added**

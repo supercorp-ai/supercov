@@ -308,10 +308,39 @@ What a project needs:
 
 The project needs no `cfg` flag or build step of its own for Supercov.
 
+#### What a test harness can rely on
+
+- **Any configuration, anywhere.** A test may write its own wrangler
+  configuration, per test, outside the crate, with a `main` of its own: a
+  module that loads the built Worker and adds stand-ins or test controls.
+  Supercov leaves every configuration as it was written. When a test runs
+  `wrangler dev`, Supercov's `wrangler` hands it a copy of the configuration
+  it was given (`-c`, or the one wrangler finds from its directory), beside
+  the original as `.supercov-wrangler-<pid>-<n>.toml` (or `.json`), whose
+  `main` is a small entry that remembers the Worker's wasm instances and then
+  loads your `main`. The copy is removed once that `wrangler` exits. A Worker
+  is read when wasm built from the crate's measured source runs in it,
+  whatever the configuration's `main` imports.
+- **The measured build.** The configuration's `[build]` builds the crate
+  with worker-build (any `cwd`), or its `main` imports a build made in the
+  run's copy. A `build/` made before the run, without probes, has nothing to
+  read.
+- **Why a Worker was not measured.** Where tests started `wrangler dev` and
+  no measured build ran in it, the Worker's files name each `wrangler dev -c
+  <path>` the tests started, and why a configuration was left as it was (no
+  `main`, say), in `gaps` and the file view.
+- **`--inspector-port`.** A test may pass its own: Supercov reads the Worker
+  through that port.
+- **Knowing the run is measured.** `SUPERCOV_RUN_ID` is set in every process
+  a measured command starts, holding the run's id. The other `SUPERCOV_`
+  variables a test may see are Supercov's own wiring and change without
+  notice.
+- **Output.** `cargo test -- --nocapture` shows each test's output as it is
+  written, as plain `cargo test` does.
+
 The Worker built with probes stays in the copy: its `build/` output is never
-returned to the project, and neither is the copy's configuration, which
-points `main` at Supercov's entry. wrangler's `.wrangler/` state is not a
-build input, so writing it does not make the run stale.
+returned to the project, nor are wrangler's `.wrangler/` state and the
+configuration copies above. Writing them does not make the run stale.
 
 ### Rust tests compiled to wasm
 

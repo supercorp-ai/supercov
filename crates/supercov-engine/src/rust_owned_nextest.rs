@@ -90,6 +90,8 @@ pub struct NextestOutcome {
     pub built_crates: BTreeSet<String>,
     /// A test started a Worker with `wrangler dev --remote`.
     pub remote_workers: bool,
+    /// The `wrangler dev` the tests started, by their notes.
+    pub started_workers: Vec<String>,
 }
 
 // -------------------------------------------------------------- the engine
@@ -115,6 +117,7 @@ pub(crate) fn run_nextest(
             .current_dir(&project.workspace_root)
             .env("CARGO_TARGET_DIR", &project.target_directory)
             .env("RUSTFLAGS", capped_rustflags(project, invocation))
+            .env(crate::rust_runtime::RUN_ID_ENV, run_id)
             // Every test process descends from this one, through this
             // program as nextest's runner: a test that starts `wrangler dev`
             // finds Supercov's first, as under `cargo test`.
@@ -248,6 +251,7 @@ pub(crate) fn run_nextest(
     let mut ran = BTreeSet::new();
     let mut built_crates = BTreeSet::new();
     let mut remote_workers = false;
+    let mut started_workers = Vec::new();
     let mut results = Vec::with_capacity(records.len());
     for record in records {
         let key = (record.binary_id.clone(), record.test_name.clone());
@@ -283,6 +287,7 @@ pub(crate) fn run_nextest(
         let attempt_id = format!("{run_id}:{}:{}", record.runner_attempt_id, record.attempt);
         if rust_workers.is_some() {
             remote_workers |= crate::rust_worker::started_remote(&record.evidence);
+            started_workers.extend(crate::rust_worker::started_worker_configs(&record.evidence));
             built_crates.extend(
                 crate::rust_worker::materialize_worker_windows(
                     &record.evidence,
@@ -350,6 +355,7 @@ pub(crate) fn run_nextest(
         results,
         built_crates,
         remote_workers,
+        started_workers,
         artifact_files: artifacts
             .into_values()
             .map(|artifact| artifact.executable)

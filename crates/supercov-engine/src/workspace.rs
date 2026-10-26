@@ -1832,6 +1832,18 @@ fn jvm_build_state(workspace: &Path, relative: &Path) -> bool {
     false
 }
 
+/// What a run leaves in the copy that is no output of the command's own:
+/// wrangler's local state (`.wrangler/`, its dev server's cache and
+/// storage), and the wrapped configurations Supercov hands `wrangler dev`.
+/// Returned, they put a Worker's dev state and Supercov's files in the
+/// project.
+fn run_state(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        name == ".wrangler" || name.starts_with(crate::rust_worker::WRAPPED_PREFIX)
+    })
+}
+
 /// `sync_command_outputs` for a command of any of the languages that run in
 /// a copy.
 pub fn sync_outputs_of(
@@ -1861,7 +1873,7 @@ pub fn sync_outputs_of(
     let mut built_directories = BuiltDirectories::new(root);
     let mut cargo_targets = CargoTargets::new(workspace);
     for (relative, state) in &current {
-        if baseline.entries.get(relative) == Some(state) {
+        if baseline.entries.get(relative) == Some(state) || run_state(relative) {
             continue;
         }
         if !protected.contains(relative) {
@@ -4149,6 +4161,33 @@ mod tests {
             )]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// wrangler's local state and the configurations Supercov wraps for
+    /// `wrangler dev` stay in the copy; the command's own outputs beside
+    /// them still flow back.
+    #[test]
+    fn wrangler_state_and_wrapped_configurations_stay_in_the_copy() {
+        let (root, workspace) = writeback_fixture("wrangler-state");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        for (file, text) in [
+            (".wrangler/state/v3/d1.sqlite", "state"),
+            ("worker/.wrangler/tmp/bundle.js", "bundle"),
+            ("worker/.supercov-wrangler-1-0.toml", "main = \"x\"\n"),
+            (
+                "worker/.supercov-wrangler-1-0/supercov-worker-entry.mjs",
+                "entry",
+            ),
+            ("worker/report.txt", "the command's own"),
+        ] {
+            fs::create_dir_all(workspace.join(file).parent().unwrap()).unwrap();
+            fs::write(workspace.join(file), text).unwrap();
+        }
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        assert_eq!(sync.synced_paths, [PathBuf::from("worker/report.txt")]);
+        assert!(!root.join(".wrangler").exists());
+        assert!(!root.join("worker/.wrangler").exists());
+        assert!(!root.join("worker/.supercov-wrangler-1-0.toml").exists());
     }
 
     /// A lockfile Cargo wrote stays in the copy, and a manifest the command

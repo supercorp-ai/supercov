@@ -200,6 +200,19 @@ struct ProcessOutcome {
     output: Output,
 }
 
+/// A line of a test process's standard output shown while it runs without
+/// capture: libtest's frame of each one-test process (`running 1 test`, its
+/// `test result:` and the blank lines around them) is the run's to report,
+/// once, and not each process's.
+fn shown_without_capture(line: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(line);
+    let text = text.trim();
+    !(text.is_empty()
+        || text.starts_with("running ") && text.ends_with(" test")
+        || text.starts_with("running ") && text.ends_with(" tests")
+        || text.starts_with("test result: "))
+}
+
 /// A command line split the way POSIX `sh` splits a script's: quotes group,
 /// `''` and `""` are an empty word, and inside double quotes a backslash
 /// escapes only `$`, `` ` ``, `"`, `\` and a newline.
@@ -2081,15 +2094,28 @@ fn worker_files(project: &PreparedRustProject, keys: &BTreeSet<String>) -> BTree
 /// starts it with `wrangler dev`; plain `cargo test` compiles the crate and
 /// never runs it. Where no test of the run did, each of its files says so,
 /// rather than reading as code the tests missed.
+///
+/// Where tests did start `wrangler dev` and none loaded this crate's measured
+/// build, the files name what they started, and why a configuration was left
+/// unmeasured where it was.
 fn note_unrun_workers(
     project: &mut PreparedRustProject,
     built_crates: &BTreeSet<String>,
     remote: bool,
+    started: &[String],
 ) {
+    let mut started = started.to_vec();
+    started.sort();
+    started.dedup();
     let reason = if remote {
-        "A Rust Worker started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector, so what it ran cannot be read; a test that starts it with `wrangler dev` measures it"
+        "A Rust Worker started with `wrangler dev --remote`: it ran on Cloudflare's edge, where wrangler opens no inspector, so what it ran cannot be read; a test that starts it with `wrangler dev` measures it".to_owned()
+    } else if started.is_empty() {
+        "A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`, and no test of this run did".to_owned()
     } else {
-        "A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`, and no test of this run did"
+        format!(
+            "A Rust Worker no test's `wrangler dev` ran: the tests started {}, and none loaded a build of this crate's measured source; a configuration whose `[build]` builds the crate with worker-build, or whose `main` imports such a build, is measured",
+            started.join("; ")
+        )
     };
     let ran = worker_files(project, built_crates);
     let unrun = worker_files(project, &project.probes.workers)
@@ -2202,7 +2228,12 @@ pub fn run_prepared_rust_tests(
             diagnostics,
         )?;
         let mut project = project.clone();
-        note_unrun_workers(&mut project, &outcome.built_crates, outcome.remote_workers);
+        note_unrun_workers(
+            &mut project,
+            &outcome.built_crates,
+            outcome.remote_workers,
+            &outcome.started_workers,
+        );
         let project = &project;
         let artifact_count = outcome.artifact_files.len();
         let project = &PreparedRustProject {
@@ -2315,42 +2346,58 @@ pub fn run_prepared_rust_tests(
     let outcomes = Mutex::new(Vec::<Result<ProcessOutcome, String>>::with_capacity(
         tasks.len(),
     ));
+    // Asked to run without capture, each test does, and what it writes is
+    // shown as it writes it: a test that starts a server and prints while it
+    // waits is seen waiting.
+    let uncaptured = invocation
+        .runner_arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--nocapture" | "--no-capture"));
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     let Some(task) = tasks.get(index) else { break };
-                    let result = crate::child_signal_guard::output(
-                        launcher
-                            .command(&task.artifact.executable, Some(&task.directory))
-                            // No --nocapture: libtest's in-memory capture is what
-                            // plain `cargo test` gives users, and it re-emits a
-                            // failing test's output, which `.output()` still
-                            // receives. Streaming instead turns every print in a
-                            // hot loop into an unbuffered stderr syscall: bytes'
-                            // advance_bytes_mut_remaining_capacity prints per
-                            // iteration, and --nocapture alone cost 6.9s of its
-                            // 14.4s (baseline 8.0s streamed vs 1.0s captured).
-                            .args(["--exact", &task.test])
-                            .args(&ignored_mode)
-                            .args(coloured_results.then_some("--color=always"))
-                            .current_dir(&task.artifact.package_directory)
-                            .envs(instrumented_stack_environment())
-                            .envs(dynamic_library_environment(
-                                &target_libdir,
-                                &task.artifact.executable,
-                            ))
-                            .envs(crate::rust_runtime::evidence_environment(
-                                &project.probes.token,
-                                &task.directory,
-                            ))
-                            .envs(
-                                rust_workers
-                                    .iter()
-                                    .flat_map(|workers| workers.environment()),
-                            ),
-                    )
+                    let run = |command: &mut Command| {
+                        if uncaptured {
+                            crate::child_signal_guard::output_streamed(
+                                command.arg("--nocapture"),
+                                shown_without_capture,
+                            )
+                        } else {
+                            crate::child_signal_guard::output(command)
+                        }
+                    };
+                    let result = run(launcher
+                        .command(&task.artifact.executable, Some(&task.directory))
+                        // No --nocapture unless asked: libtest's in-memory capture is what
+                        // plain `cargo test` gives users, and it re-emits a
+                        // failing test's output, which `.output()` still
+                        // receives. Streaming instead turns every print in a
+                        // hot loop into an unbuffered stderr syscall: bytes'
+                        // advance_bytes_mut_remaining_capacity prints per
+                        // iteration, and --nocapture alone cost 6.9s of its
+                        // 14.4s (baseline 8.0s streamed vs 1.0s captured).
+                        .args(["--exact", &task.test])
+                        .args(&ignored_mode)
+                        .args(coloured_results.then_some("--color=always"))
+                        .current_dir(&task.artifact.package_directory)
+                        .envs(instrumented_stack_environment())
+                        .env(crate::rust_runtime::RUN_ID_ENV, run_id)
+                        .envs(dynamic_library_environment(
+                            &target_libdir,
+                            &task.artifact.executable,
+                        ))
+                        .envs(crate::rust_runtime::evidence_environment(
+                            &project.probes.token,
+                            &task.directory,
+                        ))
+                        .envs(
+                            rust_workers
+                                .iter()
+                                .flat_map(|workers| workers.environment()),
+                        ))
                     .map(|output| ProcessOutcome {
                         task: ProcessTask {
                             ordinal: task.ordinal,
@@ -2384,9 +2431,13 @@ pub fn run_prepared_rust_tests(
     // run's own build never compiled them.
     let mut built_crates = BTreeSet::new();
     let mut remote = false;
+    let mut started = Vec::new();
     if rust_workers.is_some() {
         for outcome in &outcomes {
             remote |= crate::rust_worker::started_remote(&outcome.task.directory);
+            started.extend(crate::rust_worker::started_worker_configs(
+                &outcome.task.directory,
+            ));
             built_crates.extend(
                 crate::rust_worker::materialize_worker_windows(
                     &outcome.task.directory,
@@ -2397,7 +2448,7 @@ pub fn run_prepared_rust_tests(
         }
     }
     let mut project = project.clone();
-    note_unrun_workers(&mut project, &built_crates, remote);
+    note_unrun_workers(&mut project, &built_crates, remote, &started);
     let project = &project;
     // What `cargo test` prints for each binary: every test, the failures
     // together, one result.
@@ -3192,8 +3243,14 @@ mod tests {
             ("host".to_owned(), vec!["host/src/lib.rs".to_owned()]),
         ]);
         project.probes.workers = BTreeSet::from(["plane".to_owned(), "runners".to_owned()]);
+        let empty = project.clone();
         for _ in 0..2 {
-            note_unrun_workers(&mut project, &BTreeSet::from(["plane".to_owned()]), false);
+            note_unrun_workers(
+                &mut project,
+                &BTreeSet::from(["plane".to_owned()]),
+                false,
+                &[],
+            );
         }
         assert_eq!(
             project
@@ -3204,6 +3261,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["rust-worker-not-run#runners/src/lib.rs"]
         );
+        assert!(
+            project.manifest.limitations[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no test of this run did")
+        );
+        // Tests that did start `wrangler dev` are named, once each, with why
+        // a configuration was not measured.
+        let mut started = empty;
+        let configs = [
+            "`wrangler dev -c tests/w.toml`".to_owned(),
+            "`wrangler dev -c tests/other.toml`, not measured because it names no `main`"
+                .to_owned(),
+            "`wrangler dev -c tests/w.toml`".to_owned(),
+        ];
+        note_unrun_workers(&mut started, &BTreeSet::new(), false, &configs);
+        let reason = started.manifest.limitations[0]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains(
+                "the tests started `wrangler dev -c tests/other.toml`, not measured because it names no `main`; `wrangler dev -c tests/w.toml`, and none loaded"
+            ),
+            "{reason}"
+        );
+    }
+
+    /// Without capture, a test's own lines are shown and libtest's frame of
+    /// each one-test process is not.
+    #[test]
+    fn a_test_without_capture_shows_its_lines_and_not_each_frame() {
+        for frame in [
+            "\n",
+            "running 1 test\n",
+            "running 2 tests\n",
+            "test result: ok. 1 passed\n",
+        ] {
+            assert!(!shown_without_capture(frame.as_bytes()), "{frame}");
+        }
+        for line in ["test a ... ok\n", "hello\n", "running late\n", "running"] {
+            assert!(shown_without_capture(line.as_bytes()), "{line}");
+        }
     }
 
     #[cfg(unix)]
