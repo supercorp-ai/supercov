@@ -4157,8 +4157,15 @@ pub(crate) mod tests {
         fs::write(&file, b"x").unwrap();
         assert!(read(&file).starts_with("Io"), "{}", read(&file));
         // Below a file nothing can be found, which is no race to forgive.
+        // Windows answers such a path as not found: there it reads as a slot
+        // its process already removed.
         let below = file.join("p.1.slot");
-        assert!(entry_metadata("p.1.slot", &below).is_err());
+        let metadata = entry_metadata("p.1.slot", &below);
+        if cfg!(unix) {
+            assert!(metadata.is_err());
+        } else {
+            assert!(matches!(metadata, Ok(None)), "{metadata:?}");
+        }
         assert!(map_slot(&below).is_err());
         let no_marker = |marker: &Path| {
             materialize_shared_slot(marker, "p.1.slot", &|_| unreachable!()).map_err(|_| ())
