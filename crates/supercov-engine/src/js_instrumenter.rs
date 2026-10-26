@@ -10787,6 +10787,77 @@ mod tests {
         }
     }
 
+    /// TypeScript's wrappers wherever a value can stand -- a callee, an
+    /// assignment target, a property read, an anonymous definition, an
+    /// optional chain -- and labelled statements, logical assignments and
+    /// methods: each is instrumented to TypeScript that parses again.
+    #[test]
+    fn typescript_wrappers_and_labels_instrument_to_source_that_parses() {
+        let source = r#"declare const fetcher: any, obj: any, key: string, flag: boolean, maybe: any;
+type F = () => number;
+export class Box {
+    #inner = 1;
+    value = 0;
+    method() { return this.#inner; }
+    get size() { return this.value; }
+    reset(other: Box | undefined) {
+        (this.#inner as any) = 2;
+        (this.value satisfies number);
+        (this.value as number) = 3;
+        (this.value satisfies number) = 4;
+        this.value! = 5;
+        (<number>this.value) = 6;
+        (this.value) = 7;
+        return other?.value ?? maybe?.box!.value;
+    }
+}
+export function shapes(n: number): unknown {
+    (fetcher as any)(1);
+    (fetcher satisfies unknown);
+    fetcher!(2);
+    (<any>fetcher)(3);
+    obj["run"](4);
+    fetcher()(5);
+    const anonymous = (function () { return 1; }) satisfies F;
+    const asserted = <F>(function () { return 2; });
+    const forced = (() => 3)!;
+    const read = (obj as any).field ?? (obj!).other ?? (<any>obj).third ?? (obj satisfies object);
+    let a: number | undefined;
+    a ??= n;
+    a ||= 1;
+    a &&= 2;
+    const either = flag || true;
+    const both = flag && false;
+    outer: try {
+        if (n > 1) break outer;
+    } finally {
+        n++;
+    }
+    choose: switch (n) {
+        case 1:
+            break choose;
+        default:
+            n--;
+    }
+    loop: for (let i = 0; i < n; i++) {
+        if (i > 2) break loop;
+    }
+    const chained = obj?.[key]?.call!(n) ?? obj?.list?.at(0);
+    return [anonymous, asserted, forced, read, a, either, both, chained];
+}
+"#;
+        let output =
+            analyze_candidate(source, "src/shapes.ts").unwrap_or_else(|error| panic!("{error:?}"));
+        let allocator = Allocator::default();
+        let reparsed = Parser::new(&allocator, &output.code, SourceType::ts()).parse();
+        assert!(
+            reparsed.errors.is_empty(),
+            "{:?}\n{}",
+            reparsed.errors,
+            output.code
+        );
+    }
+
     #[test]
     fn direct_runtime_mode_has_no_virtual_module_or_legacy_global() {
         for file in ["src/module.mjs", "src/script.cjs"] {
