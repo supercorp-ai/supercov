@@ -1533,4 +1533,23 @@ mod tests {
         assert_eq!(collector.manifest.branches.len(), 2);
         assert_eq!(collector.plan.loops.len(), 1);
     }
+
+    #[test]
+    fn each_python_instrumenter_error_says_what_failed() {
+        use super::PythonInstrumenterError as E;
+        let messages = [
+            E::SourceTooLarge,
+            E::Parse("bad indent".into()),
+            E::InvalidRange,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Python source exceeds the parser range",
+                "Python parse failed: bad indent",
+                "Python parser returned an invalid range",
+            ]
+        );
+    }
 }

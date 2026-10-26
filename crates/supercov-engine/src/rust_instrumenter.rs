@@ -3139,6 +3139,29 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[test]
+    fn each_instrumenter_error_says_what_failed() {
+        use super::RustInstrumenterError as E;
+        let messages = [
+            E::SourceTooLarge,
+            E::Parse(vec!["one".into(), "two".into()]),
+            E::InvalidRange,
+            E::InvalidRuntimePath,
+            E::Internal("boom".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Rust source exceeds the parser range",
+                "Rust parse failed: one; two",
+                "Rust parser returned an invalid range",
+                "invalid generated Rust runtime path",
+                "an internal error: boom",
+            ]
+        );
+    }
+
     use super::*;
 
     /// The names instrumentation generated in `code`, other than the

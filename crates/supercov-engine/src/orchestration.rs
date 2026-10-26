@@ -510,4 +510,24 @@ mod tests {
         assert!(!log.exists());
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn each_orchestration_error_says_what_failed() {
+        use super::OrchestrationError as E;
+        let messages = [
+            E::InvalidPlan("cycle".into()),
+            E::PhaseSetup {
+                phase: "server".into(),
+                reason: "port".into(),
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "invalid execution plan: cycle",
+                "could not prepare server phase: port",
+            ]
+        );
+    }
 }

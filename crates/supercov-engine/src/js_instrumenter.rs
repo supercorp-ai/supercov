@@ -13585,4 +13585,29 @@ mod tests {
         );
         assert_eq!(printed, "2,3,0\n4,4,0\n5,5,1\n1,-1,0");
     }
+
+    #[test]
+    fn each_candidate_error_says_what_failed() {
+        use super::CandidateError as E;
+        let messages = [
+            E::UnknownSourceType("a.txt".into()),
+            E::Parse(vec!["one".into(), "two".into()]),
+            E::Internal("boom".into()),
+            E::CommentPreservation {
+                expected: 2,
+                actual: 1,
+                detail: "lost".into(),
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "no JavaScript source type for a.txt",
+                "one; two",
+                "an internal error: boom",
+                "2 comments in the source, 1 after instrumenting: lost",
+            ]
+        );
+    }
 }

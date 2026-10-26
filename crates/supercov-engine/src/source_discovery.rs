@@ -2377,4 +2377,26 @@ mod tests {
         assert_eq!(listed, [root.join("apps/web")]);
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn each_source_discovery_error_says_what_failed() {
+        use super::SourceDiscoveryError as E;
+        let messages = [
+            E::Io {
+                path: std::path::PathBuf::from("a"),
+                source: std::io::Error::other("disk full"),
+            },
+            E::NonUtf8Path(std::path::PathBuf::from("a")),
+            E::InvalidRoot(std::path::PathBuf::from("a")),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "a: disk full",
+                "source path is not valid UTF-8: a",
+                "source root is not a regular file or directory: a",
+            ]
+        );
+    }
 }

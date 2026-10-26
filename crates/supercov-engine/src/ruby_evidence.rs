@@ -2767,4 +2767,64 @@ pub(crate) mod tests {
             crate::coverage_report::ATTRIBUTION_PARTIAL
         );
     }
+
+    #[test]
+    fn each_ruby_evidence_error_says_what_failed() {
+        use super::RubyEvidenceError as E;
+        let messages = [
+            E::Io("gone".into()),
+            E::UnsafeEntry("../e".into()),
+            E::InvalidRecord {
+                file: "e".into(),
+                line: 2,
+                reason: "json".into(),
+            },
+            E::InvalidTransport {
+                file: "e".into(),
+                reason: "size".into(),
+            },
+            E::DroppedRecords {
+                file: "e".into(),
+                count: 3,
+            },
+            E::RunMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            E::UnsupportedVersion(9),
+            E::UnknownContext {
+                file: "e".into(),
+                line: 2,
+                context: 7,
+            },
+            E::UnknownObligation("o".into()),
+            E::InvalidVector {
+                id: "d".into(),
+                expected: 2,
+                actual: 3,
+            },
+            E::NoInterpreter,
+            E::NoTests,
+            E::UnsupportedRuby("3.2.0".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "could not read Ruby evidence: gone",
+                "unsafe Ruby evidence entry: ../e",
+                "invalid Ruby evidence record e:2: json",
+                "invalid Ruby evidence transport e: size",
+                "Ruby evidence transport e exhausted its bounded capacity and dropped 3 record(s)",
+                "Ruby evidence belongs to run b, expected a",
+                "unsupported Ruby evidence version 9",
+                "Ruby evidence e:2 references undeclared context 7",
+                "Ruby runtime reported an unknown obligation: o",
+                "Ruby decision d reported 3 condition values, expected 2",
+                "no Supercov-hooked Ruby interpreter ran: the test command did not start Ruby 3.3+ with Supercov's RUBYOPT hook (RUBYOPT may be cleared by the command, or the runner is not Ruby)",
+                "the Ruby run produced no test outcomes; Supercov measures Ruby through RSpec, Minitest, test-unit and Cucumber",
+                "Supercov measures Ruby 3.3 or newer; the test command ran Ruby 3.2.0",
+            ]
+        );
+    }
 }

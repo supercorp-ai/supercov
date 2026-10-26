@@ -1637,4 +1637,33 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();
     }
+
+    #[test]
+    fn each_integrity_error_says_what_failed() {
+        use super::IntegrityError as E;
+        let messages = [
+            E::Io {
+                path: std::path::PathBuf::from("a"),
+                source: std::io::Error::other("disk full"),
+            },
+            E::UnsafeFile(std::path::PathBuf::from("a")),
+            E::NonUtf8Path(std::path::PathBuf::from("a")),
+            E::OutsideRoot {
+                root: std::path::PathBuf::from("r"),
+                path: std::path::PathBuf::from("a"),
+            },
+            E::InvalidEngineDigest("engine"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "a: disk full",
+                "fingerprint input is not a regular file: a",
+                "fingerprint path is not valid UTF-8: a",
+                "fingerprint input a is outside r",
+                "invalid engine SHA-256",
+            ]
+        );
+    }
 }

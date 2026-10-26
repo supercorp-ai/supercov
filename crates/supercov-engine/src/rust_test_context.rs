@@ -132,4 +132,27 @@ mod tests {
             ["first", "second"]
         );
     }
+
+    #[test]
+    fn each_test_context_error_says_what_failed() {
+        use super::RustTestContextError as E;
+        let messages = [
+            E::InvalidTestName,
+            E::DuplicateTest("a::b".into()),
+            E::Collision {
+                context_id: 255,
+                first: "a".into(),
+                second: "b".into(),
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Rust test name is empty or contains NUL",
+                "duplicate Rust test identity a::b",
+                "Rust test context 00000000000000ff collides between a and b",
+            ]
+        );
+    }
 }

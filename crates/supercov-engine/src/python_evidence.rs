@@ -4284,4 +4284,64 @@ pub(crate) mod tests {
             1
         );
     }
+
+    #[test]
+    fn each_python_evidence_error_says_what_failed() {
+        use super::PythonEvidenceError as E;
+        let messages = [
+            E::Io("gone".into()),
+            E::UnsafeEntry("../e".into()),
+            E::InvalidRecord {
+                file: "e".into(),
+                line: 2,
+                reason: "json".into(),
+            },
+            E::InvalidTransport {
+                file: "e".into(),
+                reason: "size".into(),
+            },
+            E::DroppedRecords {
+                file: "e".into(),
+                count: 3,
+            },
+            E::RunMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            E::UnsupportedVersion(9),
+            E::UnknownContext {
+                file: "e".into(),
+                line: 2,
+                context: 7,
+            },
+            E::UnknownObligation("o".into()),
+            E::InvalidVector {
+                id: "d".into(),
+                expected: 2,
+                actual: 3,
+            },
+            E::NoInterpreter,
+            E::NoTests,
+            E::UnsupportedPython("3.8.1".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "could not read Python evidence: gone",
+                "unsafe Python evidence entry: ../e",
+                "invalid Python evidence record e:2: json",
+                "invalid Python evidence transport e: size",
+                "Python evidence transport e exhausted its bounded capacity and dropped 3 record(s)",
+                "Python evidence belongs to run b, expected a",
+                "unsupported Python evidence version 9",
+                "Python evidence e:2 references undeclared context 7",
+                "Python runtime reported an unknown obligation: o",
+                "Python decision d reported 3 condition values, expected 2",
+                "no Supercov-hooked Python interpreter ran: the test command did not start CPython 3.9+ with Supercov's start-up hook (PYTHONPATH may be ignored by -I/-E/-S, or the runner is not Python)",
+                "the Python run produced no test outcomes; Supercov measures Python through pytest and unittest",
+                "Supercov measures CPython 3.9 or newer; the test command ran Python 3.8.1",
+            ]
+        );
+    }
 }

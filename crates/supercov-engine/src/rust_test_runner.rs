@@ -2597,6 +2597,47 @@ pub fn run_prepared_rust_tests(
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn each_test_runner_error_says_what_failed() {
+        use super::RustTestRunnerError as E;
+        let messages = [
+            E::UnsupportedCommand("cargo bench is not a test command".into()),
+            E::Launch("no cargo".into()),
+            E::CargoFailed("exit 101".into()),
+            E::CargoJson("eof".into()),
+            E::UnsafeArtifact("../t".into()),
+            E::ListFailed("exit 1".into()),
+            E::Probe("header".into()),
+            E::Context("collision".into()),
+            E::UnknownProbe("o".into()),
+            E::InvalidVector {
+                id: "d".into(),
+                expected: 2,
+                actual: 3,
+            },
+            E::from(serde_json::from_str::<u8>("x").unwrap_err()),
+            E::Io("disk full".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "cargo bench is not a test command",
+                "could not launch Rust test process: no cargo",
+                "Cargo test build failed: exit 101",
+                "invalid Cargo JSON output: eof",
+                "Cargo emitted an unsafe test artifact: ../t",
+                "could not enumerate Rust tests: exit 1",
+                "invalid Rust probe evidence: header",
+                "invalid Rust test context: collision",
+                "Rust runtime emitted an unknown obligation: o",
+                "Rust decision d emitted vector width 3; expected 2",
+                "could not encode Rust evidence: expected value at line 1 column 1",
+                "disk full",
+            ]
+        );
+    }
+
     /// `--color` decides when given, in either spelling; otherwise Cargo
     /// follows CLICOLOR_FORCE, NO_COLOR and CLICOLOR, and both colour a
     /// terminal whose TERM is set and not `dumb`.

@@ -1583,4 +1583,30 @@ mod tests {
         assert_eq!(discovered.playwright_exports, ["scenario", "expect"]);
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn each_project_discovery_error_says_what_failed() {
+        use super::ProjectDiscoveryError as E;
+        let messages = [
+            E::from(crate::source_discovery::SourceDiscoveryError::InvalidRoot(
+                std::path::PathBuf::from("src"),
+            )),
+            E::Io {
+                path: std::path::PathBuf::from("a"),
+                source: std::io::Error::other("disk full"),
+            },
+            E::NoSourceFiles,
+            E::RootsLeftNothing("nothing left".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "source root is not a regular file or directory: src",
+                "a: disk full",
+                "No application source files were discovered. If your sources live somewhere unusual, set SUPERCOV_SOURCE_ROOTS=src,app. Alternatively, Supercov may not support your project layout or test framework yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+                "nothing left",
+            ]
+        );
+    }
 }
