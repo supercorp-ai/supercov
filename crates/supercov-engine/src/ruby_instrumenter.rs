@@ -3618,6 +3618,14 @@ mod tests {
             "def t(x)\n  begin\n    x.call\n  rescue StandardError\n    retry\n  end\nend\ndef u(xs)\n  xs.each { |x| redo if x }\n  xs.each do |x|\n    next x if x\n    break\n  end\nend\n",
             "def v(x)\n  if x\n    return 1\n  elsif x.nil?\n    2\n  end\nend\ndef w(x)\n  unless x\n    1\n  end\nend\ndef y(x)\n  case x\n  in 1 then return 1\n  in 2 then 2\n  end\nend\n",
             "def z(x)\n  return 1 if !x.nil?\n  return 2 if x.!\n  return 3 if !x.call(1)\n  return 4 if x&.y && !x\n  x&.(1)\n  (x)\nend\n",
+            // Empty bodies: a loop's, a `begin`'s before its rescue, a rescue's
+            // and an `in` arm's, each where a value is and where it is not.
+            "def e1(xs)\n  for x in xs\n  end\n  for y in xs do end\nend\n",
+            "def e2\n  begin\n  rescue StandardError\n    1\n  end\nend\ndef e3\n  begin\n    1\n  rescue StandardError\n  end\nend\n",
+            "def e4(x)\n  case x\n  in Integer\n  in String then 1\n  end\nend\n",
+            "def e5(x)\n  a = case x\n      when 1\n      else return 1\n      end\n  b = unless x then else return 2 end\n  c = (begin; rescue; return 3; end)\n  d = case x\n      in Integer\n      else return 4\n      end\n  [a, b, c, d]\nend\n",
+            "def e6(x)\n  y = if x then else return 1 end\n  z = if x then return 2 elsif x.nil? then else 3 end\n  [y, z]\nend\n",
+            "def e7(xs)\n  xs&.map { |x| x ? 1 : 2 }\n  xs&.each do |x|\n    next unless x\n  end\nend\n",
         ];
         for source in shapes {
             let mut next = 0;
