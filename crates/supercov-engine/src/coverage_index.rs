@@ -4590,6 +4590,47 @@ mod tests {
         }
     }
 
+    /// A limitation missing a field, or holding the wrong kind of value in
+    /// one, is refused; so is an MC/DC vector of a width its decision does
+    /// not have.
+    #[test]
+    fn a_malformed_limitation_or_vector_is_refused() {
+        let refused = |edit: &dyn Fn(&mut CoverageReport)| {
+            let mut report = report();
+            edit(&mut report);
+            match coverage_index_sections(&report) {
+                Err(CoverageIndexError::InvalidRecord(reason)) => reason,
+                other => panic!("not refused: {:?}", other.map(|_| ())),
+            }
+        };
+        for field in ["id", "kind", "file", "source", "reason", "line", "column"] {
+            let reason = refused(&|report| {
+                report.view.limitations[0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field);
+            });
+            assert_eq!(reason, "coverage limitation", "{field}");
+        }
+        for field in ["file", "kind", "line"] {
+            let reason = refused(&|report| {
+                report.view.limitations[0][field] = if field == "line" {
+                    serde_json::json!("three")
+                } else {
+                    serde_json::json!(3)
+                };
+            });
+            assert_eq!(reason, "coverage limitation", "{field}");
+        }
+        let reason = refused(&|report| {
+            report.view.decisions[0].vector_observations[0]
+                .vector
+                .values
+                .push(Some(true));
+        });
+        assert_eq!(reason, "MC/DC vector width");
+    }
+
     /// A real index with one section's bytes changed, written with digests
     /// that match: what the record readers alone must refuse.
     fn index_with(
