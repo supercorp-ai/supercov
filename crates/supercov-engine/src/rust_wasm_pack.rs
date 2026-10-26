@@ -14,8 +14,8 @@
 // On Windows `learn` refuses at once, and nothing below it is called.
 #![cfg_attr(windows, allow(dead_code, unused_imports))]
 
+use crate::fault_fs as fs;
 use std::{
-    fs,
     path::{Path, PathBuf},
     process::Command,
 };

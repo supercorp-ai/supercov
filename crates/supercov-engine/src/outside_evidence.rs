@@ -11,9 +11,9 @@
 //! that says so. The run's own records are left exactly as they were.
 //!
 //! The run is not changed: the import publishes a new run, made from it.
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 

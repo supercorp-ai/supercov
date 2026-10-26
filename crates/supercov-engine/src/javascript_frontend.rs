@@ -4,9 +4,9 @@
 //! are transformed by the Rust instrumenter; the small Node/browser runtime
 //! remains a language shim and is copied into the workspace under `.supercov`.
 
+use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},

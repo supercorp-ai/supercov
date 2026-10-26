@@ -4,9 +4,9 @@
 //! Rust engine owns source, test, dependency, configuration and execution
 //! fingerprints for every language.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeSet,
-    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::Command,

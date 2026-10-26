@@ -10,9 +10,9 @@
 //! Playwright fixture, in each page. Each take belongs to the test that just
 //! ended, exactly, and the run publishes them as a Rust run of its own.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeMap,
-    fs,
     io::Write,
     path::{Path, PathBuf},
 };

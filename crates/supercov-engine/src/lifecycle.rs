@@ -4,9 +4,9 @@
 //! atomically moved into durable trash; recursive unlinking is a separate,
 //! retryable operation that the CLI can run in a detached child.
 
+use crate::fault_fs::{self as fs, File, OpenOptions};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -2881,5 +2881,116 @@ mod tests {
         assert!(!container.join("workspace-2").exists());
         sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Each file operation of `scenario` failing in turn, on a project
+    /// `setup` makes along with whatever else the scenario needs.
+    fn fail_each_file_operation<Extra>(
+        setup: impl Fn() -> (PathBuf, Extra),
+        scenario: impl Fn(&Path, &Extra) -> Result<(), LifecycleError>,
+    ) -> usize {
+        crate::fault::fail_each_call(
+            "fs",
+            setup,
+            |(root, extra)| scenario(root, extra),
+            |(root, _)| {
+                sweep_trash(&root).unwrap();
+                fs::remove_dir_all(root).unwrap();
+            },
+        )
+    }
+
+    #[test]
+    fn publishing_survives_any_file_operation_failing() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let operations = fail_each_file_operation(
+            || {
+                let root = project();
+                let evidence = analysable_evidence(&root, id);
+                (root, evidence)
+            },
+            |root, (evidence, metadata)| publish_run(root, metadata, evidence).map(drop),
+        );
+        assert!(operations > 5, "{operations}");
+    }
+
+    #[test]
+    fn recovering_runs_survives_any_file_operation_failing() {
+        let operations = fail_each_file_operation(
+            || {
+                let root = project();
+                let dead = "2026-01-01T00-00-00-000Z";
+                let published = "2026-01-02T00-00-00-000Z";
+                for id in [dead, published] {
+                    fs::create_dir_all(
+                        root.join(".supercov/work")
+                            .join(id)
+                            .join(root.file_name().unwrap()),
+                    )
+                    .unwrap();
+                    fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+                    write_run_state(&root, &state(&root, id, RunStateStatus::Testing, u32::MAX))
+                        .unwrap();
+                }
+                let (evidence, bytes) = evidence(&root);
+                publish_run(&root, &metadata(published, bytes), &evidence).unwrap();
+                (root, ())
+            },
+            |root, ()| recover_abandoned_runs(root, "recovered").map(drop),
+        );
+        assert!(operations > 5, "{operations}");
+    }
+
+    #[test]
+    fn cleaning_storage_survives_any_file_operation_failing() {
+        let operations = fail_each_file_operation(
+            || {
+                let root = project();
+                let (evidence, bytes) = evidence(&root);
+                for id in ["2026-01-01T00-00-00-000Z", "2026-01-02T00-00-00-000Z"] {
+                    let copy = root.join(format!("{id}.gz"));
+                    fs::copy(&evidence, &copy).unwrap();
+                    publish_run(&root, &metadata(id, bytes), &copy).unwrap();
+                }
+                fs::create_dir_all(root.join(".supercov/evidence/2026-01-03T00-00-00-000Z"))
+                    .unwrap();
+                kept_evidence(&root, "2025-12-31T00-00-00-000Z");
+                fs::create_dir_all(root.join(".supercov/cache/build")).unwrap();
+                (root, ())
+            },
+            |root, ()| {
+                clean_storage(
+                    root,
+                    CleanupOptions {
+                        keep: 1,
+                        dry_run: false,
+                    },
+                    "now",
+                )
+                .map(drop)
+            },
+        );
+        assert!(operations > 5, "{operations}");
+    }
+
+    #[test]
+    fn locking_and_removing_trees_survive_any_file_operation_failing() {
+        let locked = fail_each_file_operation(
+            || (project(), ()),
+            |root, ()| ProjectLock::acquire(root, "run", "now")?.release(),
+        );
+        let removed = fail_each_file_operation(
+            || {
+                let root = project();
+                fs::create_dir_all(root.join(".supercov/work/run/deep")).unwrap();
+                fs::write(root.join(".supercov/work/run/deep/file"), "x").unwrap();
+                (root, ())
+            },
+            |root, ()| {
+                remove_stored_tree_deferred(root, &root.join(".supercov/work/run"))?;
+                sweep_trash(root).map(drop)
+            },
+        );
+        assert!(locked > 2 && removed > 2, "{locked} {removed}");
     }
 }

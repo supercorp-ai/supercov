@@ -88,7 +88,7 @@ pub fn is_test_file(relative: &str) -> bool {
 /// Empty when there is no workspace, which is also the answer for a repository
 /// that simply has one module at its root.
 pub fn workspace_modules(root: &Path) -> BTreeSet<String> {
-    let Ok(text) = std::fs::read_to_string(root.join("go.work")) else {
+    let Ok(text) = crate::fault_fs::read_to_string(root.join("go.work")) else {
         return BTreeSet::new();
     };
     let mut modules = BTreeSet::new();
@@ -136,7 +136,7 @@ pub fn workspace_modules(root: &Path) -> BTreeSet<String> {
 
 fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String> {
     let members = workspace_modules(root);
-    let entries = std::fs::read_dir(directory)
+    let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     let mut sorted = entries
         .collect::<Result<Vec<_>, _>>()
@@ -226,7 +226,7 @@ const IGNORED_BY_THE_TOOLCHAIN: &str = "ignored by the Go toolchain";
 
 /// A Go file's text, for the constraints above its package clause.
 fn read_source(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path)
+    let bytes = crate::fault_fs::read(path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -277,7 +277,7 @@ fn ignored_by_the_toolchain(
     directory: &Path,
     files: &mut GoFiles,
 ) -> Result<(), String> {
-    let entries = std::fs::read_dir(directory)
+    let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     for entry in entries {
         let entry =
@@ -394,7 +394,7 @@ pub fn prepare_go_project(
     let mut next_decision = 0_u32;
     for relative in &files.sources {
         let path = root.join(relative);
-        let Ok(source) = std::fs::read_to_string(&path) else {
+        let Ok(source) = crate::fault_fs::read_to_string(&path) else {
             let reason = "file could not be read as UTF-8";
             manifest
                 .limitations
@@ -513,7 +513,7 @@ fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
         if !directory.pop() || !directory.starts_with(root) {
             break None;
         }
-        if let Ok(text) = std::fs::read_to_string(directory.join("go.mod")) {
+        if let Ok(text) = crate::fault_fs::read_to_string(directory.join("go.mod")) {
             break Some(text);
         }
     };
@@ -543,7 +543,7 @@ fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
 /// The module path declared in `go.mod`, which package identities are relative
 /// to.
 pub fn module_path(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
+    let text = crate::fault_fs::read_to_string(root.join("go.mod")).ok()?;
     text.lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix("module "))

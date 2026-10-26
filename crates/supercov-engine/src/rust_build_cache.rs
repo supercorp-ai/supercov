@@ -1,7 +1,7 @@
 //! Exact-input stable workspace metadata for the owned Rust frontend.
 
+use crate::fault_fs as fs;
 use std::{
-    fs,
     path::{Path, PathBuf},
     process::Command,
 };

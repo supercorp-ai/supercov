@@ -39,9 +39,9 @@
 //! the accounting does not balance the run fails rather than attribute
 //! evidence to a guess.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Output},

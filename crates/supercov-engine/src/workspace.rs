@@ -4304,27 +4304,12 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Run `scenario` once for each file operation it makes, with that one
-    /// failing: every run must end, with an error or without, and never
-    /// panic. The number of operations, so a test knows the sweep reached
-    /// them.
     fn fail_each_file_operation<Fixture>(
         setup: impl Fn() -> Fixture,
         scenario: impl Fn(&Fixture) -> Result<(), WorkspaceError>,
         cleanup: impl Fn(Fixture),
     ) -> usize {
-        let mut nth = 0;
-        loop {
-            nth += 1;
-            let fixture = setup();
-            let (result, reached) =
-                crate::fault::during_reaching(&format!("fs@{nth}"), || scenario(&fixture));
-            cleanup(fixture);
-            if !reached {
-                result.unwrap();
-                return nth - 1;
-            }
-        }
+        crate::fault::fail_each_call("fs", setup, scenario, cleanup)
     }
 
     /// A project with something of each kind a copy treats apart: nested

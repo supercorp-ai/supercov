@@ -1,6 +1,7 @@
 //! What a run captures of its sources: each file's text at the time of the
 //! run, fingerprinted into the manifest archived with the evidence, and the
 //! check that a later query reads the same bytes.
+use crate::fault_fs as fs;
 use crate::{
     evidence_archive::EvidenceArchiveEntry,
     source_manifest::{FileFingerprint, Files, InputManifest, Inputs, local_path},
@@ -8,7 +9,6 @@ use crate::{
 };
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
 };
 

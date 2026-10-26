@@ -1,8 +1,8 @@
 //! Public, isolated Rust coverage run lifecycle.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeSet,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,

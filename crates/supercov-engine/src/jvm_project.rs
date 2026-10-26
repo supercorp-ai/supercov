@@ -150,7 +150,7 @@ fn role(relative: &str) -> Option<&'static str> {
 fn targets_only_the_jvm(root: &Path) -> bool {
     let mut text = String::new();
     for name in ["build.gradle.kts", "build.gradle", "pom.xml"] {
-        if let Ok(own) = std::fs::read_to_string(root.join(name)) {
+        if let Ok(own) = crate::fault_fs::read_to_string(root.join(name)) {
             text.push_str(&own);
             text.push('\n');
         }
@@ -176,7 +176,7 @@ fn targets_only_the_jvm(root: &Path) -> bool {
 
 fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), String> {
     let jvm_only = targets_only_the_jvm(root);
-    let entries = std::fs::read_dir(directory)
+    let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     let mut sorted = entries
         .collect::<Result<Vec<_>, _>>()
@@ -310,7 +310,7 @@ pub fn prepare_jvm_project(
     let mut next_decision = 0_u32;
     for (relative, language) in &files.sources {
         let path = root.join(relative);
-        let Ok(source) = std::fs::read_to_string(&path) else {
+        let Ok(source) = crate::fault_fs::read_to_string(&path) else {
             let reason = "file could not be read as UTF-8";
             manifest
                 .limitations

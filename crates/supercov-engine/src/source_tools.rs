@@ -23,9 +23,9 @@
 //! read it, the tests run the copy that is measured, and when the command
 //! ends the change is the project's, as the command meant it to be.
 
+use crate::fault_fs as fs;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;

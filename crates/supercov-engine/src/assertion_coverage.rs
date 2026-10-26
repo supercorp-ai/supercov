@@ -1231,7 +1231,7 @@ impl Population {
         files
             .entry(file.to_owned())
             .or_insert_with(|| {
-                std::fs::read_to_string(self.root.join(file))
+                crate::fault_fs::read_to_string(self.root.join(file))
                     .ok()
                     .map(Into::into)
             })
@@ -2149,14 +2149,14 @@ pub fn save_snapshot(path: &Path, files: &BTreeMap<String, String>) -> Result<()
     encoder.write_all(&bytes).map_err(|e| e.to_string())?;
     let compressed = encoder.finish().map_err(|e| e.to_string())?;
     let temp = path.with_extension("tmp");
-    std::fs::write(&temp, compressed).map_err(|e| e.to_string())?;
-    std::fs::rename(&temp, path).map_err(|e| e.to_string())
+    crate::fault_fs::write(&temp, compressed).map_err(|e| e.to_string())?;
+    crate::fault_fs::rename(&temp, path).map_err(|e| e.to_string())
 }
 
 /// Read files written by [`save_snapshot`].
 pub fn load_snapshot(path: &Path) -> Option<BTreeMap<String, String>> {
     use std::io::Read;
-    let compressed = std::fs::read(path).ok()?;
+    let compressed = crate::fault_fs::read(path).ok()?;
     let mut text = Vec::new();
     flate2::read::GzDecoder::new(compressed.as_slice())
         .read_to_end(&mut text)

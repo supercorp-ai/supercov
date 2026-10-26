@@ -8,9 +8,9 @@
 //! records to the browser or JavaScript tests the run reported and publishes
 //! them against the crate's manifest.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Write,
     path::{Path, PathBuf},
 };

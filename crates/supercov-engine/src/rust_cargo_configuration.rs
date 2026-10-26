@@ -7,10 +7,10 @@
 //! before the repository is copied into the isolated workspace. Unsupported
 //! configuration surfaces fail before user code executes.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::OsString,
-    fs,
     path::{Component, Path, PathBuf},
     process::Command,
     str::FromStr,

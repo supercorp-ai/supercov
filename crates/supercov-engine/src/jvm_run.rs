@@ -20,10 +20,10 @@
 //! notices and says so — but the better outcome is that it never happens, and
 //! Supercov owns the workspace, so it can simply make sure of it.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,

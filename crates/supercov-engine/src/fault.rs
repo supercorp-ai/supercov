@@ -90,6 +90,30 @@ pub fn during_reaching<R>(faults: &str, body: impl FnOnce() -> R) -> (R, bool) {
     (result, reached)
 }
 
+/// Run `scenario` once for each call it makes at `site`, with that one
+/// failing (`site@1`, `site@2`, ...): every run must end, with an error or
+/// without, and never panic, and the run that reaches no fault must succeed.
+/// The number of calls, so a test knows the sweep reached them.
+#[cfg(any(test, debug_assertions))]
+pub fn fail_each_call<Fixture, E: std::fmt::Debug>(
+    site: &str,
+    setup: impl Fn() -> Fixture,
+    scenario: impl Fn(&Fixture) -> Result<(), E>,
+    cleanup: impl Fn(Fixture),
+) -> usize {
+    let mut nth = 0;
+    loop {
+        nth += 1;
+        let fixture = setup();
+        let (result, reached) = during_reaching(&format!("{site}@{nth}"), || scenario(&fixture));
+        cleanup(fixture);
+        if !reached {
+            result.expect("the run no fault reached succeeds");
+            return nth - 1;
+        }
+    }
+}
+
 /// When the call at `site` fails this time, the errno the test chose for
 /// it, if any.
 fn failing(site: &str) -> Option<Option<i32>> {

@@ -8,9 +8,9 @@
 //! 1.95.0 (`f2d3ce0bd`) and are checked against real Cargo in the compiler
 //! corpus before this model may support a public Rust frontend.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, HashSet},
-    fs,
     path::{Path, PathBuf},
 };
 

@@ -3,9 +3,10 @@
 //! Discovery defines the coverage denominator. The walker never follows
 //! links and turns unclassified first-party files into explicit blockers.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::{Component, Path, PathBuf},
 };
 

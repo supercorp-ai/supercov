@@ -23,9 +23,9 @@
 //! containers it measured, and the rest of their compose projects, so each
 //! writes its last evidence; it never removes them.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},

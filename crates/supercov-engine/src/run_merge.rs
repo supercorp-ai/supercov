@@ -252,7 +252,7 @@ fn judged_against_latest(
             if into.files.contains_key(file) {
                 continue;
             }
-            if let Ok(text) = std::fs::read_to_string(root.join(file)) {
+            if let Ok(text) = crate::fault_fs::read_to_string(root.join(file)) {
                 into.files.insert(
                     file.clone(),
                     crate::source_manifest::FileFingerprint::of(&text),
@@ -273,7 +273,7 @@ fn judged_against_latest(
     let reference = crate::run_currency::Ran::from_entries(&archives[latest], merged(latest));
     // A file's text, where the checkout holds what the latest run recorded.
     let text = |file: &str| {
-        let text = std::fs::read_to_string(root.join(file)).ok()?;
+        let text = crate::fault_fs::read_to_string(root.join(file)).ok()?;
         (crate::source_manifest::FileFingerprint::of(&text).sha256 == into.files.get(file)?.sha256)
             .then_some(text)
     };

@@ -950,7 +950,7 @@ pub fn run_direct_javascript(
             .collect::<BTreeMap<_, _>>(),
     });
     let settings_path = frontend.preload_path.with_file_name("run.json");
-    std::fs::write(
+    crate::fault_fs::write(
         &settings_path,
         serde_json::to_vec(&settings).map_err(|error| error.to_string())?,
     )

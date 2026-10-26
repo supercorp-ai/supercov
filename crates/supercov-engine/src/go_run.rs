@@ -17,10 +17,10 @@
 //!   than one that took longer. The run adds `-count=1` when the command does
 //!   not already say otherwise, and says so.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,

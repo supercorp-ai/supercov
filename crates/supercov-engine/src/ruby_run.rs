@@ -6,9 +6,9 @@
 //! it through `RUBYOPT`, supervises the user's command unchanged, and
 //! publishes the joined evidence.
 
+use crate::fault_fs as fs;
 use std::{
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,

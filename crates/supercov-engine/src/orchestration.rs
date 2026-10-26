@@ -4,8 +4,8 @@
 //! commands. This layer owns ordering, fail-fast behavior, timings and the
 //! single persistent signal guard across every external phase.
 
+use crate::fault_fs::{self as fs, File};
 use std::{
-    fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
     time::Instant,

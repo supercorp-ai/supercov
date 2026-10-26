@@ -537,7 +537,7 @@ pub fn checkout_files(
         .keys()
         .chain(configurations)
         .filter_map(|file| {
-            let text = std::fs::read_to_string(root.join(file)).ok()?;
+            let text = crate::fault_fs::read_to_string(root.join(file)).ok()?;
             Some((file.clone(), FileFingerprint::read(file, &text)))
         })
         .collect()

@@ -1,10 +1,10 @@
 //! Conservative import-elision policy for the supported tsc/tsx/ts-node path.
 //! Unknown loaders, config resolution and emit overrides retain runtime obligations.
+use crate::fault_fs as fs;
 use crate::source_discovery::{strip_jsonc_comments, strip_trailing_commas};
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
 };
 

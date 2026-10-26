@@ -15,9 +15,9 @@
 //! last records of its process. Rust joins those records into the shared
 //! frontend protocol; the runtime never computes a verdict.
 
+use crate::fault_fs::{self as fs, File};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
     path::{Path, PathBuf},
 };
 

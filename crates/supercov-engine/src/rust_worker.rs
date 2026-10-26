@@ -11,9 +11,9 @@
 //! to the one browser test whose span it overlaps, as for a Go or JVM server;
 //! what no single test's window holds is the run's background.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},

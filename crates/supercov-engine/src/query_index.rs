@@ -6,9 +6,9 @@
 //! Reads validate the authenticated header, all checked layout invariants and
 //! the SHA-256 digest of every data page they touch.
 
+use crate::fault_fs::{self as fs, File, OpenOptions};
 use std::{
     collections::{BTreeSet, HashSet},
-    fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{

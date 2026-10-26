@@ -1,8 +1,8 @@
 //! Cargo workspace discovery and isolated owned-Rust frontend preparation.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Component, Path, PathBuf},
     process::Command,
 };

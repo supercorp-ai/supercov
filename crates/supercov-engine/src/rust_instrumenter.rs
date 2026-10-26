@@ -3125,8 +3125,8 @@ fn still_parses(
     }
     if let Some(directory) = dump() {
         let name = file.replace(['/', '\\'], "__");
-        let _ = std::fs::create_dir_all(&directory);
-        let _ = std::fs::write(std::path::Path::new(&directory).join(name), &code);
+        let _ = crate::fault_fs::create_dir_all(&directory);
+        let _ = crate::fault_fs::write(std::path::Path::new(&directory).join(name), &code);
     }
     Err(RustInstrumenterError::Parse(errors))
 }

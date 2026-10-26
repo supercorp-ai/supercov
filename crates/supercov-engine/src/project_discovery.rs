@@ -1,8 +1,9 @@
 //! Runner/build/project discovery for zero-configuration JavaScript suites.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 

@@ -6,10 +6,10 @@
 //! points the interpreter at it through environment variables, supervises the
 //! user's command unchanged, and publishes the joined evidence.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,

@@ -10,10 +10,10 @@
 //! What cannot be read is said: an import whose path is computed, or one that
 //! resolves to nothing Supercov can name, leaves the answer open, and an open
 //! answer is "it may load anything".
+use crate::fault_fs as fs;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs,
     path::{Component, Path, PathBuf},
 };
 

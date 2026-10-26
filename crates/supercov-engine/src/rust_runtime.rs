@@ -6,8 +6,9 @@
 //! thread. The runtime never computes coverage: the reader rebuilds the
 //! records in execution order and the evidence model takes them from there.
 
+use crate::fault_fs as fs;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]

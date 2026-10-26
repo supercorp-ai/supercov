@@ -5,9 +5,9 @@
 //! runtime probe plan, and records which files were included, excluded or
 //! unparseable so the run can say exactly what its denominator covers.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 

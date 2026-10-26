@@ -4,8 +4,8 @@
 //! run, and never silently treats malformed metadata as a valid run. Callers
 //! receive accepted runs and rejected-entry diagnostics independently.
 
+use crate::fault_fs::{self as fs, File};
 use std::{
-    fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };

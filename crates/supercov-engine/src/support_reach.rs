@@ -9,9 +9,9 @@
 //! tests: a mock keeps state between tests, so its files are judged whole,
 //! never by route.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 

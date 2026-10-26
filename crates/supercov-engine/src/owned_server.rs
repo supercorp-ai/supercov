@@ -4,9 +4,9 @@
 //! window is credited, by time, to the one browser test whose span it
 //! overlaps. What no single test's window holds is no test's.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Write,
     path::{Path, PathBuf},
 };

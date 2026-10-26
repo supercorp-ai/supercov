@@ -14,10 +14,10 @@
 //! A runner the user already configured for the target keeps running the
 //! binaries: this program wraps it rather than replacing it.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     process::Command,

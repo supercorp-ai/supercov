@@ -5,9 +5,9 @@
 //! paths must be canonical and sorted, headers must use the exact canonical
 //! JSON encoding, and a gzip member may not hide trailing data.
 
+use crate::fault_fs::{self as fs, File, OpenOptions};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},

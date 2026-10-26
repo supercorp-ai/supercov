@@ -466,8 +466,8 @@ fn take_regions(upstream: SocketAddr, session: &str, evidence: &Path, token: &st
         if crate::rust_worker::region_token(&bytes) != Some(token) {
             continue;
         }
-        let _ = std::fs::create_dir_all(evidence);
-        let _ = std::fs::write(
+        let _ = crate::fault_fs::create_dir_all(evidence);
+        let _ = crate::fault_fs::write(
             evidence.join(format!(
                 "{token}-browser-{}-{}.region",
                 std::process::id(),

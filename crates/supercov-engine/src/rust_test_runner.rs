@@ -8,10 +8,10 @@
 //! keeps its own scheduling and retries and this program serves as its target
 //! runner (`rust_owned_nextest`), recording each attempt it launches.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Output},

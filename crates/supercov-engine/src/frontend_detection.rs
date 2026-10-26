@@ -5,7 +5,8 @@
 //! genuinely mixed test command. No language is guessed from source extension
 //! alone.
 
-use std::{collections::BTreeSet, fs, path::Path};
+use crate::fault_fs as fs;
+use std::{collections::BTreeSet, path::Path};
 
 use serde::{Deserialize, Serialize};
 

@@ -3,6 +3,7 @@
 //! change model that says which tests a later edit could have reached.
 //! `tests affected`, `runs source` and assertions coverage all read these.
 
+use crate::fault_fs as fs;
 use crate::{
     coverage_report::{
         ArchiveReportRequest, CoverageReport, ExitCodeInput, analyze_coverage_archive,
@@ -17,7 +18,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 pub type Files = BTreeMap<String, String>;
