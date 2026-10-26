@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A Rust Worker no test of a run started, or whose tests loaded no build of its measured source, is not measured, instead of counting every line as one the tests missed: its files leave the run's totals, the file view gives the reason at the top, the run names them after the tests' output, and `runs check` refuses to judge a floor over such a run.
+- A build made before the run is named in that reason: Supercov builds nothing itself, so a Worker the tests load from an earlier `build/` is built in the measured command or the tests.
+
 ## 4.20.1
 
 **Changed**

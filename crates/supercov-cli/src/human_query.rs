@@ -1467,6 +1467,17 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
         }
         IndexedQueryData::FileDetail(data) => {
             let page = page.expect("file detail is paginated");
+            // Left out of the run: none of it is a gap, so say why instead.
+            if let Some(reason) = &data.not_measured {
+                return [
+                    data.file.clone(),
+                    String::new(),
+                    format!("Not measured: {}", reason.trim_end_matches('.')),
+                    String::new(),
+                    "Nothing in this file counts as covered or uncovered.".into(),
+                ]
+                .join("\n");
+            }
             let mut lines = vec![
                 data.file.clone(),
                 String::new(),
