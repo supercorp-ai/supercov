@@ -3431,4 +3431,86 @@ mod edge_unit_tests {
         };
         assert_eq!(plain("one"), plain("two"));
     }
+
+    /// The declarations each language's rarer shapes make: JSX, template
+    /// literal types, `declare global`, accessors, Ruby's commands and
+    /// interpolated symbols, Java's interfaces, enums and annotations, and
+    /// Kotlin's objects and properties.
+    #[test]
+    fn each_language_s_rarer_declarations_are_units() {
+        let units = |path: &str, source: &str| {
+            code(path, source)
+                .unwrap_or_else(|| panic!("{path} did not read"))
+                .units
+                .iter()
+                .skip(1)
+                .map(|u| (u.kind.clone(), u.path.clone()))
+                .collect::<Vec<_>>()
+        };
+        let pairs = |list: &[(&str, &str)]| {
+            list.iter()
+                .map(|(kind, path)| ((*kind).to_owned(), (*path).to_owned()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            units(
+                "v.tsx",
+                "export const V = () => <Box.Item x={1} />;\ntype T = `a-${string}`;\ndeclare global {\n  interface W { x: number }\n}\nnamespace N { export const y = 1; }\nexport class C {\n  get a() { return 1; }\n  set a(v: number) {}\n}\n"
+            ),
+            pairs(&[
+                ("function", "V"),
+                ("type", "T"),
+                ("namespace", "global"),
+                ("interface", "global.W"),
+                ("namespace", "N"),
+                ("class", "C"),
+                ("get", "C.a"),
+                ("set", "C.a#2")
+            ])
+        );
+        assert_eq!(
+            units("a.rb", "def f(x)\n  `ls`\n  `ls #{x}`\n  :\"s#{x}\"\nend\n"),
+            pairs(&[("method", "f")])
+        );
+        assert_eq!(
+            units(
+                "A.java",
+                "interface I {}\nenum E { A }\n@interface Ann {}\nclass C { void m() {} }\n"
+            ),
+            pairs(&[
+                ("interface", "I"),
+                ("enum", "E"),
+                ("annotation", "Ann"),
+                ("class", "C"),
+                ("method", "C.m()")
+            ])
+        );
+        assert_eq!(
+            units(
+                "a.kt",
+                "package a\n\ninterface K {\n    fun k(): Int\n}\n\nobject O {\n    val v = 1\n}\n\nclass C {\n    fun f(): Int = 1\n}\n\nfun top(): Int = 2\n"
+            ),
+            pairs(&[
+                ("class", "K"),
+                ("function", "K.k()"),
+                ("object", "O"),
+                ("property", "O.v"),
+                ("class", "C"),
+                ("function", "C.f()"),
+                ("function", "top()")
+            ])
+        );
+        assert_eq!(
+            units("a.py", "@decorate\ndef f():\n    return 1\n"),
+            pairs(&[("function", "f")])
+        );
+        let java = code("A.java", "interface I {}\nenum E { A }\n@interface Ann {}\nclass C { void m() {} }\nclass D {}\nclass F {}\n").unwrap();
+        assert_eq!(named(&java.units[1..1]), "nothing");
+        assert_eq!(named(&java.units[1..3]).matches(", ").count(), 1);
+        assert!(
+            named(&java.units[1..]).ends_with("and 4 more"),
+            "{}",
+            named(&java.units[1..])
+        );
+    }
 }
