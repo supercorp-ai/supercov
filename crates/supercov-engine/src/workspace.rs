@@ -4414,8 +4414,8 @@ mod tests {
                 fs::create_dir_all(workspace.join("dist")).unwrap();
                 fs::write(workspace.join("dist/out.js"), "rebuilt").unwrap();
                 fs::write(workspace.join("src/index.js"), "instrumented").unwrap();
-                fs::create_dir_all(workspace.join("coverage/lcov-report")).unwrap();
-                fs::write(workspace.join("coverage/lcov-report/index.html"), "report").unwrap();
+                fs::create_dir_all(workspace.join("coverage/html-report")).unwrap();
+                fs::write(workspace.join("coverage/html-report/index.html"), "report").unwrap();
                 fs::write(workspace.join("report.xml"), "<testsuites/>").unwrap();
                 (root, lock, workspace, baseline)
             },
