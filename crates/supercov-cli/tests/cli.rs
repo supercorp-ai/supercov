@@ -12338,3 +12338,104 @@ fn exact_attribution_runs_the_command_after_it() {
         .succeeds();
     contains_all(&measured, &["pass 3", "[coverage] evidence:"]);
 }
+
+/// A measured run of `command`, once for each place in the code that makes
+/// a file operation, with that place's first one failing
+/// (`SUPERCOV_TEST_FAULT=fs#N`): it may stop, but says why and never panics,
+/// and the next run of the project, with no fault, recovers whatever the
+/// stopped one left and succeeds. Eight projects `write` lays out share the
+/// places. The most places a run reached.
+fn fail_each_place_of_a_run(label: &str, write: fn(&Project), command: &[&str]) -> usize {
+    const PROJECTS: usize = 8;
+    let reached = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for first in 1..=PROJECTS {
+            let reached = &reached;
+            scope.spawn(move || {
+                let project = Project::empty(&format!("{label}-{first}"));
+                write(&project);
+                project.git(&["init", "-q"]);
+                project.commit("fixture");
+                let mut nth = first;
+                loop {
+                    let fault = format!("fs#{nth}");
+                    let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
+                    let said = ran.stderr();
+                    assert!(
+                        !said.contains("panicked at") && ran.code() != 101,
+                        "{label} with {fault} panicked:\n{said}"
+                    );
+                    if !said.contains("[supercov] test fault at fs") {
+                        break;
+                    }
+                    reached.fetch_max(nth, std::sync::atomic::Ordering::Relaxed);
+                    nth += PROJECTS;
+                }
+                project.supercov(command).succeeds();
+            });
+        }
+    });
+    reached.into_inner()
+}
+
+#[test]
+fn a_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
+    let javascript = fail_each_place_of_a_run(
+        "run-faults-js",
+        |project| {
+            project.write(
+                "package.json",
+                r#"{ "name": "cart", "private": true, "type": "module" }"#,
+            );
+            project.write(
+                "src/cart.js",
+                "export const total = (a, b) => (a && b ? a + b : 0);\n",
+            );
+            project.write(
+                "test/cart.test.js",
+                "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { total } from '../src/cart.js';\ntest('adds', () => assert.equal(total(1, 2), 3));\n",
+            );
+        },
+        &["--", "node", "--test"],
+    );
+    let python = fail_each_place_of_a_run(
+        "run-faults-py",
+        |project| {
+            project.write("pkg/__init__.py", "");
+            project.write("pkg/w.py", "def double(n):\n    return n * 2 if n else 0\n");
+            project.write("tests/__init__.py", "");
+            project.write(
+                "tests/test_w.py",
+                "import unittest\nfrom pkg.w import double\n\nclass W(unittest.TestCase):\n    def test_doubles(self):\n        self.assertEqual(double(2), 4)\n",
+            );
+        },
+        &[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ],
+    );
+    assert!(javascript > 50 && python > 50, "{javascript} {python}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_ruby_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
+    let reached = fail_each_place_of_a_run(
+        "run-faults-rb",
+        |project| {
+            project.write(
+                "lib/w.rb",
+                "module W\n  def self.double(n) = n ? n * 2 : 0\nend\n",
+            );
+            project.write(
+                "test/w_test.rb",
+                "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_doubles\n    assert_equal 4, W.double(2)\n  end\nend\n",
+            );
+        },
+        &command,
+    );
+    assert!(reached > 50, "{reached}");
+}

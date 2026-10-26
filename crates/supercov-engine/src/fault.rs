@@ -1,8 +1,10 @@
 //! Faults a test injects, so the code that handles a system call failing runs
 //! under test. `SUPERCOV_TEST_FAULT` names call sites, comma-separated: `site`
 //! fails every call there, `site=N` only the first N, `site@N` only the Nth,
-//! and `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead
-//! of its usual error. A failing
+//! `site#N` only the first call from the Nth place in the code that calls it
+//! (where the site knows its caller, as [`crate::fault_fs`] does), and
+//! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
+//! its usual error. A failing
 //! site does not make its call; it returns what the call returns when it
 //! fails, and says so on standard error (`test fault at <site>`), so a test
 //! knows the site was reached. Only debug builds read the variable: a release
@@ -23,7 +25,13 @@ struct Fault {
     remaining: Option<std::sync::atomic::AtomicUsize>,
     /// Whether a call failed by it.
     fired: std::sync::atomic::AtomicBool,
+    /// For `site#N`: N, and the places in the code that called the site so
+    /// far, in the order they first did.
+    place: Option<(usize, std::sync::Mutex<Vec<Place>>)>,
 }
+
+/// Where in the code a call was made.
+pub type Place = &'static std::panic::Location<'static>;
 
 #[cfg(any(test, debug_assertions))]
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
@@ -35,6 +43,7 @@ fn parse(text: &str) -> Vec<Fault> {
         .filter(|entry| !entry.is_empty())
         .map(|entry| {
             let (site, count) = entry.split_once('=').unwrap_or((entry, ""));
+            let (site, place) = site.split_once('#').unwrap_or((site, ""));
             let (site, nth) = site.split_once('@').unwrap_or((site, ""));
             let (site, errno) = site.split_once(':').unwrap_or((site, ""));
             let nth = nth.parse::<usize>().ok();
@@ -47,6 +56,10 @@ fn parse(text: &str) -> Vec<Fault> {
                     .or_else(|| count.parse().ok())
                     .map(std::sync::atomic::AtomicUsize::new),
                 fired: false.into(),
+                place: place
+                    .parse::<usize>()
+                    .ok()
+                    .map(|nth| (nth, std::sync::Mutex::new(Vec::new()))),
             }
         })
         .collect()
@@ -101,11 +114,34 @@ pub fn fail_each_call<Fixture, E: std::fmt::Debug>(
     scenario: impl Fn(&Fixture) -> Result<(), E>,
     cleanup: impl Fn(Fixture),
 ) -> usize {
+    fail_each(&format!("{site}@"), setup, scenario, cleanup)
+}
+
+/// [`fail_each_call`], failing instead the first call from each place in the
+/// code that calls `site` (`site#1`, `site#2`, ...): one run per place, where
+/// a loop over many files would take one per file. The number of places.
+#[cfg(any(test, debug_assertions))]
+pub fn fail_each_place<Fixture, E: std::fmt::Debug>(
+    site: &str,
+    setup: impl Fn() -> Fixture,
+    scenario: impl Fn(&Fixture) -> Result<(), E>,
+    cleanup: impl Fn(Fixture),
+) -> usize {
+    fail_each(&format!("{site}#"), setup, scenario, cleanup)
+}
+
+#[cfg(any(test, debug_assertions))]
+fn fail_each<Fixture, E: std::fmt::Debug>(
+    fault: &str,
+    setup: impl Fn() -> Fixture,
+    scenario: impl Fn(&Fixture) -> Result<(), E>,
+    cleanup: impl Fn(Fixture),
+) -> usize {
     let mut nth = 0;
     loop {
         nth += 1;
         let fixture = setup();
-        let (result, reached) = during_reaching(&format!("{site}@{nth}"), || scenario(&fixture));
+        let (result, reached) = during_reaching(&format!("{fault}{nth}"), || scenario(&fixture));
         cleanup(fixture);
         if !reached {
             result.expect("the run no fault reached succeeds");
@@ -117,18 +153,23 @@ pub fn fail_each_call<Fixture, E: std::fmt::Debug>(
 /// When the call at `site` fails this time, the errno the test chose for
 /// it, if any.
 fn failing(site: &str) -> Option<Option<i32>> {
+    failing_at(site, None)
+}
+
+/// [`failing`], for a call made at `place`.
+fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
     #[cfg(any(test, debug_assertions))]
     {
         // This thread's faults first, the variable's where they name nothing.
         DURING
-            .with(|during| take(&during.borrow(), site))
-            .or_else(|| take(&FAULTS, site))
+            .with(|during| take(&during.borrow(), site, place))
+            .or_else(|| take(&FAULTS, site, place))
             .flatten()
             .inspect(|_| announce(site))
     }
     #[cfg(not(any(test, debug_assertions)))]
     {
-        let _ = site;
+        let _ = (site, place);
         None
     }
 }
@@ -154,7 +195,7 @@ fn announce(site: &str) {
 /// Of the faults `faults`, whether the one at `site` fails this time, and
 /// with which errno: `None` when no fault names the site.
 #[cfg(any(test, debug_assertions))]
-fn take(faults: &[Fault], site: &str) -> Option<Option<Option<i32>>> {
+fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Option<i32>>> {
     use std::sync::atomic::Ordering;
     let count_down = |left: &std::sync::atomic::AtomicUsize| {
         left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -163,7 +204,23 @@ fn take(faults: &[Fault], site: &str) -> Option<Option<Option<i32>>> {
         .is_ok()
     };
     faults.iter().find(|fault| fault.site == site).map(|fault| {
-        let fails = !count_down(&fault.skip) && fault.remaining.as_ref().is_none_or(count_down);
+        let fails = match (&fault.place, place) {
+            // The first call from a place not seen before, when it is the Nth.
+            (Some((nth, seen)), Some(place)) => {
+                let mut seen = seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                !seen.contains(&place) && {
+                    seen.push(place);
+                    seen.len() == *nth
+                }
+            }
+            // A caller that cannot say where it is is never the Nth place.
+            (Some(_), None) => false,
+            (None, _) => {
+                !count_down(&fault.skip) && fault.remaining.as_ref().is_none_or(count_down)
+            }
+        };
         if fails {
             fault.fired.store(true, Ordering::SeqCst);
         }
@@ -184,6 +241,21 @@ pub fn io<T>(
     call: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
     match failing(site) {
+        Some(Some(errno)) => Err(io::Error::from_raw_os_error(errno)),
+        Some(None) => Err(io::Error::new(kind, format!("injected fault at {site}"))),
+        None => call(),
+    }
+}
+
+/// [`io`], for a call made where the caller of a `#[track_caller]` function
+/// is: `site#N` counts the places it is called from.
+#[track_caller]
+pub fn io_here<T>(
+    site: &str,
+    kind: io::ErrorKind,
+    call: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    match failing_at(site, Some(std::panic::Location::caller())) {
         Some(Some(errno)) => Err(io::Error::from_raw_os_error(errno)),
         Some(None) => Err(io::Error::new(kind, format!("injected fault at {site}"))),
         None => call(),
