@@ -1013,7 +1013,8 @@ fn parse_rfc3339_ms(text: &str) -> Option<i64> {
     let hour: i64 = clock_parts.next()?.parse().ok()?;
     let minute: i64 = clock_parts.next()?.parse().ok()?;
     let second: i64 = clock_parts.next()?.parse().ok()?;
-    let millis: i64 = format!("{fraction:0<3}")[..3].parse().ok()?;
+    // By characters: a fraction that is not digits is no time, not a panic.
+    let millis: i64 = format!("{fraction:0<3}").get(..3)?.parse().ok()?;
     // Days from the civil date (Howard Hinnant's algorithm).
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
@@ -2000,5 +2001,169 @@ mod tests {
         )]));
         let default = PathBuf::from("/var/run/docker.sock");
         assert_eq!(upstream, default.exists().then_some(default));
+    }
+
+    /// A time written any other way is no time: never a panic, whatever is
+    /// where a number belongs.
+    #[test]
+    fn a_time_written_wrong_is_no_time() {
+        for text in [
+            "2026-10-17",
+            "x-10-17T21:05:37Z",
+            "2026-10-17T",
+            "2026-x-17T21:05:37Z",
+            "2026-10T21:05:37Z",
+            "2026-10-xT21:05:37Z",
+            "2026--T21:05:37Z",
+            "2026-10-17T21:05:37",
+            "2026-10-17T21:05:37+x",
+            "2026-10-17T21:05:37+05:x",
+            "2026-10-17Tx:05:37Z",
+            "2026-10-17T21Z",
+            "2026-10-17T21:x:37Z",
+            "2026-10-17T21:05Z",
+            "2026-10-17T21:05:xZ",
+            "2026-10-17T21:05:37.xZ",
+            "2026-10-17T21:05:37.\u{e9}\u{e9}Z",
+        ] {
+            assert_eq!(parse_rfc3339_ms(text), None, "{text}");
+        }
+        assert!(parse_rfc3339_ms("2026-10-17T21:05:37+05Z").is_none());
+        assert!(parse_rfc3339_ms("2026-10-17T21:05:37.5+05").is_some());
+    }
+
+    /// A stream that fails at its `n`th read or write, as a socket the other
+    /// side closed does.
+    struct Faulty<T> {
+        inner: T,
+        left: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl<T> Faulty<T> {
+        fn count_call(&self) -> io::Result<()> {
+            match self.left.get() {
+                // Spent: from now on every call fails, and says it did by
+                // leaving the count at its largest.
+                0 | usize::MAX => {
+                    self.left.set(usize::MAX);
+                    Err(io::Error::other("closed"))
+                }
+                left => {
+                    self.left.set(left - 1);
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    impl<T: Read> Read for Faulty<T> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.count_call()?;
+            // A byte at a time, so each line takes many reads.
+            let end = buffer.len().min(1);
+            self.inner.read(&mut buffer[..end])
+        }
+    }
+
+    impl<T: Write> Write for Faulty<T> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.count_call()?;
+            self.inner.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.count_call()?;
+            self.inner.flush()
+        }
+    }
+
+    /// Relaying a message whose stream fails at each read in turn, and then
+    /// at each write: every failure is an error, and with none the message
+    /// crosses whole.
+    #[test]
+    fn a_stream_that_fails_anywhere_fails_the_relay_and_never_panics() {
+        let chunked = head("HTTP/1.1 200 OK", &[("Transfer-Encoding", "chunked")]);
+        let sized = head("HTTP/1.1 200 OK", &[("Content-Length", "5")]);
+        let messages: [(&Head, &[u8]); 2] = [
+            (
+                &chunked,
+                b"3\r\nabc\r\n2;x=1\r\nde\r\n0\r\nTrailer: t\r\n\r\n",
+            ),
+            (&sized, b"hello"),
+        ];
+        for (head, body) in messages {
+            for failing_reads in [true, false] {
+                let mut nth = 0;
+                loop {
+                    let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+                    let unlimited = std::rc::Rc::new(std::cell::Cell::new(usize::MAX - 1));
+                    let (reads, writes) = if failing_reads {
+                        (left.clone(), unlimited)
+                    } else {
+                        (unlimited, left.clone())
+                    };
+                    let mut reader = io::BufReader::with_capacity(
+                        1,
+                        Faulty {
+                            inner: body,
+                            left: reads,
+                        },
+                    );
+                    let mut out = Faulty {
+                        inner: Vec::new(),
+                        left: writes,
+                    };
+                    let relayed = relay_body(head, &mut reader, &mut out);
+                    if left.get() != usize::MAX {
+                        relayed.unwrap();
+                        assert_eq!(out.inner, body);
+                        break;
+                    }
+                    assert!(relayed.is_err(), "{nth} {failing_reads}");
+                    nth += 1;
+                }
+                assert!(nth > 2, "{nth}");
+            }
+            // Read whole, failing at each read in turn.
+            let mut nth = 0;
+            loop {
+                let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+                let mut reader = io::BufReader::with_capacity(
+                    1,
+                    Faulty {
+                        inner: body,
+                        left: left.clone(),
+                    },
+                );
+                let read = read_body(head, &mut reader);
+                if left.get() != usize::MAX {
+                    read.unwrap();
+                    break;
+                }
+                assert!(read.is_err());
+                nth += 1;
+            }
+        }
+        // A head cut by a failing read, at each read.
+        let text: &[u8] = b"\r\nGET / HTTP/1.1\r\nHost: docker\r\n\r\n";
+        let mut nth = 0;
+        loop {
+            let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+            let mut reader = io::BufReader::with_capacity(
+                1,
+                Faulty {
+                    inner: text,
+                    left: left.clone(),
+                },
+            );
+            let read = read_head(&mut reader);
+            if left.get() != usize::MAX {
+                assert!(read.unwrap().is_some());
+                break;
+            }
+            assert!(read.is_err());
+            nth += 1;
+        }
+        assert!(nth > 10, "{nth}");
     }
 }
