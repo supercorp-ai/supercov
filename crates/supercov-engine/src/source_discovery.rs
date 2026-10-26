@@ -998,7 +998,11 @@ fn declared_workspace_packages(root: &Path) -> Result<Vec<PathBuf>, SourceDiscov
         {
             continue;
         }
-        let base = root.join(parent);
+        // Joined segment by segment: a declared `libs/core` is then written
+        // as the directories listed beside it are, on Windows too.
+        let base = parent
+            .split('/')
+            .fold(root.to_path_buf(), |path, segment| path.join(segment));
         let candidates: Vec<PathBuf> = if wildcard {
             match fs::read_dir(&base) {
                 Ok(entries) => entries
@@ -1654,8 +1658,6 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_root_that_is_no_directory_or_no_source_is_refused_by_name() {
         let root = repository(
@@ -1670,8 +1672,11 @@ mod tests {
             discover_source_scope(&root.join("src/a.js"), None),
             Err(SourceDiscoveryError::InvalidRoot(_))
         ));
-        // A root below a file is neither missing nor a root: the error says so.
-        assert!(discover_source_scope(&root, Some(&["src/a.js/inner".into()])).is_err());
+        // A root below a file is neither missing nor a root: the error says
+        // so. Windows answers such a path as not found, so there it is a
+        // root that does not exist, refused as one later.
+        let below_a_file = discover_source_scope(&root, Some(&["src/a.js/inner".into()]));
+        assert_eq!(below_a_file.is_err(), cfg!(unix));
         // A root that exists but holds no source is not called missing.
         let environment = BTreeMap::from([(SOURCE_ROOTS_VARIABLE.to_owned(), "docs".to_owned())]);
         let roots = ExplicitSourceRoots::from_environment(&root, &environment)
@@ -2325,8 +2330,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn declared_workspace_patterns_name_only_real_package_directories() {
         let root = repository(
@@ -2364,7 +2367,7 @@ mod tests {
                 path.strip_prefix(&root)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned()
+                    .replace('\\', "/")
             })
             .collect::<Vec<_>>();
         found.sort();

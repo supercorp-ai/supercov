@@ -3300,6 +3300,7 @@ mod tests {
     }
 
     /// Evidence of `probes` probes, none reached, and one passing test.
+    #[cfg(unix)]
     fn evidence_of_one_test(probes: usize) -> Vec<u8> {
         let mut bytes = (probes as u64).to_le_bytes().to_vec();
         bytes.extend(std::iter::repeat_n(0_u8, probes * 8));
@@ -3317,8 +3318,8 @@ mod tests {
         bytes
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
+    // Driven by a shell command.
+    #[cfg(unix)]
     #[test]
     fn evidence_measured_and_then_not_published_is_kept() {
         let root = temporary_root("jvm-kept");

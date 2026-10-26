@@ -948,8 +948,6 @@ mod tests {
 
     /// The suite's own `RUBYOPT` follows the runtime, in the test command
     /// and in a server's environment alike.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_suite_s_own_rubyopt_is_kept_after_the_runtime() {
         let variables = environment(
@@ -968,7 +966,11 @@ mod tests {
             .filter(|(name, _)| name == "RUBYOPT")
             .map(|(_, value)| value.clone())
             .collect::<Vec<_>>();
-        assert_eq!(rubyopt, [OsString::from("-r/r/supercov_runtime.rb -w")]);
+        let runtime = Path::new("/r").join("supercov_runtime.rb");
+        assert_eq!(
+            rubyopt,
+            [OsString::from(format!("-r{} -w", runtime.display()))]
+        );
         assert!(variables.contains(&("HOME".into(), "/h".into())));
         let root = project("rubyopt");
         let command = ["npx".to_owned(), "playwright".to_owned(), "test".to_owned()];

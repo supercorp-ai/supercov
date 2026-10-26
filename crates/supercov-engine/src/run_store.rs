@@ -1318,8 +1318,6 @@ mod tests {
     /// directory name no run has, and evidence metadata that does not
     /// describe the archive beside it; a store that is not a directory is
     /// refused whole.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_stored_run_is_refused_for_what_does_not_describe_it() {
         let root = temporary_directory("refusals");
@@ -1352,7 +1350,12 @@ mod tests {
             vec![b' '; (MAX_RUN_METADATA_BYTES + 1) as usize],
         )
         .unwrap();
-        fs::create_dir_all(root.join(".supercov/runs/bad\u{1}id")).unwrap();
+        // Every character a run id may not hold is one Windows refuses in a
+        // file name too: there no directory can be named that way.
+        let bad_name = cfg!(unix);
+        if bad_name {
+            fs::create_dir_all(root.join(".supercov/runs/bad\u{1}id")).unwrap();
+        }
         let inventory = discover_runs(&root).unwrap();
         assert!(inventory.runs.is_empty(), "{:?}", inventory.runs);
         let reasons = inventory
@@ -1367,6 +1370,9 @@ mod tests {
             ("run-large", "run metadata is too large"),
             ("bad\u{1}id", "run directory name"),
         ] {
+            if id.starts_with("bad") && !bad_name {
+                continue;
+            }
             assert!(reasons[id].contains(reason), "{id}: {}", reasons[id]);
         }
         let file_store = temporary_directory("file-store");

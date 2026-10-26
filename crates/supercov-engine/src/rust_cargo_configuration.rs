@@ -1132,22 +1132,22 @@ mod tests {
     /// A runner path is relative to the workspace when inside it, absolute
     /// when outside, a name to search for when bare, and refused when it is
     /// the workspace itself, climbs out of it, or is left relative.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_runner_path_is_read_against_the_workspace() {
-        let root = Path::new("/w");
+        use crate::test_directory::native;
+        let workspace = native("/w");
+        let root = Path::new(&workspace);
         let read = |path: &str| runner_program(root, PathBuf::from(path));
         assert_eq!(
-            read("/w/bin/run").unwrap(),
+            read(&native("/w/bin/run")).unwrap(),
             RustCargoRunnerProgram::WorkspaceRelative {
                 value: "bin/run".into()
             }
         );
         assert_eq!(
-            read("/usr/bin/run").unwrap(),
+            read(&native("/usr/bin/run")).unwrap(),
             RustCargoRunnerProgram::Absolute {
-                value: "/usr/bin/run".into()
+                value: native("/usr/bin/run").into()
             }
         );
         assert_eq!(
@@ -1156,8 +1156,8 @@ mod tests {
                 value: "wasm-runner".into()
             }
         );
-        for refused in ["/w", "/w/../x", "tools/run"] {
-            assert!(read(refused).is_err(), "{refused}");
+        for refused in [native("/w"), native("/w/../x"), "tools/run".to_owned()] {
+            assert!(read(&refused).is_err(), "{refused}");
         }
     }
 
