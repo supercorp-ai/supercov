@@ -12553,3 +12553,58 @@ fn a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     );
     assert!(reached > 50, "{reached}");
 }
+
+/// A Python test whose process ends during it reported no outcome, but what
+/// it ran was recorded: the test is in the run, failed, credited with that.
+#[test]
+fn a_python_test_whose_process_ends_during_it_is_failed_and_credited() {
+    let project = Project::empty("python-dies");
+    project.write("pkg/__init__.py", "");
+    project.write("pkg/w.py", "def double(n):\n    return n * 2 if n else 0\n");
+    project.write("tests/__init__.py", "");
+    project.write(
+        "tests/test_w.py",
+        "import os\nimport unittest\nfrom pkg.w import double\n\nclass W(unittest.TestCase):\n    def test_a_passes(self):\n        self.assertEqual(double(2), 4)\n\n    def test_b_dies(self):\n        double(0)\n        os._exit(3)\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project.supercov(&[
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ]);
+    let dies = project
+        .supercov(&["runs", "latest", "test", "test_b_dies"])
+        .succeeds();
+    contains_all(&dies, &["outcome failed", "line: pkg/w.py:2"]);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Passed      1", "Failed      1"]);
+}
+
+/// The same of a Ruby test: its process ends during it, after a test that
+/// passed.
+#[cfg(unix)]
+#[test]
+fn a_ruby_test_whose_process_ends_during_it_is_failed_and_credited() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-dies");
+    project.write(
+        "lib/w.rb",
+        "module W\n  def self.double(n) = n ? n * 2 : 0\nend\n",
+    );
+    project.write(
+        "test/w_test.rb",
+        "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  i_suck_and_my_tests_are_order_dependent!\n\n  def test_a_passes\n    assert_equal 4, W.double(2)\n  end\n\n  def test_b_dies\n    W.double(nil)\n    exit!(3)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project.supercov(&["--", &ruby, "-Ilib", "test/w_test.rb"]);
+    // Its probes were read; its lines are not, as Ruby gives them when a
+    // test ends and this one never did.
+    let dies = project
+        .supercov(&["runs", "latest", "test", "test_b_dies"])
+        .succeeds();
+    contains_all(&dies, &["outcome failed", "1 decision"]);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Passed      1", "Failed      1"]);
+}
