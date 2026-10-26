@@ -2,7 +2,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -12,6 +11,7 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::fault_fs::{self as fs, OpenOptions};
 use crate::lifecycle::{LifecycleError, ProjectLock, atomic_rename, remove_stored_tree_deferred};
 
 const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
@@ -558,7 +558,7 @@ impl WorkspaceOperations for SystemWorkspaceOperations {
 
 #[cfg(unix)]
 pub(crate) fn create_link(target: &Path, destination: &Path, _directory: bool) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, destination)
+    fs::symlink(target, destination)
 }
 
 #[cfg(windows)]
@@ -574,7 +574,7 @@ pub(crate) fn create_link(target: &Path, destination: &Path, directory: bool) ->
             Ok(()) => Ok(()),
             Err(junction_error) => {
                 let _ = fs::remove_dir(destination);
-                std::os::windows::fs::symlink_dir(target, destination).map_err(
+                fs::symlink_dir(target, destination).map_err(
                     |symlink_error| {
                         io::Error::new(
                             symlink_error.kind(),
@@ -590,7 +590,7 @@ pub(crate) fn create_link(target: &Path, destination: &Path, directory: bool) ->
         // A project that already contains a file symlink necessarily runs in
         // an environment capable of creating one. Do not silently copy it:
         // that can change Node realpath/module-identity semantics.
-        std::os::windows::fs::symlink_file(target, destination)
+        fs::symlink_file(target, destination)
     }
 }
 
@@ -657,7 +657,7 @@ fn hard_link_tree(source: &Path, destination: &Path) -> bool {
             if file_type.is_dir() {
                 link(&from, &to)?;
             } else if file_type.is_symlink() {
-                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+                fs::symlink(fs::read_link(&from)?, &to)?;
             } else if file_type.is_file() {
                 fs::hard_link(&from, &to)?;
             } else {
@@ -4302,5 +4302,144 @@ mod tests {
             Err(WorkspaceError::Io { .. })
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Run `scenario` once for each file operation it makes, with that one
+    /// failing: every run must end, with an error or without, and never
+    /// panic. The number of operations, so a test knows the sweep reached
+    /// them.
+    fn fail_each_file_operation<Fixture>(
+        setup: impl Fn() -> Fixture,
+        scenario: impl Fn(&Fixture) -> Result<(), WorkspaceError>,
+        cleanup: impl Fn(Fixture),
+    ) -> usize {
+        let mut nth = 0;
+        loop {
+            nth += 1;
+            let fixture = setup();
+            let (result, reached) =
+                crate::fault::during_reaching(&format!("fs@{nth}"), || scenario(&fixture));
+            cleanup(fixture);
+            if !reached {
+                result.unwrap();
+                return nth - 1;
+            }
+        }
+    }
+
+    /// A project with something of each kind a copy treats apart: nested
+    /// sources, a dependency tree with tools, a virtual environment and, on
+    /// Unix, links.
+    fn varied_project() -> (PathBuf, ProjectLock) {
+        let root = project();
+        fs::create_dir_all(root.join("src/nested/deeper")).unwrap();
+        fs::write(root.join("src/nested/deeper/leaf.js"), "leaf").unwrap();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        fs::create_dir_all(root.join("node_modules/left-pad")).unwrap();
+        fs::write(root.join("node_modules/left-pad/index.js"), "pad").unwrap();
+        fs::create_dir_all(root.join("node_modules/@scope/tool/bin")).unwrap();
+        fs::write(root.join("node_modules/@scope/tool/bin/tool.js"), "tool").unwrap();
+        fs::write(root.join("node_modules/.bin/tool"), "#!/bin/sh\n").unwrap();
+        fs::create_dir_all(root.join(".venv/lib")).unwrap();
+        fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr\n").unwrap();
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::write(root.join("dist/out.js"), "built").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("index.js", root.join("src/alias.js")).unwrap();
+            std::os::unix::fs::symlink("/nowhere/outside", root.join("src/outside")).unwrap();
+        }
+        let lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        (root, lock)
+    }
+
+    fn release(fixture: (PathBuf, ProjectLock)) {
+        let (root, mut lock) = fixture;
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preparing_the_cached_copy_survives_any_file_operation_failing() {
+        let operations = fail_each_file_operation(
+            varied_project,
+            |(root, lock)| prepare_cached_workspace(root, lock, &[]).map(drop),
+            release,
+        );
+        assert!(operations > 20, "{operations}");
+    }
+
+    #[test]
+    fn refreshing_the_cached_copy_survives_any_file_operation_failing() {
+        let operations = fail_each_file_operation(
+            || {
+                let (root, lock) = varied_project();
+                let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+                fs::create_dir_all(workspace.join("build")).unwrap();
+                fs::write(workspace.join("build/output.js"), "instrumented").unwrap();
+                fs::write(workspace.join("stale.txt"), "stale").unwrap();
+                fs::write(root.join("src/index.js"), "two").unwrap();
+                (root, lock)
+            },
+            |(root, lock)| {
+                prepare_cached_workspace(root, lock, &[PathBuf::from("build")]).map(drop)
+            },
+            release,
+        );
+        assert!(operations > 20, "{operations}");
+    }
+
+    #[test]
+    fn preparing_an_isolated_copy_survives_any_file_operation_failing() {
+        let operations = fail_each_file_operation(
+            varied_project,
+            |(root, lock)| prepare_isolated_workspace(root, "run", lock).map(drop),
+            release,
+        );
+        assert!(operations > 20, "{operations}");
+    }
+
+    #[test]
+    fn recovering_and_pruning_the_cached_copy_survive_any_file_operation_failing() {
+        let prepared = || {
+            let (root, lock) = varied_project();
+            prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            (root, lock)
+        };
+        let recovered = fail_each_file_operation(
+            prepared,
+            |(root, lock)| recover_cached_workspace(root, lock).map(drop),
+            release,
+        );
+        let pruned = fail_each_file_operation(
+            prepared,
+            |(root, lock)| prune_cached_workspace_sources(root, lock).map(drop),
+            release,
+        );
+        assert!(recovered > 0 && pruned > 0, "{recovered} {pruned}");
+    }
+
+    #[test]
+    fn syncing_outputs_back_survives_any_file_operation_failing() {
+        let operations = fail_each_file_operation(
+            || {
+                let (root, lock) = varied_project();
+                let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+                let baseline = workspace_output_baseline(&workspace).unwrap();
+                fs::create_dir_all(workspace.join("dist")).unwrap();
+                fs::write(workspace.join("dist/out.js"), "rebuilt").unwrap();
+                fs::write(workspace.join("src/index.js"), "instrumented").unwrap();
+                fs::create_dir_all(workspace.join("coverage/lcov-report")).unwrap();
+                fs::write(workspace.join("coverage/lcov-report/index.html"), "report").unwrap();
+                fs::write(workspace.join("report.xml"), "<testsuites/>").unwrap();
+                (root, lock, workspace, baseline)
+            },
+            |(root, _, workspace, baseline)| {
+                workspace_output_baseline(workspace)?;
+                sync_command_outputs(root, workspace, baseline, &BTreeSet::new()).map(drop)
+            },
+            |(root, lock, _, _)| release((root, lock)),
+        );
+        assert!(operations > 5, "{operations}");
     }
 }

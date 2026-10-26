@@ -1,7 +1,8 @@
 //! Faults a test injects, so the code that handles a system call failing runs
 //! under test. `SUPERCOV_TEST_FAULT` names call sites, comma-separated: `site`
-//! fails every call there, `site=N` only the first N, and `site:E` (or
-//! `site:E=N`) fails it with errno `E` instead of its usual error. A failing
+//! fails every call there, `site=N` only the first N, `site@N` only the Nth,
+//! and `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead
+//! of its usual error. A failing
 //! site does not make its call; it returns what the call returns when it
 //! fails, and says so on standard error (`test fault at <site>`), so a test
 //! knows the site was reached. Only debug builds read the variable: a release
@@ -16,8 +17,12 @@ use std::io;
 struct Fault {
     site: String,
     errno: Option<i32>,
+    /// Calls left to pass before the first that fails.
+    skip: std::sync::atomic::AtomicUsize,
     /// Calls left to fail; `None` for every call.
     remaining: Option<std::sync::atomic::AtomicUsize>,
+    /// Whether a call failed by it.
+    fired: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -30,11 +35,18 @@ fn parse(text: &str) -> Vec<Fault> {
         .filter(|entry| !entry.is_empty())
         .map(|entry| {
             let (site, count) = entry.split_once('=').unwrap_or((entry, ""));
+            let (site, nth) = site.split_once('@').unwrap_or((site, ""));
             let (site, errno) = site.split_once(':').unwrap_or((site, ""));
+            let nth = nth.parse::<usize>().ok();
             Fault {
                 site: site.to_owned(),
                 errno: errno.parse().ok(),
-                remaining: count.parse().ok().map(std::sync::atomic::AtomicUsize::new),
+                skip: nth.map_or(0, |nth| nth.saturating_sub(1)).into(),
+                remaining: nth
+                    .map(|_| 1)
+                    .or_else(|| count.parse().ok())
+                    .map(std::sync::atomic::AtomicUsize::new),
+                fired: false.into(),
             }
         })
         .collect()
@@ -61,10 +73,21 @@ thread_local! {
 /// on this thread.
 #[cfg(any(test, debug_assertions))]
 pub fn during<R>(faults: &str, body: impl FnOnce() -> R) -> R {
+    during_reaching(faults, body).0
+}
+
+/// [`during`]'s result, and whether any of the faults failed a call: a test
+/// failing each call of a site in turn (`site@1`, `site@2`, ...) stops at the
+/// first run that no longer reaches its fault.
+#[cfg(any(test, debug_assertions))]
+pub fn during_reaching<R>(faults: &str, body: impl FnOnce() -> R) -> (R, bool) {
     let earlier = DURING.with(|during| during.replace(parse(faults)));
     let result = body();
-    DURING.with(|during| during.replace(earlier));
-    result
+    let set = DURING.with(|during| during.replace(earlier));
+    let reached = set
+        .iter()
+        .any(|fault| fault.fired.load(std::sync::atomic::Ordering::SeqCst));
+    (result, reached)
 }
 
 /// When the call at `site` fails this time, the errno the test chose for
@@ -109,18 +132,18 @@ fn announce(site: &str) {
 #[cfg(any(test, debug_assertions))]
 fn take(faults: &[Fault], site: &str) -> Option<Option<Option<i32>>> {
     use std::sync::atomic::Ordering;
+    let count_down = |left: &std::sync::atomic::AtomicUsize| {
+        left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+    };
     faults.iter().find(|fault| fault.site == site).map(|fault| {
-        fault
-            .remaining
-            .as_ref()
-            .is_none_or(|remaining| {
-                remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                        left.checked_sub(1)
-                    })
-                    .is_ok()
-            })
-            .then_some(fault.errno)
+        let fails = !count_down(&fault.skip) && fault.remaining.as_ref().is_none_or(count_down);
+        if fails {
+            fault.fired.store(true, Ordering::SeqCst);
+        }
+        fails.then_some(fault.errno)
     })
 }
 
