@@ -274,8 +274,11 @@ of that build is not counted, and wasm-only code is, whatever target
 `cargo test` builds the rest for. The crate counts whether or not
 `cargo test` compiles it (`cargo test -p host` does not) and whether or not
 a test started its Worker, so every run of the workspace has one
-denominator. Where no test of a run started a Worker, its files say so, in
-`gaps` and the file view, rather than reading as code the tests missed.
+denominator. Where no test of a run started a Worker, its files are not
+measured, rather than read as code the tests missed: they leave the run's
+totals, the file view says why at the top, `scope` lists them as left out,
+the run names them after the tests' output, and `runs check` refuses to judge
+a floor over a run that left them unmeasured.
 
 `wrangler dev --remote` runs the Worker on Cloudflare's edge, and wrangler
 opens no inspector into it there, so nothing can read what it ran. A test
@@ -292,7 +295,11 @@ Worker of a session, and Supercov reads each through workerd's own, whose
 address a small preload in wrangler's Node process reports. A test that
 sets its own `NODE_OPTIONS` keeps them; the preload is added after. A workspace with several Worker crates counts each crate
 once, and runs of different tests -- each starting different Workers, or
-none -- merge with `supercov merge`. Tests that run a Worker only when its `build/` exists, as a test
+none -- merge with `supercov merge`. A crate the Worker is built with, such
+as a core library the native tests call too, is measured inside the Worker:
+its probes run in the Worker's wasm and are read with the Worker's, into the
+same file as its native tests, each test credited what it reached either
+way. Tests that run a Worker only when its `build/` exists, as a test
 kit that will not start an unbuilt Worker does, run it: a `build/` you made
 beforehand and keep out of git is in the copy, and `wrangler dev` builds the
 crate with probes over it there.
@@ -324,11 +331,12 @@ The project needs no `cfg` flag or build step of its own for Supercov.
 - **The measured build.** The configuration's `[build]` builds the crate
   with worker-build (any `cwd`), or its `main` imports a build made in the
   run's copy. A `build/` made before the run, without probes, has nothing to
-  read.
+  read. Supercov builds nothing itself: as a JavaScript suite builds the wasm
+  it loads, build the Worker in the measured command or in the tests.
 - **Why a Worker was not measured.** Where tests started `wrangler dev` and
   no measured build ran in it, the Worker's files name each `wrangler dev -c
   <path>` the tests started, and why a configuration was left as it was (no
-  `main`, say), in `gaps` and the file view.
+  `main`, say), in the file view, `scope` and the run's output.
 - **`--inspector-port`.** A test may pass its own: Supercov reads the Worker
   through that port.
 - **Knowing the run is measured.** `SUPERCOV_RUN_ID` is set in every process

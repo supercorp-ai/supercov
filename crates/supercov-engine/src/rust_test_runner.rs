@@ -2092,18 +2092,18 @@ fn worker_files(project: &PreparedRustProject, keys: &BTreeSet<String>) -> BTree
 
 /// A Rust Worker's code runs in Cloudflare's runtime, and only when a test
 /// starts it with `wrangler dev`; plain `cargo test` compiles the crate and
-/// never runs it. Where no test of the run did, each of its files says so,
-/// rather than reading as code the tests missed.
+/// never runs it. Where no test of the run did, its files are not measured,
+/// and say why, rather than reading as code the tests missed.
 ///
 /// Where tests did start `wrangler dev` and none loaded this crate's measured
 /// build, the files name what they started, and why a configuration was left
-/// unmeasured where it was.
+/// unmeasured where it was. Returns each file left unmeasured, with why.
 fn note_unrun_workers(
     project: &mut PreparedRustProject,
     built_crates: &BTreeSet<String>,
     remote: bool,
     started: &[String],
-) {
+) -> Vec<(String, String)> {
     let mut started = started.to_vec();
     started.sort();
     started.dedup();
@@ -2113,7 +2113,7 @@ fn note_unrun_workers(
         "A Rust Worker: its code runs in Cloudflare's runtime, when a test starts it with `wrangler dev`, and no test of this run did".to_owned()
     } else {
         format!(
-            "A Rust Worker no test's `wrangler dev` ran: the tests started {}, and none loaded a build of this crate's measured source; a configuration whose `[build]` builds the crate with worker-build, or whose `main` imports such a build, is measured",
+            "A Rust Worker no test's `wrangler dev` ran: the tests started {}, and none loaded a build of this crate's measured source; a configuration whose `[build]` builds the crate with worker-build, or whose `main` imports such a build, is measured. A build made before the run, such as a `build/` already in the project, is of the project's source: build the Worker in the measured command or its tests",
             started.join("; ")
         )
     };
@@ -2121,14 +2121,16 @@ fn note_unrun_workers(
     let unrun = worker_files(project, &project.probes.workers)
         .into_iter()
         .filter(|file| !ran.contains(file) && project.source_files.contains(file))
-        .collect::<Vec<_>>();
-    for file in unrun {
+        .collect::<BTreeSet<_>>();
+    for file in &unrun {
         let id = format!("rust-worker-not-run#{file}");
         if project.manifest.limitations.iter().any(|limitation| {
             limitation.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())
         }) {
             continue;
         }
+        // The whole file: the report takes it out of the denominator and
+        // says why, rather than counting its lines as gaps.
         project.manifest.limitations.push(serde_json::json!({
             "id": id,
             "kind": "source-scope",
@@ -2138,8 +2140,13 @@ fn note_unrun_workers(
             "source": "",
             "reason": reason,
             "blocking": false,
+            "wholeFile": true,
         }));
     }
+    unrun
+        .into_iter()
+        .map(|file| (file, reason.clone()))
+        .collect()
 }
 
 /// Says which files the build left out of the denominator.
@@ -2161,6 +2168,31 @@ fn report_declined(
             .collect::<Vec<_>>()
             .join(", "),
         if declined.len() > 3 { ", ..." } else { "" }
+    )
+    .map_err(|error| RustTestRunnerError::Io(error.to_string()))
+}
+
+/// Says, after the tests' own output, which Worker files the run could not
+/// measure and why: they are out of the totals, and `runs check` refuses to
+/// judge a run that left them unmeasured.
+fn report_unmeasured_workers(
+    unmeasured: &[(String, String)],
+    diagnostics: &mut dyn Write,
+) -> Result<(), RustTestRunnerError> {
+    let Some((_, reason)) = unmeasured.first() else {
+        return Ok(());
+    };
+    writeln!(
+        diagnostics,
+        "[supercov] not measured: {} Rust Worker file(s), {}{}. {reason}.",
+        unmeasured.len(),
+        unmeasured
+            .iter()
+            .take(3)
+            .map(|(file, _)| file.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        if unmeasured.len() > 3 { ", ..." } else { "" }
     )
     .map_err(|error| RustTestRunnerError::Io(error.to_string()))
 }
@@ -2228,7 +2260,7 @@ pub fn run_prepared_rust_tests(
             diagnostics,
         )?;
         let mut project = project.clone();
-        note_unrun_workers(
+        let unmeasured_workers = note_unrun_workers(
             &mut project,
             &outcome.built_crates,
             outcome.remote_workers,
@@ -2240,6 +2272,7 @@ pub fn run_prepared_rust_tests(
             manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
             ..project.clone()
         };
+        report_unmeasured_workers(&unmeasured_workers, diagnostics)?;
         return Ok(RustFrontendRun {
             declaration: FrontendRunDeclaration {
                 protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -2448,7 +2481,7 @@ pub fn run_prepared_rust_tests(
         }
     }
     let mut project = project.clone();
-    note_unrun_workers(&mut project, &built_crates, remote, &started);
+    let unmeasured_workers = note_unrun_workers(&mut project, &built_crates, remote, &started);
     let project = &project;
     // What `cargo test` prints for each binary: every test, the failures
     // together, one result.
@@ -2615,6 +2648,7 @@ pub fn run_prepared_rust_tests(
         runners.push(rust_runner_declaration("rustdoc"));
     }
     let structural_limitations = structural_limitations(&project.manifest);
+    report_unmeasured_workers(&unmeasured_workers, diagnostics)?;
     Ok(RustFrontendRun {
         declaration: FrontendRunDeclaration {
             protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -3227,7 +3261,7 @@ mod tests {
     }
 
     #[test]
-    fn each_file_of_a_worker_no_test_started_is_noted_once() {
+    fn the_files_of_a_worker_no_test_started_are_not_measured_and_say_why() {
         let mut project = PreparedRustProject::empty(std::env::temp_dir());
         project.source_files = vec!["plane/src/lib.rs".into(), "runners/src/lib.rs".into()];
         project.probes.crates = BTreeMap::from([
@@ -3244,29 +3278,54 @@ mod tests {
         ]);
         project.probes.workers = BTreeSet::from(["plane".to_owned(), "runners".to_owned()]);
         let empty = project.clone();
+        let mut unmeasured = Vec::new();
         for _ in 0..2 {
-            note_unrun_workers(
+            unmeasured = note_unrun_workers(
                 &mut project,
                 &BTreeSet::from(["plane".to_owned()]),
                 false,
                 &[],
             );
         }
+        // One note on the Worker no test ran, for the whole file, however
+        // often it is noted; the one that ran has none.
+        let notes = project
+            .manifest
+            .limitations
+            .iter()
+            .filter(|limitation| limitation["wholeFile"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["id"], "rust-worker-not-run#runners/src/lib.rs");
+        let reason = notes[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("no test of this run did"), "{reason}");
         assert_eq!(
-            project
-                .manifest
-                .limitations
-                .iter()
-                .map(|limitation| limitation["id"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["rust-worker-not-run#runners/src/lib.rs"]
+            unmeasured,
+            [("runners/src/lib.rs".to_owned(), reason.to_owned())]
         );
+        let mut said = Vec::new();
+        report_unmeasured_workers(&unmeasured, &mut said).unwrap();
+        assert_eq!(
+            String::from_utf8(said).unwrap(),
+            format!(
+                "[supercov] not measured: 1 Rust Worker file(s), runners/src/lib.rs. {reason}.\n"
+            )
+        );
+        let mut said = Vec::new();
+        report_unmeasured_workers(&[], &mut said).unwrap();
+        assert!(said.is_empty());
+        // Every Worker ran: nothing changes.
+        let mut ran = empty.clone();
         assert!(
-            project.manifest.limitations[0]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("no test of this run did")
+            note_unrun_workers(
+                &mut ran,
+                &BTreeSet::from(["plane".to_owned(), "runners".to_owned()]),
+                false,
+                &[],
+            )
+            .is_empty()
         );
+        assert_eq!(ran, empty);
         // Tests that did start `wrangler dev` are named, once each, with why
         // a configuration was not measured.
         let mut started = empty;
@@ -3276,12 +3335,17 @@ mod tests {
                 .to_owned(),
             "`wrangler dev -c tests/w.toml`".to_owned(),
         ];
-        note_unrun_workers(&mut started, &BTreeSet::new(), false, &configs);
-        let reason = started.manifest.limitations[0]["reason"].as_str().unwrap();
+        let said = note_unrun_workers(&mut started, &BTreeSet::new(), false, &configs);
+        assert_eq!(said.len(), 2);
+        let reason = &said[0].1;
         assert!(
             reason.contains(
                 "the tests started `wrangler dev -c tests/other.toml`, not measured because it names no `main`; `wrangler dev -c tests/w.toml`, and none loaded"
             ),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("build the Worker in the measured command"),
             "{reason}"
         );
     }
