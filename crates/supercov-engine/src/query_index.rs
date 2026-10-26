@@ -200,8 +200,8 @@ fn layout_sections(
     let mut descriptors = Vec::with_capacity(ordered.len());
     for section in &ordered {
         cursor = align(cursor, 8)?;
-        let length =
-            u64::try_from(section.bytes.len()).map_err(|_| QueryIndexError::SizeOverflow)?;
+        // Lossless: `usize` is 64 bits on every target Supercov builds for.
+        let length = section.bytes.len() as u64;
         let offset = cursor;
         cursor = checked_end(cursor, length)?;
         descriptors.push(SectionDescriptor {
@@ -212,7 +212,7 @@ fn layout_sections(
             count: section.count,
             digests_offset: 0,
             digest_count: u32::try_from(section.bytes.len().div_ceil(QUERY_INDEX_PAGE_SIZE))
-                .map_err(|_| QueryIndexError::SizeOverflow)?,
+                .expect("a section holds fewer than 2^32 pages: it is written from memory"),
         });
     }
     for descriptor in &mut descriptors {
@@ -405,9 +405,7 @@ impl QueryIndex {
                     reason: "record shape",
                 });
             }
-            let digest_count = usize::try_from(descriptor.length)
-                .map_err(|_| QueryIndexError::SizeOverflow)?
-                .div_ceil(QUERY_INDEX_PAGE_SIZE);
+            let digest_count = (descriptor.length as usize).div_ceil(QUERY_INDEX_PAGE_SIZE);
             if descriptor.digest_count as usize != digest_count {
                 return Err(QueryIndexError::InvalidSection {
                     kind: descriptor.kind,
@@ -469,18 +467,15 @@ impl QueryIndex {
         if self.verified_pages.lock().unwrap().contains(&key) {
             return Ok(());
         }
-        let page_start = usize::try_from(descriptor.offset)
-            .map_err(|_| QueryIndexError::SizeOverflow)?
+        let page_start = (descriptor.offset as usize)
             .checked_add(page * QUERY_INDEX_PAGE_SIZE)
             .ok_or(QueryIndexError::SizeOverflow)?;
-        let section_end = usize::try_from(checked_end(descriptor.offset, descriptor.length)?)
-            .map_err(|_| QueryIndexError::SizeOverflow)?;
+        let section_end = checked_end(descriptor.offset, descriptor.length)? as usize;
         let page_end = page_start
             .checked_add(QUERY_INDEX_PAGE_SIZE)
             .ok_or(QueryIndexError::SizeOverflow)?
             .min(section_end);
-        let digest_start = usize::try_from(descriptor.digests_offset)
-            .map_err(|_| QueryIndexError::SizeOverflow)?
+        let digest_start = (descriptor.digests_offset as usize)
             .checked_add(page * 32)
             .ok_or(QueryIndexError::SizeOverflow)?;
         let expected =
@@ -512,18 +507,14 @@ impl QueryIndex {
             });
         }
         if length > 0 {
-            let first = usize::try_from(offset).map_err(|_| QueryIndexError::SizeOverflow)?
-                / QUERY_INDEX_PAGE_SIZE;
-            let last = usize::try_from(end - 1).map_err(|_| QueryIndexError::SizeOverflow)?
-                / QUERY_INDEX_PAGE_SIZE;
+            let first = offset as usize / QUERY_INDEX_PAGE_SIZE;
+            let last = (end - 1) as usize / QUERY_INDEX_PAGE_SIZE;
             for page in first..=last {
                 self.verify_page(descriptor, page)?;
             }
         }
-        let start = usize::try_from(descriptor.offset + offset)
-            .map_err(|_| QueryIndexError::SizeOverflow)?;
-        let end =
-            usize::try_from(descriptor.offset + end).map_err(|_| QueryIndexError::SizeOverflow)?;
+        let start = (descriptor.offset + offset) as usize;
+        let end = (descriptor.offset + end) as usize;
         Ok(&self.mmap[start..end])
     }
 

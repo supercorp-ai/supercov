@@ -36,7 +36,6 @@ pub enum EvidenceArchiveError {
     TrailingCompressedData,
     UnsupportedSource(PathBuf),
     PathOutsideSource { source: PathBuf, path: PathBuf },
-    SizeOverflow,
 }
 
 impl std::fmt::Display for EvidenceArchiveError {
@@ -99,7 +98,6 @@ impl std::fmt::Display for EvidenceArchiveError {
                 path.display(),
                 source.display(),
             ),
-            Self::SizeOverflow => write!(formatter, "evidence archive size exceeds its format"),
         }
     }
 }
@@ -377,13 +375,13 @@ fn write_framed_with_magic<W: Write>(
     for entry in entries {
         let header = EntryHeader {
             path: entry.path.clone(),
-            bytes: u64::try_from(entry.contents.len())
-                .map_err(|_| EvidenceArchiveError::SizeOverflow)?,
+            // Lossless: `usize` is 64 bits on every target Supercov builds for.
+            bytes: entry.contents.len() as u64,
         };
         let mut encoded = serde_json::to_vec(&header)?;
         encoded.push(b'\n');
-        let header_size =
-            u32::try_from(encoded.len()).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
+        let header_size = u32::try_from(encoded.len())
+            .expect("an entry header, a path and a size, is shorter than 4 GiB");
         writer.write_all(&header_size.to_be_bytes())?;
         writer.write_all(&encoded)?;
         writer.write_all(&entry.contents)?;
@@ -578,8 +576,7 @@ fn read_framed_entries<R: Read>(
         }
         // Each path follows the one before in order, so none is seen twice.
         seen.insert(header.path.clone());
-        let payload_size =
-            usize::try_from(header.bytes).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
+        let payload_size = header.bytes as usize;
         previous = Some(header.path.clone());
         if retain(&header.path) {
             // Read as the bytes arrive: a damaged header's size is never
