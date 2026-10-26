@@ -2116,12 +2116,9 @@ fn could_not_measure(error: &str) -> ExitCode {
         // Interrupted, nothing published: exit as the command did, as a
         // shell reports a signal.
         process_exit_code(signal.exit_code())
-    } else if error.contains("could not spawn")
-        // Windows looks the program up itself and says so in its own words.
-        && (error.contains("(os error 2)") || error.contains("program not found"))
-    {
+    } else if error.contains("could not spawn") && error.contains(": no such program: ") {
         ExitCode::from(127)
-    } else if error.contains("could not spawn") && error.contains("(os error 13)") {
+    } else if error.contains("could not spawn") && error.contains(": not allowed to run: ") {
         ExitCode::from(126)
     } else {
         ExitCode::from(1)
@@ -3956,11 +3953,11 @@ mod tests {
             ),
             ("the test command exited 3 after a while", 1),
             (
-                "could not spawn nope: No such file or directory (os error 2)",
+                "could not spawn nope: no such program: No such file or directory (os error 2)",
                 127,
             ),
             (
-                "could not spawn ./t.sh: Permission denied (os error 13)",
+                "could not spawn ./t.sh: not allowed to run: Permission denied (os error 13)",
                 126,
             ),
             ("could not spawn x: other (os error 5)", 1),

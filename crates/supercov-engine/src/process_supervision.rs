@@ -60,10 +60,21 @@ impl std::fmt::Display for SupervisionError {
                 )
             }
             Self::EmptyCommand => write!(formatter, "test command must not be empty"),
+            // Said by kind, which every platform reports alike, before the
+            // platform's own words: Windows looks a program up itself and
+            // has its own for one that is not there.
             Self::Spawn { program, source } => {
+                // A file that may not be run is EACCES, Windows' access
+                // denied; EPERM is a step of Supercov's own refused.
+                let not_runnable = if cfg!(windows) { 5 } else { 13 };
+                let kind = match source.kind() {
+                    std::io::ErrorKind::NotFound => "no such program: ",
+                    _ if source.raw_os_error() == Some(not_runnable) => "not allowed to run: ",
+                    _ => "",
+                };
                 write!(
                     formatter,
-                    "could not spawn {}: {source}",
+                    "could not spawn {}: {kind}{source}",
                     program.to_string_lossy()
                 )
             }

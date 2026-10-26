@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A test command that could not start says whether there is no such program or it may not be run, before the system's own words, and exits `127` or `126` by that on every platform rather than by the message's wording; a step of Supercov's own that the system refused no longer reads as a file that may not be run.
+
 ## 4.20.0
 
 **Added**
