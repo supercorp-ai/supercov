@@ -267,7 +267,8 @@ pub(crate) fn run_doctests(
             .env("RUSTDOC", &program)
             .env(WRAPPER_ROOT_ENV, root)
             .env(REAL_RUSTDOC_ENV, &real_rustdoc)
-            .env(crate::rust_runtime::PROBE_TOKEN_ENV, &project.probes.token),
+            .env(crate::rust_runtime::PROBE_TOKEN_ENV, &project.probes.token)
+            .env(crate::rust_runtime::RUN_ID_ENV, run_id),
     )
     .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);

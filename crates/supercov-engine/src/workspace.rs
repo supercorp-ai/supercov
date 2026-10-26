@@ -1832,6 +1832,18 @@ fn jvm_build_state(workspace: &Path, relative: &Path) -> bool {
     false
 }
 
+/// What a run leaves in the copy that is no output of the command's own:
+/// wrangler's local state (`.wrangler/`, its dev server's cache and
+/// storage), and the wrapped configurations Supercov hands `wrangler dev`.
+/// Returned, they put a Worker's dev state and Supercov's files in the
+/// project.
+fn run_state(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        name == ".wrangler" || name.starts_with(crate::rust_worker::WRAPPED_PREFIX)
+    })
+}
+
 /// `sync_command_outputs` for a command of any of the languages that run in
 /// a copy.
 pub fn sync_outputs_of(
@@ -1861,7 +1873,7 @@ pub fn sync_outputs_of(
     let mut built_directories = BuiltDirectories::new(root);
     let mut cargo_targets = CargoTargets::new(workspace);
     for (relative, state) in &current {
-        if baseline.entries.get(relative) == Some(state) {
+        if baseline.entries.get(relative) == Some(state) || run_state(relative) {
             continue;
         }
         if !protected.contains(relative) {
@@ -3682,8 +3694,6 @@ mod tests {
     /// The workspace container is Supercov's only where it holds the marker
     /// with its contents and its own ignore file: made fresh, found again,
     /// and refused when anything else is there.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn the_workspace_container_is_made_once_and_refused_when_not_ours() {
         static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -3738,10 +3748,17 @@ mod tests {
         fs::create_dir_all(&container).unwrap();
         fs::write(container.join(WORKSPACE_MARKER), WORKSPACE_MARKER_CONTENTS).unwrap();
         fs::create_dir(container.join(".gitignore")).unwrap();
-        assert!(matches!(
-            ensure_container(&root),
-            Err(WorkspaceError::UnsafePath(_))
-        ));
+        // Windows answers creating a file over a directory as access denied,
+        // not as there being one: refused all the same, as an I/O error.
+        let refused = ensure_container(&root);
+        if cfg!(unix) {
+            assert!(matches!(refused, Err(WorkspaceError::UnsafePath(_))));
+        } else {
+            assert!(
+                matches!(refused, Err(WorkspaceError::Io { .. })),
+                "{refused:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -4133,22 +4150,48 @@ mod tests {
 
     /// A copy that is the project, or has no name, names nothing; one that
     /// does not exist is named as it is spelled.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn only_a_copy_apart_from_the_project_is_renamed() {
         let root = project();
         assert!(console_names(&root, &root).places.is_empty());
         assert!(copy_and_project(Path::new(""), Path::new("")).is_empty());
         let missing = root.join("missing");
-        assert_eq!(
-            copy_and_project(&root.join("other"), &missing),
-            [(
-                missing.display().to_string(),
-                root.join("other").display().to_string()
-            )]
+        let pairs = copy_and_project(&root.join("other"), &missing);
+        let native = (
+            missing.display().to_string(),
+            root.join("other").display().to_string(),
         );
+        assert!(pairs.contains(&native), "{pairs:?}");
+        // Windows names the same paths in JSON's and in forward slashes too.
+        assert_eq!(pairs.len(), if cfg!(windows) { 3 } else { 1 }, "{pairs:?}");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// wrangler's local state and the configurations Supercov wraps for
+    /// `wrangler dev` stay in the copy; the command's own outputs beside
+    /// them still flow back.
+    #[test]
+    fn wrangler_state_and_wrapped_configurations_stay_in_the_copy() {
+        let (root, workspace) = writeback_fixture("wrangler-state");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        for (file, text) in [
+            (".wrangler/state/v3/d1.sqlite", "state"),
+            ("worker/.wrangler/tmp/bundle.js", "bundle"),
+            ("worker/.supercov-wrangler-1-0.toml", "main = \"x\"\n"),
+            (
+                "worker/.supercov-wrangler-1-0/supercov-worker-entry.mjs",
+                "entry",
+            ),
+            ("worker/report.txt", "the command's own"),
+        ] {
+            fs::create_dir_all(workspace.join(file).parent().unwrap()).unwrap();
+            fs::write(workspace.join(file), text).unwrap();
+        }
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        assert_eq!(sync.synced_paths, [PathBuf::from("worker/report.txt")]);
+        assert!(!root.join(".wrangler").exists());
+        assert!(!root.join("worker/.wrangler").exists());
+        assert!(!root.join("worker/.supercov-wrangler-1-0.toml").exists());
     }
 
     /// A lockfile Cargo wrote stays in the copy, and a manifest the command
@@ -4289,18 +4332,19 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn node_modules_that_cannot_be_looked_at_is_an_error() {
         // A project root that is a file: its node_modules is a path below a
-        // file, which is neither there nor missing.
+        // file, which is neither there nor missing. Windows answers such a
+        // path as not found: there the project has no node_modules.
         let root = project();
         let file = root.join("package.json");
-        assert!(matches!(
-            link_node_modules(&file, &root.join("workspace"), &mut OrdinaryCopyOperations),
-            Err(WorkspaceError::Io { .. })
-        ));
+        let linked = link_node_modules(&file, &root.join("workspace"), &mut OrdinaryCopyOperations);
+        assert_eq!(
+            matches!(linked, Err(WorkspaceError::Io { .. })),
+            cfg!(unix),
+            "{linked:?}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,0 +1,12 @@
+# CI runs the workspace's tests under nextest, a process per test and the
+# test binaries side by side. Cargo ran the binaries one at a time, which the
+# JVM tests relied on: they drive real Maven and Gradle builds, which cannot
+# run alongside each other (on Windows they stop). Their lock is per process
+# (`tests/common/mod.rs`, `building`), so here they take one slot between
+# them.
+[test-groups]
+jvm-builds = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary(jvm_frontend) | binary(jvm_run)"
+test-group = "jvm-builds"

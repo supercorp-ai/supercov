@@ -5480,13 +5480,17 @@ mod tests {
         crate::test_directory::TestDirectory,
         crate::query_index::QueryIndex,
     ) {
+        // The clock ticks once per microsecond and the tests share a pid:
+        // the counter keeps two that start together apart.
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "supercov-query-{}-{}",
+            "supercov-query-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
         let root = crate::test_directory::TestDirectory::adopt(root);

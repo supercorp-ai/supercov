@@ -2564,12 +2564,11 @@ pub(crate) mod tests {
         assert_eq!(good.decisions.len(), 1);
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn an_evidence_directory_holds_only_transports_and_a_path_only_project_files() {
-        let root = Path::new("/project");
-        assert_eq!(relative(root, "/project"), None);
+        let project = crate::test_directory::native("/project");
+        let root = Path::new(&project);
+        assert_eq!(relative(root, &project), None);
         assert_eq!(relative(root, "../lib/m.rb"), None);
         assert_eq!(relative(root, "./lib/m.rb").as_deref(), Some("lib/m.rb"));
         let base = temporary("entries");

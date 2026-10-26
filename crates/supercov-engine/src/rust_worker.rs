@@ -1102,25 +1102,21 @@ pub struct CargoTestWorkers {
 }
 
 impl CargoTestWorkers {
-    /// Point the copy's Worker configurations at Supercov's entry and put the
-    /// stand-in in `tools`. None where the workspace has no Rust Worker, or
-    /// where no `wrangler` is installed: a test that looks for one must find
-    /// none, as it would without Supercov.
+    /// Put the stand-in in `tools`. None where the workspace has no Rust
+    /// Worker, or where no `wrangler` is installed: a test that looks for one
+    /// must find none, as it would without Supercov.
+    ///
+    /// The copy's configurations are left as the project wrote them: a test
+    /// may read one as a template for its own. The stand-in wraps whatever
+    /// configuration a test's `wrangler dev` is given, as it starts.
     pub fn prepare(workspace: &Path, tools: &Path) -> Result<Option<Self>, String> {
-        let configs = worker_configs(workspace)
-            .iter()
-            .filter_map(|path| parse_config(path))
-            .collect::<Vec<_>>();
-        if configs.is_empty() {
+        if worker_configs(workspace).is_empty() {
             return Ok(None);
         }
         let path = std::env::var_os("PATH").unwrap_or_default();
         let Some(real) = on_path(&path, "wrangler") else {
             return Ok(None);
         };
-        for config in &configs {
-            point_at_entry(config, None)?;
-        }
         let supercov = std::env::current_exe().map_err(|error| error.to_string())?;
         fs::create_dir_all(tools).map_err(|error| format!("{}: {error}", tools.display()))?;
         write_stand_in(tools, &supercov)?;
@@ -1340,6 +1336,11 @@ fn watched_arguments(
                     hooked_node_options(inherited.as_deref(), &hook).into(),
                 ));
             }
+            // What the test's own configuration names runs inside Supercov's
+            // entry, so its wasm instances can be read, wherever the
+            // configuration is and whatever its `main` loads.
+            let cwd = std::env::current_dir().unwrap_or_default();
+            wrap_started_configs(&mut arguments, &cwd, &windows.with_extension("started"));
             let _ = poller
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -1350,6 +1351,252 @@ fn watched_arguments(
     Watched {
         arguments,
         environment,
+    }
+}
+
+/// The name of what a measured `wrangler dev` is given beside a test's own
+/// configuration: a copy of it whose `main` is Supercov's entry, and that
+/// entry. The copy's writeback and the run's staleness pass over them.
+pub(crate) const WRAPPED_PREFIX: &str = ".supercov-wrangler-";
+
+/// Where the argument naming a configuration is, to name the copy instead:
+/// the word after `-c` or `--config`, one `--config=` word, or none given.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ConfigSlot {
+    After(usize),
+    Inline(usize),
+    Default,
+}
+
+/// The configurations `wrangler dev` reads, as wrangler finds them: each one
+/// `-c` or `--config` names, against `--cwd` or the directory it was started
+/// in; else the first `wrangler.json`, `wrangler.jsonc` or `wrangler.toml`
+/// there or in a directory above it.
+fn started_configs(arguments: &[std::ffi::OsString], cwd: &Path) -> Vec<(ConfigSlot, PathBuf)> {
+    let words = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mut base = cwd.to_owned();
+    let mut named = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        let next = words.get(index + 1);
+        match (word.as_str(), next) {
+            ("-c" | "--config", Some(path)) => {
+                named.push((ConfigSlot::After(index + 1), PathBuf::from(path)));
+                index += 1;
+            }
+            ("--cwd", Some(directory)) => {
+                base = cwd.join(directory);
+                index += 1;
+            }
+            _ => {
+                if let Some(path) = word.strip_prefix("--config=") {
+                    named.push((ConfigSlot::Inline(index), PathBuf::from(path)));
+                } else if let Some(directory) = word.strip_prefix("--cwd=") {
+                    base = cwd.join(directory);
+                }
+            }
+        }
+        index += 1;
+    }
+    if !named.is_empty() {
+        return named
+            .into_iter()
+            .map(|(slot, path)| (slot, base.join(path)))
+            .collect();
+    }
+    base.ancestors()
+        .flat_map(|directory| {
+            ["wrangler.json", "wrangler.jsonc", "wrangler.toml"].map(|name| directory.join(name))
+        })
+        .find(|path| path.is_file())
+        .map(|path| vec![(ConfigSlot::Default, path)])
+        .unwrap_or_default()
+}
+
+/// The environment `wrangler dev` picks: `-e`, `--env` or `--env=`.
+fn started_environment(arguments: &[std::ffi::OsString]) -> Option<String> {
+    let words = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    words
+        .iter()
+        .enumerate()
+        .find_map(|(index, word)| match word.as_str() {
+            "-e" | "--env" => words.get(index + 1).cloned(),
+            _ => word.strip_prefix("--env=").map(str::to_owned),
+        })
+}
+
+/// A copy of the configuration at `path` beside it, whose `main` (the
+/// environment's, where it names one) is Supercov's entry: the registry,
+/// then the configuration's own `main`, whatever that module loads. Returns
+/// the copy and every file written, or why the configuration was left as it
+/// is.
+fn wrap_config(
+    path: &Path,
+    environment: Option<&str>,
+    number: usize,
+) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    let (text, document) =
+        read_config(path).ok_or_else(|| "it could not be read as a configuration".to_owned())?;
+    let environment_main = environment
+        .and_then(|name| document["env"][name]["main"].as_str())
+        .map(str::to_owned);
+    let main = environment_main
+        .clone()
+        .or_else(|| document["main"].as_str().map(str::to_owned))
+        .ok_or_else(|| "it names no `main`".to_owned())?;
+    let file = Path::new(&main)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if file == ENTRY_FILE || main.contains(WRAPPED_PREFIX) {
+        return Err("its `main` is Supercov's entry already".to_owned());
+    }
+    let directory = path.parent().unwrap_or(Path::new("."));
+    let name = format!("{WRAPPED_PREFIX}{}-{number}", std::process::id());
+    let folder = directory.join(&name);
+    fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
+    let import = if Path::new(&main).is_absolute() {
+        main.replace('\\', "/")
+    } else {
+        format!("../{}", main.trim_start_matches("./"))
+    };
+    fs::write(folder.join(REGISTRY_FILE), REGISTRY)
+        .and_then(|()| {
+            fs::write(
+                folder.join(ENTRY_FILE),
+                format!(
+                    "// Generated by Supercov: the configuration's entry, with its wasm instances remembered.\nimport './{REGISTRY_FILE}';\nexport * from '{import}';\nexport {{ default }} from '{import}';\n"
+                ),
+            )
+        })
+        .map_err(|error| format!("{}: {error}", folder.display()))?;
+    let entry = format!("{name}/{ENTRY_FILE}");
+    let toml = path
+        .extension()
+        .is_some_and(|extension| extension == "toml");
+    let rewritten = if toml {
+        let mut document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        document["main"] = toml_edit::value(entry.as_str());
+        if let (Some(name), Some(_)) = (environment, &environment_main) {
+            document["env"][name]["main"] = toml_edit::value(entry.as_str());
+        }
+        document.to_string()
+    } else {
+        let mut document = document;
+        document["main"] = json!(entry);
+        if let (Some(name), Some(_)) = (environment, &environment_main) {
+            document["env"][name]["main"] = json!(entry);
+        }
+        serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?
+    };
+    let extension = if toml { "toml" } else { "json" };
+    let copy = directory.join(format!("{name}.{extension}"));
+    fs::write(&copy, rewritten).map_err(|error| format!("{}: {error}", copy.display()))?;
+    Ok((copy.clone(), vec![copy, folder]))
+}
+
+/// Hand `wrangler dev` a wrapped copy of each configuration it reads, and
+/// note in the test's evidence what was started and how: the run says so of
+/// a Worker it could not read, and the poller removes the copies once
+/// wrangler is gone.
+fn wrap_started_configs(arguments: &mut Vec<std::ffi::OsString>, cwd: &Path, note: &Path) {
+    let environment = started_environment(arguments);
+    let mut started = Vec::new();
+    let mut written = Vec::new();
+    for (number, (slot, config)) in started_configs(arguments, cwd).into_iter().enumerate() {
+        match wrap_config(&config, environment.as_deref(), number) {
+            Ok((copy, files)) => {
+                match slot {
+                    ConfigSlot::After(index) => arguments[index] = copy.clone().into_os_string(),
+                    ConfigSlot::Inline(index) => {
+                        arguments[index] = format!("--config={}", copy.display()).into();
+                    }
+                    ConfigSlot::Default => {
+                        arguments.push("--config".into());
+                        arguments.push(copy.clone().into_os_string());
+                    }
+                }
+                started.push(json!({"config": config, "wrapped": true}));
+                written.extend(files);
+            }
+            Err(reason) => {
+                started.push(json!({"config": config, "wrapped": false, "reason": reason}))
+            }
+        }
+    }
+    let _ = fs::write(
+        note,
+        json!({"configs": started, "written": written}).to_string(),
+    );
+}
+
+/// What the tests that started a `wrangler dev` in `directory`, by their
+/// notes, gave it: each configuration, and why one was left unwrapped.
+pub fn started_worker_configs(directory: &Path) -> Vec<String> {
+    let mut said = Vec::new();
+    let Ok(entries) = fs::read_dir(directory) else {
+        return said;
+    };
+    let notes = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "started")
+        });
+    for path in notes {
+        let Some(note) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            continue;
+        };
+        for config in note["configs"].as_array().into_iter().flatten() {
+            let named = config["config"].as_str().unwrap_or("?");
+            said.push(match config["reason"].as_str() {
+                Some(reason) => format!("`wrangler dev -c {named}`, not measured because {reason}"),
+                None => format!("`wrangler dev -c {named}`"),
+            });
+        }
+    }
+    said.sort();
+    said.dedup();
+    said
+}
+
+/// Remove what `wrap_started_configs` wrote, by its note: each a copy or a
+/// folder named by `WRAPPED_PREFIX`, and nothing else.
+fn remove_wrapped(note: &Path) {
+    let Some(note) = fs::read_to_string(note)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return;
+    };
+    for path in note["written"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let path = Path::new(path);
+        let ours = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(WRAPPED_PREFIX));
+        if ours && path.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        } else if ours {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -1442,6 +1689,9 @@ pub fn poll_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
         std::thread::sleep(Duration::from_millis(20));
     }
     poller.finish();
+    // The wrapped copies of the test's configurations, once wrangler is done
+    // with them.
+    remove_wrapped(&windows.with_extension("started"));
     let parts = others.map(OtherWorkers::finish).unwrap_or_default();
     for part in std::iter::once(part).chain(parts) {
         if fs::symlink_metadata(&part).is_ok() {
@@ -2494,6 +2744,221 @@ mod tests {
             );
         }
         fs::remove_dir_all(package).unwrap();
+    }
+
+    /// The configurations `wrangler dev` reads are found as wrangler finds
+    /// them: each named one against `--cwd`, else the nearest default.
+    #[test]
+    fn the_configurations_a_wrangler_dev_reads_are_found_as_wrangler_finds_them() {
+        let root = temporary("started-configs");
+        fs::create_dir_all(root.join("crate/nested")).unwrap();
+        fs::write(root.join("crate/wrangler.toml"), "").unwrap();
+        let words = |text: &str| {
+            text.split(' ')
+                .filter(|word| !word.is_empty())
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            started_configs(&words("dev -c a.toml --config=b.json --config"), &root),
+            [
+                (ConfigSlot::After(2), root.join("a.toml")),
+                (ConfigSlot::Inline(3), root.join("b.json"))
+            ]
+        );
+        assert_eq!(
+            started_configs(&words("--cwd crate dev --config w.toml"), &root),
+            [(ConfigSlot::After(4), root.join("crate/w.toml"))]
+        );
+        assert_eq!(
+            started_configs(&words("--cwd=crate dev -c w.toml"), &root),
+            [(ConfigSlot::After(3), root.join("crate/w.toml"))]
+        );
+        // None named: the nearest default, here or above.
+        assert_eq!(
+            started_configs(&words("dev"), &root.join("crate/nested")),
+            [(ConfigSlot::Default, root.join("crate/wrangler.toml"))]
+        );
+        assert!(started_configs(&words("dev --cwd"), &root).is_empty());
+        assert_eq!(
+            started_environment(&words("dev -e staging")).as_deref(),
+            Some("staging")
+        );
+        assert_eq!(
+            started_environment(&words("dev --env=qa")).as_deref(),
+            Some("qa")
+        );
+        assert_eq!(started_environment(&words("dev --env")), None);
+        assert_eq!(started_environment(&words("dev")), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A configuration is handed on as a copy beside it whose `main` (the
+    /// environment's, where it names one) is Supercov's entry, which loads
+    /// the configuration's own; one it cannot wrap says why.
+    #[test]
+    fn a_configuration_is_wrapped_in_a_copy_beside_it() {
+        let root = temporary("wrap-config");
+        let toml = root.join("wrangler.toml");
+        fs::write(
+            &toml,
+            "name = \"w\"\nmain = \"./harness.mjs\"\n\n[env.staging]\nmain = \"staging.mjs\"\n",
+        )
+        .unwrap();
+        let (copy, written) = wrap_config(&toml, Some("staging"), 0).unwrap();
+        let name = format!("{WRAPPED_PREFIX}{}-0", std::process::id());
+        assert_eq!(copy, root.join(format!("{name}.toml")));
+        assert_eq!(written, [copy.clone(), root.join(&name)]);
+        let wrapped = fs::read_to_string(&copy).unwrap();
+        assert!(
+            wrapped.contains(&format!("main = \"{name}/{ENTRY_FILE}\"")),
+            "{wrapped}"
+        );
+        assert!(wrapped.contains("[env.staging]"), "{wrapped}");
+        assert_eq!(
+            wrapped.matches(&format!("{name}/{ENTRY_FILE}")).count(),
+            2,
+            "{wrapped}"
+        );
+        let entry = fs::read_to_string(root.join(&name).join(ENTRY_FILE)).unwrap();
+        assert!(entry.contains("export * from '../staging.mjs';"), "{entry}");
+        assert!(entry.starts_with("// Generated by Supercov"), "{entry}");
+        assert!(root.join(&name).join(REGISTRY_FILE).is_file());
+        // A JSON configuration is copied as JSON, and an absolute `main` (on
+        // Unix: a path with no drive is not absolute on Windows) is imported
+        // as written.
+        let json = root.join("wrangler.jsonc");
+        let absolute = if cfg!(windows) {
+            "C:/abs/worker.mjs"
+        } else {
+            "/abs/worker.mjs"
+        };
+        fs::write(
+            &json,
+            format!("{{ // a comment\n\"main\": \"{absolute}\" }}\n"),
+        )
+        .unwrap();
+        let (copy, _) = wrap_config(&json, None, 1).unwrap();
+        assert_eq!(copy.extension().unwrap(), "json");
+        let document: Value = serde_json::from_str(&fs::read_to_string(&copy).unwrap()).unwrap();
+        assert!(document["main"].as_str().unwrap().ends_with(ENTRY_FILE));
+        let entry = fs::read_to_string(
+            root.join(format!("{WRAPPED_PREFIX}{}-1", std::process::id()))
+                .join(ENTRY_FILE),
+        )
+        .unwrap();
+        assert!(
+            entry.contains(&format!("export * from '{absolute}';")),
+            "{entry}"
+        );
+        // Without an environment, the top-level `main`.
+        let (copy, _) = wrap_config(&toml, None, 2).unwrap();
+        let entry = fs::read_to_string(
+            root.join(format!("{WRAPPED_PREFIX}{}-2", std::process::id()))
+                .join(ENTRY_FILE),
+        )
+        .unwrap();
+        assert!(entry.contains("export * from '../harness.mjs';"), "{entry}");
+        assert!(
+            fs::read_to_string(copy)
+                .unwrap()
+                .contains("[env.staging]\nmain = \"staging.mjs\"")
+        );
+        // What cannot be wrapped says why.
+        let no_main = root.join("no-main.toml");
+        fs::write(&no_main, "name = \"w\"\n").unwrap();
+        assert_eq!(
+            wrap_config(&no_main, None, 3).unwrap_err(),
+            "it names no `main`"
+        );
+        let ours = root.join("ours.toml");
+        fs::write(&ours, format!("main = \"{ENTRY_FILE}\"\n")).unwrap();
+        assert!(
+            wrap_config(&ours, None, 4)
+                .unwrap_err()
+                .contains("Supercov's entry already")
+        );
+        assert!(
+            wrap_config(&root.join("missing.toml"), None, 5)
+                .unwrap_err()
+                .contains("could not be read")
+        );
+        let broken = root.join("broken.toml");
+        fs::write(&broken, "main = \"m.mjs\"\n[").unwrap();
+        assert!(wrap_config(&broken, None, 6).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `wrangler dev` is handed the copies, the test's evidence notes what it
+    /// started and why a configuration was left, and the poller's cleanup
+    /// removes Supercov's files alone.
+    #[test]
+    fn a_started_wrangler_is_handed_copies_noted_and_cleaned_up() {
+        let root = temporary("wrap-started");
+        fs::create_dir_all(root.join("crate")).unwrap();
+        fs::write(
+            root.join("crate/wrangler.toml"),
+            "main = \"build/worker/shim.mjs\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("crate/other.toml"), "name = \"x\"\n").unwrap();
+        fs::write(root.join("crate/inline.toml"), "main = \"i.mjs\"\n").unwrap();
+        let note = root.join("worker-1.started");
+        let mut arguments = [
+            "dev",
+            "-c",
+            "crate/other.toml",
+            "--config=crate/inline.toml",
+        ]
+        .map(std::ffi::OsString::from)
+        .to_vec();
+        wrap_started_configs(&mut arguments, &root, &note);
+        assert_eq!(arguments[2], "crate/other.toml");
+        assert!(arguments[3].to_string_lossy().starts_with("--config="));
+        assert!(arguments[3].to_string_lossy().contains(WRAPPED_PREFIX));
+        let said = started_worker_configs(&root);
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said.iter()
+                .any(|line| line.contains("other.toml`, not measured because it names no `main`")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line.ends_with("inline.toml`")),
+            "{said:?}"
+        );
+        // The default configuration, found from the directory, is added.
+        let mut defaulted = vec![std::ffi::OsString::from("dev")];
+        let default_note = root.join("worker-2.started");
+        wrap_started_configs(&mut defaulted, &root.join("crate"), &default_note);
+        assert_eq!(defaulted[1], "--config");
+        assert!(defaulted[2].to_string_lossy().contains(WRAPPED_PREFIX));
+        // A note that is no note, and a file that is no note, are passed over.
+        fs::write(root.join("worker-3.started"), "{").unwrap();
+        fs::write(root.join("unrelated.txt"), "x").unwrap();
+        assert_eq!(started_worker_configs(&root).len(), 3);
+        assert!(started_worker_configs(&root.join("missing")).is_empty());
+        // Cleanup removes only what is Supercov's.
+        let keep = root.join("crate/keep.txt");
+        fs::write(&keep, "x").unwrap();
+        let written =
+            serde_json::from_str::<Value>(&fs::read_to_string(&default_note).unwrap()).unwrap();
+        let mut listed = written["written"].as_array().unwrap().clone();
+        listed.push(json!(keep));
+        fs::write(&default_note, json!({"written": listed}).to_string()).unwrap();
+        remove_wrapped(&default_note);
+        remove_wrapped(&note);
+        remove_wrapped(&root.join("worker-3.started"));
+        remove_wrapped(&root.join("missing.started"));
+        assert!(keep.is_file());
+        let left = fs::read_dir(root.join("crate"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(WRAPPED_PREFIX))
+            .collect::<Vec<_>>();
+        assert!(left.is_empty(), "{left:?}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A poller whose thread never started has nothing to wait for.

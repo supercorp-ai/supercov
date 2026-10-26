@@ -4069,19 +4069,19 @@ pub(crate) mod tests {
     /// empty, a cut-short layout and an unsized slot are passed over, and
     /// anything else -- a directory, an unknown name, a bad shared-memory
     /// marker -- is refused by name.
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn evidence_entries_and_paths_are_read_or_refused_by_name() {
-        let root = Path::new("/project");
+        use crate::test_directory::native;
+        let project = native("/project");
+        let root = Path::new(&project);
         assert_eq!(
-            relative(root, "/project/src/a.py").as_deref(),
+            relative(root, &native("/project/src/a.py")).as_deref(),
             Some("src/a.py")
         );
         assert_eq!(relative(root, "./src/a.py").as_deref(), Some("src/a.py"));
-        assert_eq!(relative(root, "/elsewhere/a.py"), None);
+        assert_eq!(relative(root, &native("/elsewhere/a.py")), None);
         assert_eq!(relative(root, "../a.py"), None);
-        assert_eq!(relative(root, "/project"), None);
+        assert_eq!(relative(root, &project), None);
         let base = std::env::temp_dir().join(format!(
             "supercov-python-entries-{}-{}",
             std::process::id(),
@@ -4157,14 +4157,25 @@ pub(crate) mod tests {
         fs::write(&file, b"x").unwrap();
         assert!(read(&file).starts_with("Io"), "{}", read(&file));
         // Below a file nothing can be found, which is no race to forgive.
+        // Windows answers such a path as not found: there it reads as a slot
+        // its process already removed.
         let below = file.join("p.1.slot");
-        assert!(entry_metadata("p.1.slot", &below).is_err());
-        assert!(map_slot(&below).is_err());
+        let metadata = entry_metadata("p.1.slot", &below);
+        let mapped = map_slot(&below);
+        if cfg!(unix) {
+            assert!(metadata.is_err());
+            assert!(mapped.is_err());
+        } else {
+            assert!(matches!(metadata, Ok(None)), "{metadata:?}");
+            assert!(matches!(mapped, Ok(None)));
+        }
         let no_marker = |marker: &Path| {
             materialize_shared_slot(marker, "p.1.slot", &|_| unreachable!()).map_err(|_| ())
         };
         assert_eq!(no_marker(&base.join("missing/p.1.shm")), Ok(None));
-        assert_eq!(no_marker(&file.join("p.1.shm")), Err(()));
+        // A marker below a file: not found, on Windows, as above.
+        let below_marker = no_marker(&file.join("p.1.shm"));
+        assert_eq!(below_marker, if cfg!(unix) { Err(()) } else { Ok(None) });
     }
 
     /// What a macOS process kept in shared memory is copied into a slot file

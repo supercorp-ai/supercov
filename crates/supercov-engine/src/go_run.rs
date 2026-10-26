@@ -741,26 +741,39 @@ pub fn run_direct_go(
             .map_err(|error| error.to_string())?;
         }
         let test_started = Instant::now();
-        let plan = ExecutionPlan {
-            preparation: Vec::new(),
-            test: ExecutionPhase {
-                name: "test".into(),
-                kind: PhaseKind::Test,
-                command: CommandSpec {
-                    program: command[0].clone().into(),
-                    arguments: command[1..].iter().map(OsString::from).collect(),
-                    cwd: workspace.clone(),
-                    environment: go_flags.map(|flags| {
-                        std::env::vars_os()
-                            .filter(|(name, _)| name != "GOFLAGS")
-                            .chain([(OsString::from("GOFLAGS"), OsString::from(flags))])
-                            .collect()
-                    }),
-                    captured_output: None,
-                    console: Some(crate::workspace::console_names(&root, &workspace)),
+        let replaced = go_flags.is_some();
+        let plan =
+            ExecutionPlan {
+                preparation: Vec::new(),
+                test: ExecutionPhase {
+                    name: "test".into(),
+                    kind: PhaseKind::Test,
+                    command: CommandSpec {
+                        program: command[0].clone().into(),
+                        arguments: command[1..].iter().map(OsString::from).collect(),
+                        cwd: workspace.clone(),
+                        // The run's id, for a test that wants to know it is
+                        // measured; and Go's flags where Supercov added any.
+                        environment: Some(
+                            std::env::vars_os()
+                                .filter(|(name, _)| {
+                                    name != crate::rust_runtime::RUN_ID_ENV
+                                        && (!replaced || name != "GOFLAGS")
+                                })
+                                .chain(go_flags.map(|flags| {
+                                    (OsString::from("GOFLAGS"), OsString::from(flags))
+                                }))
+                                .chain([(
+                                    OsString::from(crate::rust_runtime::RUN_ID_ENV),
+                                    OsString::from(&request.run_id),
+                                )])
+                                .collect(),
+                        ),
+                        captured_output: None,
+                        console: Some(crate::workspace::console_names(&root, &workspace)),
+                    },
                 },
-            },
-        };
+            };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
@@ -1443,6 +1456,7 @@ mod tests {
     }
 
     /// Evidence of `probes` probes, the first reached, and no test.
+    #[cfg(unix)]
     fn evidence_reaching_the_first_of(probes: usize) -> Vec<u8> {
         let mut bytes = (probes as u64).to_le_bytes().to_vec();
         for index in 0..probes {
@@ -1453,8 +1467,8 @@ mod tests {
         bytes
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
+    // Driven by a shell command.
+    #[cfg(unix)]
     #[test]
     fn code_reached_with_no_test_to_name_is_still_a_run() {
         // Every test called t.Parallel(): nothing could be credited, and what

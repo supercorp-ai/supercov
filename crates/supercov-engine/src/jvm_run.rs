@@ -1686,26 +1686,39 @@ pub fn run_direct_jvm(
             writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
         }
         let test_started = Instant::now();
-        let plan = ExecutionPlan {
-            preparation: Vec::new(),
-            test: ExecutionPhase {
-                name: "test".into(),
-                kind: PhaseKind::Test,
-                command: CommandSpec {
-                    program: command[0].clone().into(),
-                    arguments: command[1..].iter().map(OsString::from).collect(),
-                    cwd: workspace.clone(),
-                    environment: maven_opts.map(|opts| {
-                        std::env::vars_os()
-                            .filter(|(name, _)| name != "MAVEN_OPTS")
-                            .chain([(OsString::from("MAVEN_OPTS"), OsString::from(opts))])
-                            .collect()
-                    }),
-                    captured_output: None,
-                    console: Some(crate::workspace::console_names(&root, &workspace)),
+        let replaced = maven_opts.is_some();
+        let plan =
+            ExecutionPlan {
+                preparation: Vec::new(),
+                test: ExecutionPhase {
+                    name: "test".into(),
+                    kind: PhaseKind::Test,
+                    command: CommandSpec {
+                        program: command[0].clone().into(),
+                        arguments: command[1..].iter().map(OsString::from).collect(),
+                        cwd: workspace.clone(),
+                        // The run's id, for a test that wants to know it is
+                        // measured; and Maven's options where Supercov added any.
+                        environment: Some(
+                            std::env::vars_os()
+                                .filter(|(name, _)| {
+                                    name != crate::rust_runtime::RUN_ID_ENV
+                                        && (!replaced || name != "MAVEN_OPTS")
+                                })
+                                .chain(maven_opts.map(|opts| {
+                                    (OsString::from("MAVEN_OPTS"), OsString::from(opts))
+                                }))
+                                .chain([(
+                                    OsString::from(crate::rust_runtime::RUN_ID_ENV),
+                                    OsString::from(&request.run_id),
+                                )])
+                                .collect(),
+                        ),
+                        captured_output: None,
+                        console: Some(crate::workspace::console_names(&root, &workspace)),
+                    },
                 },
-            },
-        };
+            };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
@@ -3287,6 +3300,7 @@ mod tests {
     }
 
     /// Evidence of `probes` probes, none reached, and one passing test.
+    #[cfg(unix)]
     fn evidence_of_one_test(probes: usize) -> Vec<u8> {
         let mut bytes = (probes as u64).to_le_bytes().to_vec();
         bytes.extend(std::iter::repeat_n(0_u8, probes * 8));
@@ -3304,8 +3318,8 @@ mod tests {
         bytes
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
+    // Driven by a shell command.
+    #[cfg(unix)]
     #[test]
     fn evidence_measured_and_then_not_published_is_kept() {
         let root = temporary_root("jvm-kept");

@@ -196,7 +196,9 @@ pub fn java_release(javac: &std::path::Path) -> Option<u32> {
 ///
 /// A flag on one script cannot protect a command someone else runs, so the
 /// rule belongs in the test rather than in the way it is invoked. Cargo runs
-/// test binaries one at a time, so a lock per process is enough.
+/// test binaries one at a time, so a lock per process is enough; nextest,
+/// which runs a process per test, holds them to one at a time in its
+/// `jvm-builds` test group (`.config/nextest.toml`).
 ///
 /// A panicking test poisons the mutex; the guard is taken anyway, because a
 /// failed test must not turn every later one into a second failure that hides

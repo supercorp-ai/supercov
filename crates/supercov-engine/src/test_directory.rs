@@ -38,3 +38,14 @@ impl Drop for TestDirectory {
         }
     }
 }
+
+/// A Unix-style absolute path (`/project/src/a.py`) as this platform writes
+/// one: as it is on Unix, under `C:` with backslashes on Windows, where a
+/// path without a drive is not absolute.
+pub(crate) fn native(path: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", path.replace('/', "\\"))
+    } else {
+        path.to_owned()
+    }
+}

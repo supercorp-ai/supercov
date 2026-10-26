@@ -2774,17 +2774,19 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    // Written to Unix paths and filesystem behaviour.
-    #[cfg_attr(windows, ignore = "Unix paths and filesystem behaviour")]
     #[test]
     fn a_stored_tree_under_a_file_is_an_error_not_already_gone() {
         let root = project();
         fs::create_dir_all(root.join(".supercov/runs")).unwrap();
         fs::write(root.join(".supercov/runs/file"), "").unwrap();
-        assert!(matches!(
-            remove_stored_tree_deferred(&root, &root.join(".supercov/runs/file/run_x")),
-            Err(LifecycleError::Io { .. })
-        ));
+        // Windows answers a path below a file as not found: there it is a
+        // tree already gone. Either way the file is left alone.
+        let removed = remove_stored_tree_deferred(&root, &root.join(".supercov/runs/file/run_x"));
+        if cfg!(unix) {
+            assert!(matches!(removed, Err(LifecycleError::Io { .. })));
+        } else {
+            assert!(matches!(removed, Ok(None)), "{removed:?}");
+        }
         assert!(root.join(".supercov/runs/file").is_file());
         fs::remove_dir_all(root).unwrap();
     }
