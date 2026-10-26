@@ -8635,16 +8635,26 @@ fn both_streams_into_one_file_name_the_project() {
         .unwrap();
     let written = std::fs::read_to_string(&log).unwrap();
     assert!(status.success(), "{written}");
-    let root = project.root.display().to_string();
-    // Line by line: on Windows a line may end in `\r\n`.
-    assert!(
-        written.lines().any(|line| line == format!("out {root}")),
-        "{written}"
-    );
-    assert!(
-        written.lines().any(|line| line == format!("err {root}")),
-        "{written}"
-    );
+    // The project as given, or its long form: Windows runners' TEMP is a
+    // short `RUNNER~1` path, which Go names in full (canonical paths there
+    // carry `\\?\`). Line by line: a Windows line may end in `\r\n`.
+    let canonical = std::fs::canonicalize(&project.root).unwrap();
+    let canonical = canonical.display().to_string();
+    let roots = [
+        project.root.display().to_string(),
+        canonical
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&canonical)
+            .to_owned(),
+    ];
+    for stream in ["out", "err"] {
+        assert!(
+            written
+                .lines()
+                .any(|line| roots.iter().any(|root| line == format!("{stream} {root}"))),
+            "{written}"
+        );
+    }
     // Supercov's own lines name the copy; the command's do not.
     assert!(
         written
