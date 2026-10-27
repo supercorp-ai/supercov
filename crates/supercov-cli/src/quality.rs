@@ -1098,7 +1098,7 @@ fn discover_for(
                 path.display()
             ));
         }
-        let canonical = input.canonicalize().map_err(|e| e.to_string())?;
+        let canonical = fs::canonicalize(&input).map_err(|e| e.to_string())?;
         if !canonical.starts_with(root) {
             return Err(format!(
                 "quality target is outside current directory: {}",
@@ -1348,7 +1348,8 @@ pub(crate) fn evaluate(
     request: &Value,
 ) -> Result<ApiResponse, String> {
     let host = host(endpoint);
-    for attempt in 0..4 {
+    let mut attempt = 0;
+    loop {
         wait_out_any_pause();
         let mut response = agent
             .post(endpoint)
@@ -1376,6 +1377,7 @@ pub(crate) fn evaluate(
                 ));
             }
             pause_for(Duration::from_secs(delay) + jitter());
+            attempt += 1;
             continue;
         }
         if !(200..300).contains(&status) {
@@ -1396,7 +1398,6 @@ pub(crate) fn evaluate(
         validate(&parsed, request)?;
         return Ok(parsed);
     }
-    unreachable!("last attempt returns")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1432,7 +1433,10 @@ fn cached(
 }
 
 fn save(path: &Path, entry: &CacheEntry) -> Result<(), String> {
-    store::write_atomic(path, &serde_json::to_vec(entry).map_err(|e| e.to_string())?)
+    store::write_atomic(
+        path,
+        &serde_json::to_vec(entry).expect("a cache entry serializes"),
+    )
 }
 
 /// One request answered: from the cache when this exact request was answered
@@ -1604,7 +1608,8 @@ fn catalog_windows(
             pieces.push(candidate);
             continue;
         }
-        for line in candidate.start_line..=candidate.end_line {
+        // A window has at least its first line.
+        (candidate.start_line..=candidate.end_line).try_for_each(|line| {
             let piece = Window {
                 index: 0,
                 of: 0,
@@ -1619,7 +1624,8 @@ fn catalog_windows(
                 ));
             }
             pieces.push(piece);
-        }
+            Ok(())
+        })?;
     }
     let mut planned: Vec<Window> = Vec::new();
     for candidate in pieces {
@@ -2053,8 +2059,10 @@ fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, Strin
             cut.push(window);
             continue;
         }
+        // Over two hundred lines: cut every two hundred, the last cut
+        // ending where the window does.
         let mut start = window.start_line;
-        while start <= window.end_line {
+        loop {
             let end = (start + 199).min(window.end_line);
             cut.push(Window {
                 index: 0,
@@ -2063,6 +2071,9 @@ fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, Strin
                 end_line: end,
                 declarations: window.declarations.clone(),
             });
+            if end == window.end_line {
+                break;
+            }
             start = end + 1;
         }
     }
@@ -2113,8 +2124,9 @@ fn ask_lines(
     // candidates and skip to round two.
     let mut views_by_index: BTreeMap<usize, Vec<View>> = BTreeMap::new();
     let mut pairs: BTreeMap<usize, Vec<candidates::Candidate>> = BTreeMap::new();
-    // Each pending request names its job: which file and which view.
-    let mut jobs: Vec<(usize, usize)> = Vec::new();
+    // Each pending request names its job: which file, which view and how
+    // many of its lines.
+    let mut jobs: Vec<(usize, usize, usize)> = Vec::new();
     let mut pending = Vec::new();
     let mut unchecked: BTreeMap<usize, usize> = BTreeMap::new();
     for (index, answer) in answers.iter().enumerate() {
@@ -2168,7 +2180,7 @@ fn ask_lines(
                                 || None,
                                 || within_budget(&request),
                             ) {
-                                jobs.push((index, v));
+                                jobs.push((index, v, take));
                                 pending.push(((index, Some(jobs.len() - 1)), request, bytes));
                                 took = take;
                                 break;
@@ -2215,20 +2227,21 @@ fn ask_lines(
             pending.len() > 4,
         );
         for ((index, slot), result) in answered {
+            let (_, v, lines) = jobs[slot.expect("each classification names its job")];
             let entry = match result {
                 Ok((_, entry, hit, _)) => {
                     let counted = if hit { &mut reused } else { &mut usage };
                     counted.input_tokens += entry.response.usage.input_tokens;
                     entry
                 }
-                Err(_) => continue,
+                // The lines it asked about are not checked, and the report
+                // says so rather than reading as nothing found.
+                Err(_) => {
+                    answers[index].unchecked_lines += lines;
+                    continue;
+                }
             };
-            let Some(view) = slot
-                .and_then(|k| jobs.get(k))
-                .and_then(|(_, v)| views_by_index.get(&index).and_then(|views| views.get(*v)))
-            else {
-                continue;
-            };
+            let view = &views_by_index[&index][v];
             let classified = classifications(&entry.response);
             for (i, check) in classified {
                 // A validated answer has the request's ids alone, and the
@@ -2329,22 +2342,20 @@ fn ask_lines(
     let mut confirmed = 0usize;
     let mut lines_by_index: BTreeMap<usize, Vec<ConfirmedLine>> = BTreeMap::new();
     for ((index, slot), result) in answered {
+        let (_, v, chunk) = &jobs[slot.expect("each confirmation names its job")];
         let entry = match result {
             Ok((_, entry, hit, _)) => {
                 let counted = if hit { &mut reused } else { &mut usage };
                 counted.input_tokens += entry.response.usage.input_tokens;
                 entry
             }
-            Err(_) => continue,
+            // As with a classification that failed: its lines are unchecked.
+            Err(_) => {
+                answers[index].unchecked_lines += chunk.len();
+                continue;
+            }
         };
-        let Some((_, v, chunk)) = slot.and_then(|k| jobs.get(k)) else {
-            continue;
-        };
-        let offset = views_by_index
-            .get(&index)
-            .and_then(|views| views.get(*v))
-            .map(|view| view.offset)
-            .unwrap_or(0);
+        let offset = views_by_index[&index][*v].offset;
         let lines = lines_by_index.entry(index).or_default();
         for (i, candidate) in chunk.iter().enumerate() {
             let Some(value) = noul(&entry.response, &format!("c{i}")) else {
@@ -3727,7 +3738,7 @@ fn human_security(report: &Value) -> String {
         out.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
         if let Some(lines) = file["unchecked_lines"].as_u64().filter(|lines| *lines > 0) {
             out.push_str(&format!(
-                "    {lines} line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of\n"
+                "    {lines} line(s) not checked one by one: a request asking about them did not fit beside the code, or was refused\n"
             ));
         }
         for finding in file["present"].as_array().unwrap_or(&empty) {

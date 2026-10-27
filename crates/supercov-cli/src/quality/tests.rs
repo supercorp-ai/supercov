@@ -3478,3 +3478,69 @@ fn each_option_is_read_and_each_mistake_named() {
         })
     ));
 }
+
+/// Each refused status names its likeliest cause.
+#[test]
+fn a_refused_request_is_named_by_its_status() {
+    for (status, cause) in [
+        (400, "larger than"),
+        (413, "larger than"),
+        (401, "the key was refused"),
+        (403, "the key was refused"),
+        (402, "out of quota"),
+        (429, "out of quota"),
+        (500, "the request failed"),
+    ] {
+        let said = http_failure("api.example", status);
+        assert!(
+            said.starts_with(&format!("api.example HTTP {status}: ")),
+            "{said}"
+        );
+        assert!(said.contains(cause), "{status}: {said}");
+    }
+}
+
+/// Nothing to look at, a directory read as a file, a directory no one may
+/// list, and an answer to no questions.
+#[test]
+fn discovery_and_reading_refuse_what_they_cannot_read() {
+    let temp = Temp::new();
+    assert_eq!(
+        discover(&temp.0, &[]).unwrap_err(),
+        "no supported source files found"
+    );
+    temp.write("src/a.js", "export const a = 1;\n");
+    assert!(read_text(&temp.0.join("src")).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.write("locked/b.js", "export const b = 1;\n");
+        let locked = temp.0.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // A root user reads it anyway; the walk refuses for anyone else.
+        let refused = discover(&temp.0, &[PathBuf::from(".")]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if !running_as_root() {
+            assert!(refused.is_err(), "{refused:?}");
+        }
+    }
+    let response: ApiResponse = serde_json::from_value(serde_json::json!({
+        "model": "m", "answers": {}, "usage": {"input_tokens": 1, "output_tokens": 1}
+    }))
+    .unwrap();
+    assert!(
+        validate(
+            &response,
+            &serde_json::json!({"model": "m", "questions": {}})
+        )
+        .is_ok()
+    );
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .is_ok_and(|output| output.stdout.starts_with(b"0"))
+}

@@ -599,7 +599,7 @@ fn render_file_catalog(view: &Value) -> String {
     }
     if let Some(lines) = view["unchecked_lines"].as_u64().filter(|lines| *lines > 0) {
         out.push_str(&format!(
-            "\n{lines} line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of.\n"
+            "\n{lines} line(s) not checked one by one: a request asking about them did not fit beside the code, or was refused.\n"
         ));
     }
     out.push_str("\nEach line is a model judgment you can check against the file.\n");

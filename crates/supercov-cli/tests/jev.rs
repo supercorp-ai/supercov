@@ -5051,7 +5051,7 @@ fn a_line_whose_question_does_not_fit_is_said_to_be_unchecked() {
         .supercov_with(&["security", "src/big.js"], &through(&base))
         .succeeds();
     assert!(
-        report.contains("line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of"),
+        report.contains("line(s) not checked one by one: a request asking about them did not fit beside the code, or was refused"),
         "{report}"
     );
     let json = project
@@ -5150,9 +5150,11 @@ fn a_run_with_no_statement_to_assess_asks_nothing() {
 fn a_jev_command_whose_file_operation_fails_says_so_and_recovers() {
     let (base, _seen) = gateway(MODEL, answer_yes);
     let jev = through(&base);
-    let commands: [&[&str]; 7] = [
+    let commands: [&[&str]; 9] = [
         &["quality", "--dry-run"],
         &["quality"],
+        &["quality", "src/cart.js"],
+        &["quality", "src"],
         &["quality", "gaps"],
         &["quality", "file", "src/cart.js"],
         &["security"],
@@ -5179,4 +5181,39 @@ fn a_jev_command_whose_file_operation_fails_says_so_and_recovers() {
         }
         project.supercov_with(command, &jev).succeeds();
     }
+}
+
+/// A large file read in windows, with some of its requests refused: what
+/// was answered is reported, what was refused is named, and nothing stops
+/// half way. Every third request after the first is refused, file windows
+/// and line confirmations alike.
+#[test]
+fn a_windowed_review_with_refused_requests_reports_what_was_answered() {
+    let project = Project::empty("windows-refused");
+    project.write("package.json", r#"{"name":"big","type":"module"}"#);
+    let mut source = String::new();
+    for i in 0..1600 {
+        source.push_str(&format!(
+            "export function f{i}(a, b) {{\n  if (a > {i} && b < {i}) {{\n    return a * b + {i};\n  }}\n  return eval(\"a\" + b);\n}}\n\n"
+        ));
+    }
+    project.write("src/big.js", &source);
+    let (base, seen) = gateway_with(MODEL, answer_yes, |n| {
+        (n % 3 == 2).then_some((400, "refused"))
+    });
+    for command in ["security", "quality"] {
+        let ran = project.supercov_with(&[command, "src/big.js", "--refresh"], &through(&base));
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert!(!said.contains("panicked at"), "{command}: {said}");
+        assert!(said.contains("src/big.js"), "{command}: {said}");
+    }
+    // A refused line question leaves its lines unchecked, said as such.
+    let report = project
+        .supercov_with(&["security", "src/big.js", "--refresh"], &through(&base))
+        .succeeds();
+    assert!(
+        report.contains("line(s) not checked one by one"),
+        "{report}"
+    );
+    assert!(seen.lock().unwrap().len() > 10);
 }
