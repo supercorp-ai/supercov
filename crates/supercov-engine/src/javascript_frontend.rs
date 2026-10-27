@@ -1889,6 +1889,18 @@ pub fn prepare_javascript_frontend(
 
 #[cfg(test)]
 mod tests {
+    /// A source path the test fault says is not the project's is refused;
+    /// without it, a plain relative path is taken.
+    #[test]
+    fn a_source_path_is_taken_only_inside_the_project() {
+        use super::project_relative;
+        assert!(
+            crate::fault::during("javascript-source-path", || project_relative("src/a.js"))
+                .is_err()
+        );
+        assert!(project_relative("src/a.js").is_ok());
+        assert!(project_relative("../a.js").is_err());
+    }
 
     /// A cached frontend is reused only when its schema, key and every
     /// artifact check out: a safe path, a cache file named by its digest, a

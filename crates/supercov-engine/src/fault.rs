@@ -309,3 +309,25 @@ unsafe fn errno_location() -> *mut i32 {
 unsafe fn errno_location() -> *mut i32 {
     unsafe { libc::__error() }
 }
+
+#[cfg(test)]
+mod tests {
+    #[track_caller]
+    fn here() -> bool {
+        super::injected_here("t", "op")
+    }
+
+    /// `site#N` fails the first call from the Nth place only: an earlier
+    /// place, and a place called again, go on as usual.
+    #[test]
+    fn the_nth_place_fails_its_first_call() {
+        let (first, second, again) = super::during("t#2", || {
+            let first = here();
+            let calls = (0..2).map(|_| here()).collect::<Vec<_>>();
+            (first, calls[0], calls[1])
+        });
+        assert!(!first);
+        assert!(second);
+        assert!(!again);
+    }
+}

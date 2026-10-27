@@ -4377,6 +4377,8 @@ mod tests {
         .unwrap();
         let container = QueryIndex::open(&path, &identity()).unwrap();
         let index = CoverageIndex::new(&container).unwrap();
+        // A read the test fault fails is refused, not answered.
+        assert!(crate::fault::during("coverage-index-read", || index.model()).is_err());
         assert_eq!(
             index.model().unwrap(),
             IndexedCoverageModel {
