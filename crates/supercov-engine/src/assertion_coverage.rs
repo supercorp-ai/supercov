@@ -963,7 +963,9 @@ fn python_statement_starts(source: &str) -> BTreeMap<usize, Vec<(String, Option<
 /// preferred over the same words anywhere else.
 fn js_test_line(lines: &[&str], name: &str) -> Option<usize> {
     let parts = name.split(" > ").collect::<Vec<_>>();
-    let (title, groups) = parts.split_last()?;
+    let (title, groups) = parts
+        .split_last()
+        .expect("a split's first piece is always there");
     let quoted = |line: &str, text: &str| {
         ['\'', '"', '`']
             .iter()
@@ -1230,12 +1232,15 @@ fn quoted_fragments(text: &str) -> Vec<String> {
                 _ => {}
             }
         }
-        for piece in pieces {
-            let piece = piece.trim();
-            if piece.len() >= 6 && piece.chars().filter(|c| c.is_alphabetic()).count() >= 3 {
-                out.push(piece.to_owned());
-            }
-        }
+        out.extend(
+            pieces
+                .iter()
+                .map(|piece| piece.trim())
+                .filter(|piece| {
+                    piece.len() >= 6 && piece.chars().filter(|c| c.is_alphabetic()).count() >= 3
+                })
+                .map(str::to_owned),
+        );
     }
     out.sort();
     out.dedup();
@@ -2955,6 +2960,44 @@ mod tests {
     }
 
     use super::*;
+
+    /// Each helper given nothing finds nothing, and one given text it
+    /// cannot read hands it back.
+    #[test]
+    fn helpers_given_nothing_find_nothing() {
+        assert!(name_words("").is_empty());
+        for text in ["", "'", "''"] {
+            assert!(quoted_fragments(text).is_empty(), "{text}");
+        }
+        assert_eq!(comment_start(""), 0);
+        assert_eq!(brace_end_within(&[], 0, 5), 0);
+        assert_eq!(brace_end_within(&[""], 0, 1), 0);
+        assert!(definitions(&[], Language::Rust).is_empty());
+        assert_eq!(split_initializer("x"), None);
+        assert_eq!(python_class_lines(&["x = 1"], &["Missing"]), (0, 1, None));
+        for line in ["while x {", "if x {", "if (x"] {
+            assert_eq!(condition(line), line);
+        }
+        // Empty and unparsable sources hold no statement and no function.
+        for source in ["", "def (:\n"] {
+            assert!(python_statement_starts(source).is_empty(), "{source}");
+            assert!(
+                outermost_functions(Language::Python, "t.py", source).is_empty(),
+                "{source}"
+            );
+        }
+        assert!(outermost_functions(Language::JavaScript, "t.js", "").is_empty());
+        // An empty namespace and block hold none either.
+        assert_eq!(
+            outermost_functions(
+                Language::JavaScript,
+                "t.ts",
+                "namespace N {}\n{ }\nfunction f() {}\n"
+            )
+            .len(),
+            1
+        );
+    }
 
     #[test]
     fn a_statement_many_tests_run_is_asked_of_the_tests_that_ran_little_else() {
