@@ -2267,6 +2267,8 @@ mod tests {
             file_url_from_slash_path("/w/p x?q/ü.mjs"),
             "file:///w/p%20x%3Fq/%C3%BC.mjs"
         );
+        // A server named alone is its root.
+        assert_eq!(file_url_from_slash_path("//server"), "file://server/");
     }
 
     #[test]
