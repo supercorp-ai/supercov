@@ -433,8 +433,8 @@ fn scope_status_rank(status: &str) -> u8 {
     match status {
         "ambiguous" => 0,
         "included" => 1,
-        "excluded" => 2,
-        _ => 3,
+        // `excluded`: the index holds no other status.
+        _ => 2,
     }
 }
 
@@ -5658,6 +5658,34 @@ mod tests {
             detail("one.js", 0),
             Err(QueryError::InvalidPagination)
         ));
+        // Narrowed to one runner, a line only another runner's test ran is a
+        // gap that names where it was covered.
+        let narrowed = coverage_file_detail_from(
+            &FileDetailSource::read(&index, CoverageViewId::All).unwrap(),
+            CoverageFileDetailOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                kind: None,
+                runner: Some("node:test"),
+                selector: "two.js",
+                metric: MinimizeMetric::All,
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap()
+        .0;
+        let elsewhere = serde_json::to_value(&narrowed.gap_lines)
+            .unwrap()
+            .to_string();
+        for said in [
+            r#""coveredElsewhere":true"#,
+            r#""kinds":["e2e"]"#,
+            r#""runners":["playwright"]"#,
+            "e2e-b",
+        ] {
+            assert!(elsewhere.contains(said), "{said}: {elsewhere}");
+        }
     }
 
     /// A run is complete only as the passing view of a current, valid run
