@@ -295,25 +295,28 @@ fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
             .find(|child| child.kind() == "statement_list")
             .unwrap_or(body)
     };
+    // A body that calls `t.Parallel()` has a statement at least.
     let mut cursor = statements.walk();
-    for statement in statements.children(&mut cursor).filter(Node::is_named) {
-        // The grammar wraps a call standing alone as a statement in an
-        // `expression_statement`; it is never a statement's child on its own.
-        let call = match statement.kind() {
-            "expression_statement" => match statement.named_child(0) {
-                Some(inner) if inner.kind() == "call_expression" => inner,
-                // Some other expression standing alone -- a channel receive,
-                // say -- which is not the call being looked for; the next
-                // statement might be.
-                _ => continue,
-            },
-            _ => continue,
-        };
-        if callee(call, source).is_some_and(|function| function.ends_with(".Parallel")) {
-            return Some(statement.end_byte());
-        }
-    }
-    None
+    statements
+        .children(&mut cursor)
+        .filter(Node::is_named)
+        .find_map(|statement| {
+            // The grammar wraps a call standing alone as a statement in an
+            // `expression_statement`; it is never a statement's child on its own.
+            let call = match statement.kind() {
+                "expression_statement" => match statement.named_child(0) {
+                    Some(inner) if inner.kind() == "call_expression" => inner,
+                    // Some other expression standing alone -- a channel receive,
+                    // say -- which is not the call being looked for; the next
+                    // statement might be.
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            callee(call, source)
+                .is_some_and(|function| function.ends_with(".Parallel"))
+                .then(|| statement.end_byte())
+        })
 }
 
 /// What a call expression calls, as written; nothing for any other node.
@@ -669,6 +672,23 @@ mod tests {
         ));
         assert_eq!(file.tests, ["TestOne"]);
         assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    /// Serialised, a test that pauses itself only inside an `if` makes no
+    /// call of its own to wait for: it is announced at the top of its body.
+    #[test]
+    fn a_serialised_test_that_pauses_only_conditionally_is_announced_first() {
+        let source = "package p\n\nimport \"testing\"\n\nfunc TestMaybe(t *testing.T) {\n\tdoWork()\n\tif slow {\n\t\tt.Parallel()\n\t}\n}\n";
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        let announced = out
+            .find("__supercovTest(t, \"TestMaybe\")")
+            .expect("announced");
+        assert!(announced < out.find("doWork()").unwrap(), "{out}");
+        // A file of nothing at all has no declaration to walk.
+        let empty = instrument_test_file("", "__supercov", "evidence.bin", false);
+        assert!(empty.unwrap().edits.is_empty());
     }
 
     #[test]
