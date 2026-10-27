@@ -146,11 +146,12 @@ impl Collector<'_> {
 impl<'pr> Visit<'pr> for Collector<'_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         if !self.lists.contains(&node.location().start_offset()) {
-            for statement in node.body().iter() {
+            // Prism gives a statements node a statement at least.
+            node.body().iter().for_each(|statement| {
                 let change = self.change(&statement);
                 let l = statement.location();
                 self.push(l.start_offset(), l.end_offset(), change);
-            }
+            });
         }
         ruby_prism::visit_statements_node(self, node);
     }
@@ -525,13 +526,12 @@ pub(super) fn helpers(root: &Path, from: &str, text: &str) -> Vec<String> {
                 .map(Into::into)
                 .collect()
         };
-        for base in bases {
-            let path = super::normalize(&base.join(format!("{name}.rb")));
-            if root.join(&path).is_file() {
-                out.push(path);
-                break;
-            }
-        }
+        out.extend(
+            bases
+                .iter()
+                .map(|base| super::normalize(&base.join(format!("{name}.rb"))))
+                .find(|path| root.join(path).is_file()),
+        );
     }
     out
 }
@@ -563,15 +563,15 @@ pub(super) fn support_files(root: &Path, text: &str) -> Vec<String> {
             .build()
             .filter_map(Result::ok)
             .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_owned));
-        for relative in relatives {
-            if relative.extension().and_then(|x| x.to_str()) != Some("rb") {
-                continue;
-            }
-            let stem = relative.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if names.contains(stem) {
-                out.push(relative.to_string_lossy().replace('\\', "/"));
-            }
-        }
+        // The walk yields `base` itself first.
+        out.extend(
+            relatives
+                .filter(|relative| relative.extension().and_then(|x| x.to_str()) == Some("rb"))
+                .filter(|relative| {
+                    names.contains(relative.file_stem().and_then(|s| s.to_str()).unwrap_or(""))
+                })
+                .map(|relative| relative.to_string_lossy().replace('\\', "/")),
+        );
     }
     out.sort();
     out
@@ -580,7 +580,8 @@ pub(super) fn support_files(root: &Path, text: &str) -> Vec<String> {
 /// `CamelizeLower` -> `camelize_lower`
 fn snake(name: &str) -> String {
     let mut out = String::new();
-    for (i, c) in name.chars().enumerate() {
+    // A name starts with its capital.
+    name.chars().enumerate().for_each(|(i, c)| {
         if c.is_ascii_uppercase() {
             if i > 0 {
                 out.push('_');
@@ -589,7 +590,7 @@ fn snake(name: &str) -> String {
         } else {
             out.push(c);
         }
-    }
+    });
     out
 }
 
