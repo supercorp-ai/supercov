@@ -784,13 +784,14 @@ pub fn candidates(source: &str) -> Vec<Candidate> {
     if all.len() <= MAX_CANDIDATES {
         return all;
     }
+    // More than the cap: some.
     let mut by_check: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
-    for candidate in all {
+    all.into_iter().for_each(|candidate| {
         by_check
             .entry(candidate.check.clone())
             .or_default()
             .push(candidate);
-    }
+    });
     // Round by round, one of each check: there are more candidates than
     // the cap, so the cap is reached before every list runs out.
     let mut picked = Vec::new();
@@ -815,6 +816,13 @@ mod tests {
     /// Each pattern check is listed once and is neither of the checks
     /// matched apart from the patterns, so a line is never a candidate for
     /// one check twice.
+    /// An empty file has no line to be a candidate.
+    #[test]
+    fn an_empty_file_has_no_candidate() {
+        assert!(super::from_patterns("").is_empty());
+        assert!(super::template_or_config_nodes(std::path::Path::new("a.html"), "").is_empty());
+    }
+
     #[test]
     fn no_line_is_a_pattern_candidate_for_one_check_twice() {
         let mut checks = super::PATTERNS

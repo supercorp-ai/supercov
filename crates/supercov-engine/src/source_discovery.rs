@@ -1475,6 +1475,9 @@ mod tests {
         assert_eq!(strip_trailing_commas(""), "");
         assert!(!strip_jsonc_comments("{} //").contains("//"));
         assert!(!strip_jsonc_comments("{} /* open").contains("/*"));
+        // A comment opened at the very end, and the empty path.
+        assert_eq!(strip_jsonc_comments("{} /*"), "{} ");
+        assert_eq!(lexical_normalize(Path::new("")), PathBuf::new());
         let mut targets = Vec::new();
         string_targets(
             &serde_json::json!({"a": [], "b": {}, "c": 5, "d": ["./x.js", {"e": "./y.js"}]}),
