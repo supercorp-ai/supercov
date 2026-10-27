@@ -495,8 +495,8 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                     let owner = path.qualifier()?.syntax().text().to_string();
                     let made =
                         name == "new" || name.starts_with("from_") || name.starts_with("with_");
-                    (made && owner.rsplit("::").next()?.starts_with(char::is_uppercase))
-                        .then(|| owner.rsplit("::").next().unwrap_or(&owner).to_owned())
+                    let last = owner.rsplit("::").next().unwrap_or(&owner);
+                    (made && last.starts_with(char::is_uppercase)).then(|| last.to_owned())
                 })
             }
             _ => None,
@@ -2783,6 +2783,19 @@ fn made() -> Thing {
         assert_eq!(r[&2][0].1, "(true, s.as_str(), x.to_string(), make())");
         assert!(r[&3][0].1.starts_with("!(match x {"), "{}", r[&3][0].1);
         assert_eq!(r[&7][0].1, "(!(m), t)");
+    }
+
+    /// A value whose type this module cannot read -- an empty `Some()`, a
+    /// call of what is not a path, a cast it cannot see the pointer of, an
+    /// unwrap of the unknown -- takes the type's default.
+    #[test]
+    fn a_value_of_a_type_this_module_cannot_read_takes_the_default() {
+        let source = "fn f() {\n    let a = Some();\n    let b = (make)(1);\n    let c = fns[0](1);\n    let d = p.cast();\n    let e = unknown.unwrap();\n    let g = q.cast::<u8>();\n    let h = <Foo>::new();\n}\n";
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        assert_eq!(r[&2][0].1, "None");
+        for line in 3..=8 {
+            assert_eq!(r[&line][0].1, "Default::default()", "line {line}");
+        }
     }
 
     /// The rarest readings: an associated type with a value, a tuple element
