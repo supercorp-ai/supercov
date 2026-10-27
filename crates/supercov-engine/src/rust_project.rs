@@ -972,7 +972,8 @@ pub fn prepare_rust_project_for(
     // One numbering spans the workspace: a file may be compiled into several
     // crates, and every crate's runtime maps the same region.
     let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
-    for (relative, source) in &sources {
+    // Never none: no source left by the roots was refused above.
+    sources.iter().try_for_each(|(relative, source)| -> Result<(), RustProjectError> {
         let test_file = tests.contains(relative) || test_code_path(relative);
         // A file is compiled as each crate that holds it is built: a Worker's
         // library by worker-build, the rest for the command's target. Items
@@ -1013,7 +1014,7 @@ pub fn prepare_rust_project_for(
                     "blocking": false,
                     "reason": format!("Supercov hit {error} instrumenting this file, a bug to report; it compiles as written and nothing in it is measured"),
                 }));
-                continue;
+                return Ok(());
             }
             Err(error) => {
                 return Err(RustProjectError::Instrument {
@@ -1029,7 +1030,8 @@ pub fn prepare_rust_project_for(
                 reason: error.to_string(),
             }
         })?;
-    }
+        Ok(())
+    })?;
 
     preparation.instrument_ms = elapsed(started);
     let started = std::time::Instant::now();
@@ -1039,47 +1041,51 @@ pub fn prepare_rust_project_for(
     probes.token = token.clone();
     let mut crate_roots = Vec::new();
     let mut crate_files = Vec::new();
-    for root in roots {
-        let relative = confined_relative(&workspace, &root)?;
-        // The crate answers `cfg!` for the gates in the files it compiles.
-        let crate_cfgs = probes
-            .cfgs
-            .iter()
-            .enumerate()
-            .filter(|(_, gate)| {
-                owners
-                    .get(&gate.file)
-                    .is_some_and(|roots| roots.contains(&root))
-            })
-            .map(|(ordinal, _)| ordinal)
-            .collect::<Vec<_>>();
-        let key = crate_key(&token, &relative);
-        if worker_roots.contains_key(&root) {
-            probes.workers.insert(key.clone());
-        }
-        let runtime =
-            render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs)
-                .map_err(RustProjectError::Runtime)?;
-        crate_files.push((
-            key,
-            owners
+    // A workspace has a crate at least.
+    roots
+        .into_iter()
+        .try_for_each(|root| -> Result<(), RustProjectError> {
+            let relative = confined_relative(&workspace, &root)?;
+            // The crate answers `cfg!` for the gates in the files it compiles.
+            let crate_cfgs = probes
+                .cfgs
                 .iter()
-                .filter(|(_, roots)| roots.contains(&root))
-                .map(|(file, _)| file.clone())
-                .collect::<Vec<_>>(),
-        ));
-        let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
-            path: root.clone(),
-            reason: error.to_string(),
+                .enumerate()
+                .filter(|(_, gate)| {
+                    owners
+                        .get(&gate.file)
+                        .is_some_and(|roots| roots.contains(&root))
+                })
+                .map(|(ordinal, _)| ordinal)
+                .collect::<Vec<_>>();
+            let key = crate_key(&token, &relative);
+            if worker_roots.contains_key(&root) {
+                probes.workers.insert(key.clone());
+            }
+            let runtime =
+                render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs)
+                    .map_err(RustProjectError::Runtime)?;
+            crate_files.push((
+                key,
+                owners
+                    .iter()
+                    .filter(|(_, roots)| roots.contains(&root))
+                    .map(|(file, _)| file.clone())
+                    .collect::<Vec<_>>(),
+            ));
+            let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
+                path: root.clone(),
+                reason: error.to_string(),
+            })?;
+            source.push('\n');
+            source.push_str(&runtime);
+            fs::write(&root, source).map_err(|error| RustProjectError::Io {
+                path: root,
+                reason: error.to_string(),
+            })?;
+            crate_roots.push(relative);
+            Ok(())
         })?;
-        source.push('\n');
-        source.push_str(&runtime);
-        fs::write(&root, source).map_err(|error| RustProjectError::Io {
-            path: root,
-            reason: error.to_string(),
-        })?;
-        crate_roots.push(relative);
-    }
     preparation.runtime_ms = elapsed(started);
     probes.crates = crate_files.into_iter().collect();
 
