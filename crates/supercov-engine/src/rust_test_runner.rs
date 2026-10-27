@@ -2151,6 +2151,12 @@ fn note_unrun_workers(
         .collect()
 }
 
+/// The first three of `files`, and `, ...` after them when there are more.
+fn first_files<'a>(files: impl ExactSizeIterator<Item = &'a str>) -> String {
+    let more = if files.len() > 3 { ", ..." } else { "" };
+    format!("{}{more}", files.take(3).collect::<Vec<_>>().join(", "))
+}
+
 /// Says which files the build left out of the denominator.
 fn report_declined(
     declined: &BTreeSet<String>,
@@ -2161,15 +2167,9 @@ fn report_declined(
     }
     writeln!(
         diagnostics,
-        "[supercov] {} source file(s) this build did not compile are outside the denominator: {}{}",
+        "[supercov] {} source file(s) this build did not compile are outside the denominator: {}",
         declined.len(),
-        declined
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", "),
-        if declined.len() > 3 { ", ..." } else { "" }
+        first_files(declined.iter().map(String::as_str)),
     )
     .map_err(|error| RustTestRunnerError::Io(error.to_string()))
 }
@@ -2186,15 +2186,9 @@ fn report_unmeasured_workers(
     };
     writeln!(
         diagnostics,
-        "[supercov] not measured: {} Rust Worker file(s), {}{}. {reason}.",
+        "[supercov] not measured: {} Rust Worker file(s), {}. {reason}.",
         unmeasured.len(),
-        unmeasured
-            .iter()
-            .take(3)
-            .map(|(file, _)| file.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        if unmeasured.len() > 3 { ", ..." } else { "" }
+        first_files(unmeasured.iter().map(|(file, _)| file.as_str())),
     )
     .map_err(|error| RustTestRunnerError::Io(error.to_string()))
 }
