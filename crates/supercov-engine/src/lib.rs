@@ -97,6 +97,7 @@ pub mod support_reach;
 mod test_directory;
 pub mod test_kind;
 pub mod test_loads;
+mod threads;
 mod typescript_imports;
 pub mod workspace;
 

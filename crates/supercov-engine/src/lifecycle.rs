@@ -1051,9 +1051,7 @@ pub(crate) fn publish_run_with_fault(
             archived_inputs,
         );
         if let Some(index) = index {
-            index
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            index.join().unwrap_or_else(crate::threads::rethrow);
         }
         prepared
     });

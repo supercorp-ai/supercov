@@ -714,7 +714,7 @@ pub fn run_direct_javascript(
 
     let mut servers = preparing_servers
         .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+        .unwrap_or_else(crate::threads::rethrow)?;
     // Prepared for where the workspace was to be; one moved since is
     // prepared again for where it is.
     if workspace != prepared_for && !servers.is_empty() {

@@ -918,11 +918,7 @@ fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) ->
             .collect::<Vec<_>>();
         workers
             .into_iter()
-            .flat_map(|worker| {
-                worker
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
+            .flat_map(|worker| worker.join().unwrap_or_else(crate::threads::rethrow))
             .collect::<Vec<_>>()
     });
     done.sort_unstable_by_key(|(index, _)| *index);

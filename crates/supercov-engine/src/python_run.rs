@@ -314,9 +314,7 @@ fn archive_python_run(
             let archive_ms = elapsed_ms(publication_started) - joined_ms - serialized_ms;
             Ok::<_, String>((raw, serialized_ms, archive_ms))
         })();
-        let analysed = analysis
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let analysed = analysis.join().unwrap_or_else(crate::threads::rethrow);
         (archived, analysed)
     });
     let (raw, serialized_ms, archive_ms) = archived?;

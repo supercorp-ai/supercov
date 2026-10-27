@@ -3016,12 +3016,8 @@ pub fn analyze_coverage_results(
         let view = build(&all);
         (
             view,
-            passed
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-            failed
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            passed.join().unwrap_or_else(crate::threads::rethrow),
+            failed.join().unwrap_or_else(crate::threads::rethrow),
         )
     });
     let (view, passed, failed) = (view?, passed?, failed?);
@@ -3080,11 +3076,7 @@ fn parse_in_parallel<T: Send>(
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
+            .map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
             .collect::<Vec<_>>()
     });
     let mut parsed = Vec::new();
