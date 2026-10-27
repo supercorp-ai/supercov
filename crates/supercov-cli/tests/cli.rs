@@ -186,6 +186,21 @@ fn a_measured_suite_reads_back_through_every_query() {
         next.contains("12 │ export function shipping(sum, express) {"),
         "{next}"
     );
+    for (arguments, said) in [
+        (
+            &["src/cart.js", "--offset"][..],
+            "--offset requires a value",
+        ),
+        (
+            &["src/missing.js"],
+            "File absent from the run's source manifest: src/missing.js",
+        ),
+    ] {
+        let mut command = vec!["runs", "latest", "source"];
+        command.extend(arguments);
+        let refused = project.supercov(&command).exits(2);
+        assert!(refused.contains(said), "{refused}");
+    }
 
     let assertions = project
         .supercov(&["runs", "latest", "assertions"])

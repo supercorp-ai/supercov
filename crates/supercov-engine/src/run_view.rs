@@ -936,6 +936,11 @@ mod tests {
         assert_eq!(parse_percentage("100").unwrap(), 1_000_000);
         assert_eq!(parse_percentage("0").unwrap(), 0);
         assert_eq!(parse_percentage(" 87.6543 ").unwrap(), 876_543);
+        // A whole part too large to scale is too large, not some other number.
+        assert_eq!(
+            parse_percentage("18446744073709551615").unwrap_err(),
+            "\"18446744073709551615\" is too large"
+        );
         for refused in ["101", "-1", "abc", "", "1e2", "50.123456", "100.0001"] {
             assert!(parse_percentage(refused).is_err(), "{refused} was accepted");
         }
