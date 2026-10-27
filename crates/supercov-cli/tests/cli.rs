@@ -13136,10 +13136,11 @@ fn browser_project(project: &Project) {
     );
 }
 
-/// A Playwright run whose project also holds a Python and a Ruby server's
-/// source, which Supercov prepares to measure beside the browser tests: once
-/// for every place it makes a file operation, with that one failing, it ends
-/// saying so and never panics, and then succeeds.
+/// A Playwright run whose project also holds the source of a server in each
+/// language Supercov measures beside browser tests -- Python, Ruby, Go, a
+/// Rust Worker and Java -- which it prepares in the copy: once for every
+/// place it makes a file operation, with that one failing, it ends saying so
+/// and never panics, and then succeeds.
 #[cfg(unix)]
 #[test]
 fn a_browser_run_preparing_servers_whose_file_operation_fails_says_so_and_recovers() {
@@ -13155,44 +13156,13 @@ fn a_browser_run_preparing_servers_whose_file_operation_fails_says_so_and_recove
                 "app/server.rb",
                 "def handle(n)\n  n.zero? ? 0 : n * 2\nend\n",
             );
-        },
-        &["--", "npx", "playwright", "test"],
-    );
-    assert!(reached > 50, "{reached}");
-}
-
-/// The same for a Go server beside the browser tests.
-#[cfg(unix)]
-#[test]
-fn a_browser_run_preparing_a_go_server_whose_file_operation_fails_says_so_and_recovers() {
-    if go().is_none() {
-        eprintln!("skipping: no Go toolchain found");
-        return;
-    }
-    let reached = fail_each_place_of_a_run(
-        "run-faults-browser-go",
-        |project| {
-            browser_project(project);
-            project.write("go.mod", "module example.com/server\n\ngo 1.22\n");
-            project.write(
-                "server.go",
-                "package main\n\nfunc handle(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n\nfunc main() { _ = handle(1) }\n",
-            );
-        },
-        &["--", "npx", "playwright", "test"],
-    );
-    assert!(reached > 50, "{reached}");
-}
-
-/// The same for a Rust Worker beside the browser tests, which Supercov
-/// instruments in the copy for `wrangler dev` to build.
-#[cfg(unix)]
-#[test]
-fn a_browser_run_preparing_a_rust_worker_whose_file_operation_fails_says_so_and_recovers() {
-    let reached = fail_each_place_of_a_run(
-        "run-faults-browser-worker",
-        |project| {
-            browser_project(project);
+            if go().is_some() {
+                project.write("go.mod", "module example.com/server\n\ngo 1.22\n");
+                project.write(
+                    "server.go",
+                    "package main\n\nfunc handle(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n\nfunc main() { _ = handle(1) }\n",
+                );
+            }
             project.write(
                 "worker/wrangler.toml",
                 "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
@@ -13205,20 +13175,6 @@ fn a_browser_run_preparing_a_rust_worker_whose_file_operation_fails_says_so_and_
                 "worker/src/lib.rs",
                 "pub fn handle(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n",
             );
-        },
-        &["--", "npx", "playwright", "test"],
-    );
-    assert!(reached > 50, "{reached}");
-}
-
-/// The same for a Java server beside the browser tests.
-#[cfg(unix)]
-#[test]
-fn a_browser_run_preparing_a_java_server_whose_file_operation_fails_says_so_and_recovers() {
-    let reached = fail_each_place_of_a_run(
-        "run-faults-browser-java",
-        |project| {
-            browser_project(project);
             project.write(
                 "pom.xml",
                 "<project><modelVersion>4.0.0</modelVersion><groupId>w</groupId><artifactId>w</artifactId><version>1</version></project>\n",
