@@ -13675,6 +13675,39 @@ fn a_rust_run_told_to_stop_takes_its_test_with_it() {
     assert!(gone, "test process {test} outlived the run");
 }
 
+/// A `wasm-pack test` that stops before it runs `cargo test` is refused with
+/// what it said; one that cannot start says so.
+#[cfg(unix)]
+#[test]
+fn a_wasm_pack_test_that_never_runs_cargo_says_what_it_said() {
+    let project = Project::empty("wasm-pack-stops");
+    small_crate(&project);
+    project.write_script(
+        "tools/wasm-pack",
+        "#!/bin/sh\necho 'no wasm32 target installed' >&2\nexit 1\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let tool = project.root.join("tools/wasm-pack");
+    let stopped = project.supercov(&["--", tool.to_str().unwrap(), "test", "--node"]);
+    assert_ne!(stopped.code(), 0);
+    assert!(
+        stopped.stderr().contains(
+            "`wasm-pack test` stopped before it ran `cargo test`:\nno wasm32 target installed"
+        ),
+        "{}",
+        stopped.stderr()
+    );
+    let missing = project.root.join("tools/missing/wasm-pack");
+    let refused = project.supercov(&["--", missing.to_str().unwrap(), "test", "--node"]);
+    assert_ne!(refused.code(), 0);
+    assert!(
+        refused.stderr().contains("could not run"),
+        "{}",
+        refused.stderr()
+    );
+}
+
 /// A Python or Ruby run measured under the source roots it was given is
 /// read back under the same roots, and is current while the project is.
 #[test]
