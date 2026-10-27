@@ -347,6 +347,7 @@ fn an_assessment_whose_file_operation_fails_says_so_and_never_panics() {
         &["runs", &run, "assertions", "assess", "--refresh"][..],
         &["quality"],
         &["security"],
+        &["security", "--run", "latest"],
     ] {
         for place in 1.. {
             let fault = format!("fs#{place}");

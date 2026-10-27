@@ -12746,6 +12746,9 @@ fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
         ],
         &["runs", "latest", "minimize"],
         &["diff", &first, "latest"],
+        &["runs", "latest", "tests", "affected", "--title", "total"],
+        // Last: a merge adds a run the queries above would read.
+        &["merge"],
     ] {
         let mut nth = 0;
         loop {
