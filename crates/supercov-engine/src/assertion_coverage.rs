@@ -2758,6 +2758,54 @@ mod tests {
             .collect()
     }
 
+    /// Nothing to assess plans nothing, and a test asked about no statement
+    /// is asked nothing: no questions, no code.
+    #[test]
+    fn nothing_to_assess_is_asked_nothing() {
+        let empty = AssessmentInput {
+            tests: Vec::new(),
+            points: Vec::new(),
+            decisions: Vec::new(),
+        };
+        assert!(empty.only_tests(|_| true).tests.is_empty());
+        let none = population_from(
+            Path::new("/nonexistent"),
+            &empty,
+            &BTreeMap::new(),
+            Language::JavaScript,
+        )
+        .unwrap();
+        assert!(none.statements.is_empty());
+        let one = AssessmentInput {
+            tests: vec![InputTest {
+                id: "t".into(),
+                file: Some("t.test.js".into()),
+                name: "t".into(),
+                role: "test".into(),
+                runner: "node:test".into(),
+            }],
+            points: Vec::new(),
+            decisions: Vec::new(),
+        };
+        let population = population_from(
+            Path::new("/nonexistent"),
+            &one,
+            &BTreeMap::new(),
+            Language::JavaScript,
+        )
+        .unwrap();
+        assert!(population.code_run(0, &[]).is_empty());
+        assert!(population.files_read().is_empty());
+        let request = population.request(0, &[], "m");
+        assert_eq!(request["model"], "m");
+        assert!(
+            request["questions"]
+                .as_object()
+                .is_none_or(|q| q.is_empty()),
+            "{request}"
+        );
+    }
+
     /// Each runner a question can name is described, each language read
     /// from its manifest name with its "nothing", and each runner's titles
     /// split where it writes them.
