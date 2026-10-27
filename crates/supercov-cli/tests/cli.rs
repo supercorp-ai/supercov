@@ -2249,6 +2249,26 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             .exits(1)
             .is_empty()
     );
+    // Output passed on after nobody reads it any more, text or not, is
+    // dropped without a panic.
+    for script in ["printf 'a\\n'", "printf '\\377\\n'"] {
+        let mut child = project
+            .supercov_command(&[
+                "__supervise",
+                "--",
+                "sh",
+                "-c",
+                &format!("sleep 0.2; {script}"),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let output = child.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(!said.contains("panicked at"), "{script}: {said}");
+    }
     // Nor can its watchdog, or the command at each place it is started.
     let mut places = 0;
     for nth in 1.. {
