@@ -795,19 +795,11 @@ pub fn candidates(source: &str) -> Vec<Candidate> {
     });
     // Round by round, one of each check: there are more candidates than
     // the cap, so the cap is reached before every list runs out.
-    let mut picked = Vec::new();
-    let mut round = 0;
-    while picked.len() < MAX_CANDIDATES {
-        for list in by_check.values() {
-            if let Some(candidate) = list.get(round) {
-                picked.push(candidate.clone());
-                if picked.len() == MAX_CANDIDATES {
-                    break;
-                }
-            }
-        }
-        round += 1;
-    }
+    let mut picked = (0..)
+        .flat_map(|round| by_check.values().filter_map(move |list| list.get(round)))
+        .take(MAX_CANDIDATES)
+        .cloned()
+        .collect::<Vec<_>>();
     picked.sort();
     picked
 }
