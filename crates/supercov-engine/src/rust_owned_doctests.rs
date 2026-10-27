@@ -756,9 +756,10 @@ fn relay(output: &Output) {
     let _ = stderr.flush();
 }
 
-/// This program standing in for rustdoc during `cargo test --doc`.
-pub fn rustdoc_wrapper(arguments: Vec<String>) -> i32 {
-    match rustdoc_wrapper_inner(&arguments) {
+/// This program standing in for rustdoc during `cargo test --doc`, its
+/// results under `root` (see [`rustdoc_wrapper_root`]).
+pub fn rustdoc_wrapper(root: PathBuf, arguments: Vec<String>) -> i32 {
+    match rustdoc_wrapper_inner(root, &arguments) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -767,10 +768,7 @@ pub fn rustdoc_wrapper(arguments: Vec<String>) -> i32 {
     }
 }
 
-fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerError> {
-    let root = PathBuf::from(std::env::var_os(WRAPPER_ROOT_ENV).ok_or_else(|| {
-        RustTestRunnerError::Context("the doctest wrapper has no results root".into())
-    })?);
+fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, RustTestRunnerError> {
     let real = PathBuf::from(std::env::var_os(REAL_RUSTDOC_ENV).ok_or_else(|| {
         RustTestRunnerError::Context("the doctest wrapper does not know the real rustdoc".into())
     })?);
@@ -1247,7 +1245,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             fs::create_dir_all(&evidence).map_err(io_error)?;
             let output = Command::new(&binary)
                 .envs(instrumented_stack_environment())
-                .envs(evidence_environment(&evidence)?)
+                .envs(evidence_environment(probe_token(), &evidence)?)
                 .output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -1284,15 +1282,25 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
 /// evidence directory, record how it went, and exit as it exited.
 /// A doctest's evidence directory, for the instrumentation the run that
 /// started rustdoc named (see `rust_runtime::evidence_environment`).
-fn evidence_environment(evidence: &Path) -> Result<[(String, PathBuf); 2], RustTestRunnerError> {
-    let token = std::env::var(crate::rust_runtime::PROBE_TOKEN_ENV).map_err(|_| {
+/// `token` is the one this process was given, if any.
+fn evidence_environment(
+    token: Option<String>,
+    evidence: &Path,
+) -> Result<[(String, PathBuf); 2], RustTestRunnerError> {
+    let token = token.ok_or_else(|| {
         RustTestRunnerError::Context("the doctest runner has no instrumentation token".into())
     })?;
     Ok(crate::rust_runtime::evidence_environment(&token, evidence))
 }
 
-pub fn doctest_child() -> i32 {
-    match doctest_child_inner() {
+fn probe_token() -> Option<String> {
+    std::env::var(crate::rust_runtime::PROBE_TOKEN_ENV).ok()
+}
+
+/// The child of a merged harness, its records under `children` (see
+/// [`doctest_child_directory`]).
+pub fn doctest_child(children: PathBuf) -> i32 {
+    match doctest_child_inner(children) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -1301,16 +1309,13 @@ pub fn doctest_child() -> i32 {
     }
 }
 
-fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
+fn doctest_child_inner(children: PathBuf) -> Result<i32, RustTestRunnerError> {
     let index = std::env::var(RUSTDOC_RUN_NB_TEST_ENV)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .ok_or_else(|| {
             RustTestRunnerError::Context("the doctest child has no case index".into())
         })?;
-    let children = PathBuf::from(std::env::var_os(CHILD_DIR_ENV).ok_or_else(|| {
-        RustTestRunnerError::Context("the doctest child has no record directory".into())
-    })?);
     let binary = PathBuf::from(std::env::var_os(CHILD_BINARY_ENV).ok_or_else(|| {
         RustTestRunnerError::Context("the doctest child has no harness binary".into())
     })?);
@@ -1323,7 +1328,7 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
         .env_remove(CHILD_DIR_ENV)
         .env_remove(CHILD_BINARY_ENV)
         .envs(instrumented_stack_environment())
-        .envs(evidence_environment(&evidence)?)
+        .envs(evidence_environment(probe_token(), &evidence)?)
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
@@ -1341,22 +1346,38 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
     Ok(exit)
 }
 
-/// Whether this process was started by a merged harness as a case's child.
-pub fn is_doctest_child() -> bool {
-    std::env::var_os(RUSTDOC_RUN_NB_TEST_ENV).is_some() && std::env::var_os(CHILD_DIR_ENV).is_some()
+/// Where a case's child records how it went, when a merged harness started
+/// this process as one.
+pub fn doctest_child_directory() -> Option<PathBuf> {
+    std::env::var_os(RUSTDOC_RUN_NB_TEST_ENV)?;
+    std::env::var_os(CHILD_DIR_ENV).map(PathBuf::from)
 }
 
-/// Whether this process is standing in for rustdoc.
-pub fn is_rustdoc_wrapper(arguments: &[String]) -> bool {
-    std::env::var_os(WRAPPER_ROOT_ENV).is_some()
-        && arguments
-            .first()
-            .is_none_or(|first| first != RUNTOOL_MODE_ARGUMENT)
+/// Where the results go, when this process is standing in for rustdoc.
+pub fn rustdoc_wrapper_root(arguments: &[String]) -> Option<PathBuf> {
+    let root = std::env::var_os(WRAPPER_ROOT_ENV)?;
+    let runtool = arguments
+        .first()
+        .is_some_and(|first| first == RUNTOOL_MODE_ARGUMENT);
+    (!runtool).then(|| PathBuf::from(root))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_doctest_runner_given_no_token_names_no_evidence() {
+        let error = evidence_environment(None, Path::new("e")).unwrap_err();
+        assert!(
+            error.to_string().contains("no instrumentation token"),
+            "{error}"
+        );
+        let [(_, plain), (named, _)] =
+            evidence_environment(Some("t".into()), Path::new("e")).unwrap();
+        assert_eq!(plain, Path::new("e"));
+        assert!(named.ends_with("_t"), "{named}");
+    }
 
     #[test]
     fn isolation_picks_a_filter_and_skips_for_one_doctest() {

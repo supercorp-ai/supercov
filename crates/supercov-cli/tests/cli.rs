@@ -12334,6 +12334,76 @@ fn ctrl_c_during_a_go_python_ruby_or_jvm_run_exits_as_the_signal_and_publishes_n
     }
 }
 
+/// The processes Supercov stands in as for `cargo test --doc` -- rustdoc,
+/// its runtool, a merged harness's child -- each refuse what they were not
+/// given, say why, and exit as rustdoc's harness does on an error.
+#[test]
+fn a_doctest_stand_in_missing_what_it_needs_says_so() {
+    let project = Project::empty("doctest-stand-ins");
+    let missing = project.root.join("missing");
+    let missing = missing.to_str().unwrap();
+    let root = project.root.to_str().unwrap();
+    for (args, env, said) in [
+        (
+            &["__doctest-runner", "only"][..],
+            &[][..],
+            "needs a package directory, a mode and a binary",
+        ),
+        (
+            &["__doctest-runner", root, "bogus", missing],
+            &[],
+            "unknown doctest runtool mode bogus",
+        ),
+        (
+            &[],
+            &[("SUPERCOV_DOCTEST_WRAPPER_ROOT", root)],
+            "does not know the real rustdoc",
+        ),
+        (
+            &["--version"],
+            &[
+                ("SUPERCOV_DOCTEST_WRAPPER_ROOT", root),
+                ("SUPERCOV_DOCTEST_REAL_RUSTDOC", missing),
+            ],
+            "[supercov]",
+        ),
+        (
+            &[],
+            &[
+                ("RUSTDOC_DOCTEST_RUN_NB_TEST", "first"),
+                ("SUPERCOV_DOCTEST_CHILD_DIR", root),
+            ],
+            "no case index",
+        ),
+        (
+            &[],
+            &[
+                ("RUSTDOC_DOCTEST_RUN_NB_TEST", "0"),
+                ("SUPERCOV_DOCTEST_CHILD_DIR", root),
+            ],
+            "no harness binary",
+        ),
+        (
+            &[],
+            &[
+                ("RUSTDOC_DOCTEST_RUN_NB_TEST", "0"),
+                ("SUPERCOV_DOCTEST_CHILD_DIR", root),
+                ("SUPERCOV_DOCTEST_CHILD_BINARY", missing),
+                ("SUPERCOV_RUST_PROBE_TOKEN", "doctests"),
+            ],
+            "[supercov]",
+        ),
+    ] {
+        let ran = project.supercov_with(args, env);
+        assert_eq!(ran.code(), 101, "{args:?} {env:?}");
+        assert!(
+            ran.stderr().contains(said),
+            "{args:?} {env:?}: {}",
+            ran.stderr()
+        );
+    }
+}
+
 /// Each query, run once for every file operation it makes with that one
 /// failing (`SUPERCOV_TEST_FAULT=fs@N`): it may refuse, but says why and never
 /// panics, and the run its fault no longer reaches answers as usual.

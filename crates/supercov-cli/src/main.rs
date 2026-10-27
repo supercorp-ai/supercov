@@ -253,14 +253,15 @@ fn main() -> ExitCode {
     // Doctests of the owned frontend: a merged harness spawns this program
     // once per case; Cargo runs it in place of rustdoc during `cargo test
     // --doc`. Both are told apart by their environment alone.
-    if supercov_engine::rust_owned_doctests::is_doctest_child() {
+    if let Some(children) = supercov_engine::rust_owned_doctests::doctest_child_directory() {
         return ExitCode::from(
-            supercov_engine::rust_owned_doctests::doctest_child().clamp(0, 255) as u8,
+            supercov_engine::rust_owned_doctests::doctest_child(children).clamp(0, 255) as u8,
         );
     }
-    if supercov_engine::rust_owned_doctests::is_rustdoc_wrapper(&arguments) {
+    if let Some(root) = supercov_engine::rust_owned_doctests::rustdoc_wrapper_root(&arguments) {
         return ExitCode::from(
-            supercov_engine::rust_owned_doctests::rustdoc_wrapper(arguments).clamp(0, 255) as u8,
+            supercov_engine::rust_owned_doctests::rustdoc_wrapper(root, arguments).clamp(0, 255)
+                as u8,
         );
     }
     let mut arguments = arguments.into_iter();
