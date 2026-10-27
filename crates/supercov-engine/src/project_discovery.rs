@@ -952,6 +952,7 @@ mod tests {
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("tests/a"), root.join("tests/linked")).unwrap();
+        std::fs::create_dir(root.join("tests/empty")).unwrap();
         let found = nested_playwright_configs(&root)
             .into_iter()
             .map(|path| {
@@ -1388,6 +1389,7 @@ mod tests {
         assert_eq!(candidates[0].module, "my-playwright-kit");
         assert_eq!(candidates[0].score, 8 + 10 + 5);
         assert_eq!(candidates[0].test_export, None);
+        assert!(imported_test_apis(Path::new("empty.spec.ts"), "").is_empty());
         let root = project(
             "apis",
             &[
@@ -1403,6 +1405,7 @@ mod tests {
         );
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("results"), root.join("linked")).unwrap();
+        fs::create_dir(root.join("e2e/empty")).unwrap();
         let mut found = Vec::new();
         test_api_candidates(&root, &mut found);
         assert_eq!(
@@ -1444,6 +1447,7 @@ mod tests {
             ],
         );
         fs::write(root.join("test/latin1.test.js"), b"// caf\xe9\n").unwrap();
+        fs::create_dir(root.join("test/empty")).unwrap();
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(
