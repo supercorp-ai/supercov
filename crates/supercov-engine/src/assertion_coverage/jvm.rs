@@ -577,6 +577,16 @@ mod tests {
             Some(Change::ValueUndefined)
         );
         assert_eq!(change_at(&starts, 11, "log(z);", j), Some(Change::Skip));
+        // A class declared in a method is no statement to change.
+        let local = "class A {\n    void f() {\n        class L {}\n    }\n}\n";
+        let starts = statement_starts("A.java", local);
+        assert_eq!(change_at(&starts, 3, "class L {}", j), None);
+        // A Kotlin `else if` branch's value is the outer `if`'s; an `if`
+        // ending a lambda whose value nobody takes yields nothing.
+        let kotlin = "fun f(c: Boolean, d: Boolean): Int {\n    val v = if (c) {\n        1\n    } else if (d) {\n        log()\n        2\n    } else {\n        3\n    }\n    run {\n        if (c) {\n            log()\n            4\n        } else {\n            5\n        }\n    }\n    return v\n}\n";
+        let starts = statement_starts("F.kt", kotlin);
+        assert_eq!(change_at(&starts, 6, "2", j), Some(Change::ReturnUndefined));
+        assert_eq!(change_at(&starts, 13, "4", j), Some(Change::Skip));
     }
 
     /// Forge's `stringBuilder.toString()` ending a `when` branch: the value
