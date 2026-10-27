@@ -269,7 +269,8 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
         .collect::<BTreeSet<_>>();
     let mut names = BTreeSet::new();
     let mut cuts = Vec::new();
-    for statement in &parsed.program.body {
+    // A file that gained a function has a statement at least.
+    parsed.program.body.iter().for_each(|statement| {
         let bound = match statement {
             Statement::FunctionDeclaration(_) | Statement::VariableDeclaration(_) => {
                 statement.as_declaration().and_then(functions)
@@ -292,7 +293,7 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
             }
             _ => None,
         };
-        let Some(bound) = bound else { continue };
+        let Some(bound) = bound else { return };
         if bound.iter().all(|name| top.contains(name)) {
             names.extend(bound);
             cuts.push((
@@ -301,7 +302,7 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
                 String::new(),
             ));
         }
-    }
+    });
     // Every added unit is one of those functions or inside one.
     let inside = |index: usize| {
         after.ancestors(index).any(|unit| {
@@ -322,37 +323,39 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
         }
     }
     let mut remaining = Names(BTreeSet::new());
-    for statement in &parsed.program.body {
-        let span = statement.span();
-        if !cuts
-            .iter()
-            .any(|(start, _, _)| *start == span.start as usize)
-        {
-            remaining.visit_statement(statement);
-        }
-    }
+    parsed
+        .program
+        .body
+        .iter()
+        .filter(|statement| {
+            !cuts
+                .iter()
+                .any(|(start, _, _)| *start == statement.span().start as usize)
+        })
+        .for_each(|statement| remaining.visit_statement(statement));
     if names.iter().any(|name| remaining.0.contains(name)) {
         return None;
     }
     // Import names that only the additions use. A whole declaration goes
     // only where it brings in types or a package; a first-party module newly
     // imported runs its top level, which no earlier test did.
-    for statement in &parsed.program.body {
+    // A file that gained a function has a statement at least.
+    parsed.program.body.iter().try_for_each(|statement| {
         let Statement::ImportDeclaration(import) = statement else {
-            continue;
+            return Some(());
         };
         let Some(specifiers) = &import.specifiers else {
-            continue;
+            return Some(());
         };
         if specifiers.is_empty() {
-            continue;
+            return Some(());
         }
         let unused = specifiers
             .iter()
             .map(|specifier| !remaining.0.contains(specifier.local().name.as_str()))
             .collect::<Vec<_>>();
         if !unused.contains(&true) {
-            continue;
+            return Some(());
         }
         let span = (import.span.start as usize, import.span.end as usize);
         if unused.iter().all(|unused| *unused) {
@@ -360,7 +363,7 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
             let package = !module.starts_with('.') && !module.starts_with('/');
             if import.import_kind.is_type() || package {
                 cuts.push((span.0, span.1, String::new()));
-                continue;
+                return Some(());
             }
             return None;
         }
@@ -393,19 +396,10 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
                 &source[last.end as usize..span.1]
             ),
         ));
-    }
+        Some(())
+    })?;
     cuts.sort_by_key(|(start, _, _)| *start);
-    let mut earlier = String::with_capacity(source.len());
-    let mut cursor = 0;
-    // Each cut is a whole statement of the top level, so none overlaps the
-    // next.
-    for (start, end, replacement) in cuts {
-        earlier.push_str(&source[cursor..start]);
-        earlier.push_str(&replacement);
-        cursor = end;
-    }
-    earlier.push_str(&source[cursor..]);
-    let then = code(path, &earlier)?;
+    let then = code(path, &cut_out(source, cuts))?;
     let digests = |code: &Code| {
         code.units
             .iter()
@@ -450,7 +444,8 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
         .collect::<BTreeSet<_>>();
     let mut names = BTreeSet::new();
     let mut cuts = Vec::new();
-    for statement in body {
+    // A file that gained a function has a statement at least.
+    body.iter().for_each(|statement| {
         if let Stmt::FunctionDef(function) = statement
             && function.decorator_list.is_empty()
             && top.contains(function.name.as_str())
@@ -462,7 +457,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
                 String::new(),
             ));
         }
-    }
+    });
     let inside = |index: usize| {
         after.ancestors(index).any(|unit| {
             after.units[unit].parent == Some(0) && names.contains(&after.units[unit].path)
@@ -489,13 +484,13 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
         cuts.iter()
             .any(|(start, _, _)| *start == statement.range().start().to_usize())
     };
-    for statement in body {
+    body.iter().for_each(|statement| {
         if cut(statement, &cuts) {
             used.visit_stmt(statement);
         } else {
             remaining.visit_stmt(statement);
         }
-    }
+    });
     // `__all__` lists names as strings.
     let exported = body
         .iter()
@@ -513,11 +508,11 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
     }
     // Import names only the additions use; one nothing uses was there
     // before or is a change.
-    for statement in body {
+    body.iter().try_for_each(|statement| {
         let (aliases, relative) = match statement {
             Stmt::Import(import) => (&import.names, false),
             Stmt::ImportFrom(import) => (&import.names, import.level > 0),
-            _ => continue,
+            _ => return Some(()),
         };
         let bound = |alias: &ruff_python_ast::Alias| {
             alias.asname.as_ref().map_or_else(
@@ -534,7 +529,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
             )
         };
         if aliases.iter().any(|alias| alias.name.as_str() == "*") {
-            continue;
+            return Some(());
         }
         let unused = aliases
             .iter()
@@ -544,7 +539,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
             })
             .collect::<Vec<_>>();
         if !unused.contains(&true) {
-            continue;
+            return Some(());
         }
         let range = statement.range();
         let span = (range.start().to_usize(), range.end().to_usize());
@@ -553,7 +548,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
                 return None;
             }
             cuts.push((span.0, span.1, String::new()));
-            continue;
+            return Some(());
         }
         // Some names stay: the statement as it read with only those.
         let first = aliases[0].range();
@@ -577,19 +572,10 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
                 &source[last.end().to_usize()..span.1]
             ),
         ));
-    }
+        Some(())
+    })?;
     cuts.sort_by_key(|(start, _, _)| *start);
-    let mut earlier = String::with_capacity(source.len());
-    let mut cursor = 0;
-    // Each cut is a whole statement of the top level, so none overlaps the
-    // next.
-    for (start, end, replacement) in cuts {
-        earlier.push_str(&source[cursor..start]);
-        earlier.push_str(&replacement);
-        cursor = end;
-    }
-    earlier.push_str(&source[cursor..]);
-    let then = code(path, &earlier)?;
+    let then = code(path, &cut_out(source, cuts))?;
     let digests = |code: &Code| {
         code.units
             .iter()
@@ -617,6 +603,21 @@ struct Outline {
 
 /// The parser's view of a file, or `None` when Supercov has no parser for it
 /// or the file does not parse. A file without a view is compared by its bytes.
+/// `source` with each cut's span replaced by its text. Each cut is a whole
+/// statement of the top level, in order, so none overlaps the next.
+fn cut_out(source: &str, cuts: Vec<(usize, usize, String)>) -> String {
+    let mut earlier = String::with_capacity(source.len());
+    let cursor = cuts
+        .into_iter()
+        .fold(0, |cursor, (start, end, replacement)| {
+            earlier.push_str(&source[cursor..start]);
+            earlier.push_str(&replacement);
+            end
+        });
+    earlier.push_str(&source[cursor..]);
+    earlier
+}
+
 pub fn code(path: &str, source: &str) -> Option<Code> {
     let extension = path.rsplit_once('.').map_or("", |(_, e)| e);
     let outline = match extension {
@@ -700,9 +701,7 @@ fn build(source: &str, outline: Outline) -> Code {
         }
         stripped.push_str(&source[cursor..start]);
         let base = stripped.len() - (start - cursor);
-        for (i, slot) in map[cursor..start].iter_mut().enumerate() {
-            *slot = base + i;
-        }
+        number_from(&mut map[cursor..start], base);
         let here = stripped.len();
         stripped.push_str(replacement);
         map[start..stop].fill(here);
@@ -710,9 +709,7 @@ fn build(source: &str, outline: Outline) -> Code {
     }
     stripped.push_str(&source[cursor..]);
     let base = stripped.len() - (source.len() - cursor);
-    for (i, slot) in map[cursor..=source.len()].iter_mut().enumerate() {
-        *slot = base + i;
-    }
+    number_from(&mut map[cursor..=source.len()], base);
     // Then blank lines and trailing whitespace, outside string literals.
     let mut strings = outline
         .strings
@@ -722,9 +719,8 @@ fn build(source: &str, outline: Outline) -> Code {
         .collect::<Vec<_>>();
     strings.sort_unstable();
     let (stripped, remap) = erase_blank(&stripped, &strings);
-    for slot in &mut map {
-        *slot = remap[*slot];
-    }
+    // One slot past the source's end at least.
+    map.iter_mut().for_each(|slot| *slot = remap[*slot]);
 
     let mut declarations = outline.declarations;
     declarations.retain(|d| d.start < d.end && d.end <= source.len());
@@ -798,40 +794,43 @@ fn build(source: &str, outline: Outline) -> Code {
         stack.push(index);
     }
 
-    let mut units = Vec::with_capacity(built.len());
-    for unit in &built {
-        let mut text = String::new();
-        let mut cursor = map[unit.start];
-        for child in unit.children.iter().map(|c| &built[*c]) {
-            let (start, end) = (map[child.start], map[child.end]);
-            if start < cursor {
-                continue;
+    // The file's own unit at least.
+    let units = built
+        .iter()
+        .map(|unit| {
+            let mut text = String::new();
+            let mut cursor = map[unit.start];
+            for child in unit.children.iter().map(|c| &built[*c]) {
+                let (start, end) = (map[child.start], map[child.end]);
+                if start < cursor {
+                    continue;
+                }
+                text.push_str(&stripped[cursor..start]);
+                // An inert declaration leaves no mark: adding a type alias next to
+                // a function does not change what the function's file does.
+                if child.inert {
+                    cursor = line_end_after(&stripped, end);
+                } else {
+                    text.push('\u{0}');
+                    cursor = end;
+                }
             }
-            text.push_str(&stripped[cursor..start]);
-            // An inert declaration leaves no mark: adding a type alias next to
-            // a function does not change what the function's file does.
-            if child.inert {
-                cursor = line_end_after(&stripped, end);
-            } else {
-                text.push('\u{0}');
-                cursor = end;
+            text.push_str(&stripped[cursor..map[unit.end]]);
+            let (line, column) = position(unit.start);
+            let (end_line, end_column) = position(unit.end);
+            Unit {
+                path: unit.path.clone(),
+                kind: unit.kind.to_owned(),
+                line,
+                column,
+                end_line,
+                end_column,
+                digest: short_digest(&text),
+                parent: unit.parent,
+                inert: unit.inert,
             }
-        }
-        text.push_str(&stripped[cursor..map[unit.end]]);
-        let (line, column) = position(unit.start);
-        let (end_line, end_column) = position(unit.end);
-        units.push(Unit {
-            path: unit.path.clone(),
-            kind: unit.kind.to_owned(),
-            line,
-            column,
-            end_line,
-            end_column,
-            digest: short_digest(&text),
-            parent: unit.parent,
-            inert: unit.inert,
-        });
-    }
+        })
+        .collect::<Vec<_>>();
 
     let mut semantic = String::with_capacity(stripped.len());
     let mut cursor = 0;
@@ -919,18 +918,14 @@ fn erase_blank(text: &str, strings: &[(usize, usize)]) -> (String, Vec<usize>) {
         let keep_until = if dropping { drop_start } else { next };
         out.push_str(&text[cursor..keep_until]);
         let base = out.len() - (keep_until - cursor);
-        for (i, slot) in map[cursor..keep_until].iter_mut().enumerate() {
-            *slot = base + i;
-        }
+        number_from(&mut map[cursor..keep_until], base);
         if dropping {
             map[drop_start..drop_end].fill(out.len());
             if drop_end < next {
                 // A trailing-whitespace drop keeps the newline.
                 out.push_str(&text[drop_end..next]);
                 let base = out.len() - (next - drop_end);
-                for (i, slot) in map[drop_end..next].iter_mut().enumerate() {
-                    *slot = base + i;
-                }
+                number_from(&mut map[drop_end..next], base);
             }
         }
         cursor = next;
@@ -941,6 +936,14 @@ fn erase_blank(text: &str, strings: &[(usize, usize)]) -> (String, Vec<usize>) {
     }
     map[text.len()] = out.len();
     (out, map)
+}
+
+/// Each slot numbered on from `base`, one apart.
+fn number_from(slots: &mut [usize], base: usize) {
+    slots
+        .iter_mut()
+        .zip(base..)
+        .for_each(|(slot, number)| *slot = number);
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
@@ -1248,12 +1251,8 @@ fn python(source: &str) -> Option<Outline> {
         fn visit_stmt(&mut self, stmt: &'a Stmt) {
             match stmt {
                 Stmt::FunctionDef(def) => {
-                    let start = def
-                        .decorator_list
-                        .iter()
-                        .map(|d| d.range().start())
-                        .min()
-                        .map_or(def.range().start(), |s| s.min(def.range().start()));
+                    // Ruff's range starts at the first decorator.
+                    let start = def.range().start();
                     self.0.push(Item {
                         name: def.name.to_string(),
                         kind: "function",
@@ -1263,12 +1262,8 @@ fn python(source: &str) -> Option<Outline> {
                     });
                 }
                 Stmt::ClassDef(def) => {
-                    let start = def
-                        .decorator_list
-                        .iter()
-                        .map(|d| d.range().start())
-                        .min()
-                        .map_or(def.range().start(), |s| s.min(def.range().start()));
+                    // Ruff's range starts at the first decorator.
+                    let start = def.range().start();
                     self.0.push(Item {
                         name: def.name.to_string(),
                         kind: "class",
@@ -1318,7 +1313,8 @@ fn rust(source: &str) -> Option<Outline> {
         }
         block.clear();
     };
-    for element in root.syntax().descendants_with_tokens() {
+    // The root node at least.
+    root.syntax().descendants_with_tokens().for_each(|element| {
         match element {
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
                 let text = token.text();
@@ -1328,7 +1324,7 @@ fn rust(source: &str) -> Option<Outline> {
                     u32::from(range.end()) as usize,
                 );
                 if universally_significant(text) {
-                    continue;
+                    return;
                 }
                 let doc = ast::Comment::cast(token.clone()).is_some_and(|c| c.kind().doc.is_some());
                 if doc {
@@ -1419,7 +1415,7 @@ fn rust(source: &str) -> Option<Outline> {
                 declarations.extend(declaration);
             }
         }
-    }
+    });
     flush(&mut doc_block, &mut comments);
     Some(Outline {
         comments,
@@ -1479,11 +1475,11 @@ fn ruby(source: &str) -> Option<Outline> {
         /// A heredoc's node is its opener; its body sits lines below, so the
         /// literal spans from the first of its parts to the last.
         fn literal<'pr>(&mut self, parts: impl IntoIterator<Item = Option<Location<'pr>>>) {
-            let mut span: Option<(usize, usize)> = None;
-            for part in parts.into_iter().flatten() {
-                let (s, e) = (part.start_offset(), part.end_offset());
-                span = Some(span.map_or((s, e), |(a, b)| (a.min(s), b.max(e))));
-            }
+            let span = parts
+                .into_iter()
+                .flatten()
+                .map(|part| (part.start_offset(), part.end_offset()))
+                .reduce(|(a, b), (s, e)| (a.min(s), b.max(e)));
             self.strings.extend(span);
         }
         fn record(&mut self, name: String, kind: &'static str, location: ruby_prism::Location<'_>) {
@@ -1592,15 +1588,15 @@ fn ruby(source: &str) -> Option<Outline> {
 
 /// Every node of a tree-sitter tree, in source order.
 fn tree_nodes(tree: &tree_sitter::Tree) -> Vec<tree_sitter::Node<'_>> {
-    let mut out = Vec::new();
     let mut stack = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        out.push(node);
+    std::iter::from_fn(|| {
+        let node = stack.pop()?;
         let mut cursor = node.walk();
         let children = node.children(&mut cursor).collect::<Vec<_>>();
         stack.extend(children.into_iter().rev());
-    }
-    out
+        Some(node)
+    })
+    .collect()
 }
 
 fn field_text<'t>(node: tree_sitter::Node<'t>, field: &str, source: &str) -> Option<String> {
@@ -1629,7 +1625,8 @@ fn go(source: &str) -> Option<Outline> {
     let mut comments = Vec::new();
     let mut strings = Vec::new();
     let mut declarations = Vec::new();
-    for node in tree_nodes(&tree) {
+    // The root at least.
+    tree_nodes(&tree).into_iter().for_each(|node| {
         let text = &source[node.byte_range()];
         match node.kind() {
             "interpreted_string_literal" | "raw_string_literal" | "rune_literal" => {
@@ -1690,7 +1687,7 @@ fn go(source: &str) -> Option<Outline> {
             }),
             _ => {}
         }
-    }
+    });
     Some(Outline {
         comments,
         strings,
@@ -1746,17 +1743,18 @@ fn java(source: &str) -> Option<Outline> {
     let mut comments = Vec::new();
     let mut strings = Vec::new();
     let mut declarations = Vec::new();
-    for node in tree_nodes(&tree) {
+    // The root at least.
+    tree_nodes(&tree).into_iter().for_each(|node| {
         let kind = match node.kind() {
             "string_literal" | "character_literal" => {
                 strings.push((node.start_byte(), node.end_byte()));
-                continue;
+                return;
             }
             "line_comment" | "block_comment" => {
                 if !universally_significant(&source[node.byte_range()]) {
                     comments.push((node.start_byte(), node.end_byte()));
                 }
-                continue;
+                return;
             }
             "class_declaration" => "class",
             "interface_declaration" => "interface",
@@ -1765,10 +1763,10 @@ fn java(source: &str) -> Option<Outline> {
             "annotation_type_declaration" => "annotation",
             "method_declaration" => "method",
             "constructor_declaration" => "constructor",
-            _ => continue,
+            _ => return,
         };
         let Some(name) = field_text(node, "name", source) else {
-            continue;
+            return;
         };
         let name = if matches!(kind, "method" | "constructor") {
             with_parameters(name, node.child_by_field_name("parameters"), source)
@@ -1782,7 +1780,7 @@ fn java(source: &str) -> Option<Outline> {
             end: node.end_byte(),
             inert: false,
         });
-    }
+    });
     Some(Outline {
         comments,
         strings,
@@ -1797,17 +1795,18 @@ fn kotlin(source: &str) -> Option<Outline> {
     let mut comments = Vec::new();
     let mut strings = Vec::new();
     let mut declarations = Vec::new();
-    for node in tree_nodes(&tree) {
+    // The root at least.
+    tree_nodes(&tree).into_iter().for_each(|node| {
         let (name, kind, inert) = match node.kind() {
             "string_literal" | "multiline_string_literal" | "character_literal" => {
                 strings.push((node.start_byte(), node.end_byte()));
-                continue;
+                return;
             }
             "line_comment" | "block_comment" | "multiline_comment" => {
                 if !universally_significant(&source[node.byte_range()]) {
                     comments.push((node.start_byte(), node.end_byte()));
                 }
-                continue;
+                return;
             }
             "class_declaration" => (field_text(node, "name", source), "class", false),
             "object_declaration" => (field_text(node, "name", source), "object", false),
@@ -1850,10 +1849,10 @@ fn kotlin(source: &str) -> Option<Outline> {
                 "type",
                 true,
             ),
-            _ => continue,
+            _ => return,
         };
         let Some(name) = name else {
-            continue;
+            return;
         };
         declarations.push(Item {
             name,
@@ -1862,7 +1861,7 @@ fn kotlin(source: &str) -> Option<Outline> {
             end: node.end_byte(),
             inert,
         });
-    }
+    });
     Some(Outline {
         comments,
         strings,
@@ -2413,6 +2412,23 @@ mod tests {
             vec![item("A", 0, 11, true), item("b", 11, 23, false)],
         );
         assert_eq!(overlapping.units[0].digest, alone.units[0].digest);
+    }
+
+    /// A Python decorator is part of the function or class it decorates.
+    #[test]
+    fn a_python_decorator_starts_its_declaration() {
+        let code = code(
+            "a.py",
+            "x = 1\n@cache\ndef f():\n    pass\n@dataclass\nclass C:\n    pass\n",
+        )
+        .unwrap();
+        let starts = code
+            .units
+            .iter()
+            .skip(1)
+            .map(|unit| (unit.path.as_str(), unit.line, unit.column))
+            .collect::<Vec<_>>();
+        assert_eq!(starts, [("f", 2, 1), ("C", 5, 1)]);
     }
 
     #[test]
