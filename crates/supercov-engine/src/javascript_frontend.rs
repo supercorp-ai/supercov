@@ -36,7 +36,13 @@ const FRONTEND_CACHE_DIRECTORY: &str = ".supercov/frontend-cache-artifacts";
 const AUTHORED_DIRECTORY: &str = ".supercov/node_modules/.authored";
 const AUTHORED_LIST: &str = ".supercov/node_modules/authored-sources.json";
 const CHANGED_DIRECTORY: &str = ".supercov/node_modules/.changed";
-const RUNTIME_FILES: &[&str] = &[
+/// Every runtime file the frontend writes, embedded by its name.
+macro_rules! runtime_files {
+    ($($name:literal),* $(,)?) => {
+        &[$(($name, include_bytes!(concat!("../runtime-assets/javascript/", $name)))),*]
+    };
+}
+const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "atomic.mjs",
     "ava.mjs",
     "bootstrap.cjs",
@@ -374,7 +380,7 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
     artifacts.extend(
         RUNTIME_FILES
             .iter()
-            .map(|name| format!(".supercov/node_modules/{name}")),
+            .map(|(name, _)| format!(".supercov/node_modules/{name}")),
     );
     // Scope entries outside the instrumented set may still be rewritten
     // (assertion attribution, capability imports), so they are cached like
@@ -489,68 +495,6 @@ fn write_javascript_frontend_cache(
     let mut encoded = serde_json::to_vec_pretty(&cache).expect("plain data serializes");
     encoded.push(b'\n');
     atomic_write(&workspace.join(FRONTEND_CACHE_FILE), &encoded)
-}
-
-fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
-    match name {
-        "atomic.mjs" => Some(include_bytes!("../runtime-assets/javascript/atomic.mjs")),
-        "ava.mjs" => Some(include_bytes!("../runtime-assets/javascript/ava.mjs")),
-        "bootstrap.cjs" => Some(include_bytes!("../runtime-assets/javascript/bootstrap.cjs")),
-        "capability.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/capability.mjs"
-        )),
-        "jest.cjs" => Some(include_bytes!("../runtime-assets/javascript/jest.cjs")),
-        "jest.config.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/jest.config.mjs"
-        )),
-        "jestReporter.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/jestReporter.mjs"
-        )),
-        "jestRuntime.cjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/jestRuntime.cjs"
-        )),
-        "launchSupervisor.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/launchSupervisor.mjs"
-        )),
-        "mocha.mjs" => Some(include_bytes!("../runtime-assets/javascript/mocha.mjs")),
-        "nodeAssert.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/nodeAssert.mjs"
-        )),
-        "nodeAssertAdapter.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/nodeAssertAdapter.mjs"
-        )),
-        "nodeAssertStrict.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/nodeAssertStrict.mjs"
-        )),
-        "nodeTest.mjs" => Some(include_bytes!("../runtime-assets/javascript/nodeTest.mjs")),
-        "playwright.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/playwright.mjs"
-        )),
-        "playwrightReporter.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/playwrightReporter.mjs"
-        )),
-        "provenance.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/provenance.mjs"
-        )),
-        "register.mjs" => Some(include_bytes!("../runtime-assets/javascript/register.mjs")),
-        "resolve-loader.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/resolve-loader.mjs"
-        )),
-        "runnerEvidence.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/runnerEvidence.mjs"
-        )),
-        "runtime.mjs" => Some(include_bytes!("../runtime-assets/javascript/runtime.mjs")),
-        "tap.mjs" => Some(include_bytes!("../runtime-assets/javascript/tap.mjs")),
-        "transport.mjs" => Some(include_bytes!("../runtime-assets/javascript/transport.mjs")),
-        "vitest.mjs" => Some(include_bytes!("../runtime-assets/javascript/vitest.mjs")),
-        "vitestBrowser.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/vitestBrowser.mjs"
-        )),
-        "vitestReporter.mjs" => Some(include_bytes!(
-            "../runtime-assets/javascript/vitestReporter.mjs"
-        )),
-        _ => None,
-    }
 }
 
 fn unique() -> String {
@@ -883,13 +827,10 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
         &generated.join("package.json"),
         b"{\"private\":true,\"type\":\"module\"}\n",
     )?;
-    for name in RUNTIME_FILES {
+    for (name, bytes) in RUNTIME_FILES {
         let destination = generated.join(name);
         let source_path = PathBuf::from(format!("embedded:{name}"));
-        let bytes = embedded_runtime(name)
-            .expect("every declared runtime file must have an embedded asset")
-            .to_vec();
-        let bytes = strip_source_map_reference(bytes);
+        let bytes = strip_source_map_reference(bytes.to_vec());
         if *name == "runtime.mjs" {
             let text = String::from_utf8(bytes).map_err(|source| {
                 io_error(
@@ -2623,12 +2564,16 @@ mod tests {
 
     #[test]
     fn embedded_runtime_contains_every_declared_shim() {
-        for name in RUNTIME_FILES {
-            let bytes = embedded_runtime(name).unwrap();
+        for (name, bytes) in RUNTIME_FILES {
             assert!(!bytes.is_empty(), "embedded runtime is empty: {name}");
         }
+        let runtime = RUNTIME_FILES
+            .iter()
+            .find(|(name, _)| *name == "runtime.mjs")
+            .unwrap()
+            .1;
         assert!(
-            std::str::from_utf8(embedded_runtime("runtime.mjs").unwrap())
+            std::str::from_utf8(runtime)
                 .unwrap()
                 .contains(RUNTIME_INSTANCE_MARKER)
         );
