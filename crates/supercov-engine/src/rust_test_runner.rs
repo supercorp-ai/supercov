@@ -3856,6 +3856,26 @@ mod tests {
         assert!(build_owned_arguments(Vec::new()).unwrap().is_empty());
     }
 
+    /// Each nextest option is read for whether it takes the next word as
+    /// its value: one written with `=` carries its own.
+    #[test]
+    fn each_nextest_option_says_whether_it_takes_a_value() {
+        for (argument, run_only, shared) in [
+            ("--retries", Some(true), None),
+            ("--retries=2", Some(false), None),
+            ("--fail-fast", Some(false), None),
+            ("-j4", Some(false), None),
+            ("--profile", None, Some(true)),
+            ("--profile=ci", None, Some(false)),
+            ("--no-pager", None, Some(false)),
+            ("name", None, None),
+        ] {
+            assert_eq!(nextest_run_only_option(argument), run_only, "{argument}");
+            assert_eq!(nextest_shared_option(argument), shared, "{argument}");
+        }
+        assert_eq!(nextest_unsupported_run_option("--no-run"), Some(false));
+    }
+
     #[test]
     fn nextest_list_projection_keeps_short_options_with_attached_values() {
         let invocation = CargoTestInvocation {
