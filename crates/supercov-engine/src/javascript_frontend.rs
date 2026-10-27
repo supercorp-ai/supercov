@@ -2347,7 +2347,19 @@ mod tests {
             fs::read_to_string(workspace.join("src/example.mjs")).unwrap(),
             transformed
         );
+        // A cache of nothing restores nothing, and a manifest that is no
+        // JSON is no frontend to load.
+        let mut nothing = cache.clone();
+        nothing.artifacts.clear();
+        assert!(load_cached_javascript_frontend(&workspace, &nothing).is_ok());
+        fs::write(&prepared.manifest_path, "{").unwrap();
+        assert!(matches!(
+            load_cached_javascript_frontend(&workspace, &nothing),
+            Err(JavascriptFrontendError::Serialize(_))
+        ));
         fs::write(workspace.join(&cache.artifacts[0].cache_file), "corrupt").unwrap();
+        assert!(read_javascript_frontend_cache(&workspace, "cache-test").is_none());
+        fs::write(workspace.join(FRONTEND_CACHE_FILE), "{").unwrap();
         assert!(read_javascript_frontend_cache(&workspace, "cache-test").is_none());
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();
