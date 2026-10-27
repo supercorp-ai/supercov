@@ -12514,6 +12514,9 @@ fn the_nextest_runner_missing_what_it_needs_says_so() {
 fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
     let project = Project::cart("query-faults");
     project.supercov(&["--", "node", "--test"]).succeeds();
+    // A second run, for the queries that compare two.
+    let first = project.latest();
+    project.supercov(&["--", "node", "--test"]).succeeds();
     for query in [
         &["runs"][..],
         &["runs", "latest"],
@@ -12523,6 +12526,29 @@ fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
         &["runs", "latest", "tests", "affected"],
         &["runs", "latest", "tests", "without-evidence"],
         &["report", "--no-open", "--output", "faults.html"],
+        &[
+            "report",
+            "--no-open",
+            "--output",
+            "faults-compared.html",
+            "--compare",
+            &first,
+        ],
+        &[
+            "runs",
+            "latest",
+            "report",
+            "--format",
+            "lcov",
+            "--output",
+            "faults.info",
+            "--force",
+            "--title",
+            "total",
+        ],
+        &["runs", "latest", "test", "total"],
+        &["runs", "latest", "minimize"],
+        &["diff", &first, "latest"],
     ] {
         let mut nth = 0;
         loop {
