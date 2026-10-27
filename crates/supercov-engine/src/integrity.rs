@@ -1165,6 +1165,15 @@ mod tests {
         // understand stays conservative instead of silently hashing nothing.
         assert!(behavioural_manifest(ManifestKind::PackageJson, b"{ not json").is_none());
         assert!(behavioural_manifest(ManifestKind::CargoToml, b"[[[").is_none());
+        // A manifest that is no text, a null kept apart from false, a path
+        // with no name, and a hash of no fields.
+        assert!(behavioural_manifest(ManifestKind::CargoToml, &[0xff, 0xfe]).is_none());
+        assert_ne!(
+            behavioural_manifest(ManifestKind::PackageJson, b"{\"x\": null}"),
+            behavioural_manifest(ManifestKind::PackageJson, b"{\"x\": false}")
+        );
+        assert!(manifest_kind(Path::new("/")).is_none());
+        assert_ne!(domain_hash("a", &[]), domain_hash("b", &[]));
         let root = directory("manifest-fallback");
         write(&root, "package.json", "{ not json");
         let first = digest_manifests(&root, [root.join("package.json")]).unwrap();
