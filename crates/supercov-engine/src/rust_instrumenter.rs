@@ -2782,25 +2782,29 @@ fn numbered_file(
             // doctest further down the file is reported.
             format!(" const {table}: &[u32] = &[{entries}];"),
         );
-        for (index, arm) in arms.iter().enumerate() {
-            let body = arm
-                .expr()
-                .expect("a tree parsed without errors has every part its syntax requires");
-            let call = format!("{runtime_path}::arms({table}, {index});");
-            match &body {
-                ast::Expr::BlockExpr(block) if plain_block(block) => {
-                    push_direct(&mut insertions, block_entry(block)?, format!(" {call}"));
+        // Not empty: a match with no arm was passed over above.
+        arms.iter().enumerate().try_for_each(
+            |(index, arm)| -> Result<(), RustInstrumenterError> {
+                let body = arm
+                    .expr()
+                    .expect("a tree parsed without errors has every part its syntax requires");
+                let call = format!("{runtime_path}::arms({table}, {index});");
+                match &body {
+                    ast::Expr::BlockExpr(block) if plain_block(block) => {
+                        push_direct(&mut insertions, block_entry(block)?, format!(" {call}"));
+                    }
+                    _ => push_wrapper(
+                        &mut insertions,
+                        body.syntax().text_range(),
+                        arm.syntax().text_range(),
+                        0,
+                        format!("{{ {call} ("),
+                        ") }".into(),
+                    ),
                 }
-                _ => push_wrapper(
-                    &mut insertions,
-                    body.syntax().text_range(),
-                    arm.syntax().text_range(),
-                    0,
-                    format!("{{ {call} ("),
-                    ") }".into(),
-                ),
-            }
-        }
+                Ok(())
+            },
+        )?;
     }
 
     // Logical operators: the left operand alone decides whether the right one
@@ -3241,6 +3245,7 @@ mod tests {
             "    { let _ = 1; }\n",
             "    #[allow(unused)] { let _z = 1; }\n",
             "    #[allow(unused)] let _w = { 1 };\n",
+            "    let _v = match y {};\n",
             "    let h = || -> u8 { 2 };\n",
             "    g(y) + h()\n",
             "}\n",
