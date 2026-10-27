@@ -1448,6 +1448,13 @@ mod tests {
             entry("manifest.json", b"{}"),
         ];
         let (framed, _) = write_framed_with_magic(&entries, Vec::new(), "").unwrap();
+        // No entry frames to nothing.
+        assert!(
+            write_framed_with_magic(&[], Vec::new(), "")
+                .unwrap()
+                .0
+                .is_empty()
+        );
         for left in 0.. {
             let mut stream = Failing {
                 input: b"",

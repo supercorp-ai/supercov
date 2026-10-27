@@ -929,15 +929,17 @@ pub fn prepare_rust_project_for(
         return Err(RustProjectError::NoSourceFiles);
     }
 
-    let mut sources = BTreeMap::new();
-    for path in files {
-        let relative = confined_relative(&workspace, &path)?;
-        let source = fs::read_to_string(&path).map_err(|error| RustProjectError::Io {
-            path: path.clone(),
-            reason: error.to_string(),
-        })?;
-        sources.insert(relative, source);
-    }
+    let mut sources = files
+        .into_iter()
+        .map(|path| {
+            let relative = confined_relative(&workspace, &path)?;
+            let source = fs::read_to_string(&path).map_err(|error| RustProjectError::Io {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
+            Ok((relative, source))
+        })
+        .collect::<Result<BTreeMap<_, _>, RustProjectError>>()?;
     preparation.discovery_ms = elapsed(started);
     let started = std::time::Instant::now();
     let runtime_module = runtime_module_name(&sources);
