@@ -649,11 +649,10 @@ fn stable_id(file: &str, kind: &str, start: usize, end: usize, suffix: &str) -> 
         hash.update([0]);
     }
     let digest = hash.finalize();
-    let mut encoded = String::with_capacity(24);
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
+    let encoded: String = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("rb:{kind}:{encoded}")
 }
 
@@ -1074,7 +1073,9 @@ impl<'a> Collector<'a> {
     /// (its own line, or a probe when it shares one) witnesses that the body
     /// ran. `None` for an empty body.
     fn first_statement_id(&self, statements: &Option<StatementsNode<'_>>) -> Option<String> {
-        let first = statements.as_ref()?.body().iter().next()?;
+        let first = statements
+            .as_ref()
+            .and_then(|statements| statements.body().iter().next())?;
         let location = first.location();
         Some(stable_id(
             self.file,
@@ -1274,13 +1275,16 @@ impl<'a> Collector<'a> {
         // A lone condition's value is the outcome; the runtime reads it from
         // the outcome probe, so it needs no wrapper of its own.
         if leaves.len() > 1 {
-            for (index, (leaf_start, leaf_end, _)) in leaves.iter().enumerate() {
-                self.wrap(
-                    *leaf_start,
-                    *leaf_end,
-                    format!("{RUBY_PROBE_RECEIVER}.c({key}, {index}, ("),
-                );
-            }
+            leaves
+                .iter()
+                .enumerate()
+                .for_each(|(index, (leaf_start, leaf_end, _))| {
+                    self.wrap(
+                        *leaf_start,
+                        *leaf_end,
+                        format!("{RUBY_PROBE_RECEIVER}.c({key}, {index}, ("),
+                    );
+                });
         }
         self.depth -= 2;
         Some(key)
@@ -1409,7 +1413,9 @@ impl<'a> Collector<'a> {
             let node = current?;
             // What follows an `if` is an `elsif` or an `else`.
             let Some(elsif) = node.as_if_node() else {
-                let else_node = node.as_else_node()?;
+                let else_node = node
+                    .as_else_node()
+                    .expect("what follows an if is an elsif or an else");
                 ids.push(self.first_statement_id(&else_node.statements())?);
                 return Some(ids);
             };
@@ -3626,6 +3632,9 @@ mod tests {
             "def e5(x)\n  a = case x\n      when 1\n      else return 1\n      end\n  b = unless x then else return 2 end\n  c = (begin; rescue; return 3; end)\n  d = case x\n      in Integer\n      else return 4\n      end\n  [a, b, c, d]\nend\n",
             "def e6(x)\n  y = if x then else return 1 end\n  z = if x then return 2 elsif x.nil? then else 3 end\n  [y, z]\nend\n",
             "def e7(xs)\n  xs&.map { |x| x ? 1 : 2 }\n  xs&.each do |x|\n    next unless x\n  end\nend\n",
+            // Predicates Ruby folds, and parentheses that hold nothing, two
+            // statements or parentheses.
+            "def f1(x, y)\n  return 1 if 1 and 2\n  return 2 if false or nil\n  return 3 if ()\n  return 4 if (x; y)\n  return 5 if ((x))\n  6\nend\n",
         ];
         for source in shapes {
             let mut next = 0;
@@ -3649,6 +3658,42 @@ mod tests {
             build_ruby_obligations("lib/l.rb", b"def broken(\n", &mut next),
             Err(RubyInstrumenterError::Parse(_))
         ));
+    }
+
+    /// Every probe target a file's shapes make names its ids, so a dropped
+    /// probe's implications are found by any of them; a plan reads back as
+    /// it was written; an empty plan moves to the Ractor-safe receiver too.
+    #[test]
+    fn each_probe_target_names_its_ids_and_a_plan_round_trips() {
+        let source = "def a(xs, x, y)\n  for v in xs\n    v\n  end\n  z = x || y\n  w ||= x\n  x&.call\n  begin\n    x.call\n  rescue ArgumentError\n    1\n  rescue StandardError\n    2\n  end\n  while x && y\n    break\n  end\n  if x then end\n  [z, w]\nend\n";
+        let mut next = 0;
+        let obligations = build_ruby_obligations("lib/a.rb", source.as_bytes(), &mut next).unwrap();
+        let mut kinds = std::collections::HashSet::new();
+        for target in obligations.probes.values() {
+            let ids = target_ids(target);
+            assert!(
+                !ids.is_empty() || matches!(target, ProbeTarget::Hits { .. }),
+                "{target:?}"
+            );
+            kinds.insert(std::mem::discriminant(target));
+        }
+        assert!(kinds.len() >= 5, "{kinds:?}");
+        assert!(target_ids(&ProbeTarget::Hits { ids: Vec::new() }).is_empty());
+        let plan = serde_json::to_value(&obligations.plan).unwrap();
+        let read: RubyFilePlan = serde_json::from_value(plan.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&read).unwrap(), plan);
+        let mut empty = RubyProbePlan {
+            version: 1,
+            root: String::new(),
+            receiver: RUBY_PROBE_RECEIVER.into(),
+            files: BTreeMap::new(),
+            probes: BTreeMap::new(),
+            probe_obligations: Vec::new(),
+            ractors: false,
+        };
+        empty.use_ractor_safe_receiver();
+        assert!(empty.ractors);
+        assert_eq!(empty.receiver, RUBY_RACTOR_SAFE_RECEIVER);
     }
 
     /// Every line keeps its number once probed.
