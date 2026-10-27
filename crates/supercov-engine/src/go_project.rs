@@ -886,8 +886,10 @@ mod tests {
         fs::create_dir_all(root.join("sub")).unwrap();
         fs::write(root.join("sub/go.mod"), "module example.com/sub\n").unwrap();
         fs::write(root.join("sub/sub.go"), "package sub\n\nfunc B() {}\n").unwrap();
-        // A plain subdirectory of this module is still measured.
+        // A plain subdirectory of this module is still measured, and an
+        // empty one holds nothing.
         fs::create_dir_all(root.join("internal")).unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
         fs::write(
             root.join("internal/helper.go"),
             "package internal\n\nfunc C() {}\n",
@@ -985,6 +987,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["only"]
         );
+
+        // An empty go.work names none.
+        fs::write(root.join("go.work"), "").unwrap();
+        assert!(workspace_modules(&root).is_empty());
 
         // And a repository with no workspace has none, which is how a single
         // module at the root is told apart from a workspace member.

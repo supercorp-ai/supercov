@@ -293,7 +293,8 @@ fn instrument_sources(
         members.into_iter().collect::<Vec<_>>()
     };
     let mut runtimes: Vec<(String, String)> = Vec::new();
-    for directory in &directories {
+    // The root at least.
+    directories.iter().try_for_each(|directory| -> Result<(), String> {
         let at = workspace.join(directory);
         let module = module_path(&at).ok_or_else(|| {
             format!(
@@ -310,7 +311,8 @@ fn instrument_sources(
             RUNTIME_VALUES_SOURCE,
         )?;
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
-    }
+        Ok(())
+    })?;
     // Longest first, so a nested module wins over the root it sits under.
     runtimes.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
     let mut sources = InstrumentedSources {
@@ -444,21 +446,28 @@ fn instrument_workspace(
         // can hold both `foo` and `foo_test` files; the internal one wins,
         // because that is where the instrumented sources are.
         let mut harness_package: Option<String> = None;
-        for relative in tests {
-            let path = workspace.join(relative);
-            let source = read(&path)?;
-            let Some(name) = package_name(&source) else {
-                continue;
-            };
-            // The package a harness joins is read from the text, so it is
-            // known whether or not the file parses -- and a package whose only
-            // test file is unreadable still needs one.
-            let internal = source_packages.get(&directory) == Some(&name);
-            if internal || harness_package.is_none() {
-                harness_package = Some(name);
-            }
-            let file =
-                match instrument_test_file(&source, RUNTIME_ALIAS, &evidence_literal, serialised) {
+        // Grouped from the tests, so a directory has one at least.
+        tests
+            .into_iter()
+            .try_for_each(|relative| -> Result<(), String> {
+                let path = workspace.join(relative);
+                let source = read(&path)?;
+                let Some(name) = package_name(&source) else {
+                    return Ok(());
+                };
+                // The package a harness joins is read from the text, so it is
+                // known whether or not the file parses -- and a package whose only
+                // test file is unreadable still needs one.
+                let internal = source_packages.get(&directory) == Some(&name);
+                if internal || harness_package.is_none() {
+                    harness_package = Some(name);
+                }
+                let file = match instrument_test_file(
+                    &source,
+                    RUNTIME_ALIAS,
+                    &evidence_literal,
+                    serialised,
+                ) {
                     Ok(file) => file,
                     Err(error) => {
                         // Taking the run down with it is the reflex a source file
@@ -478,24 +487,26 @@ fn instrument_workspace(
                         // for rather than parsed for, which is the one question
                         // that cannot go unanswered.
                         declares_test_main |= declares_test_main_textually(&source);
-                        continue;
+                        return Ok(());
                     }
                 };
-            declares_test_main |= file.declares_test_main;
-            for test in &file.tests {
-                declared_in.insert(test.clone(), relative.clone());
-            }
-            unattributed.extend(file.unattributed.iter().cloned());
-            // Written also when nothing in it changed, for its name.
-            write(
-                &path,
-                &named_for_the_project(
-                    project_root,
-                    relative,
-                    &rewrite(&source, &file.edits).replace(RUNTIME_IMPORT, import_for(relative)),
-                ),
-            )?;
-        }
+                declares_test_main |= file.declares_test_main;
+                for test in &file.tests {
+                    declared_in.insert(test.clone(), relative.clone());
+                }
+                unattributed.extend(file.unattributed.iter().cloned());
+                // Written also when nothing in it changed, for its name.
+                write(
+                    &path,
+                    &named_for_the_project(
+                        project_root,
+                        relative,
+                        &rewrite(&source, &file.edits)
+                            .replace(RUNTIME_IMPORT, import_for(relative)),
+                    ),
+                )?;
+                Ok(())
+            })?;
         let Some(package) = harness_package else {
             continue;
         };
