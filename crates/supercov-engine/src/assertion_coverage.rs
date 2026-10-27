@@ -2725,6 +2725,7 @@ fn normalize(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
     fn questions_of(
         file: &str,
         source: &str,
@@ -2760,6 +2761,12 @@ mod tests {
 
     /// Nothing to assess plans nothing, and a test asked about no statement
     /// is asked nothing: no questions, no code.
+    #[test]
+    fn a_path_is_named_by_its_parts_with_dots_resolved() {
+        assert_eq!(normalize(Path::new("")), "");
+        assert_eq!(normalize(Path::new("./src/../lib/a.js")), "lib/a.js");
+    }
+
     #[test]
     fn nothing_to_assess_is_asked_nothing() {
         let empty = AssessmentInput {
@@ -3110,13 +3117,14 @@ mod tests {
         );
         // destr: `return undefined as T` was asked as "returns undefined", which no
         // test can catch, and read as the one statement not asserted.
-        let typed = "function f<T>(a: number): T {\n  if (a === 1) return undefined as T\n  if (a === 2) return (undefined as unknown) as T\n  if (a === 3) return <T>undefined\n  return undefined!\n}\n";
+        let typed = "function f<T>(a: number): T {\n  if (a === 1) return undefined as T\n  if (a === 2) return (undefined as unknown) as T\n  if (a === 3) return <T>undefined\n  if (a === 4) return undefined satisfies unknown\n  return undefined!\n}\n";
         let starts = statement_starts("x.ts", typed);
         for (line, text) in [
             (2, "return undefined as T"),
             (3, "return (undefined as unknown) as T"),
             (4, "return <T>undefined"),
-            (5, "return undefined!"),
+            (5, "return undefined satisfies unknown"),
+            (6, "return undefined!"),
         ] {
             assert_eq!(
                 change_at(&starts, line, text, js),
