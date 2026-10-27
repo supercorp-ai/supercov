@@ -3337,6 +3337,11 @@ fn the_html_report_says_what_it_could_not_embed() {
         .supercov(&["report", "--no-open", "--output", "whole.html"])
         .succeeds();
     let data = report_data(&whole.read("whole.html"));
+    // And no gap to export, in every line format.
+    let exported = whole
+        .supercov(&["runs", "latest", "gaps", "--format", "jsonl"])
+        .succeeds();
+    assert!(!exported.contains("\"file\""), "{exported}");
     assert_eq!(
         data["runs"][0]["fileDetails"],
         serde_json::json!({}),
