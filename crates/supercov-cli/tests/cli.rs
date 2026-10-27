@@ -13309,6 +13309,10 @@ fn go_project(project: &Project) {
             "w_test.go",
             "package w\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
         );
+    // What the toolchain ignores, walked on its own: a test's data, and an
+    // empty directory in it.
+    project.write("testdata/sample.go", "package sample\n");
+    std::fs::create_dir_all(project.root.join("testdata/empty")).unwrap();
 }
 
 #[test]
