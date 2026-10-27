@@ -605,11 +605,12 @@ pub fn population_from(
         credit_module_level(&mut statements, sources, language);
     }
     let mut ran = vec![BTreeMap::<String, BTreeSet<usize>>::new(); tests.len()];
-    for s in &statements {
-        for &t in &s.tests {
+    statements
+        .iter()
+        .flat_map(|s| s.tests.iter().map(move |&t| (t, s)))
+        .for_each(|(t, s)| {
             ran[t].entry(s.file.clone()).or_default().insert(s.line);
-        }
-    }
+        });
     let source_files = statements.iter().map(|s| s.file.clone()).collect();
     let test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
     let unnumbered_test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
@@ -1423,11 +1424,8 @@ impl Population {
             let (first, rest): (Vec<usize>, Vec<usize>) = quoting
                 .iter()
                 .partition(|&&t| files.insert(self.tests[t].file.clone()));
-            for t in first.into_iter().chain(rest) {
-                if picked.len() < k {
-                    picked.push(t);
-                }
-            }
+            let room = k.saturating_sub(picked.len());
+            picked.extend(first.into_iter().chain(rest).take(room));
         }
         let mut depth = 0;
         while picked.len() < k && by_file.iter().any(|(_, g)| g.len() > depth) {
