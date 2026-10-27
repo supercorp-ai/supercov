@@ -480,14 +480,15 @@ fn model_targets(
         .map(BTreeSet::into_iter)
         .map(Iterator::collect::<Vec<_>>)?;
     let mut names = HashMap::new();
-    for target in &targets {
-        if let Some(first) = names.insert(&target.name, &target.cargo_argument) {
-            return Err(RustCargoConfigurationError::Invalid(format!(
+    targets.iter().try_for_each(|target| {
+        match names.insert(&target.name, &target.cargo_argument) {
+            Some(first) => Err(RustCargoConfigurationError::Invalid(format!(
                 "Cargo targets {first} and {} have the same configuration identity {:?}",
                 target.cargo_argument, target.name
-            )));
+            ))),
+            None => Ok(()),
         }
-    }
+    })?;
     Ok(targets)
 }
 
@@ -975,24 +976,27 @@ fn model_rustflags(
         .collect::<Vec<_>>();
     if !cfg_flags.is_empty() {
         let cfg = target_cfg(configuration_root, execution_root, compiler, target)?;
-        for (key, expression, value) in cfg_flags {
-            let expression = CfgExpr::from_str(expression).map_err(|error| {
-                RustCargoConfigurationError::Invalid(format!(
-                    "invalid Cargo target cfg key {key:?}: {error}"
-                ))
+        cfg_flags
+            .into_iter()
+            .try_for_each(|(key, expression, value)| {
+                let expression = CfgExpr::from_str(expression).map_err(|error| {
+                    RustCargoConfigurationError::Invalid(format!(
+                        "invalid Cargo target cfg key {key:?}: {error}"
+                    ))
+                })?;
+                if expression.matches(&cfg) {
+                    flags.extend(
+                        flag_list(
+                            Some(value),
+                            &format!("target.{key}.rustflags"),
+                            None,
+                            inputs,
+                        )?
+                        .unwrap_or_default(),
+                    );
+                }
+                Ok::<(), RustCargoConfigurationError>(())
             })?;
-            if expression.matches(&cfg) {
-                flags.extend(
-                    flag_list(
-                        Some(value),
-                        &format!("target.{key}.rustflags"),
-                        None,
-                        inputs,
-                    )?
-                    .unwrap_or_default(),
-                );
-            }
-        }
     }
     if !flags.is_empty() {
         return Ok(Some(flags));
@@ -2007,6 +2011,41 @@ mod tests {
             error("half-rustc"),
             "invalid Cargo configuration: Cargo's configured compiler command failed while resolving cfg values for target x86_64-unknown-linux-gnu with status 3: no cfg here"
         );
+        let host = "if [ \"$1\" = -vV ]; then echo 'host: x86_64-unknown-linux-gnu'; exit 0; fi\n";
+        for (rustc, script, said) in [
+            (
+                "hostless-rustc",
+                "echo 'release: 1.95.0'\n".to_owned(),
+                "did not report a host in rustc -vV output",
+            ),
+            (
+                "binary-rustc",
+                "printf '\\377'\n".to_owned(),
+                "produced non-UTF-8 verbose version output",
+            ),
+            (
+                "killed-rustc",
+                "kill -9 $$\n".to_owned(),
+                "while resolving its host with status signal",
+            ),
+            (
+                "binary-cfg-rustc",
+                format!("{host}printf '\\377'\n"),
+                "produced non-UTF-8 cfg output for target x86_64-unknown-linux-gnu",
+            ),
+            (
+                "bad-cfg-rustc",
+                format!("{host}echo '1x='\n"),
+                "rustc emitted an invalid cfg value",
+            ),
+            ("absent-rustc", String::new(), "absent-rustc"),
+        ] {
+            if !script.is_empty() {
+                write_script(&root.join(rustc), &format!("#!/bin/sh\n{script}"));
+            }
+            let said_error = error(rustc);
+            assert!(said_error.contains(said), "{rustc}: {said_error}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2023,9 +2062,38 @@ mod tests {
         .unwrap();
         let mut inputs = model_inputs();
         inputs.host_override = None;
-        let plan = resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs).unwrap();
+        let plan =
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs.clone()).unwrap();
         assert_eq!(plan.targets.len(), 1);
         assert_eq!(plan.targets[0].underlying_runner, None);
+        // An empty target table configures nothing.
+        fs::write(root.join(".cargo/config.toml"), "[target]\n").unwrap();
+        let plan =
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs.clone()).unwrap();
+        assert_eq!(plan.targets[0].underlying_runner, None);
+        // A custom target's cfg values are asked for by its spec, from where
+        // Cargo runs the compiler.
+        #[cfg(unix)]
+        {
+            fs::write(root.join("board.json"), "{}").unwrap();
+            write_script(
+                &root.join("spec-rustc"),
+                "#!/bin/sh\nif [ \"$1\" = -vV ]; then echo 'host: x86_64-unknown-linux-gnu'; exit 0; fi\n[ -f \"$4\" ] && echo 'target_os=\"none\"'\n",
+            );
+            fs::write(
+                root.join(".cargo/config.toml"),
+                "[build]\nrustc='./spec-rustc'\n[target.'cfg(target_os = \"none\")']\nrunner='board-runner'\n",
+            )
+            .unwrap();
+            let plan = resolve_with_inputs(
+                &root,
+                &root,
+                &invocation(&["test", "--target", "board.json"]),
+                inputs,
+            )
+            .unwrap();
+            assert!(plan.targets[0].underlying_runner.is_some(), "{plan:?}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
