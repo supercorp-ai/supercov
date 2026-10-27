@@ -2417,6 +2417,21 @@ mod tests {
             resolve_program_with(OsStr::new("tool"), &root, path.clone(), None),
             root.join("tool.CMD").into_os_string()
         );
+        // No PATH searches nowhere, and a PATHEXT of no extension tries
+        // only the name itself.
+        assert_eq!(
+            resolve_program_with(OsStr::new("tool"), &root, None, None),
+            OsString::from("tool")
+        );
+        assert_eq!(
+            resolve_program_with(
+                OsStr::new("named.exe"),
+                &root,
+                path.clone(),
+                Some(";;".into())
+            ),
+            root.join("named.exe").into_os_string()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
