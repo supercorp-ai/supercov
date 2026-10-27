@@ -12951,6 +12951,45 @@ fn a_rust_run_that_cannot_put_its_wrangler_in_place_says_so() {
     }
 }
 
+/// A browser suite beside a Rust Worker: the run instruments the Worker in
+/// its copy and points its configuration at Supercov's entry before the
+/// suite starts. Each step of that failing -- the evidence and inspector
+/// directories made, the inspector hook, registry and entry written, the
+/// configuration read and rewritten -- ends the run and says what failed.
+#[test]
+fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
+    for (fault, said) in [
+        ("fs.create_dir_all@16", "injected fault at fs"),
+        ("fs.write@6", "rust-worker-0"),
+        ("fs.create_dir_all@17", "injected fault at fs"),
+        ("fs.write@7", "injected fault at fs"),
+        ("fs.write@8", "injected fault at fs"),
+        ("fs.read_to_string@21", "wrangler.toml"),
+        ("fs.write@9", "wrangler.toml"),
+    ] {
+        let project = Project::cart("worker-server-steps");
+        project.write("playwright.config.js", "export default {};\n");
+        project.write(
+            "worker/Cargo.toml",
+            "[package]\nname = \"edge\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        project.write("worker/src/lib.rs", "pub fn edge() {}\n");
+        project.write(
+            "worker/wrangler.toml",
+            "name = \"edge\"\nmain = \"build/worker/shim.mjs\"\ncompatibility_date = \"2026-10-01\"\n\n[build]\ncommand = \"worker-build --release\"\n",
+        );
+        project.commit("worker");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(
+            stderr.contains(said) && !stderr.contains("panicked at"),
+            "{fault}: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn a_go_run_whose_own_step_fails_says_so() {
     let Some(go) = go() else {
