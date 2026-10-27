@@ -13062,6 +13062,34 @@ fn a_run_whose_output_stops_being_read_goes_on_without_a_panic() {
     }
 }
 
+/// A file a Rust test writes in its crate comes back to the project, and
+/// the run says so.
+#[test]
+fn a_file_a_rust_test_writes_comes_back_to_the_project() {
+    let project = Project::empty("rust-writes");
+    small_crate(&project);
+    project.write(
+        "tests/writes.rs",
+        "#[test]\nfn writes() {\n    std::fs::write(\"written.txt\", \"x\").unwrap();\n}\n",
+    );
+    project.write(".gitignore", "target/\nwritten.txt\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let ran = project.supercov(&["--", "cargo", "test", "-q"]);
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    assert!(
+        ran.stderr().contains(
+            "synced 1 file(s) the command created or changed back to the project: written.txt"
+        ),
+        "{}",
+        ran.stderr()
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.root.join("written.txt")).unwrap(),
+        "x"
+    );
+}
+
 /// A nextest run refuses an option it cannot tell the selected tests from,
 /// and a Cargo configuration it cannot read, before running anything.
 #[test]
