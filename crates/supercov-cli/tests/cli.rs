@@ -13697,6 +13697,7 @@ fn each_query_says_so_wherever_a_read_of_its_index_fails() {
         &["runs", "latest", "decision", "src/cart.js:6", "--json"],
         &["runs", "latest", "test", "total", "--json"],
         &["runs", "latest", "minimize", "--json"],
+        &["runs", "latest", "gaps", "--format", "jsonl"],
         &["diff", &older, "latest", "--json"],
         &["report", "--no-open", "--output", "r.html"],
     ];
@@ -13753,6 +13754,7 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
         ],
         &["tests", "affected", "--kind", "unit"],
         &["runs", "latest", "tests", "affected", "--json"],
+        &["runs", "latest", "gaps", "--format", "jsonl"],
         &["runs", "latest", "gaps", "--kind", "unit", "--json"],
         &["diff", &older, "latest", "--json"],
         &["diff", &older, "latest"],
