@@ -1360,22 +1360,23 @@ fn parse(source: &str) -> ra_ap_syntax::Parse<SourceFile> {
 
 /// The declared return type of the function or closure a `return` leaves.
 fn return_type(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
-    for ancestor in node.ancestors().skip(1) {
-        if let Some(f) = ast::Fn::cast(ancestor.clone()) {
-            return Some(
-                f.ret_type()
+    node.ancestors()
+        .skip(1)
+        .find_map(|ancestor| {
+            if let Some(f) = ast::Fn::cast(ancestor.clone()) {
+                return Some(Some(
+                    f.ret_type()
+                        .and_then(|r| r.ty())
+                        .map_or("()".into(), |t| t.syntax().text().to_string()),
+                ));
+            }
+            ast::ClosureExpr::cast(ancestor).map(|c| {
+                c.ret_type()
                     .and_then(|r| r.ty())
-                    .map_or("()".into(), |t| t.syntax().text().to_string()),
-            );
-        }
-        if let Some(c) = ast::ClosureExpr::cast(ancestor) {
-            return c
-                .ret_type()
-                .and_then(|r| r.ty())
-                .map(|t| t.syntax().text().to_string());
-        }
-    }
-    None
+                    .map(|t| t.syntax().text().to_string())
+            })
+        })
+        .flatten()
 }
 
 /// The type a block's value has when it is what the function returns: the
@@ -2590,6 +2591,10 @@ fn h(e: E) -> Result<Made, E> {
         assert_eq!(callable_output("Box<dynFn()->u8>"), Some("u8"));
         assert_eq!(float_literal_value("2f32"), Some(2.0));
         assert!(boolean("!ready"));
+        // Nothing written has no operator and calls nothing.
+        assert!(!boolean(""));
+        assert!(!integer_shaped(""));
+        assert_eq!(last_method(")"), None);
         let lines = [
             "/// Doc",
             "/// ```",
