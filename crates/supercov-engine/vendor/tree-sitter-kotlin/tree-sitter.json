@@ -1,0 +1,37 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "kotlin",
+      "camelcase": "Kotlin",
+      "scope": "source.kotlin",
+      "file-types": [
+        "kt",
+        "kts"
+      ],
+      "injection-regex": "^(kotlin|kt)$"
+    }
+  ],
+  "metadata": {
+    "version": "1.1.0",
+    "license": "MIT",
+    "description": "Kotlin grammar for tree-sitter",
+    "authors": [
+      {
+        "name": "Amaan Qureshi",
+        "email": "amaanq12@gmail.com"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-kotlin"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true
+  }
+}
