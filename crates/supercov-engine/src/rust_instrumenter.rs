@@ -5577,6 +5577,40 @@ pub fn documented(value: i32) -> i32 {
         }
     }
 
+    /// The same tree collected against a source of its length with two
+    /// bytes made one `é`, at every place: only the ranges with an edge
+    /// inside it fall within a character, and each such source is refused
+    /// whole, never half collected and never with a panic.
+    #[test]
+    fn a_tree_collected_against_a_source_with_a_character_anywhere_is_refused_whole() {
+        let source = concat!(
+            "pub fn f(a: bool, b: bool, v: &[u8]) -> Option<u8> {\n",
+            "    if a && (b || !a) { return None; }\n",
+            "    for x in v { if *x > 1 { break; } }\n",
+            "    while a { break; }\n",
+            "    let n = match v.len() { 0 => 1, n if n > 2 => 2, _ => 3 };\n",
+            "    let g = |y: u8| y.checked_add(1)?.checked_sub(1);\n",
+            "    let w = if let Some(z) = v.first() && *z > 0 { *z } else { 0 };\n",
+            "    assert!(a || b, \"a or b\");\n",
+            "    Some(g(n)? + w)\n",
+            "}\n",
+        );
+        let tree = SourceFile::parse(source, Edition::Edition2024).tree();
+        let mut refused = 0;
+        for at in 0..source.len() - 1 {
+            let mut shifted = source.to_owned();
+            shifted.replace_range(at..at + 2, "é");
+            match RustObligationCollector::new("src/lib.rs", &shifted).collect(&tree, &[], &[]) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error, RustInstrumenterError::InvalidRange, "at {at}");
+                    refused += 1;
+                }
+            }
+        }
+        assert!(refused > 10, "{refused}");
+    }
+
     /// A match of no arm -- on a type with no value -- has no arm to
     /// record.
     #[test]

@@ -1540,6 +1540,44 @@ mod tests {
         }
     }
 
+    /// The same tree read against a source of its length whose characters
+    /// are laid out otherwise -- two bytes made one `é`, at every place --
+    /// so that only the ranges with an edge inside it fall within a
+    /// character: each such source is refused whole, never half read, and
+    /// never panics.
+    #[test]
+    fn a_tree_read_against_a_source_with_a_character_anywhere_is_refused_whole() {
+        let source = concat!(
+            "def f(a, b, c):\n",
+            "    if a and (b or not c):\n",
+            "        return [x for x in a if x]\n",
+            "    for item in b:\n",
+            "        print(item)\n",
+            "    match a:\n",
+            "        case 1 if b:\n",
+            "            pass\n",
+            "        case _:\n",
+            "            pass\n",
+            "    x = a or b or c\n",
+            "    y = 1 if a else 2\n",
+            "    return x and (y or not b)\n",
+        );
+        let parsed = parse_module(source).unwrap();
+        let mut refused = 0;
+        for at in 0..source.len() - 1 {
+            let mut shifted = source.to_owned();
+            shifted.replace_range(at..at + 2, "é");
+            match obligations_of("a.py", &shifted, parsed.suite()) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error, PythonInstrumenterError::InvalidRange, "at {at}");
+                    refused += 1;
+                }
+            }
+        }
+        assert!(refused > 10, "{refused}");
+    }
+
     #[test]
     fn a_source_longer_than_ruff_can_address_is_too_large() {
         assert_eq!(within_text_size(u32::MAX as usize), Ok(()));
