@@ -2244,6 +2244,17 @@ pub fn prune_cached_workspace_sources(
 
 #[cfg(test)]
 mod tests {
+    /// A file at the project's root is in no directory that could be built
+    /// output, and neither is no file at all.
+    #[test]
+    fn a_file_at_the_root_is_in_no_built_directory() {
+        let mut built = BuiltDirectories::new(Path::new("/nowhere"));
+        built.add(Path::new("file.txt"));
+        built.add(Path::new(""));
+        assert!(built.directories.is_empty() && built.judged.is_empty());
+        assert!(!built.holds(Path::new("file.txt")));
+    }
+
     #[test]
     fn file_urls_match_what_node_derives_for_every_path_shape() {
         use super::file_url_from_slash_path;
