@@ -259,14 +259,18 @@ fn require_exact_identities(
         })
         .collect::<BTreeMap<_, _>>();
     for start in causes.keys() {
+        // Followed cause by cause until one has no cause, or one repeats.
         let mut visited = BTreeSet::new();
         let mut current = *start;
-        while let Some(next) = causes.get(current) {
+        loop {
             if !visited.insert(current) {
                 return Err(FrontendProtocolError::CyclicPhaseReference(
                     (*start).to_owned(),
                 ));
             }
+            let Some(next) = causes.get(current) else {
+                break;
+            };
             current = next;
         }
     }
@@ -777,6 +781,9 @@ mod tests {
             E::DuplicatePhase("p".into()),
             E::UnknownPhaseReference("p".into()),
             E::CyclicPhaseReference("p".into()),
+            E::Analysis(crate::coverage_report::ReportError::InvalidArchive(
+                "x".into(),
+            )),
         ]
         .map(|error| error.to_string());
         assert_eq!(
@@ -796,6 +803,7 @@ mod tests {
                 "duplicate frontend phase ID: p",
                 "unknown frontend phase reference: p",
                 "cyclic frontend phase causality at: p",
+                "InvalidArchive(\"x\")",
             ]
         );
     }
