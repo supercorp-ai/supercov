@@ -4034,6 +4034,28 @@ mod tests {
         assert!(!HELP.contains("Assertion map schema and syntax: supercov assertions"));
     }
 
+    /// The package script a command runs, however npm, pnpm or Yarn is
+    /// asked, and none for anything else.
+    #[test]
+    fn the_package_script_a_command_runs_is_read_from_it() {
+        let script = |command: &[&str]| {
+            let command = command
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>();
+            selected_package_script(&command).map(str::to_owned)
+        };
+        assert_eq!(script(&[]), None);
+        assert_eq!(script(&["node", "--test"]), None);
+        assert_eq!(script(&["npm", "-s", "t"]).as_deref(), Some("test"));
+        assert_eq!(
+            script(&["npm", "run", "--silent", "test:unit"]).as_deref(),
+            Some("test:unit")
+        );
+        assert_eq!(script(&["pnpm", "test:e2e"]).as_deref(), Some("test:e2e"));
+        assert_eq!(script(&["npm", "install"]), None);
+    }
+
     #[test]
     fn suite_slice_hint_points_to_the_existing_full_package_command() {
         let root = std::env::temp_dir().join(format!(

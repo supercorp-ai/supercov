@@ -925,6 +925,19 @@ fn shards_merge_into_one_run_and_mismatched_ones_do_not() {
         0,
         "a merge across source changes is refused"
     );
+    // The merged run outlives the runs it was made of, and is still listed
+    // and read by its own command.
+    project
+        .supercov(&["runs", "clean", "--keep", "2"])
+        .succeeds();
+    let listed = project.supercov(&["runs", "--json"]).json();
+    let commands = listed["data"]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["command"][1].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert!(commands.contains(&"merge".to_owned()), "{listed}");
 }
 
 #[test]
