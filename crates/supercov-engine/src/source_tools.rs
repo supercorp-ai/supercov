@@ -576,7 +576,7 @@ fn run_source_tool_in(
     };
     let dependencies = variable("SUPERCOV_SOURCE_PROJECT_ROOT")
         .map(|root| PathBuf::from(root).join("node_modules"))
-        .unwrap_or_else(|| workspace.join("node_modules"));
+        .unwrap_or(workspace.join("node_modules"));
     let state = match refresh(&workspace, &view, &dependencies) {
         Ok(state) => state,
         Err(error) => {

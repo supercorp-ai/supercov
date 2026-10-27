@@ -60,7 +60,7 @@ fn tool_version(program: &str, arguments: &[&str]) -> String {
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unavailable".into())
+        .unwrap_or("unavailable".into())
 }
 
 pub fn rust_build_cache_key(

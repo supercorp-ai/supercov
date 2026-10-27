@@ -2333,7 +2333,7 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
             value["assess"]
                 .as_str()
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!(
+                .unwrap_or(format!(
                     "{} runs latest assertions assess",
                     crate::launcher_command()
                 ))

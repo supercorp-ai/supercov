@@ -1223,8 +1223,7 @@ impl<'a> RustObligationCollector<'a> {
         for call in root.descendants().filter_map(ast::MacroCall::cast) {
             macro_names.insert(
                 call.path()
-                    .map(|path| path.syntax().text().to_string())
-                    .unwrap_or_else(|| "?".into()),
+                    .map_or("?".into(), |path| path.syntax().text().to_string()),
             );
             first_macro.get_or_insert_with(|| call.syntax().text_range());
             macro_sites += 1;

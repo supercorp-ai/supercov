@@ -570,7 +570,7 @@ fn read_evidence_file(
                         at,
                         line_number,
                         name.to_owned(),
-                        process_worker.clone().unwrap_or_else(|| "main".into()),
+                        process_worker.as_deref().unwrap_or("main").to_owned(),
                     ));
                 } else {
                     if identity.phase == "call" {

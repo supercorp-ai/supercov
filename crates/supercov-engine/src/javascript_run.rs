@@ -516,14 +516,11 @@ pub fn run_direct_javascript(
     let root = crate::workspace::canonicalize_simplified(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
     let nonce = now_nonce();
-    let run_id = request
-        .run_id
-        .clone()
-        .unwrap_or_else(|| format!("rust-{nonce}"));
+    let run_id = request.run_id.clone().unwrap_or(format!("rust-{nonce}"));
     let started_at = request
         .started_at
         .clone()
-        .unwrap_or_else(|| format!("unix-ms-{nonce}"));
+        .unwrap_or(format!("unix-ms-{nonce}"));
     let lock =
         ProjectLock::acquire(&root, &run_id, &started_at).map_err(|error| error.to_string())?;
     let mut cleanup = RunCleanup {

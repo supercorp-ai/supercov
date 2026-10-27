@@ -591,8 +591,8 @@ fn target_ids(target: &ProbeTarget) -> Vec<String> {
 fn branch_of(alternative: &str) -> String {
     alternative
         .rsplit_once(':')
-        .map(|(branch, _)| branch.to_owned())
-        .unwrap_or_else(|| alternative.to_owned())
+        .map_or(alternative, |(branch, _)| branch)
+        .to_owned()
 }
 
 /// The manifest obligation an id names: a point (`rb:statement:<hash>`,

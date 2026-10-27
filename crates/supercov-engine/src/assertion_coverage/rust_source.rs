@@ -219,8 +219,7 @@ fn value_change(
         // is replaced whole by another value of the function's type.
         ast::Expr::LoopExpr(_) => {
             if let Some(ty) = tail_of.and_then(tail_type).filter(|t| t != "()") {
-                let value =
-                    value_of(&ty, crate_view, 0).unwrap_or_else(|| "Default::default()".to_owned());
+                let value = value_of(&ty, crate_view, 0).unwrap_or("Default::default()".to_owned());
                 push(e.syntax(), value);
             }
         }

@@ -1017,7 +1017,7 @@ fn logical_parent(node: Node, source: &str) -> bool {
 /// `for` its body, a binary expression both sides.
 fn field<'t>(node: Node<'t>, name: &str) -> Node<'t> {
     node.child_by_field_name(name)
-        .unwrap_or_else(|| panic!("the Go grammar gives every {} a {name}", node.kind()))
+        .expect("the Go grammar gives an accepted tree's node every field it requires")
 }
 
 fn unparenthesized(node: Node) -> Node {
@@ -1025,7 +1025,7 @@ fn unparenthesized(node: Node) -> Node {
         // The one expression the parentheses hold, in an accepted tree.
         let inner = node
             .named_child(0)
-            .unwrap_or_else(|| panic!("the Go grammar puts an expression in parentheses"));
+            .expect("the Go grammar puts an expression in parentheses");
         return unparenthesized(inner);
     }
     node
