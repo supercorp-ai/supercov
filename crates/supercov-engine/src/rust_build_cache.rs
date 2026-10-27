@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{coverage_report::CoverageManifest, lifecycle::atomic_write, run_store::RunIntegrity};
 
-pub const RUST_BUILD_CACHE_SCHEMA_VERSION: u32 = 4;
+pub const RUST_BUILD_CACHE_SCHEMA_VERSION: u32 = 5;
 const CACHE_FILE: &str = ".supercov/rust-build-cache.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,11 +40,16 @@ pub struct RustBuildCacheMetadata {
 #[serde(rename_all = "camelCase")]
 struct RustBuildCacheIdentity<'a> {
     schema_version: u32,
-    execution_fingerprint: &'a str,
-    /// Supercov's own build. `execution` no longer carries it, and cached
-    /// output from a different instrumenter must never be reused.
+    source_fingerprint: &'a str,
+    dependencies_fingerprint: &'a str,
+    configuration_fingerprint: &'a str,
+    /// The run's execution configuration with what follows the command's
+    /// `--` left out: libtest's arguments choose the tests a build runs, and
+    /// a run of other tests reuses the same build.
+    build_configuration: String,
+    /// Supercov's own build: cached output from a different instrumenter
+    /// must never be reused.
     instrumenter_fingerprint: &'a str,
-    command: &'a [String],
     rustc: String,
     cargo: String,
     platform: &'static str,
@@ -63,15 +68,30 @@ fn tool_version(program: &str, arguments: &[&str]) -> String {
         .unwrap_or("unavailable".into())
 }
 
+/// `execution_configuration` is the run's: its command joined by NULs, then
+/// what else the run's integrity folds in after it.
 pub fn rust_build_cache_key(
     integrity: &RunIntegrity,
+    execution_configuration: &[u8],
     command: &[String],
 ) -> Result<String, serde_json::Error> {
+    let joined = command.join("\0");
+    let rest = execution_configuration
+        .strip_prefix(joined.as_bytes())
+        .expect("the execution configuration starts with the command");
+    let build_command = command
+        .split(|argument| argument == "--")
+        .next()
+        .expect("a split yields a part at least");
+    let mut build_configuration = build_command.join("\0").into_bytes();
+    build_configuration.extend_from_slice(rest);
     let identity = RustBuildCacheIdentity {
         schema_version: RUST_BUILD_CACHE_SCHEMA_VERSION,
-        execution_fingerprint: &integrity.fingerprint.execution,
+        source_fingerprint: &integrity.fingerprint.source,
+        dependencies_fingerprint: &integrity.fingerprint.dependencies,
+        configuration_fingerprint: &integrity.fingerprint.configuration,
+        build_configuration: format!("{:x}", Sha256::digest(&build_configuration)),
         instrumenter_fingerprint: &integrity.fingerprint.instrumenter,
-        command,
         rustc: tool_version("rustc", &["-vV"]),
         cargo: tool_version("cargo", &["-Vv"]),
         platform: std::env::consts::OS,
@@ -251,6 +271,39 @@ mod tests {
 
     use super::*;
     use crate::{coverage_analysis::PointKind, coverage_report::PointMeta};
+
+    /// A run of other tests reuses the build: what follows the command's
+    /// `--` is left out of the key, and nothing else is.
+    #[test]
+    fn a_build_is_keyed_on_all_but_the_tests_a_command_chooses() {
+        let mut integrity: RunIntegrity = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 2,
+            "instrumenterVersion": "supercov-rust-1",
+            "fingerprint": {
+                "algorithm": "sha256", "source": "a", "tests": "b", "dependencies": "c",
+                "configuration": "d", "instrumenter": "e", "execution": "f", "combined": "0",
+                "sourceFiles": 1, "testFiles": 1
+            }
+        }))
+        .unwrap();
+        let command = |words: &str| words.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let key = |integrity: &RunIntegrity, words: &str, links: &str| {
+            let command = command(words);
+            let mut configuration = command.join("\0").into_bytes();
+            configuration.extend_from_slice(links.as_bytes());
+            rust_build_cache_key(integrity, &configuration, &command).unwrap()
+        };
+        let base = key(&integrity, "cargo test -- --exact a", "\0link");
+        assert_eq!(base, key(&integrity, "cargo test -- --exact b c", "\0link"));
+        assert_eq!(key(&integrity, "cargo test", "\0link"), base);
+        assert_ne!(
+            key(&integrity, "cargo test --release -- --exact a", "\0link"),
+            base
+        );
+        assert_ne!(key(&integrity, "cargo test -- --exact a", "\0other"), base);
+        integrity.fingerprint.source = "changed".into();
+        assert_ne!(key(&integrity, "cargo test -- --exact a", "\0link"), base);
+    }
 
     /// A cached build's files are named relative to their root, digested in
     /// order, and its artifacts match only by path, order, size and digest;

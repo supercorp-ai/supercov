@@ -335,8 +335,12 @@ fn run_direct_rust_timed(
             &FrontendIntegrityInputs::embedded_rust(),
         )
         .map_err(|error| error.to_string())?;
-        let build_cache_key = rust_build_cache_key(&integrity, &request.command)
-            .map_err(|error| error.to_string())?;
+        let build_cache_key = rust_build_cache_key(
+            &integrity,
+            &integrity_inputs.execution_configuration,
+            &request.command,
+        )
+        .map_err(|error| error.to_string())?;
 
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
