@@ -537,6 +537,7 @@ docs_command_tests::guides_print_commands_the_way_the_reader_started_supercov	0.
 each_affected_test_says_how_it_meets_the_change_as_the_change_grows	0.8	0.8
 each_language_refuses_a_missing_source_root_and_an_unreadable_timeout_or_interval	20.0	40.0
 each_page_names_a_next_page_command_that_shows_it	0.8	0.8
+each_query_refuses_when_a_read_or_write_it_makes_fails	45.0	60.0
 each_query_says_so_when_its_index_or_its_reply_fails	9.2	4.6
 each_way_a_sandbox_sdk_takes_an_environment_reaches_the_guest	0.9	0.9
 engine_contract	1.1	1.0

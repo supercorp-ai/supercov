@@ -12863,6 +12863,248 @@ fn a_run_whose_own_step_fails_says_so() {
     }
 }
 
+/// Each query refuses, with exit code 2 and the reason, when a read it makes
+/// fails: each record of the run's index it reads, the run store's metadata,
+/// listing and evidence, and the file a query writes. Each case names the
+/// call: an index read by the place that makes it, a file operation by its
+/// name and turn.
+#[test]
+fn each_query_refuses_when_a_read_or_write_it_makes_fails() {
+    // Measured twice, the first run's id read in between: a project in the
+    // same state for every case, so a fault names the same call each time.
+    let measured = |label: &str| {
+        let project = Project::cart(label);
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        let first = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        (project, first)
+    };
+    let (project, first) = measured("query-steps");
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        // The run's index, each record a query reads.
+        (vec!["runs", "latest"], "coverage-index-read#1"),
+        (vec!["runs", "latest"], "coverage-index-read#2"),
+        (vec!["runs", "latest"], "coverage-index-read#3"),
+        (vec!["runs", "latest"], "coverage-index-read#4"),
+        (vec!["runs", "latest"], "coverage-index-read#5"),
+        (vec!["runs", "latest"], "coverage-index-read#6"),
+        (vec!["runs", "latest", "scope"], "coverage-index-read#2"),
+        (vec!["runs", "latest", "gaps"], "coverage-index-read#1"),
+        (vec!["runs", "latest", "gaps"], "coverage-index-read#2"),
+        (
+            vec!["runs", "latest", "test", "total"],
+            "coverage-index-read#1",
+        ),
+        (
+            vec!["runs", "latest", "test", "total"],
+            "coverage-index-read#2",
+        ),
+        (
+            vec!["runs", "latest", "tests", "without-evidence"],
+            "coverage-index-read#1",
+        ),
+        (
+            vec!["runs", "latest", "tests", "without-evidence"],
+            "coverage-index-read#2",
+        ),
+        (
+            vec!["runs", "latest", "tests", "without-evidence"],
+            "coverage-index-read#3",
+        ),
+        (
+            vec!["runs", "latest", "tests", "affected", "--title", "total"],
+            "coverage-index-read#1",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js"],
+            "coverage-index-read#1",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js"],
+            "coverage-index-read#2",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js"],
+            "coverage-index-read#3",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js"],
+            "coverage-index-read#4",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js"],
+            "coverage-index-read#5",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js"],
+            "coverage-index-read#6",
+        ),
+        (vec!["diff", &first, "latest"], "coverage-index-read#1"),
+        (vec!["diff", &first, "latest"], "coverage-index-read#2"),
+        (vec!["diff", &first, "latest"], "coverage-index-read#3"),
+        (vec!["diff", &first, "latest"], "coverage-index-read#4"),
+        (vec!["diff", &first, "latest"], "coverage-index-read#5"),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "g.jsonl",
+            ],
+            "coverage-index-read#3",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "g.jsonl",
+            ],
+            "coverage-index-read#4",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "g.jsonl",
+            ],
+            "coverage-index-read#5",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "g.jsonl",
+            ],
+            "coverage-index-read#6",
+        ),
+        // The run store: its listing, a run's metadata and its evidence.
+        (vec!["runs"], "fs.symlink_metadata@1"),
+        (vec!["runs"], "fs.read_dir@1"),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "fs.symlink_metadata@2",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "fs.symlink_metadata@3",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "fs.symlink_metadata@4",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "fs.open@1",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "fs.read_to_end_from@1",
+        ),
+        // What a query writes: a report, a tracefile, an export.
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "fs.create_dir_all@1",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "fs.open_with@1",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "fs.rename@1",
+        ),
+        (
+            vec![
+                "runs", "latest", "report", "--format", "lcov", "--output", "f.info", "--force",
+                "--title", "total",
+            ],
+            "fs.write@1",
+        ),
+        (
+            vec![
+                "runs", "latest", "report", "--format", "lcov", "--output", "f.info", "--force",
+                "--title", "total",
+            ],
+            "fs.rename@1",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "g.jsonl",
+            ],
+            "fs.write@1",
+        ),
+    ];
+    for (number, (command, fault)) in cases.into_iter().enumerate() {
+        // A file operation's turn depends on what earlier queries cached: a
+        // project of its own for each; an index read is counted by place.
+        let fresh;
+        let (project, first_id) = if fault.starts_with("fs.") {
+            fresh = measured(&format!("query-steps-{number}"));
+            (&fresh.0, fresh.1.as_str())
+        } else {
+            (&project, first.as_str())
+        };
+        let command = command
+            .iter()
+            .map(|part| if *part == first { first_id } else { part })
+            .collect::<Vec<_>>();
+        let ran = project.supercov_with(&command, &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 2, "{command:?} {fault}: {said}");
+        assert!(
+            said.contains("[supercov]") && !said.contains("panicked at"),
+            "{command:?} {fault}: {said}"
+        );
+    }
+    // A run whose index is gone builds it again from its evidence, hashed
+    // first, after the four files its integrity reads: that read failing
+    // refuses the query.
+    let (rebuilt, _) = measured("query-steps-rebuilt");
+    let run = rebuilt.latest();
+    std::fs::remove_file(
+        rebuilt
+            .root
+            .join(".supercov/runs")
+            .join(&run)
+            .join("query-index.v1.bin"),
+    )
+    .unwrap();
+    let ran = rebuilt.supercov_with(
+        &["runs", "latest"],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_from@5")],
+    );
+    assert_eq!(ran.code(), 2, "{}", ran.stderr());
+}
+
 /// A run that succeeds and then cannot release its copy: each language
 /// says so and fails, or, where it gives the lock up when it ends
 /// (JavaScript), still answers; none panics. A sweep failing every place in
