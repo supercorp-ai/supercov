@@ -898,6 +898,54 @@ mod tests {
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
+    /// A tool is run as it is, in the directory it was started in, where
+    /// there is no workspace to lay a view out for, the workspace or the
+    /// directory cannot be found, the directory is outside it, or the view
+    /// cannot be laid out; and one that cannot start says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_runs_as_it_is_where_no_view_can_be_laid_out() {
+        let (workspace, _, _) = workspace();
+        let exit = |root: Option<&Path>, directory: io::Result<PathBuf>| {
+            let root = root.map(|root| root.as_os_str().to_owned());
+            run_source_tool_in(
+                Path::new("/bin/sh"),
+                &["-c".into(), "exit 4".into()],
+                directory,
+                |name| {
+                    (name == "SUPERCOV_PROJECT_ROOT")
+                        .then(|| root.clone())
+                        .flatten()
+                },
+                Vec::new(),
+            )
+        };
+        assert_eq!(exit(None, Ok(workspace.clone())), 4);
+        assert_eq!(
+            exit(Some(Path::new("/no/such/workspace")), Ok(workspace.clone())),
+            4
+        );
+        assert_eq!(exit(Some(&workspace), Err(io::Error::other("gone"))), 4);
+        assert_eq!(exit(Some(&workspace), Ok(std::env::temp_dir())), 4);
+        // Where the view goes is a file.
+        let view = source_view_path(&workspace).unwrap();
+        fs::create_dir_all(view.parent().unwrap()).unwrap();
+        let _ = fs::remove_dir_all(&view);
+        fs::write(&view, "").unwrap();
+        assert_eq!(exit(Some(&workspace), Ok(workspace.clone())), 4);
+        assert_eq!(status(&mut Command::new("/no/such/tool")), 127);
+        // Paths a view cannot be told from.
+        use std::os::unix::ffi::OsStrExt;
+        for path in [
+            Path::new("/"),
+            Path::new("/w/../proj"),
+            Path::new(std::ffi::OsStr::from_bytes(b"/p/\xff/proj")),
+        ] {
+            assert_eq!(source_view_path(path), None, "{path:?}");
+        }
+        fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+    }
+
     #[test]
     fn a_tools_change_to_source_is_the_projects_when_the_command_ends() {
         let (workspace, _, dependencies) = workspace();
