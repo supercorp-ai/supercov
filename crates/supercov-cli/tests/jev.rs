@@ -686,6 +686,20 @@ fn tests_judged_not_to_catch_a_change_are_left_out_when_asked() {
         "",
         "no affected test is judged to catch it"
     );
+    // A test file changed with the code: the tests in it are affected with
+    // no changed code of their own, and only the code's change is asked.
+    project.edit(
+        "test/cart.test.js",
+        "import test",
+        "// The cart.\nimport test",
+    );
+    let changed = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--changed"],
+            &through(&base),
+        )
+        .succeeds();
+    assert!(changed.contains("2 changed statement(s)"), "{changed}");
 }
 
 const HANDLER: &str = r#"import { exec } from "node:child_process";

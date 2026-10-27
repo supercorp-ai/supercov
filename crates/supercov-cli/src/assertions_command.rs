@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -455,22 +456,25 @@ impl Pass<'_> {
         if cache.answers.is_empty() {
             return reused;
         }
-        for s in 0..self.population.statements.len() {
-            for t in self.orders[s].clone() {
+        // Each statement is run by a test, so each has an order to walk.
+        (0..self.population.statements.len()).for_each(|s| {
+            let _ = self.orders[s].clone().into_iter().try_for_each(|t| {
                 if self.answers[s].iter().any(|(x, _)| *x == t) {
-                    continue;
+                    return ControlFlow::Continue(());
                 }
                 let key = self.key(s, t);
                 let Some(&p) = cache.answers.get(&key) else {
-                    continue;
+                    return ControlFlow::Continue(());
                 };
                 self.answers[s].push((t, p));
                 reused += 1;
                 if p >= THRESHOLD {
-                    break;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
                 }
-            }
-        }
+            });
+        });
         reused
     }
     /// Before a statement is called not asserted, more of the tests that run
@@ -505,16 +509,17 @@ impl Pass<'_> {
             if !self.undecided(s) {
                 continue;
             }
-            for &t in &self.orders[s] {
+            self.orders[s].iter().for_each(|&t| {
                 if !self.answers[s].iter().any(|(x, _)| *x == t) && !self.refused.contains(&(s, t))
                 {
                     eligible.entry(t).or_default().push(s);
                 }
-            }
+            });
         }
         let mut taken = BTreeSet::new();
         let mut batch = Vec::new();
-        while batch.len() < requests {
+        // At least one request is asked for.
+        loop {
             let best = eligible
                 .iter()
                 .map(|(t, ss)| {
@@ -538,6 +543,9 @@ impl Pass<'_> {
                 .collect::<Vec<_>>();
             taken.extend(asked.iter().copied());
             batch.push((t, asked));
+            if batch.len() == requests {
+                break;
+            }
         }
         batch
     }
@@ -893,7 +901,7 @@ fn assess_changed(
     let mut keys = BTreeMap::<(usize, usize), String>::new();
     let mut reused = 0;
     for &s in &changed {
-        for t in population.order(s, IMPACT_TESTS) {
+        population.order(s, IMPACT_TESTS).into_iter().for_each(|t| {
             let key = population.pair_key(s, t, model);
             match cache.answers.get(&key).filter(|_| !options.refresh) {
                 Some(&p) => {
@@ -903,7 +911,7 @@ fn assess_changed(
                 None => wanted.entry(t).or_default().push(s),
             }
             keys.insert((s, t), key);
-        }
+        });
     }
     let plan = wanted
         .into_iter()
@@ -1079,11 +1087,11 @@ fn summary(
             let not_asked = (!pass.asserted(s) && pass.answers[s].len() < st.tests.len()).then(|| {
                 let asked = pass.answers[s].iter().map(|(t, _)| *t).collect::<BTreeSet<_>>();
                 let mut files = BTreeMap::<&str, (usize, usize)>::new();
-                for t in &st.tests {
+                st.tests.iter().for_each(|t| {
                     let entry = files.entry(population.tests[*t].file.as_str()).or_default();
                     entry.0 += 1;
                     entry.1 += usize::from(asked.contains(t));
-                }
+                });
                 let mut untouched = files
                     .iter()
                     .filter(|(_, (_, asked))| *asked == 0)
@@ -1278,14 +1286,17 @@ fn narrow_result(
                 Value::Null
             } else {
                 let mut files = BTreeMap::<&str, usize>::new();
-                for test in tests.iter().filter(|test| {
-                    !answers.iter().any(|a| {
-                        a["name"].as_str() == Some(test.name.as_str())
-                            && a["file"].as_str() == test.file.as_deref()
+                tests
+                    .iter()
+                    .filter(|test| {
+                        !answers.iter().any(|a| {
+                            a["name"].as_str() == Some(test.name.as_str())
+                                && a["file"].as_str() == test.file.as_deref()
+                        })
                     })
-                }) {
-                    *files.entry(test.file.as_deref().unwrap_or("")).or_default() += 1;
-                }
+                    .for_each(|test| {
+                        *files.entry(test.file.as_deref().unwrap_or("")).or_default() += 1;
+                    });
                 json!({
                     "tests": tests.len() - answers.len(),
                     "files": files.iter().map(|(file, tests)| json!({"file": file, "tests": tests})).collect::<Vec<_>>(),
@@ -2475,6 +2486,30 @@ mod tests {
         assert_eq!(test["statements"][0]["catches"], true);
         assert!(view(result.clone(), &Target::File("c.js".into()), 0, None).is_err());
         assert!(view(result, &Target::Test("o".into()), 0, None).is_err());
+    }
+
+    /// A saved assessment's odd shapes -- no statements, a statement with no
+    /// answers or none listed, an answer with no name -- read as nothing.
+    #[test]
+    fn a_reading_skips_what_a_saved_assessment_leaves_out() {
+        assert!(asserted_in(&json!({})).is_empty());
+        let result = json!({"run": "run_x", "summary": {}, "statements": [
+            {"file": "a.js", "line": 1, "text": "x;", "change": "skipped", "asserted": false, "answers": []},
+            {"file": "a.js", "line": 2, "text": "y;", "change": "flipped", "asserted": true, "replacement": "!y",
+             "answers": [{"file": "t.js", "p": 0.9}, {"file": "t.js", "name": "one", "p": 0.9}]},
+            {"file": "a.js", "line": 3, "text": "z;", "change": "skipped", "asserted": false},
+        ]});
+        let line = view(result.clone(), &Target::Line("a.js".into(), 1), 0, None).unwrap();
+        assert_eq!(line["statements"][0]["answers"], json!([]));
+        let replaced =
+            render(&view(result.clone(), &Target::Line("a.js".into(), 2), 0, None).unwrap());
+        assert!(replaced.contains(" -> `!y`"), "{replaced}");
+        let test = view(result.clone(), &Target::Test("one".into()), 0, None).unwrap();
+        assert_eq!(test["testSummary"]["asked"], 1);
+        let unknown = view(result.clone(), &Target::Test("two".into()), 0, None).unwrap_err();
+        assert!(unknown.contains("  one (t.js)"), "{unknown}");
+        let file = render(&view(result, &Target::File("a.js".into()), 0, None).unwrap());
+        assert!(file.contains("x;  (skipped)\n"), "{file}");
     }
 
     /// From a real assessment: 98.7% asserted, and twelve of the asserted

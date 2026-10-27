@@ -266,12 +266,12 @@ fn javascript_archive_entries(
         results.push(command_result);
     }
     let mut by_runner = BTreeMap::<String, Vec<&RawTestResult>>::new();
-    for result in &results {
+    results.iter().for_each(|result| {
         by_runner
             .entry(result.provenance.runner.clone())
             .or_default()
             .push(result);
-    }
+    });
     if entries
         .iter()
         .any(|entry| entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl"))
@@ -424,10 +424,10 @@ fn remove_derived_pnpm_config(environment: &mut BTreeMap<OsString, OsString>) {
 fn environment_with(values: BTreeMap<String, String>) -> Vec<(OsString, OsString)> {
     let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
     remove_derived_pnpm_config(&mut environment);
-    for (key, value) in values {
+    values.into_iter().for_each(|(key, value)| {
         environment.retain(|existing, _| !existing.to_string_lossy().eq_ignore_ascii_case(&key));
         environment.insert(key.into(), value.into());
-    }
+    });
     environment.into_iter().collect()
 }
 
@@ -877,7 +877,7 @@ pub fn run_direct_javascript(
         );
     }
     for server in &servers {
-        for (name, value) in server.environment() {
+        server.environment().into_iter().for_each(|(name, value)| {
             // A server's preload joins the suite's own.
             let value = if name == "NODE_OPTIONS" {
                 overrides
@@ -887,7 +887,7 @@ pub fn run_direct_javascript(
                 value
             };
             overrides.insert(name, value);
-        }
+        });
     }
     // `uv run` syncs the environment before it runs, and the copy's is the
     // project's own, linked in: a sync rewrote the project's editable install
@@ -1198,51 +1198,55 @@ pub fn run_direct_javascript(
         let mut published = None;
         let mut server_runs = Vec::new();
         let mut failure = None;
-        for server in servers {
-            let id = if published.is_none() {
-                run_id.clone()
-            } else {
-                companion_run_id(&run_id, server_runs.len() + 1)
-            };
-            let language = server.language();
-            let published_run = crate::fault::or(
-                "server-unpublished",
-                || Ok(None),
-                || {
-                    crate::fault::or(
-                        "server-publish",
-                        || Err("injected fault at server-publish".to_owned()),
-                        || {
-                            server.publish(
-                                &root,
-                                &run_id,
-                                RunMetadata {
-                                    id: id.clone(),
-                                    ..metadata.clone()
-                                },
-                                &served,
-                                diagnostics,
-                            )
-                        },
-                    )
-                },
-            );
-            match published_run {
-                Ok(Some(run)) if published.is_none() => published = Some(run),
-                Ok(Some((directory, _))) => {
-                    finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
-                    server_runs.push((language.to_owned(), directory));
+        // Never empty: a project with no source and no server was refused.
+        servers
+            .into_iter()
+            .try_for_each(|server| -> Result<(), String> {
+                let id = if published.is_none() {
+                    run_id.clone()
+                } else {
+                    companion_run_id(&run_id, server_runs.len() + 1)
+                };
+                let language = server.language();
+                let published_run = crate::fault::or(
+                    "server-unpublished",
+                    || Ok(None),
+                    || {
+                        crate::fault::or(
+                            "server-publish",
+                            || Err("injected fault at server-publish".to_owned()),
+                            || {
+                                server.publish(
+                                    &root,
+                                    &run_id,
+                                    RunMetadata {
+                                        id: id.clone(),
+                                        ..metadata.clone()
+                                    },
+                                    &served,
+                                    diagnostics,
+                                )
+                            },
+                        )
+                    },
+                );
+                match published_run {
+                    Ok(Some(run)) if published.is_none() => published = Some(run),
+                    Ok(Some((directory, _))) => {
+                        finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
+                        server_runs.push((language.to_owned(), directory));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = writeln!(
+                            diagnostics,
+                            "[supercov] the {language} server's run could not be published: {error}"
+                        );
+                        failure.get_or_insert(error);
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    let _ = writeln!(
-                        diagnostics,
-                        "[supercov] the {language} server's run could not be published: {error}"
-                    );
-                    failure.get_or_insert(error);
-                }
-            }
-        }
+                Ok(())
+            })?;
         remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
             .map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &server_evidence_root)
@@ -1345,9 +1349,9 @@ pub fn run_direct_javascript(
             },
         )
     {
-        for (file, text) in reached.files {
+        reached.files.into_iter().for_each(|(file, text)| {
             recorded_inputs.files.entry(file).or_insert(text);
-        }
+        });
     }
     let entries = crate::source_capture::append(entries, &recorded_inputs)?;
     let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
