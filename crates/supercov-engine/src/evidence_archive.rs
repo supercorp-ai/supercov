@@ -825,6 +825,16 @@ mod tests {
             fs::write(&path, &compressed[..end]).unwrap();
             assert!(read_archive_selected(&path, |_| false).is_err());
         }
+        // A stream shorter than the magic names what it lacks.
+        fs::write(&path, gzip(b"SC")).unwrap();
+        assert!(matches!(
+            read_archive_selected(&path, |_| false),
+            Err(EvidenceArchiveError::Truncated("magic"))
+        ));
+        assert!(matches!(
+            read_archive_schema_version(&path),
+            Err(EvidenceArchiveError::Truncated("magic"))
+        ));
         let second_member = [compressed.as_slice(), gzip(b"hidden").as_slice()].concat();
         fs::write(&path, second_member).unwrap();
         assert!(matches!(
