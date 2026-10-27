@@ -3497,8 +3497,12 @@ fn main() {
         assert_eq!(decide("all(windows, feature = \"extra\")"), Some(false));
         assert_eq!(decide("any(unix, feature = \"extra\")"), Some(true));
         assert_eq!(decide("any(windows, feature = \"extra\")"), None);
+        assert_eq!(decide("true"), Some(true));
+        assert_eq!(decide("false"), Some(false));
+        // A target that names nothing settles only what is no name.
+        assert_eq!(TargetCfg::new(&[]).evaluate(&"unix".parse().unwrap()), Some(false));
 
-        let source = "pub fn a() -> u8 { b() }\n#[cfg(windows)]\nfn b() -> u8 { 1 }\n#[cfg(unix)]\nfn b() -> u8 { 2 }\n#[cfg(feature = \"x\")]\nfn c() -> u8 { 3 }\n";
+        let source = "pub fn a() -> u8 { b() }\n#[cfg(windows)]\nfn b() -> u8 { 1 }\n#[cfg(unix)]\nfn b() -> u8 { 2 }\n#[cfg(feature = \"x\")]\nfn c() -> u8 { 3 }\n#[cfg(unix)]\n#[cfg(windows)]\nfn d() -> u8 {\n    4\n}\n";
         let instrumented = instrument_rust_file(
             "src/lib.rs",
             source,
@@ -3518,6 +3522,8 @@ fn main() {
             "the windows item is left out: {lines:?}"
         );
         assert!(lines.contains(&5) && lines.contains(&7), "{lines:?}");
+        // Two predicates on one item hold together: unix and windows, never.
+        assert!(!lines.contains(&11), "{lines:?}");
         let windows = &instrumented.code[instrumented.code.find("#[cfg(windows)]").unwrap()
             ..instrumented.code.find("#[cfg(unix)]").unwrap()];
         assert!(!windows.contains("__supercov_runtime_v1"), "{windows}");
