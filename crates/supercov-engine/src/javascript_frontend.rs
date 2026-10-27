@@ -794,7 +794,7 @@ fn inline_instrumentation_map(
         "sourcesContent".into(),
         serde_json::json!([original_source]),
     );
-    let payload = serde_json::to_string(&map).ok()?;
+    let payload = serde_json::to_string(&map).expect("a JSON value serializes");
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
     Some(format!(
@@ -2070,6 +2070,26 @@ mod tests {
         .parse();
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     }
+    /// An instrumentation map is inlined only where there is one, as an
+    /// object, with its mappings written as text.
+    #[test]
+    fn only_a_whole_map_is_inlined() {
+        let file = Path::new("src/a.js");
+        for map in [
+            None,
+            Some(serde_json::json!([])),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({ "mappings": 1 })),
+        ] {
+            assert!(
+                inline_instrumentation_map("a;\n", map.as_ref(), file, "a;\n").is_none(),
+                "{map:?}"
+            );
+        }
+        let map = serde_json::json!({ "version": 3, "mappings": "AAAA" });
+        assert!(inline_instrumentation_map("a;\n", Some(&map), file, "a;\n").is_some());
+    }
+
     #[test]
     fn ancestor_description_names_each_component_and_its_state() {
         let root = std::env::temp_dir().join(format!("supercov-ancestors-{}", unique()));
