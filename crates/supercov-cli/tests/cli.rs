@@ -13069,6 +13069,33 @@ fn a_browser_run_preparing_a_go_server_whose_file_operation_fails_says_so_and_re
     assert!(reached > 50, "{reached}");
 }
 
+/// The same for a Rust Worker beside the browser tests, which Supercov
+/// instruments in the copy for `wrangler dev` to build.
+#[cfg(unix)]
+#[test]
+fn a_browser_run_preparing_a_rust_worker_whose_file_operation_fails_says_so_and_recovers() {
+    let reached = fail_each_place_of_a_run(
+        "run-faults-browser-worker",
+        |project| {
+            browser_project(project);
+            project.write(
+                "worker/wrangler.toml",
+                "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
+            );
+            project.write(
+                "worker/Cargo.toml",
+                "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[workspace]\n",
+            );
+            project.write(
+                "worker/src/lib.rs",
+                "pub fn handle(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n",
+            );
+        },
+        &["--", "npx", "playwright", "test"],
+    );
+    assert!(reached > 50, "{reached}");
+}
+
 /// A crate with a unit test and a doctest.
 fn small_crate(project: &Project) {
     project.write(
