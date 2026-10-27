@@ -1160,13 +1160,11 @@ struct MutablePhase {
 
 fn vector_key(vector: &McdcVector) -> String {
     let mut key = String::with_capacity(vector.values.len() + 2);
-    for value in &vector.values {
-        key.push(match value {
-            None => '-',
-            Some(false) => 'F',
-            Some(true) => 'T',
-        });
-    }
+    key.extend(vector.values.iter().map(|value| match value {
+        None => '-',
+        Some(false) => 'F',
+        Some(true) => 'T',
+    }));
     key.push(':');
     key.push(if vector.outcome { 'T' } else { 'F' });
     key
@@ -2486,28 +2484,32 @@ fn create_coverage_view_with_model(
                     error,
                 }
             })?;
-        let mut conditions = Vec::with_capacity(meta.conditions.len());
-        for (index, source) in meta.conditions.iter().enumerate() {
-            let witness = witnesses[index].map(|witness| {
-                [
-                    vectors[witness.first].clone(),
-                    vectors[witness.second].clone(),
-                ]
-            });
-            let witness_tests = witnesses[index].map(|witness| {
-                [
-                    observations[witness.first].tests.clone(),
-                    observations[witness.second].tests.clone(),
-                ]
-            });
-            conditions.push(ConditionResult {
-                index,
-                source: source.clone(),
-                covered: witness.is_some(),
-                witness,
-                witness_tests,
-            });
-        }
+        let conditions = meta
+            .conditions
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let witness = witnesses[index].map(|witness| {
+                    [
+                        vectors[witness.first].clone(),
+                        vectors[witness.second].clone(),
+                    ]
+                });
+                let witness_tests = witnesses[index].map(|witness| {
+                    [
+                        observations[witness.first].tests.clone(),
+                        observations[witness.second].tests.clone(),
+                    ]
+                });
+                ConditionResult {
+                    index,
+                    source: source.clone(),
+                    covered: witness.is_some(),
+                    witness,
+                    witness_tests,
+                }
+            })
+            .collect::<Vec<_>>();
         let decision_tests =
             tests_by_hit.reached(tests_by_decision.remove(&meta.id).unwrap_or_default());
         let decision_confidence = confidence(
@@ -3079,11 +3081,11 @@ fn parse_in_parallel<T: Send>(
             .map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
             .collect::<Vec<_>>()
     });
-    let mut parsed = Vec::new();
-    for part in parts {
+    // One part a worker, and there is always a worker.
+    parts.into_iter().try_fold(Vec::new(), |mut parsed, part| {
         parsed.extend(part?);
-    }
-    Ok(parsed)
+        Ok(parsed)
+    })
 }
 
 fn parse_entry<T: for<'de> Deserialize<'de>>(
@@ -3472,7 +3474,8 @@ fn separate_repeated_executions(raw_results: &mut [RawTestResult]) {
             continue;
         }
         let mut renamed = BTreeMap::<String, String>::new();
-        for phase in &raw.phases {
+        // A record that repeats a phase has phases.
+        raw.phases.iter().for_each(|phase| {
             let count = executions.entry(phase.id.clone()).or_insert(1);
             let fresh = loop {
                 *count += 1;
@@ -3482,16 +3485,16 @@ fn separate_repeated_executions(raw_results: &mut [RawTestResult]) {
                 }
             };
             renamed.insert(phase.id.clone(), fresh);
-        }
+        });
         let rename = |phase: &mut Option<String>| {
             if let Some(fresh) = phase.as_ref().and_then(|id| renamed.get(id)) {
                 *phase = Some(fresh.clone());
             }
         };
-        for phase in &mut raw.phases {
+        raw.phases.iter_mut().for_each(|phase| {
             phase.id = renamed[&phase.id].clone();
             rename(&mut phase.caused_by_phase_id);
-        }
+        });
         for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
             rename(&mut snapshot.phase_id);
             for event in &mut snapshot.events {
