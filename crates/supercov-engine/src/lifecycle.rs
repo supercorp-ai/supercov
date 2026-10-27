@@ -3015,6 +3015,38 @@ mod tests {
         ));
     }
 
+    /// Keeping a failed run's evidence survives any file operation failing:
+    /// it keeps what it can, or nothing and no empty directory.
+    #[test]
+    fn keeping_failed_evidence_survives_any_file_operation_failing() {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let fixture = || {
+            let root = std::env::temp_dir().join(format!(
+                "supercov-kept-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(root.join("evidence/worker")).unwrap();
+            fs::write(root.join("evidence/a.raw"), "a").unwrap();
+            fs::write(root.join("evidence/worker/b.raw"), "b").unwrap();
+            root
+        };
+        let steps = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |root| {
+                if let Some(kept) = keep_failed_evidence(root, &root.join("evidence"), "run") {
+                    assert!(kept.join("worker/b.raw").is_file());
+                }
+                Ok::<(), ()>(())
+            },
+            |root| {
+                let _ = fs::remove_dir_all(root);
+            },
+        );
+        assert!(steps > 4, "{steps}");
+    }
+
     #[test]
     fn a_root_without_a_name_is_never_locked() {
         assert!(matches!(
