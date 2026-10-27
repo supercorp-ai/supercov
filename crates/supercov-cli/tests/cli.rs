@@ -1811,6 +1811,17 @@ fn an_internal_error_instrumenting_a_file_leaves_it_unmeasured_and_said() {
             "Supercov hit an internal error: injected fault at instrument-panic instrumenting this file, a bug to report",
         ],
     );
+    // A transform that no longer parses is refused by file, not compiled.
+    let refused = project.supercov_with(
+        &["--", "cargo", "test"],
+        &[("SUPERCOV_TEST_FAULT", "rust-unparsable-transform")],
+    );
+    assert_ne!(refused.code(), 0);
+    assert!(
+        refused.stderr().contains("src/lib.rs"),
+        "{}",
+        refused.stderr()
+    );
 }
 
 #[test]
