@@ -220,6 +220,25 @@ jobs:
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
 
+  # The Kotlin grammar Supercov keeps: its parser is what its grammar
+  # generates, and real projects' files parse with it, but for the ones
+  # `scripts/kotlin-corpus-failures.txt` names.
+  kotlin-grammar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: node scripts/kotlin-grammar.mjs --check
+      - run: node scripts/kotlin-corpus.mjs
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
+
   # A Rust Worker under `wrangler dev`, measured through wrangler's inspector.
   rust-worker:
     runs-on: ubuntu-latest
