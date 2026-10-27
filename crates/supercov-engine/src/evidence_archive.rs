@@ -198,10 +198,8 @@ impl<W: Write> Write for FaultingWriter<W> {
             None => buffer.len(),
         };
         let written = self.inner.write(&buffer[..allowed])?;
-        self.written = self
-            .written
-            .checked_add(written as u64)
-            .ok_or_else(|| io::Error::other("evidence archive size overflow"))?;
+        // A count of bytes written is far below what a u64 holds.
+        self.written += written as u64;
         Ok(written)
     }
 
@@ -219,10 +217,8 @@ impl<W> CountingWriter<W> {
 impl<W: Write> Write for CountingWriter<W> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let written = self.inner.write(buffer)?;
-        self.written = self
-            .written
-            .checked_add(written as u64)
-            .ok_or_else(|| io::Error::other("evidence archive size overflow"))?;
+        // A count of bytes written is far below what a u64 holds.
+        self.written += written as u64;
         Ok(written)
     }
 

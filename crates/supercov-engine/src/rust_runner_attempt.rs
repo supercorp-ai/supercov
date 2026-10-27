@@ -443,7 +443,10 @@ mod tests {
             }
             for (key, value) in changes {
                 values.retain(|(k, _)| k != key);
-                values.push((key, value));
+                // An absent value is a variable nextest did not set.
+                if *value != "<absent>" {
+                    values.push((key, value));
+                }
             }
             classify_rust_runner_environment_from(environment(&values))
                 .unwrap_err()
@@ -476,6 +479,20 @@ mod tests {
         }
         assert!(refused(&[("NEXTEST_VERSION", "0.9.140.1")], false).contains("exactly three"),);
         assert!(refused(&[("NEXTEST_ATTEMPT", "2")], true).contains("exceeds"));
+        assert!(
+            refused(&[("NEXTEST_RUN_ID", "<absent>")], false)
+                .contains("nextest attempt identity lacks NEXTEST_RUN_ID")
+        );
+        assert!(
+            refused(&[("NEXTEST_VERSION", "0.9")], false).contains("nextest version lacks patch")
+        );
+        for value in ["0", "x"] {
+            assert!(
+                refused(&[("NEXTEST_ATTEMPT", value)], true)
+                    .contains("NEXTEST_ATTEMPT must be a positive integer"),
+                "{value}"
+            );
+        }
         assert!(refused(&[("NEXTEST_STRESS_TOTAL", "2")], true).contains("stress"));
     }
 

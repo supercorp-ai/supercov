@@ -57,7 +57,7 @@ pub fn parse(
         .map_err(|error| JvmInstrumenterError::Parse(error.to_string()))?;
     let tree = parser
         .parse(source, None)
-        .ok_or_else(|| JvmInstrumenterError::Parse("parser returned no tree".into()))?;
+        .expect("a parser given its language and no time limit returns a tree");
     if tree.root_node().has_error() {
         return Err(JvmInstrumenterError::Parse(
             crate::go_instrumenter::parse_failure(&tree, source),

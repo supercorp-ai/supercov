@@ -102,7 +102,7 @@ fn parse_exactly(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError>
         .map_err(|error| GoInstrumenterError::Parse(error.to_string()))?;
     let tree = parser
         .parse(source, None)
-        .ok_or_else(|| GoInstrumenterError::Parse("parser returned no tree".into()))?;
+        .expect("a parser given its language and no time limit returns a tree");
     if tree.root_node().has_error() {
         return Err(GoInstrumenterError::Parse(parse_failure(&tree, source)));
     }
