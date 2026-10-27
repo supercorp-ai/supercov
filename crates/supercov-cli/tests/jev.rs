@@ -343,12 +343,7 @@ fn an_assessment_whose_file_operation_fails_says_so_and_never_panics() {
     let project = Project::cart("assess-faults");
     let run = project.measure(&[]);
     let (base, _) = gateway(MODEL, answer_yes);
-    for command in [
-        &["runs", &run, "assertions", "assess", "--refresh"][..],
-        &["quality"],
-        &["security"],
-        &["security", "--run", "latest"],
-    ] {
+    let sweep = |command: &[&str]| {
         for place in 1.. {
             let fault = format!("fs#{place}");
             let mut environment = through(&base).to_vec();
@@ -365,7 +360,31 @@ fn an_assessment_whose_file_operation_fails_says_so_and_never_panics() {
                 break;
             }
         }
+    };
+    for command in [
+        &["runs", &run, "assertions", "assess", "--refresh"][..],
+        &["runs", &run, "assertions", "assess", "--dry-run"][..],
+        &["runs", &run, "assertions"][..],
+        &["quality"],
+        &["security"],
+        &["security", "--run", "latest"],
+    ] {
+        sweep(command);
     }
+    // A pass over what changed reads the change too.
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    sweep(&[
+        "runs",
+        &run,
+        "assertions",
+        "assess",
+        "--changed",
+        "--refresh",
+    ]);
 }
 
 #[test]
