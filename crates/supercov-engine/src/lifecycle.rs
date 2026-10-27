@@ -1535,6 +1535,8 @@ mod tests {
                 .unwrap();
         }
         assert!(sweep_trash(&root).unwrap() >= 2);
+        // An emptied trash has nothing more to sweep.
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
         assert!(!tree.exists());
         assert_eq!(
             fs::read_to_string(outside.join("tsx/dist/loader.mjs")).unwrap(),
