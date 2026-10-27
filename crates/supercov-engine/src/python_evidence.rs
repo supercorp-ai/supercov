@@ -3110,6 +3110,35 @@ pub(crate) mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A name in the evidence directory that is not UTF-8, or a shared slot
+    /// not numbered, is no evidence file of Supercov's and is refused.
+    #[cfg(unix)]
+    #[test]
+    fn an_evidence_name_supercov_never_writes_is_refused() {
+        let directory = killed_process("py-odd-names", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
+        fs::write(directory.join("stray.shm"), b"").unwrap();
+        assert!(matches!(
+            read_evidence_directory(&directory, "run-1"),
+            Err(PythonEvidenceError::UnsafeEntry(name)) if name == "stray.shm"
+        ));
+        fs::remove_file(directory.join("stray.shm")).unwrap();
+        // macOS names no file that is not UTF-8.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::write(
+                directory.join(std::ffi::OsStr::from_bytes(b"\xff.slot")),
+                b"",
+            )
+            .unwrap();
+            assert!(matches!(
+                read_evidence_directory(&directory, "run-1"),
+                Err(PythonEvidenceError::UnsafeEntry(name)) if name == "<non-utf8>"
+            ));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn a_slot_needs_its_transport_and_a_partial_layout_is_ignored() {
         let directory = killed_process("py-slot-orphan", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
