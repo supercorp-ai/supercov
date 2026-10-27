@@ -904,12 +904,11 @@ impl RustWorkerServer {
         let mut by_workspace = BTreeMap::<PathBuf, Vec<WorkerConfig>>::new();
         for path in configs {
             let Some(config) = parse_config(&path) else {
-                writeln!(
+                let _ = writeln!(
                     diagnostics,
                     "[supercov] {} names no `main`; its Worker is not measured",
                     path.display()
-                )
-                .map_err(|error| error.to_string())?;
+                );
                 continue;
             };
             let crate_directory = path.parent().unwrap_or(workspace).to_owned();

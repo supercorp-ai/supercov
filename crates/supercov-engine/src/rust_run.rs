@@ -293,12 +293,11 @@ fn run_direct_rust_timed(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         // `wasm-pack test` is learned once and then run as the `cargo test` it
@@ -355,12 +354,11 @@ fn run_direct_rust_timed(
         let mut copy_ms = 0.0;
         let reused_build = cached.is_some();
         let mut project = if let Some(cached) = cached {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] detected Rust; reusing authenticated instrumented workspace {}",
                 workspace.display()
-            )
-            .map_err(|error| error.to_string())?;
+            );
             PreparedRustProject {
                 workspace_root: workspace.clone(),
                 target_directory: target_directory.clone(),
@@ -376,12 +374,11 @@ fn run_direct_rust_timed(
             let workspace =
                 prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
             copy_ms = elapsed_ms(copy_started);
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] detected Rust; instrumenting isolated Cargo workspace {}",
                 workspace.display()
-            )
-            .map_err(|error| error.to_string())?;
+            );
             let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
             let roots = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
                 &root, &workspace, &ambient,
@@ -404,22 +401,21 @@ fn run_direct_rust_timed(
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         if phase_timing {
             let preparation = &project.preparation;
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] workspace timings cache-check={cache_read_ms:.1}ms copy={copy_ms:.1}ms metadata={:.1}ms discovery={:.1}ms instrument={:.1}ms runtime={:.1}ms",
                 preparation.metadata_ms,
                 preparation.discovery_ms,
                 preparation.instrument_ms,
                 preparation.runtime_ms,
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let nextest = request
             .command
             .windows(2)
             .any(|pair| pair == ["nextest", "run"]);
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "{}",
             if nextest {
@@ -427,8 +423,7 @@ fn run_direct_rust_timed(
             } else {
                 "[supercov] building once and running each libtest case and doctest in its own process"
             }
-        )
-        .map_err(|error| error.to_string())?;
+        );
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
         // A test that starts a Rust Worker with `wrangler dev` finds
@@ -470,7 +465,7 @@ fn run_direct_rust_timed(
             .into_iter()
             .filter(|line| !line.contains("stayed in the isolated workspace"))
         {
-            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "{line}");
         }
         write_rust_build_cache(
             &root,

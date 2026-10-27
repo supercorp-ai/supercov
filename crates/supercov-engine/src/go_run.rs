@@ -621,12 +621,11 @@ pub fn run_direct_go(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let adapter_started = Instant::now();
@@ -676,27 +675,24 @@ pub fn run_direct_go(
         )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] detected Go; instrumenting {} source file(s) across {} test package(s) in isolated workspace {}",
             instrumented.project.instrumented.len(),
             instrumented.packages.len(),
             workspace.display()
-        )
-        .map_err(|error| error.to_string())?;
+        );
         for (file, reason) in &instrumented.project.unparseable {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         for (file, reason) in &instrumented.unparseable_tests {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; the tests it declares run unattributed and what they reach counts run-wide"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if instrumented.packages.is_empty() {
             return Err(
@@ -727,18 +723,16 @@ pub fn run_direct_go(
         }
 
         if serialised {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added -parallel=1 for --exact-attribution: a test that calls t.Parallel() can only be credited with what it reached when nothing else is running. Your suite runs in order, which is slower."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if forced_fresh {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added -count=1: `go test` caches passing packages, and a cached package does not run, so it would record no coverage"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         let test_started = Instant::now();
         let plan = ExecutionPlan {
@@ -791,7 +785,7 @@ pub fn run_direct_go(
         )
         .map_err(|error| error.to_string())?;
         for line in crate::workspace::describe_command_outputs(&outputs) {
-            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "{line}");
         }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
@@ -825,13 +819,12 @@ pub fn run_direct_go(
             parts.push(evidence);
         }
         if !silent.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} test package(s) wrote no evidence and are absent from this run: {}",
                 silent.len(),
                 silent.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         let evidence = merge_evidence(parts);
         let unattributed = instrumented

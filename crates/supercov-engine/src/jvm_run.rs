@@ -1528,12 +1528,11 @@ pub fn run_direct_jvm(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let adapter_started = Instant::now();
@@ -1574,7 +1573,7 @@ pub fn run_direct_jvm(
         )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] detected {}; instrumenting {} source file(s) in isolated workspace {}",
             match instrumented.build {
@@ -1584,17 +1583,15 @@ pub fn run_direct_jvm(
             },
             instrumented.project.instrumented.len(),
             workspace.display()
-        )
-        .map_err(|error| error.to_string())?;
+        );
         if let Some(build_file) = instrumented.added_launcher {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added a test-scoped {LAUNCHER_ARTIFACT} to the workspace's {build_file}: per-test attribution comes from a JUnit Platform listener, and the API it implements is on the test runtime classpath but not the compile one. Your own {build_file} is untouched."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.serialised.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] turned JUnit's parallel execution off in the workspace copy ({}): attribution is a sweep of one shared probe array at each test boundary, so two tests running at once cannot both be credited with what they reached. Your suite runs in order here and your own configuration is untouched.",
                 // A module is the directory `module_of` names: `.` for the
@@ -1605,11 +1602,10 @@ pub fn run_direct_jvm(
                     .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.concurrent.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] JUnit runs this suite's tests at once ({}), so what they reach while they overlap is recorded against the run rather than against a test. `--exact-attribution` credits each of them instead, by running the suite in order.",
                 instrumented
@@ -1618,48 +1614,42 @@ pub fn run_direct_jvm(
                     .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.relaxed.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] in the workspace copy only: {}. The copy holds instrumented code your project never wrote a policy for, and a rule about the shape of a method is one no instrumentation can satisfy. Warnings are still reported, your build file is untouched, and your own build still runs every check in full.",
                 instrumented.relaxed.join("; ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if instrumented.added_vintage {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added junit-vintage-engine to the workspace copy: JUnit 4 is not a JUnit Platform engine, and Vintage is the platform's own way of running exactly these tests through the lifecycle Supercov listens to. Your own build still runs JUnit 4 as it did."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.modular.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} module(s) declare their tests as a Java module and are not attributed: {}. A named module names every package it holds and every dependency it may use, in its own module-info.java, so a listener added to it would not compile -- and neither would the module. Supercov leaves those tests to run exactly as they did.",
                 instrumented.modular.len(),
                 instrumented.modular.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.unmeasurable.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} module(s) run JUnit 4, which is not a JUnit Platform engine, so they are not attributed: {}. Supercov listens through the platform's own lifecycle, and putting the platform on a JUnit 4 classpath makes the build choose a provider that finds no engine -- so it leaves those modules alone rather than break them. Adding junit-vintage-engine runs the same tests on the platform, and Supercov measures them.",
                 instrumented.unmeasurable.len(),
                 instrumented.unmeasurable.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         for (file, reason) in &instrumented.project.unparseable {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let (mut command, note) = command_with_fresh_results(instrumented.build, &request.command);
@@ -1676,14 +1666,13 @@ pub fn run_direct_jvm(
                 RatSkip::Argument => command.push("-Drat.skip=true".into()),
                 RatSkip::MavenOpts(opts) => maven_opts = Some(opts),
             }
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added -Drat.skip=true: Apache RAT checks every file in the build for a license header, and the workspace copy holds Supercov's own runtime and listeners, which carry none. Your own build still runs the check."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if let Some(note) = note {
-            writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "[supercov] {note}");
         }
         let test_started = Instant::now();
         let plan = ExecutionPlan {
@@ -1741,7 +1730,7 @@ pub fn run_direct_jvm(
             .into_iter()
             .filter(|line| !line.contains("stayed in the isolated workspace"))
         {
-            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "{line}");
         }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
@@ -1816,13 +1805,12 @@ pub fn run_direct_jvm(
             parts.push(evidence);
         }
         if !silent.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} module(s) wrote no evidence and are absent from this run: {}",
                 silent.len(),
                 silent.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if outcomes.is_empty() {
             return Err(format!(

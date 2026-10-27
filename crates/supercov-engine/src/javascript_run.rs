@@ -538,12 +538,11 @@ pub fn run_direct_javascript(
     let recovered_runs =
         recover_abandoned_runs(&root, &started_at).map_err(|error| error.to_string())?;
     if !recovered_runs.is_empty() {
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] recovered abandoned run(s): {}",
             recovered_runs.join(", ")
-        )
-        .map_err(|error| error.to_string())?;
+        );
     }
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let source_roots = crate::source_discovery::configured_source_roots(&environment);
@@ -666,12 +665,11 @@ pub fn run_direct_javascript(
         eprintln!("[supercov] the workspace has no git repository of its own: {error}");
     }
     let workspace_preparation_ms = elapsed_ms(workspace_started);
-    writeln!(
+    let _ = writeln!(
         diagnostics,
         "[supercov] instrumenting isolated workspace {}",
         workspace.display()
-    )
-    .map_err(|error| error.to_string())?;
+    );
     cleanup.mark_state_written();
     write_run_state(
         &root,
@@ -711,7 +709,7 @@ pub fn run_direct_javascript(
     drop(instrumentation_progress);
     let adapter_setup_ms = elapsed_ms(adapter_started);
     if let Some(detail) = crate::javascript_frontend::setup_timing_detail() {
-        writeln!(diagnostics, "[supercov] {detail}").map_err(|error| error.to_string())?;
+        let _ = writeln!(diagnostics, "[supercov] {detail}");
     }
 
     let mut servers = preparing_servers
@@ -771,13 +769,12 @@ pub fn run_direct_javascript(
         );
     }
     for server in &servers {
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] measuring {} {language} source file(s) in any {language} server the tests start",
             server.source_files(),
             language = server.language(),
-        )
-        .map_err(|error| error.to_string())?;
+        );
     }
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");
@@ -1058,7 +1055,7 @@ pub fn run_direct_javascript(
     if let Some(proxy) = docker_proxy.take() {
         proxy.finish();
         for note in crate::docker_proxy::notes(&docker_state.join("containers.jsonl")) {
-            writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "[supercov] {note}");
         }
     }
     let test_command_ms = execution
@@ -1525,11 +1522,10 @@ fn start_docker_relay(
             Ok(Some(proxy))
         }
         Err(error) => {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] containers the tests start are not measured: the Docker relay could not start ({error})"
-            )
-            .map_err(|error| error.to_string())?;
+            );
             Ok(None)
         }
     }

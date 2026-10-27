@@ -234,12 +234,11 @@ fn run_direct_ruby_in(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let adapter_started = Instant::now();
@@ -279,18 +278,16 @@ fn run_direct_ruby_in(
                 .into_bytes(),
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] detected Ruby; measuring {} source file(s) in place through Ruby's Coverage module and load-time probes",
             project.plan.files.len()
-        )
-        .map_err(|error| error.to_string())?;
+        );
         for (file, reason) in &project.unparseable {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         let adapter_setup_ms = elapsed_ms(adapter_started);
 
@@ -608,11 +605,10 @@ impl RubyServer {
                 raw.role == "test" && raw.runtime.iter().any(|snapshot| !snapshot.hits.is_empty())
             });
             if !answered {
-                writeln!(
+                let _ = writeln!(
                     diagnostics,
                     "[supercov] a Ruby process ran, and no request a test sent reached measured Ruby code; no Ruby run was published"
-                )
-                .map_err(|error| error.to_string())?;
+                );
                 return Ok(None);
             }
             validate_frontend_report_request(&run.declaration, &run.request)
@@ -651,12 +647,11 @@ impl RubyServer {
             };
             let run_directory =
                 publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] Ruby server coverage: {tests} test(s) across {} source file(s)",
                 self.project.plan.files.len()
-            )
-            .map_err(|error| error.to_string())?;
+            );
             Ok(Some((run_directory, metadata)))
         })();
         let result = result.map_err(|error| {
