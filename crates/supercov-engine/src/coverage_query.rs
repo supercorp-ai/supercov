@@ -466,12 +466,14 @@ pub fn scope_groups(entries: &[IndexedScopeEntry]) -> Vec<ScopeGroup> {
             )
         })
         .collect::<Vec<_>>();
+    // By rank, then the most files first, then directory and reason.
     groups.sort_by(|(left_rank, left), (right_rank, right)| {
-        left_rank
-            .cmp(right_rank)
-            .then_with(|| right.files.cmp(&left.files))
-            .then_with(|| left.directory.cmp(&right.directory))
-            .then_with(|| left.reason.cmp(&right.reason))
+        (left_rank, &right.files, &left.directory, &left.reason).cmp(&(
+            right_rank,
+            &left.files,
+            &right.directory,
+            &right.reason,
+        ))
     });
     groups.into_iter().map(|(_, group)| group).collect()
 }
@@ -2594,10 +2596,7 @@ pub fn coverage_file_detail_from(
         })
         .collect::<Vec<_>>();
     limitations.sort_by(|left, right| {
-        left.line
-            .cmp(&right.line)
-            .then_with(|| left.column.cmp(&right.column))
-            .then_with(|| left.id.cmp(&right.id))
+        (left.line, left.column, &left.id).cmp(&(right.line, right.column, &right.id))
     });
     let total_tests = read
         .tests_by_file
@@ -3558,10 +3557,16 @@ pub fn coverage_areas_query(
         }
     }
     let mut areas = areas.into_values().collect::<Vec<_>>();
+    // The best covered first, then by directory.
     areas.sort_by(|left, right| {
-        dimension_for_metric(&right.totals, options.metric)
-            .cmp(&dimension_for_metric(&left.totals, options.metric))
-            .then_with(|| left.directory.cmp(&right.directory))
+        (
+            dimension_for_metric(&right.totals, options.metric),
+            &left.directory,
+        )
+            .cmp(&(
+                dimension_for_metric(&left.totals, options.metric),
+                &right.directory,
+            ))
     });
     let total = areas.len();
     let page = areas
@@ -3956,16 +3961,15 @@ pub fn coverage_file_decisions_query(
         .filter(|decision| decision.missing_conditions > 0)
         .collect::<Vec<_>>();
     missing.sort_by(|left, right| match options.sort {
-        DecisionSort::Missing => right
-            .missing_conditions
-            .cmp(&left.missing_conditions)
-            .then_with(|| left.line.cmp(&right.line))
-            .then_with(|| left.column.cmp(&right.column)),
-        DecisionSort::Location => left
-            .line
-            .cmp(&right.line)
-            .then_with(|| left.column.cmp(&right.column))
-            .then_with(|| left.id.cmp(&right.id)),
+        // The most conditions missing first, then by place.
+        DecisionSort::Missing => (right.missing_conditions, left.line, left.column).cmp(&(
+            left.missing_conditions,
+            right.line,
+            right.column,
+        )),
+        DecisionSort::Location => {
+            (left.line, left.column, &left.id).cmp(&(right.line, right.column, &right.id))
+        }
     });
     let total = missing.len();
     let rows = missing

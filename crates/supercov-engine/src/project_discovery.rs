@@ -288,9 +288,7 @@ fn discover_playwright_adapter(root: &Path) -> PlaywrightAdapter {
     let module = scores
         .into_iter()
         .min_by(|(left_module, left_score), (right_module, right_score)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_module.cmp(right_module))
+            (right_score, left_module).cmp(&(left_score, right_module))
         })
         .map(|(module, _)| module)
         .unwrap_or_else(|| "@playwright/test".into());

@@ -200,11 +200,9 @@ pub fn list(project_root: &Path, lane: &str) -> Result<Vec<(String, Value)>, Str
             found.push((id, manifest));
         }
     }
+    // The newest first.
     found.sort_by(|a, b| {
-        b.1["created_at"]
-            .as_str()
-            .cmp(&a.1["created_at"].as_str())
-            .then_with(|| b.0.cmp(&a.0))
+        (b.1["created_at"].as_str(), &b.0).cmp(&(a.1["created_at"].as_str(), &a.0))
     });
     Ok(found)
 }
