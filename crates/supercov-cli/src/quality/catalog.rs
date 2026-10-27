@@ -792,6 +792,10 @@ before it arrives, does not count.",
             assert!(!questions.contains_key("s0"), "{request}");
             assert!(questions.contains_key("s1"), "{request}");
             assert!(questions.contains_key("t0") && questions.contains_key("t1"));
+            // No candidate and no function ask nothing.
+            let none = confirm_request("a.py", "x = 1\n", &[], &Structure::default());
+            assert!(none["questions"].as_object().unwrap().is_empty(), "{none}");
+            assert!(function_questions(&[]).is_empty());
         }
 
         #[test]
