@@ -104,10 +104,13 @@ pub fn success<T: Serialize>(
         pagination: page,
     })
     .expect("serializing a Supercov JSON envelope must not fail");
-    if json.len() > AGENT_JSON_MAX_BYTES {
+    // A test fault leaves room for no reply: each command's answer to one
+    // too large runs under test.
+    let max_bytes = crate::fault::or("reply-too-large", || 0, || AGENT_JSON_MAX_BYTES);
+    if json.len() > max_bytes {
         return Err(ResponseTooLarge {
             actual_bytes: json.len(),
-            max_bytes: AGENT_JSON_MAX_BYTES,
+            max_bytes,
         });
     }
     Ok(json)

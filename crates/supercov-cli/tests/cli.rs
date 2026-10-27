@@ -12663,3 +12663,98 @@ fn a_ruby_test_whose_process_ends_during_it_is_failed_and_credited() {
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(&summary, &["Passed      1", "Failed      1"]);
 }
+
+/// Started in a directory removed since, every command says it cannot
+/// read where it is, not a panic or a run it never found.
+#[cfg(unix)]
+#[test]
+fn a_command_started_in_a_removed_directory_says_so() {
+    let project = Project::cart("removed-cwd");
+    project.measure(&[]);
+    let commands: &[&[&str]] = &[
+        &["runs", "latest"],
+        &["runs", "latest", "gaps"],
+        &["runs", "latest", "file", "src/cart.js"],
+        &["runs", "latest", "source", "src/cart.js"],
+        &["runs", "latest", "assertions"],
+        &["runs", "patch"],
+        &["runs", "check"],
+        &["runs", "clean"],
+        &["report", "--no-open"],
+        &["diff", "latest", "latest"],
+        &["merge"],
+        &["quality", "gaps"],
+        &["security"],
+        &["tests", "affected"],
+        &["--", "node", "--test"],
+        &["runs", "latest", "--json"],
+        &["runs", "latest", "gaps", "--json"],
+    ];
+    for command in commands {
+        let gone = project
+            .root
+            .join(format!("gone-{}", command.join("-").replace('/', "_")));
+        std::fs::create_dir(&gone).unwrap();
+        let script = format!(
+            "cd \"{}\" && rmdir \"{}\" && exec \"$0\" \"$@\"",
+            gone.display(),
+            gone.display()
+        );
+        let ran = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .arg(env!("CARGO_BIN_EXE_supercov"))
+            .args(*command)
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert!(!said.contains("panicked at"), "{command:?}: {said}");
+        assert!(!ran.status.success(), "{command:?} succeeded: {said}");
+    }
+}
+
+/// With every index refused, and with no room for any reply, each query
+/// says what failed: a fault the engine injects stands in for an index from
+/// another version and for an answer too large to send.
+#[test]
+fn each_query_says_so_when_its_index_or_its_reply_fails() {
+    let project = Project::cart("index-faults");
+    project.measure(&[]);
+    let older = project.latest();
+    project.measure(&[]);
+    let commands: &[&[&str]] = &[
+        &["runs", "latest"],
+        &["runs", "latest", "--json"],
+        &["runs", "latest", "gaps"],
+        &["runs", "latest", "gaps", "--json"],
+        &["runs", "latest", "file", "src/cart.js", "--json"],
+        &["runs", "latest", "line", "src/cart.js:1", "--json"],
+        &["runs", "latest", "tests", "--json"],
+        &["runs", "latest", "scope", "--json"],
+        &["runs", "latest", "summary", "--json"],
+        &["runs", "--json"],
+        &["runs", "patch", "--json"],
+        &["runs", "check", "--json"],
+        &["runs", "check", "--lines", "100", "--json"],
+        &["diff", &older, "latest", "--json"],
+        &["diff", &older, "latest"],
+        &["report", "--no-open"],
+    ];
+    for fault in ["coverage-index", "reply-too-large"] {
+        let mut reached = 0;
+        for command in commands {
+            let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", fault)]);
+            let said = format!("{}{}", ran.stdout(), ran.stderr());
+            assert!(!said.contains("panicked at"), "{fault} {command:?}: {said}");
+            reached += usize::from(said.contains(&format!("test fault at {fault}")));
+        }
+        assert!(
+            reached * 2 > commands.len(),
+            "{fault} reached {reached} commands"
+        );
+    }
+}

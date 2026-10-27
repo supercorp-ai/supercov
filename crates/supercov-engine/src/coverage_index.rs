@@ -2539,6 +2539,11 @@ impl<'a> CoverageIndex<'a> {
     }
 
     pub fn new(index: &'a QueryIndex) -> Result<Self, CoverageIndexError> {
+        // A test fault refuses every index, so each command's answer to one
+        // it cannot read runs under test.
+        if crate::fault::injected("coverage-index") {
+            return Err(CoverageIndexError::InvalidRecord("record size"));
+        }
         for (kind, size) in [
             (SECTION_STRINGS, STRING_RECORD_SIZE),
             (SECTION_VIEW_SUMMARIES, SUMMARY_RECORD_SIZE),
