@@ -2855,6 +2855,10 @@ mod tests {
             ["tracing", "unused"]
         );
         assert_eq!(enabled("worker-build --all-features").len(), features.len());
+        // No command at all builds the defaults; one that turns them off and
+        // names none builds nothing.
+        assert_eq!(enabled(""), ["audit", "default", "tracing"]);
+        assert!(enabled("--no-default-features").is_empty());
     }
 
     /// Only a package whose wrangler configuration builds with worker-build
