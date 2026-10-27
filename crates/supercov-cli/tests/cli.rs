@@ -12417,6 +12417,45 @@ fn a_doctest_stand_in_missing_what_it_needs_says_so() {
     }
 }
 
+/// Supercov as nextest's target runner refuses what it was not given: no
+/// root, target and binary; no plan; a target the plan does not name; and a
+/// start without nextest's identity, wrapping the runner the user set or not.
+#[test]
+fn the_nextest_runner_missing_what_it_needs_says_so() {
+    let project = Project::empty("nextest-runner");
+    let root = project.root.to_str().unwrap();
+    let missing = project.root.join("missing");
+    let missing = missing.to_str().unwrap();
+    let ran = project.supercov(&["__nextest-runner"]);
+    assert_eq!(ran.code(), 2);
+    assert!(
+        ran.stderr()
+            .contains("needs an evidence root, a target and a binary"),
+        "{}",
+        ran.stderr()
+    );
+    let ran = project.supercov(&["__nextest-runner", root, "x86_64", missing]);
+    assert_eq!(ran.code(), 2, "{}", ran.stderr());
+    project.write(
+        "runner-plan.json",
+        r#"{"token":"t","targets":[{"target":"wasm32","underlying":{"program":"/bin/echo","arguments":["wrapped"]}}]}"#,
+    );
+    let ran = project.supercov(&["__nextest-runner", root, "x86_64", missing]);
+    assert!(
+        ran.stderr()
+            .contains("invoked for an unplanned target: x86_64"),
+        "{}",
+        ran.stderr()
+    );
+    let ran = project.supercov(&["__nextest-runner", root, "wasm32", missing]);
+    assert_eq!(ran.code(), 2);
+    assert!(
+        ran.stderr().contains("without nextest's identity"),
+        "{}",
+        ran.stderr()
+    );
+}
+
 /// Each query, run once for every file operation it makes with that one
 /// failing (`SUPERCOV_TEST_FAULT=fs@N`): it may refuse, but says why and never
 /// panics, and the run its fault no longer reaches answers as usual.
