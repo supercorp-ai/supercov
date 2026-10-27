@@ -1942,6 +1942,47 @@ pub fn shapes(p: &Point, n: u32, text: &str, pair: (u8, u8)) -> Option<u32> {
         }
     }
 
+    /// A source missing any one character -- a node the parser leaves
+    /// empty in the middle of a file, not only at its end -- is read
+    /// without a panic.
+    #[test]
+    fn a_source_missing_any_one_character_is_read_without_a_panic() {
+        let source = r#"pub struct Point { pub x: i32, pub y: i32 }
+pub struct Pair(u8, u8);
+pub enum Mode { On, Off }
+impl Point {
+    pub fn new(x: i32) -> Self { let made = Self { x, y: 0 }; made }
+    pub fn mode(&self) -> Mode { if self.x > 0 { Mode::On } else { Mode::Off } }
+    pub fn flipped(&self) -> Point { Point { x: self.y, y: self.x } }
+}
+fn parse(text: &str) -> Result<u32, String> { text.parse().map_err(|_| String::new()) }
+pub fn shapes(p: &Point, n: u32, text: &str) -> Option<u32> {
+    let a = (n);
+    let b = parse(text)?;
+    let c = Some(Box::new(n));
+    let d = p.flipped().mode();
+    let e = { n + 1 };
+    let f = Point { x: 1, y: 2 };
+    let g = |v: u32| -> u32 { v + 1 };
+    let h = Pair(1, 2);
+    let i = if n > 1 { 3u32 } else if n > 0 { 4 } else { 5 };
+    let j = Point::new(3);
+    let k = 1.5f32;
+    let l = Vec::<u8>::new();
+    Some(a + b)
+}
+"#;
+        for (cut, character) in source.char_indices() {
+            let edited = format!(
+                "{}{}",
+                &source[..cut],
+                &source[cut + character.len_utf8()..]
+            );
+            let signatures = signatures([("src/lib.rs", edited.as_str())].into_iter());
+            let _ = replacements("src/lib.rs", &edited, &signatures);
+        }
+    }
+
     #[test]
     fn a_value_is_replaced_by_a_different_one_of_its_type() {
         assert_eq!(replacement("false", Some("bool")), "true");
