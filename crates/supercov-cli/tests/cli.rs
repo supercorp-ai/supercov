@@ -3392,6 +3392,11 @@ fn the_html_report_says_what_it_could_not_embed() {
         .supercov(&["report", "--no-open", "--output", "reports"])
         .succeeds();
     report_data(&project.read("reports/supercov-report.html"));
+    // A run to compare with that is not stored is named.
+    let missing = project
+        .supercov(&["report", "--no-open", "--compare", "run_0000000000000009"])
+        .exits(2);
+    assert!(missing.contains("run_0000000000000009"), "{missing}");
 
     // A run that left nothing uncovered has no file to detail.
     let whole = Project::empty("html-whole");

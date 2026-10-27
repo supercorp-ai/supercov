@@ -1341,6 +1341,18 @@ mod tests {
         );
         let (sources, omitted) = collect_quality_sources(Path::new("."), &json!([]));
         assert!(sources.is_empty() && omitted.is_empty());
+        // A path outside the project and one that is not there are left out
+        // by name; an entry without a path or digest is not even named.
+        let (sources, omitted) = collect_quality_sources(
+            Path::new("."),
+            &json!([
+                {"path": "../outside.js", "sha256": "x"},
+                {"path": "no-such-file.js", "sha256": "x"},
+                {"path": "a.js"},
+            ]),
+        );
+        assert!(sources.is_empty());
+        assert_eq!(omitted, ["../outside.js", "no-such-file.js"]);
     }
 
     #[test]
