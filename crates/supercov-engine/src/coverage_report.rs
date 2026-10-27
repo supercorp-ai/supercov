@@ -1857,8 +1857,9 @@ pub fn create_coverage_view(
 /// A file a frontend could not measure at all carries one limitation that
 /// says so (`"wholeFile": true`): a Rust Worker no test's `wrangler dev`
 /// ran. Its obligations leave the covered/uncovered denominator, as declined
-/// ones do, and its scope entry is left out with the limitation's reason, so
-/// the file reads as not measured rather than as code the tests missed. The
+/// ones do, its scope entry is left out with the limitation's reason, and
+/// the note blocks the run's measurement, so the file reads as not measured
+/// rather than as code the tests missed. The
 /// manifest keeps the note alone: runs that measured the file and runs that
 /// could not have one denominator, and merge.
 fn whole_files_unmeasured(manifest: &CoverageManifest) -> Option<CoverageManifest> {
@@ -1917,11 +1918,19 @@ fn whole_files_unmeasured(manifest: &CoverageManifest) -> Option<CoverageManifes
             ),
     );
     manifest.unmeasured = unmeasured.into_iter().collect();
-    manifest.limitations.retain(|limitation| {
-        limitation
-            .get("file")
-            .and_then(Value::as_str)
-            .is_none_or(|file| !reasons.contains_key(file))
+    // The file's own limitations say nothing once none of it is counted;
+    // its note stays, as a limitation that blocks: the file could have been
+    // measured and was not, so the run's measurement is not complete.
+    manifest.limitations.retain_mut(|limitation| {
+        let whole = limitation.get("wholeFile").and_then(Value::as_bool) == Some(true);
+        if whole {
+            limitation["blocking"] = Value::Bool(true);
+        }
+        whole
+            || limitation
+                .get("file")
+                .and_then(Value::as_str)
+                .is_none_or(|file| !reasons.contains_key(file))
     });
     if let Some(entries) = manifest
         .scope
@@ -3964,8 +3973,9 @@ mod tests {
     }
 
     /// A file noted as not measured at all leaves the totals whole -- its
-    /// statements, decisions and branch outcomes -- and its scope entry says
-    /// why, listed or not; the files beside it are as they were.
+    /// statements, decisions and branch outcomes -- its scope entry says why,
+    /// listed or not, and its note blocks the run's measurement; the files
+    /// beside it are as they were.
     #[test]
     fn a_file_noted_as_unmeasured_leaves_the_totals_and_says_why() {
         let point = |id: &str, file: &str| PointMeta {
@@ -4032,7 +4042,12 @@ mod tests {
             assert_eq!(view.summary.decisions, 0);
             assert_eq!(view.summary.branches.total, 0);
             assert!(view.summary.unmeasured_obligations.unwrap() >= 3);
-            assert!(view.limitations.is_empty(), "{:?}", view.limitations);
+            // Of the file's limitations only its note stays, and blocks: the
+            // run's measurement is not complete.
+            assert_eq!(view.limitations.len(), 1, "{:?}", view.limitations);
+            assert_eq!(view.limitations[0]["wholeFile"], true);
+            assert!(blocking_limitation(&view.limitations[0]));
+            assert!(!view.summary.coverage_complete);
             let entries = view.scope.unwrap()["entries"].clone();
             let entry = |file: &str| {
                 entries

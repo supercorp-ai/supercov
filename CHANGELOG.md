@@ -13,6 +13,15 @@
 - A `--json` page cut to fit one reply could still be refused as too large: the note saying where the rest starts was added after the page was fitted. The page is fitted with its note.
 - A container time from the Docker daemon with anything but digits after its seconds made the Docker relay panic while reading it; it is read as no time.
 - A test command that could not start says whether there is no such program or it may not be run, before the system's own words, and exits `127` or `126` by that on every platform rather than by the message's wording; a step of Supercov's own that the system refused no longer reads as a file that may not be run.
+- A Kotlin file with a class body on one line (`class C { val x = 1 }`), two members on one line, or a line starting with an identifier that begins with a keyword (`set_value = ...`) was read as not parsing and left unmeasured; Supercov now builds the Kotlin grammar itself with upstream's unreleased fixes for these. A file ending inside an annotation could stop the run for good; it now ends.
+- Kotlin files using context parameters, `when` guards, multi-dollar strings, `suspend { }`, `fun interface`, `actual constructor`, annotated accessors, and two dozen other constructs were read as not parsing and left unmeasured. Supercov now keeps its own copy of the grammar and checks it against every Kotlin file of six real projects (Exposed, kotlinx.coroutines, ktor, moshi, Now in Android, OkHttp): 165 of their 5,429 files were left unmeasured, now 3, two of them templates that are not Kotlin.
+
+## 4.20.3
+
+**Fixed**
+
+- `runs <run> files` and `gaps` listed a file the run left out, such as a Worker no test ran or a module no build compiled, as covered; they say it is not measured, and why.
+- `scope` and the run's summary called a run complete whose Worker no test ran; that Worker leaves the run's measurement incomplete, as `runs check` already judged it.
 
 ## 4.20.2
 

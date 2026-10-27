@@ -66,7 +66,7 @@ jobs:
     # ubuntu-latest is now, and has no browser builds for it: the minimum leg
     # runs on the last Ubuntu it supports, the current one on the latest.
     runs-on: ${{ matrix.name == 'minimum' && 'ubuntu-24.04' || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -101,8 +101,19 @@ jobs:
         run: |
           npm pkg delete 'devDependencies.@vitest/browser-playwright' 'devDependencies.@vitest/coverage-v8'
           npm install --no-save "@playwright/test@$PLAYWRIGHT_VERSION" "vite@$VITE_VERSION" "vitest@$VITEST_VERSION"
-      # The fixture matrix drives Chromium, Firefox and WebKit.
-      - run: npx playwright install --with-deps
+      # The fixture matrix drives Chromium, Firefox and WebKit. An apt mirror
+      # that slows to a package every few seconds held this step until the
+      # job's limit twice on 2026-10-26; each attempt is bounded and the next
+      # starts over, which reaches a mirror at its usual pace.
+      - name: Install the browsers and what they need
+        run: |
+          for attempt in 1 2 3; do
+            timeout 8m npx playwright install --with-deps && exit 0
+            echo "attempt $attempt did not finish; trying again"
+            # An apt stopped part way leaves dpkg to finish first.
+            sudo dpkg --configure -a || true
+          done
+          exit 1
       - run: npm run test:fixture
         timeout-minutes: 10
       # A failure here ends this commit's other runs too: no waiting on them.
