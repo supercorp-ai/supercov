@@ -1323,7 +1323,8 @@ fn apply_transport(
                     name,
                     line_number,
                 )?;
-                for (id, v, o) in vectors {
+                // An empty record is passed over above.
+                vectors.into_iter().try_for_each(|(id, v, o)| {
                     let (values, outcome) = decision_vector(&v, o).map_err(invalid)?;
                     if let Some(before) = before.as_mut() {
                         before
@@ -1337,7 +1338,8 @@ fn apply_transport(
                         .entry(id)
                         .or_default()
                         .insert((values, outcome));
-                }
+                    Ok::<_, PythonEvidenceError>(())
+                })?;
             }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
@@ -1724,7 +1726,8 @@ pub fn build_python_server_run(
 ) -> Result<PythonFrontendRun, PythonEvidenceError> {
     let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
     let mut by_attempt = BTreeMap::new();
-    for test in served {
+    // The caller publishes no server run when no browser test reported.
+    served.iter().for_each(|test| {
         let key = (test.worker.clone(), test.test_id.clone(), test.retry);
         let outcome = match test.status.as_str() {
             "passed" => "passed",
@@ -1740,7 +1743,7 @@ pub fn build_python_server_run(
             .runners
             .insert(key.clone(), test.provenance.runner.clone());
         by_attempt.insert(key, test);
-    }
+    });
     let by_time = credit_requests_by_time(&mut evidence, |evidence, transport, at, _| {
         crate::served_tests::owner(served, evidence.served_by.get(transport), at)
             .map(|test| (test.worker.clone(), test.test_id.clone(), test.retry))
@@ -1753,7 +1756,8 @@ pub fn build_python_server_run(
         test_exit_code,
         root,
     )?;
-    for raw in &mut run.request.raw_results {
+    // A run with no test outcome is refused before this.
+    run.request.raw_results.iter_mut().for_each(|raw| {
         let Some(test) = raw.scope.as_ref().and_then(|scope| {
             by_attempt.get(&(
                 scope.worker_id.clone(),
@@ -1761,7 +1765,7 @@ pub fn build_python_server_run(
                 raw.retry.unwrap_or(0),
             ))
         }) else {
-            continue;
+            return;
         };
         raw.test = test.name.clone();
         raw.title = Some(test.title.clone());
@@ -1772,7 +1776,7 @@ pub fn build_python_server_run(
         if by_time.contains(&(test.worker.clone(), test.test_id.clone(), test.retry)) {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
     run.tests = run
         .request
         .raw_results
@@ -1786,8 +1790,9 @@ pub fn build_python_server_run(
 
 /// Say of each attempt credited with a request by time that it was.
 fn mark_by_time(run: &mut PythonFrontendRun, by_time: &BTreeSet<(String, String, usize)>) {
-    for raw in &mut run.request.raw_results {
-        let Some(scope) = &raw.scope else { continue };
+    // `build_from_evidence` refuses a run with no test outcome.
+    run.request.raw_results.iter_mut().for_each(|raw| {
+        let Some(scope) = &raw.scope else { return };
         let key = (
             scope.worker_id.clone(),
             scope.test_id.clone(),
@@ -1797,7 +1802,7 @@ fn mark_by_time(run: &mut PythonFrontendRun, by_time: &BTreeSet<(String, String,
         if by_time.contains(&key) {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
 }
 
 /// Give each request that named no test to the test attempt `owner` names
@@ -2400,6 +2405,15 @@ pub(crate) mod tests {
         frontend_protocol::validate_frontend_report_request,
         python_instrumenter::build_python_obligations,
     };
+
+    /// An attempt reported more than once keeps its worst outcome: a
+    /// failure over a skip, a skip over a pass.
+    #[test]
+    fn outcomes_are_ranked_failure_skip_pass() {
+        assert!(outcome_severity("error") > outcome_severity("skipped"));
+        assert!(outcome_severity("skipped") > outcome_severity("passed"));
+        assert_eq!(outcome_severity("rerun"), outcome_severity("failed"));
+    }
 
     // A request that named no test is the test's that was running when it
     // came, if only one was: among those its process answered a request of,
@@ -4232,6 +4246,7 @@ pub(crate) mod tests {
         assert!(read(&unknown).contains("notes.txt"), "{}", read(&unknown));
         for (label, marker) in [
             ("no-size", "/name".to_owned()),
+            ("bad-size", "/name big".to_owned()),
             ("long-name", format!("/{} 64", "a".repeat(40))),
             ("no-slash", "name 64".to_owned()),
             ("bad-char", "/na-me 64".to_owned()),
