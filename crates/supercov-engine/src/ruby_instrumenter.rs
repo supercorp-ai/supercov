@@ -2513,13 +2513,13 @@ impl<'a> Collector<'a> {
                 .is_some_and(|else_node| self.arm_jump_exposed(else_node.statements()));
         }
         if let Some(parentheses) = node.as_parentheses_node() {
-            return match parentheses.body() {
-                Some(body) => match body.as_statements_node() {
-                    Some(statements) => self.arm_jump_exposed(Some(statements)),
-                    None => self.jump_exposed(&body),
-                },
-                None => false,
-            };
+            // Prism gives parentheses statements, or nothing: `(begin; end)`
+            // holds a statement that is a `begin`.
+            return self.arm_jump_exposed(
+                parentheses
+                    .body()
+                    .and_then(|body| body.as_statements_node()),
+            );
         }
         false
     }
@@ -2607,11 +2607,8 @@ impl<'a> Collector<'a> {
         }
         // `jump_exposed` holds only for a jump or the constructs above, or
         // for parentheses: nothing else reaches this point.
-        let body = node.as_parentheses_node()?.body()?;
-        match body.as_statements_node() {
-            Some(statements) => self.arm_targets(Some(statements)),
-            None => self.probe_targets(body),
-        }
+        // Parentheses hold statements (see `jump_exposed`).
+        self.arm_targets(node.as_parentheses_node()?.body()?.as_statements_node())
     }
 
     fn arm_targets<'n>(&self, statements: Option<StatementsNode<'n>>) -> Option<Vec<Node<'n>>> {
@@ -3655,6 +3652,7 @@ mod tests {
             "def g2(x)\n  y = begin\n    x\n  ensure\n    x\n  end\n  y\nend\ndef g3(x)\n  begin\n    x\n  ensure\n    x\n  end\nend\n",
             "def g4(x)\n  v = case x\n      when 1 then return 1\n      end\n  w = case x\n      in 1 then return 2\n      end\n  [v, w]\nend\n",
             "def g5(x)\n  if x\n    1\n  elsif x.nil?\n    2\n  elsif x == 0\n    3\n  end\nend\n",
+            "def g7(x)\n  if false\n    1\n  elsif x\n    2\n  end\nend\n",
             "def g6(xs)\n  xs.each { |x| break }\n  xs.each { |x| next }\n  xs.each do |x|\n    begin\n      next\n    rescue StandardError\n      nil\n    ensure\n      x\n    end\n  end\nend\n",
         ];
         for source in shapes {
@@ -4716,6 +4714,33 @@ end
         assert_eq!(collector.manifest.branches.len(), branches);
         assert_eq!(collector.manifest.decisions.len(), decisions);
         assert!(branches >= 8, "{branches}");
+    }
+
+    /// An edit at a node key's very edge moves it by its rank: a closer at
+    /// the start ends what came before, and an opener at the end begins what
+    /// comes after; neither is part of the node.
+    #[test]
+    fn an_edit_at_a_node_keys_edge_moves_it_by_its_rank() {
+        let source = b"abc def\n";
+        let mut next = 0;
+        let collector = Collector::new("lib/t.rb", source, &mut next);
+        let span = PlanSpan {
+            start: [1, 0],
+            end: [1, 3],
+        };
+        let edit = |offset, rank| PendingEdit {
+            offset,
+            rank,
+            order: 0,
+            sequence: 0,
+            text: "XX".into(),
+            scope: 5,
+        };
+        // Before the end all the same, so the end moves past it.
+        let closer = collector.shifted(span, KeyKind::Node, &[edit(0, EditRank::Closer)]);
+        assert_eq!((closer.start, closer.end), ([1, 0], [1, 5]));
+        let opener = collector.shifted(span, KeyKind::Node, &[edit(3, EditRank::Opener)]);
+        assert_eq!(opener, span);
     }
 
     #[test]
