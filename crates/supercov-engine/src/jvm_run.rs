@@ -510,6 +510,11 @@ fn platform_of_jupiter(text: &str) -> Option<String> {
 /// pom looks unversioned, and the launcher added for it disagreed with the
 /// engine the build actually resolved: JUnit refused to discover a single test.
 fn maven_effective(directory: &Path, pom: &str) -> String {
+    maven_effective_in(directory, pom, local_repository().as_deref())
+}
+
+/// [`maven_effective`], reading parents missing on disk from `repository`.
+fn maven_effective_in(directory: &Path, pom: &str, repository: Option<&Path>) -> String {
     let mut chain = vec![pom.to_owned()];
     let mut here = directory.to_path_buf();
     let mut current = pom.to_owned();
@@ -530,16 +535,16 @@ fn maven_effective(directory: &Path, pom: &str) -> String {
         let local = fs::read_to_string(&on_disk)
             .ok()
             .filter(|text| xml_block(text, "artifactId").is_some_and(|a| a.trim() == artifact));
-        let (text, next) = match local {
-            Some(text) => (text, on_disk.parent().map(Path::to_path_buf)),
-            None => match local_repository().map(|repo| {
+        let (text, found) = match local {
+            Some(text) => (text, on_disk),
+            None => match repository.map(|repo| {
                 repo.join(group.replace('.', "/"))
                     .join(&artifact)
                     .join(&version)
                     .join(format!("{artifact}-{version}.pom"))
             }) {
                 Some(path) => match fs::read_to_string(&path) {
-                    Ok(text) => (text, path.parent().map(Path::to_path_buf)),
+                    Ok(text) => (text, path),
                     Err(_) => break,
                 },
                 None => break,
@@ -547,26 +552,23 @@ fn maven_effective(directory: &Path, pom: &str) -> String {
         };
         chain.push(text.clone());
         current = text;
-        match next {
-            Some(next) => here = next,
-            None => break,
-        }
+        // A file's directory: the parent's own `relativePath` is from there.
+        here = found.parent().unwrap_or(&here).to_path_buf();
     }
     let mut properties = BTreeMap::new();
-    for text in &chain {
+    // The pom and each parent read, the nearest first.
+    chain.iter().for_each(|text| {
         if let Some(block) = xml_block(text, "properties") {
             for (name, value) in xml_children(&block) {
                 properties.entry(name).or_insert(value);
             }
         }
-        for (name, value) in [("project.version", xml_block(text, "version"))] {
-            if let Some(value) = value {
-                properties
-                    .entry(name.to_owned())
-                    .or_insert(value.trim().to_owned());
-            }
+        if let Some(value) = xml_block(text, "version") {
+            properties
+                .entry("project.version".to_owned())
+                .or_insert(value.trim().to_owned());
         }
-    }
+    });
     let mut out = chain.join("\n");
     for _ in 0..3 {
         for (name, value) in &properties {
@@ -3063,6 +3065,41 @@ mod tests {
             maven_launcher_version(&module, child).as_deref(),
             Some(DEFAULT_LAUNCHER_VERSION)
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A parent missing on disk is read from the local repository, its
+    /// properties filling the child's; a repository that lacks it, no
+    /// repository at all, or a parent naming no version, ends the chain.
+    #[test]
+    fn a_parent_missing_on_disk_is_read_from_the_local_repository() {
+        let root = temporary_root("parent-repository");
+        let repository = root.join("repository");
+        write(
+            &repository.join("org/example/base/1/base-1.pom"),
+            "<project><artifactId>base</artifactId><version>1</version><properties><junit.version>5.11.0</junit.version><empty></empty></properties></project>",
+        )
+        .unwrap();
+        let child = "<project><parent><groupId>org.example</groupId><artifactId>base</artifactId><version>1</version></parent><dependency>${junit.version}</dependency></project>";
+        let effective = maven_effective_in(&root, child, Some(&repository));
+        assert!(
+            effective.contains("<dependency>5.11.0</dependency>"),
+            "{effective}"
+        );
+        let other = child.replace("<version>1</version>", "<version>2</version>");
+        for read in [
+            maven_effective_in(&root, &other, Some(&repository)),
+            maven_effective_in(&root, child, None),
+            maven_effective_in(
+                &root,
+                &child.replace("<version>1</version>", ""),
+                Some(&repository),
+            ),
+        ] {
+            assert!(read.contains("${junit.version}"), "{read}");
+        }
+        assert_eq!(xml_block("<a>open", "a"), None);
+        assert!(xml_children("").is_empty());
         fs::remove_dir_all(&root).ok();
     }
 
