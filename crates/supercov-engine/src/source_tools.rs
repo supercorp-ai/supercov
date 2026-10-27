@@ -173,6 +173,15 @@ pub fn write_launcher(path: &Path, text: &str) -> io::Result<()> {
 /// own, which is how a workspace package's dependencies are laid out: for
 /// each source tool the project's `.bin` at `tools` has, in place of the
 /// entry the copy at `to` has for it.
+/// A directory's entries in name order: what a walk does is the same on
+/// every file system, whatever order it lists them in.
+#[track_caller]
+fn sorted_entries(directory: &Path) -> io::Result<Vec<fs::DirEntry>> {
+    let mut entries = fs::read_dir(directory)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    Ok(entries)
+}
+
 pub fn place_launchers(tools: &Path, to: &Path) -> io::Result<()> {
     let judges = source_tools();
     let (Some(binary), Ok(entries)) = (launching_binary(), fs::read_dir(tools)) else {
@@ -389,8 +398,7 @@ fn refresh_directory(
     state: &mut View,
 ) -> io::Result<()> {
     let mut present = BTreeSet::new();
-    for entry in fs::read_dir(workspace.join(local))? {
-        let entry = entry?;
+    for entry in sorted_entries(&workspace.join(local))? {
         let name = entry.file_name();
         if name == ".supercov" {
             continue;
@@ -430,8 +438,7 @@ fn refresh_directory(
         remove(&view.join(BOUNDARY))?;
         fs::create_dir(view.join(BOUNDARY))?;
     }
-    for entry in fs::read_dir(view.join(local))? {
-        let entry = entry?;
+    for entry in sorted_entries(&view.join(local))? {
         let kept =
             present.contains(&entry.file_name()) || (boundary && entry.file_name() == BOUNDARY);
         if !kept {
@@ -481,8 +488,7 @@ fn reconcile_directory(
     local: &Path,
     state: &View,
 ) -> io::Result<()> {
-    for entry in fs::read_dir(view.join(local))? {
-        let entry = entry?;
+    for entry in sorted_entries(&view.join(local))? {
         let path = local.join(entry.file_name());
         let (from, to) = (view.join(&path), workspace.join(&path));
         let file_type = fs::file_type(&entry)?;
@@ -665,8 +671,7 @@ fn apply_directory(
     local: &Path,
     changes: &mut SourceChanges,
 ) -> io::Result<()> {
-    for entry in fs::read_dir(directory.join(local))? {
-        let entry = entry?;
+    for entry in sorted_entries(&directory.join(local))? {
         let path = local.join(entry.file_name());
         if fs::file_type(&entry)?.is_dir() {
             apply_directory(root, workspace, directory, &path, changes)?;
@@ -717,9 +722,9 @@ mod tests {
             // Laid out, then what a tool did in it brought back.
             ("view", "fs.symlink_metadata@1"),
             ("view", "fs.metadata@1"),
-            ("view", "fs.symlink_metadata@5"),
+            ("view", "fs.symlink_metadata@3"),
             ("view", "fs.read@2"),
-            ("view", "fs.symlink_metadata@11"),
+            ("view", "fs.symlink_metadata@9"),
             ("view", "fs.write@1"),
             ("view", "fs.create_dir_all@1"),
             ("view", "fs.read_dir@1"),
