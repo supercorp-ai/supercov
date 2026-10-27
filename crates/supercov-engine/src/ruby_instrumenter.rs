@@ -3631,6 +3631,15 @@ mod tests {
             // Predicates Ruby folds, and parentheses that hold nothing, two
             // statements or parentheses.
             "def f1(x, y)\n  return 1 if 1 and 2\n  return 2 if false or nil\n  return 3 if ()\n  return 4 if (x; y)\n  return 5 if ((x))\n  6\nend\n",
+            // Nothing at all, an empty body, a `begin` with an `ensure` and
+            // no rescue, values whose `case` has no `else`, a longer `elsif`
+            // chain, and jumps that carry no value.
+            "",
+            "def g1; end\n",
+            "def g2(x)\n  y = begin\n    x\n  ensure\n    x\n  end\n  y\nend\ndef g3(x)\n  begin\n    x\n  ensure\n    x\n  end\nend\n",
+            "def g4(x)\n  v = case x\n      when 1 then return 1\n      end\n  w = case x\n      in 1 then return 2\n      end\n  [v, w]\nend\n",
+            "def g5(x)\n  if x\n    1\n  elsif x.nil?\n    2\n  elsif x == 0\n    3\n  end\nend\n",
+            "def g6(xs)\n  xs.each { |x| break }\n  xs.each { |x| next }\n  xs.each do |x|\n    begin\n      next\n    rescue StandardError\n      nil\n    ensure\n      x\n    end\n  end\nend\n",
         ];
         for source in shapes {
             let mut next = 0;
