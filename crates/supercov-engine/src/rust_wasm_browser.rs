@@ -770,6 +770,9 @@ mod tests {
                     }
                     ("POST", "/session") => (200, json!({"value": {"sessionId": "s1"}})),
                     ("POST", "/session/s1/execute/sync") => (200, regions.clone()),
+                    // Regions refused, sent as no JSON, or none at all.
+                    ("POST", "/session/s3/execute/sync") => (500, json!({"value": null})),
+                    ("POST", "/session/s4/execute/sync") => (200, json!("{")),
                     ("GET", "/status") => (500, json!({"value": "down"})),
                     _ => (200, json!({"value": null})),
                 };
@@ -838,6 +841,21 @@ mod tests {
                 "DELETE /session/other/deeper",
             ]
         );
+        // A session whose regions cannot be read still closes, writing none.
+        for id in ["s3", "s4", "s5"] {
+            assert_eq!(ask("DELETE", &format!("/session/{id}"), "").0, 200);
+        }
+        // A path outside the relay's, or naming an evidence directory that is
+        // no text, is not passed on; hex cut short drops its last digit.
+        let raw = |path: &str| {
+            let mut client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+            write!(client, "GET {path} HTTP/1.1\r\nContent-Length: 0\r\n\r\n").unwrap();
+            let (stream, _) = proxy.accept().unwrap();
+            relay(stream, address, token)
+        };
+        assert!(raw("/status").is_none());
+        assert!(raw("/e/ff/status").is_none());
+        assert!(raw("/e/616/status").is_some());
         let written = std::fs::read_dir(&evidence)
             .unwrap()
             .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
