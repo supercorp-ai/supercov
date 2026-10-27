@@ -1488,6 +1488,23 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A target table that is not one, and a key that only begins like a
+    /// cfg, set no runner.
+    #[test]
+    fn target_tables_of_odd_shapes_set_no_runner() {
+        let root = fixture();
+        for config in [
+            "target = 1\n",
+            "[target.'cfg(unix']\nrustflags = [\"-x\"]\n",
+        ] {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            let plan =
+                resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs()).unwrap();
+            assert_eq!(plan.targets[0].underlying_runner, None, "{config}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn resolves_exact_array_runner_and_relocates_workspace_program() {
         let root = fixture();
