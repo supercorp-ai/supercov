@@ -5577,6 +5577,23 @@ pub fn documented(value: i32) -> i32 {
         }
     }
 
+    /// A match of no arm -- on a type with no value -- has no arm to
+    /// record.
+    #[test]
+    fn a_match_of_no_arm_records_no_arm() {
+        let source = "enum Never {}\nfn f(x: Never) -> u8 { match x {} }\n";
+        let tree = SourceFile::parse(source, Edition::Edition2024).tree();
+        let manifest = RustObligationCollector::new("src/lib.rs", source)
+            .collect(&tree, &[], &[])
+            .unwrap();
+        assert!(
+            manifest
+                .branches
+                .iter()
+                .all(|branch| branch.kind != "match-arm")
+        );
+    }
+
     #[test]
     fn a_collector_given_a_tree_of_other_text_reports_an_invalid_range() {
         let tree = SourceFile::parse("fn f() { work(); }", Edition::Edition2024).tree();
