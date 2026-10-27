@@ -1301,5 +1301,4 @@ mod tests {
         assert!(!root.join("src/new.js").exists());
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
-
 }

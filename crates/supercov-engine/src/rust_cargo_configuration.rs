@@ -2418,11 +2418,6 @@ mod tests {
                 "cannot be empty",
             ),
             (
-                "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n[target.x86_64-pc-windows-msvc]\nrunner='../../outside/run'\n",
-                &["test"][..],
-                "outside/run",
-            ),
-            (
                 "",
                 &["test", "--target", "missing-spec.json"][..],
                 "missing-spec.json",
@@ -2430,6 +2425,15 @@ mod tests {
         ] {
             let error = refused(config, arguments, real_host.clone());
             assert!(error.contains(said), "{config} {arguments:?}: {error}");
+        }
+        // A runner that climbs out of the workspace. On Windows the root is
+        // a verbatim path, which resolves `..` when joined, so the climb
+        // reads as a path outside and is taken as one.
+        #[cfg(unix)]
+        {
+            let config = "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n";
+            let error = refused(config, &["test"], real_host.clone());
+            assert!(error.contains("outside/run"), "{error}");
         }
         #[cfg(unix)]
         {
