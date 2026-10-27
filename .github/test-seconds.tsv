@@ -2119,6 +2119,7 @@ tests::the_timings_line_reports_publication_and_the_whole_command	0.0	0.0
 tests::validates_exact_and_explicitly_degraded_frontends	0.0	0.0
 tests_affected_and_assertions_name_a_mistake_and_estimate_a_change	0.6	0.6
 tests_affected_lists_files_names_and_why_and_says_when_it_cannot_narrow	0.7	0.7
+tests_affected_names_the_record_it_cannot_read	6.0	8.0
 tests_affected_narrows_to_the_tests_a_filter_picks	4.2	2.2
 tests_affected_on_a_merge_counts_a_test_both_parents_ran_once	1.4	1.2
 tests_affected_reads_each_kind_of_change_and_refuses_on_stderr	0.8	0.7

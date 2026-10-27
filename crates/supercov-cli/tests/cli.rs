@@ -13675,6 +13675,72 @@ fn a_run_whose_source_record_cannot_be_read_back_is_refused() {
     }
 }
 
+/// `tests affected` answers from what a run recorded. A run without its
+/// per-test record, or without its source record, is refused, saying so;
+/// a merged run is answered by its parts, and refused when it no longer
+/// names them or one of them cannot answer.
+#[test]
+fn tests_affected_names_the_record_it_cannot_read() {
+    let affected = |project: &Project, run: &str| {
+        let ran = project.supercov(&["runs", run, "tests", "affected"]);
+        assert_ne!(ran.code(), 0, "{}", ran.stderr());
+        ran.stderr()
+    };
+
+    let project = Project::cart("affected-no-record");
+    let run = project.measure(&[]);
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&run)
+            .join("test-executions.json"),
+    )
+    .unwrap();
+    let said = affected(&project, &run);
+    assert!(said.contains("no per-test execution record"), "{said}");
+
+    let project = Project::cart("affected-no-sources");
+    let run = project.measure(&[]);
+    rewrite_evidence(&project, |entries| {
+        entries.retain(|entry| entry.path != "source-inputs.json");
+    });
+    let said = affected(&project, &run);
+    assert!(said.contains("no source manifest"), "{said}");
+
+    let merged = |label: &str| {
+        let project = Project::cart(label);
+        let first = project.measure(&["--test-name-pattern=total"]);
+        let second = project.measure(&["--test-name-pattern=shipping"]);
+        project.supercov(&["merge", &first, &second]).succeeds();
+        let listed = project.supercov(&["runs", "--limit", "1", "--json"]).json();
+        let merged = listed["data"]["runs"][0]["id"].as_str().unwrap().to_owned();
+        (project, first, merged)
+    };
+    let (project, first, run) = merged("affected-merge-part");
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&first)
+            .join("test-executions.json"),
+    )
+    .unwrap();
+    let said = affected(&project, &run);
+    assert!(said.contains("no per-test execution record"), "{said}");
+
+    let (project, _, run) = merged("affected-merge-unnamed");
+    let record = format!(".supercov/runs/{run}/run.json");
+    let mut metadata: serde_json::Value = serde_json::from_str(&project.read(&record)).unwrap();
+    metadata.as_object_mut().unwrap().remove("parents");
+    project.write(&record, &metadata.to_string());
+    let said = affected(&project, &run);
+    assert!(
+        said.contains("does not say which runs it was merged from"),
+        "{said}"
+    );
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
