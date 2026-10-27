@@ -375,14 +375,14 @@ fn runner_configuration_arguments(
     root: &Path,
     plan: &RunnerPlan,
 ) -> Result<Vec<String>, RustTestRunnerError> {
-    let json = |value: &str| serde_json::to_string(value).map_err(RustTestRunnerError::Json);
+    let json = |value: &str| serde_json::Value::from(value).to_string();
     let program = json(program.to_str().ok_or_else(|| {
         RustTestRunnerError::Context("the Supercov executable path is not UTF-8".into())
-    })?)?;
+    })?);
     let root = json(root.to_str().ok_or_else(|| {
         RustTestRunnerError::Context("the nextest evidence root is not UTF-8".into())
-    })?)?;
-    let marker = json(RUNNER_MODE_ARGUMENT)?;
+    })?);
+    let marker = json(RUNNER_MODE_ARGUMENT);
     let mut arguments = Vec::with_capacity(plan.targets.len() * 2);
     let mut seen = BTreeSet::new();
     for target in &plan.targets {
@@ -392,7 +392,7 @@ fn runner_configuration_arguments(
                 target.target
             )));
         }
-        let triple = json(&target.target)?;
+        let triple = json(&target.target);
         arguments.push("--config".into());
         arguments.push(format!(
             "target.{triple}.runner=[{program},{marker},{root},{triple}]"
@@ -627,19 +627,18 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
 /// creating its marker exclusively.
 fn claim_sequence(directory: &Path) -> Result<usize, RustTestRunnerError> {
     fs::create_dir_all(directory).map_err(io_error)?;
-    for candidate in 0..1_000_000_usize {
-        match fs::open_with(
-            fs::OpenOptions::new().write(true).create_new(true),
-            directory.join(format!("{candidate:08}.claim")),
-        ) {
-            Ok(_) => return Ok(candidate),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io_error(error)),
-        }
-    }
-    Err(RustTestRunnerError::Io(
-        "too many nextest attempt claims".into(),
-    ))
+    (0_usize..)
+        .find_map(|candidate| {
+            match fs::open_with(
+                fs::OpenOptions::new().write(true).create_new(true),
+                directory.join(format!("{candidate:08}.claim")),
+            ) {
+                Ok(_) => Some(Ok(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(io_error(error))),
+            }
+        })
+        .expect("claims are tried until one is made or fails")
 }
 
 /// The child's exit code as nextest should see it: the code itself, or the
@@ -696,11 +695,8 @@ pub(crate) fn cargo_metadata_arguments(
         "--format-version=1".into(),
         "--no-deps".into(),
     ]);
-    let command_width = match invocation.kind {
-        crate::rust_test_runner::RustCargoCommandKind::CargoTest => 1,
-        crate::rust_test_runner::RustCargoCommandKind::NextestRun => 2,
-    };
-    let mut index = command + command_width;
+    // Past `nextest run`: only a nextest run asks for its metadata.
+    let mut index = command + 2;
     while index < invocation.arguments.len() {
         let argument = &invocation.arguments[index];
         let name = argument
@@ -952,6 +948,18 @@ mod tests {
         assert!(
             runner_configuration_arguments(Path::new("/s"), Path::new("/r"), &duplicated).is_err()
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let unreadable = Path::new(std::ffi::OsStr::from_bytes(b"/\xff"));
+            let error = |program: &Path, root: &Path| {
+                runner_configuration_arguments(program, root, &plan)
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(error(unreadable, Path::new("/r")).contains("executable path is not UTF-8"));
+            assert!(error(Path::new("/s"), unreadable).contains("evidence root is not UTF-8"));
+        }
     }
 
     #[test]
