@@ -1029,12 +1029,15 @@ fn keep_directives_first(source: &str, output: &mut crate::js_instrumenter::Cand
     let lines = output.code.split('\n').collect::<Vec<_>>();
     let mut moved = Vec::new();
     let mut from = 0;
-    for directive in &directives {
-        let Some(index) = lines[from..].iter().position(|line| line == directive) else {
-            return;
-        };
+    // Each directive, in order, where the instrumented code has it.
+    let found = directives.iter().try_for_each(|directive| {
+        let index = lines[from..].iter().position(|line| line == directive)?;
         moved.push(from + index);
         from += index + 1;
+        Some(())
+    });
+    if found.is_none() {
+        return;
     }
     if moved
         .iter()
