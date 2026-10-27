@@ -91,6 +91,7 @@ a_long_decision_is_shortened_in_its_file_and_whole_on_its_own	0.9	0.9
 a_loop_condition_that_narrows_a_type_is_left_alone	25.6	20.0
 a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reached	13.4	15.1
 a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers	284.8	882.5
+a_maven_run_whose_program_cannot_start_says_so_and_recovers	40.0	120.0
 a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file	1.4	1.4
 a_measured_suite_reads_back_through_every_query	2.3	1.2
 a_merge_of_two_kinds_pages_and_narrows_by_kind	2.4	1.4

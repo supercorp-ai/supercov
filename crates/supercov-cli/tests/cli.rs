@@ -13945,6 +13945,27 @@ fn a_skipped_python_or_ruby_test_is_counted_skipped() {
     }
 }
 
+/// A Maven run, once for every place it starts a program, with that start
+/// failing.
+#[test]
+fn a_maven_run_whose_program_cannot_start_says_so_and_recovers() {
+    let maven = std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !maven {
+        return;
+    }
+    let reached = fail_each_place_at(
+        "spawn",
+        "spawn-faults-mvn",
+        small_maven_project,
+        &["--", "mvn", "-q", "test"],
+        0,
+    );
+    assert!(reached > 0, "{reached}");
+}
+
 /// A Python test whose process ends during it reported no outcome, but what
 /// it ran was recorded: the test is in the run, failed, credited with that.
 #[test]
