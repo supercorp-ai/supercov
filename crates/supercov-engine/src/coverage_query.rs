@@ -2042,23 +2042,14 @@ fn needed(
     use crate::coverage_analysis::{McdcVector, find_witnesses_for_conditions};
     let condition = sources.get(index).copied().unwrap_or("the condition");
     let describe = |vector: &McdcVector| {
-        let mut values = String::new();
-        let mut words = Vec::new();
-        for (position, value) in vector.values.iter().enumerate() {
-            values.push(match value {
-                None => '-',
-                Some(false) => 'F',
-                Some(true) => 'T',
-            });
-            if let (Some(value), Some(source)) = (value, sources.get(position)) {
-                words.push(format!("`{source}` {value}"));
-            }
-        }
-        words.push(format!("decision {}", vector.outcome));
-        (
-            format!("{values} -> {}", if vector.outcome { 'T' } else { 'F' }),
-            words.join(", "),
-        )
+        let words = vector
+            .values
+            .iter()
+            .zip(sources)
+            .filter_map(|(value, source)| value.map(|value| format!("`{source}` {value}")))
+            .chain([format!("decision {}", vector.outcome)])
+            .collect::<Vec<_>>();
+        (vector_text(vector), words.join(", "))
     };
     let Some(possible) = crate::decision_shape::possible_vectors(decision, sources) else {
         // A decision whose source is not conditions and operators: what to
@@ -2109,22 +2100,30 @@ fn needed(
     }
     // No run alone does it: no test evaluated the condition, so both of a
     // pair are needed.
-    for (position, first) in unseen.iter().enumerate() {
-        for second in &unseen[position + 1..] {
-            if shows(&[first, second]).is_some() {
-                let (first_values, first_words) = describe(first);
-                let (second_values, second_words) = describe(second);
-                return (
-                    Some(format!("{first_values} and {second_values}")),
-                    format!("{first_words}; and {second_words}"),
-                );
-            }
+    let pair = unseen
+        .iter()
+        .enumerate()
+        .flat_map(|(position, first)| {
+            unseen[position + 1..]
+                .iter()
+                .map(move |second| (first, second))
+        })
+        .find(|(first, second)| shows(&[first, second]).is_some());
+    match pair {
+        Some((first, second)) => {
+            let (first_values, first_words) = describe(first);
+            let (second_values, second_words) = describe(second);
+            (
+                Some(format!("{first_values} and {second_values}")),
+                format!("{first_words}; and {second_words}"),
+            )
         }
+        // Only for a condition the decision's source does not name.
+        None => (
+            None,
+            format!("`{condition}` cannot decide the result on its own"),
+        ),
     }
-    (
-        None,
-        format!("`{condition}` cannot decide the result on its own"),
-    )
 }
 
 fn vector_text(vector: &crate::coverage_analysis::McdcVector) -> String {
@@ -4649,6 +4648,24 @@ mod tests {
         let (values, words) = needed(1, &observed, &["a", "b"], "pick(a, b)");
         assert_eq!(values, None);
         assert_eq!(words, "no test evaluated `b`");
+        // A condition past those the source names decides nothing.
+        let (values, words) = needed(2, &observed, &["a", "b"], "a || b");
+        assert_eq!(values, None);
+        assert_eq!(words, "`the condition` cannot decide the result on its own");
+        // A condition seen both ways that never decided alone, one never
+        // false, and one never evaluated.
+        assert_eq!(
+            missing_outcome_words("a", &[]),
+            "`a` was seen both ways but never deciding the result alone"
+        );
+        assert_eq!(
+            missing_outcome_words("a", &["false".into()]),
+            "`a` was never false"
+        );
+        assert_eq!(
+            missing_outcome_words("a", &["true".into(), "false".into()]),
+            "`a` was never evaluated"
+        );
     }
 
     #[test]
