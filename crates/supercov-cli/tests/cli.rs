@@ -13307,7 +13307,9 @@ fn python_project(project: &Project) {
         );
 }
 
-/// A Ruby project of one test, run by minitest.
+/// A Ruby project of one test, run by minitest. Ruby runs are measured on
+/// Unix only, so every use is too.
+#[cfg(unix)]
 fn ruby_project(project: &Project) {
     project.write(
         "lib/w.rb",
