@@ -13062,6 +13062,13 @@ export function shapes(n: number): unknown {
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
+        // `y` decides two selections on its way up: both points are hit
+        // where evaluation goes on to `z`.
+        let deep = value_shape(
+            "export function two(a: number, b: number) {\n  return a && b;\n}\nexport function deep(w: number, x: number, y: number, z: number) {\n  return (w && (x && y)) && z;\n}\n",
+            "src/deep.ts",
+        );
+        assert!(deep.contains("&& (HIT(19), HIT(15), s1 = 3, z)"), "{deep}");
     }
 
     #[test]

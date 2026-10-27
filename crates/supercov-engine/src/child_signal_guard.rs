@@ -424,6 +424,32 @@ mod tests {
         assert!(output_streamed(&mut Command::new("/no/such/program"), |_| true).is_err());
     }
 
+    /// Past its deadline a child that ignores SIGTERM is killed once the
+    /// grace runs out, and no other command starts until the next deadline.
+    #[test]
+    fn a_deadline_kills_what_ignores_it_and_starts_nothing_after() {
+        let started = Instant::now();
+        let deadline =
+            Deadline::start(Some(Duration::from_millis(200)), Duration::from_millis(200));
+        let stubborn =
+            output(Command::new("sh").args(["-c", "trap '' TERM; exec sleep 30"])).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(stubborn.status.code(), None, "killed by a signal");
+        assert!(deadline_passed());
+        assert_eq!(deadline.passed(), Some(200));
+        let refused = output(&mut Command::new("true")).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::TimedOut);
+        drop(deadline);
+        // The next run starts with no deadline passed.
+        let _none = Deadline::start(None, Duration::ZERO);
+        assert!(!deadline_passed());
+        assert!(output(&mut Command::new("true")).is_ok());
+    }
+
     fn sleeper() -> Child {
         Command::new("sleep")
             .arg("30")
