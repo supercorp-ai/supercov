@@ -687,12 +687,12 @@ pub fn query_indexed(
         );
         // Each location once, in the order asked; `--offset` skips the
         // locations a reply before this one answered.
-        let mut locations = Vec::new();
-        for location in std::iter::once(first).chain(request.more_lines.iter().cloned()) {
+        let mut locations = vec![first];
+        request.more_lines.iter().cloned().for_each(|location| {
             if !locations.contains(&location) {
                 locations.push(location);
             }
-        }
+        });
         let total = locations.len();
         let mut lines = Vec::new();
         let mut pages = Vec::new();

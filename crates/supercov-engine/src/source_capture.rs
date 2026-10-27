@@ -159,6 +159,31 @@ mod tests {
         );
     }
 
+    /// Nothing named is nothing captured; a file that is not UTF-8 or no
+    /// longer there is left out; a root that is gone is an error, and so is
+    /// reading the run's files back under it.
+    #[test]
+    fn what_cannot_be_captured_is_left_out_or_refused() {
+        let (_base, root) = project("left-out");
+        assert!(
+            capture(&root, "javascript", Vec::<PathBuf>::new())
+                .unwrap()
+                .files
+                .is_empty()
+        );
+        fs::write(root.join("src/binary.js"), [0xff, 0xfe]).unwrap();
+        let captured = capture(
+            &root,
+            "javascript",
+            ["src/a.js", "src/binary.js", "src/gone.js"].map(PathBuf::from),
+        )
+        .unwrap();
+        assert_eq!(captured.files.keys().collect::<Vec<_>>(), ["src/a.js"]);
+        let gone = root.join("gone");
+        assert!(capture(&gone, "javascript", [PathBuf::from("src/a.js")]).is_err());
+        assert!(current_sources(&gone, &captured.manifest()).is_err());
+    }
+
     #[test]
     fn source_inputs_are_archived_once() {
         let (_base, root) = project("archived");
