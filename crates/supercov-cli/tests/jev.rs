@@ -5150,7 +5150,8 @@ fn a_run_with_no_statement_to_assess_asks_nothing() {
 fn a_jev_command_whose_file_operation_fails_says_so_and_recovers() {
     let (base, _seen) = gateway(MODEL, answer_yes);
     let jev = through(&base);
-    let commands: [&[&str]; 9] = [
+    let commands: [&[&str]; 10] = [
+        &["security", "patch"],
         &["quality", "--dry-run"],
         &["quality"],
         &["quality", "src/cart.js"],
@@ -5216,4 +5217,62 @@ fn a_windowed_review_with_refused_requests_reports_what_was_answered() {
         "{report}"
     );
     assert!(seen.lock().unwrap().len() > 10);
+}
+
+/// An answer cut off part way is named, not read as an answer.
+#[test]
+fn an_answer_cut_off_part_way_is_named() {
+    let project = Project::cart("jev-cut");
+    let (base, _seen) = gateway_with(MODEL, answer_yes, |_| Some((200, "cut")));
+    let ran = project.supercov_with(&["quality", "src/cart.js"], &through(&base));
+    let said = format!("{}{}", ran.stdout(), ran.stderr());
+    assert!(
+        said.contains("failed to read the response from 127.0.0.1"),
+        "{said}"
+    );
+}
+
+/// Each way a handler can import what reaches a sink: a named default
+/// export, an anonymous one, every export of a module, a module with no sink
+/// and a module that is not there; and a file that only imports.
+#[test]
+fn security_follows_each_kind_of_import() {
+    let project = Project::empty("security-imports");
+    project.write("package.json", r#"{"name":"orders","type":"module"}"#);
+    project.write(
+        "src/handler.js",
+        "import save from \"./save.js\";\nimport * as store from \"./store.js\";\nimport remove from \"./remove.js\";\nimport { nothing } from \"./plain.js\";\nimport missing from \"./missing.js\";\n\nexport function handler(req, db) {\n  save(db, req.body.name);\n  store.findOrders(db, req.query.id);\n  remove(db, req.params.id);\n  missing(req);\n  return nothing();\n}\n",
+    );
+    project.write(
+        "src/save.js",
+        "export default function findOrders(db, name) {\n  return db.query(\"INSERT \" + name);\n}\n",
+    );
+    project.write(
+        "src/remove.js",
+        "export default function (db, id) {\n  return db.query(\"DELETE \" + id);\n}\n",
+    );
+    project.write(
+        "src/store.js",
+        "export function findOrders(db, id) {\n  return db.query(\"UPDATE \" + id);\n}\n",
+    );
+    project.write(
+        "src/plain.js",
+        "export function nothing() {\n  return 1;\n}\n",
+    );
+    project.write(
+        "src/only.js",
+        "import { findOrders } from \"./store.js\";\nexport { findOrders };\n",
+    );
+    let (base, _seen) = gateway(MODEL, answer_taint);
+    let report = project
+        .supercov_with(&["security", "src/"], &through(&base))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "Cross-file paths confirmed",
+            "src/handler.js:8 handler -> src/save.js:1 findOrders",
+            "src/handler.js:9 handler -> src/store.js:1 findOrders",
+        ],
+    );
 }

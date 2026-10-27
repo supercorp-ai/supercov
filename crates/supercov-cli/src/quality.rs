@@ -1159,15 +1159,16 @@ fn discover_for(
                     }
                 }
             }
-            let walker = builder.build();
-            for entry in walker {
+            // The walk yields at least the directory it starts from.
+            builder.build().try_for_each(|entry| {
                 let entry = entry.map_err(|e| e.to_string())?;
                 if entry.file_type().is_some_and(|t| t.is_file())
                     && is_assessable(&inside(entry.path()), instrument)
                 {
                     files.insert(entry.into_path());
                 }
-            }
+                Ok::<_, String>(())
+            })?;
         } else {
             return Err(format!(
                 "not a regular file or directory: {}",
@@ -4142,7 +4143,7 @@ fn present(view: Value, json: bool) -> Result<bool, String> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&view).map_err(|e| e.to_string())?
+            serde_json::to_string_pretty(&view).expect("a JSON value serializes")
         );
     } else {
         print!("{}", query::render(&view));
@@ -4267,7 +4268,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 if options.json || options.dry_run {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                        serde_json::to_string_pretty(&report).expect("a JSON value serializes")
                     );
                 } else {
                     if instrument.scores() {
@@ -4330,7 +4331,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                        serde_json::to_string_pretty(&report).expect("a JSON value serializes")
                     );
                 } else {
                     print!("{}", human_patch(&report, limit));

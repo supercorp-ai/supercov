@@ -3544,3 +3544,57 @@ fn running_as_root() -> bool {
         .output()
         .is_ok_and(|output| output.stdout.starts_with(b"0"))
 }
+
+/// The renderers read a saved report as it is: one with nothing in it, one
+/// whose entries lack what a newer report carries, and one with more than a
+/// page shows, each rendered without failing.
+#[test]
+fn reports_render_whatever_they_hold() {
+    let empty = serde_json::json!({});
+    let bare = serde_json::json!({
+        "files": [{}, {"path": "src/a.js"}, {"path": "src/b.js", "present": []}],
+        "paths": [], "counts": {}, "not_asked": []
+    });
+    let finding = |check: &str| serde_json::json!({"check": check, "value": 0.9, "lines": []});
+    let full = serde_json::json!({
+        "health": 4.0,
+        "counts": {"assessed": 2, "flagged": 2, "line_confirmed": 1},
+        "by_check": {"injection_sink": 2},
+        "run": "run_1",
+        "files": [
+            {"path": "src/a.js", "status": "failed", "error": "HTTP 400", "present": [finding("injection_sink")]},
+            {"path": "src/b.js", "present": [finding("a"), finding("b"), finding("c"), finding("d")],
+             "assertions": {"lines_credited": 0}, "flagged_and_unasserted": true, "unchecked_lines": 2},
+            {"path": "src/c.js", "present": [finding("e")], "assertions": {"lines_credited": 1}}
+        ],
+        "paths": [{"value": 0.9, "check": "injection_sink",
+                   "caller": {"file": "a.js", "line": 1, "function": "f"},
+                   "callee": {"file": "b.js", "line": 2, "function": "g"}}],
+        "not_asked": [{"reason": "three per function",
+                       "caller": {"file": "a.js", "line": 1, "function": "f"},
+                       "callee": {"file": "b.js", "line": 2, "function": "g"}}]
+    });
+    for report in [&empty, &bare, &full] {
+        human_quality(report);
+        human_security(report);
+        annotations(report);
+        for limit in [0, 1] {
+            human_patch(report, limit);
+        }
+    }
+    let security = human_security(&full);
+    assert!(
+        security.contains("2 line(s) not checked one by one"),
+        "{security}"
+    );
+    assert!(
+        security.contains("Cross-file paths confirmed: 1"),
+        "{security}"
+    );
+    assert!(annotations(&full).contains("src/b.js"));
+    assert!(top_findings(&[]).is_empty());
+    assert_eq!(
+        top_findings(&[finding("a"), finding("b"), finding("c"), finding("d")]),
+        "a 0.90, b 0.90, c 0.90, +1 more"
+    );
+}
