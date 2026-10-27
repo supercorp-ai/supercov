@@ -486,6 +486,25 @@ router.get('/x/:id', async (req, res) => {{
         assert!(nodes(Path::new("b.js"), "function (").is_err());
     }
 
+    /// A route given no handler, and an import or require naming nothing,
+    /// add nothing.
+    #[test]
+    fn a_route_without_a_handler_and_an_empty_import_add_nothing() {
+        let source = "import {} from './a'\nconst {} = require('./b')\napp.get('/x')\n";
+        assert!(
+            !nodes(Path::new("a.js"), source)
+                .unwrap()
+                .iter()
+                .any(|node| node.kind == NodeKind::Handler)
+        );
+        assert!(
+            structure(Path::new("a.js"), source)
+                .unwrap()
+                .imports
+                .is_empty()
+        );
+    }
+
     #[test]
     fn a_secret_is_a_prefix_a_long_run_or_a_password_word() {
         assert!(secretish(FAKE_KEY));
