@@ -13591,12 +13591,95 @@ fn an_import_whose_step_fails_says_so() {
     }
 }
 
+/// The latest run's evidence archive, its entries changed by `change` and
+/// written back as a store damaged on disk would hold it, with the length
+/// its record names: a mismatched one is not listed at all.
+fn rewrite_evidence(
+    project: &Project,
+    change: impl FnOnce(&mut Vec<supercov_engine::evidence_archive::EvidenceArchiveEntry>),
+) {
+    use supercov_engine::evidence_archive::{read_archive, write_archive};
+    let listed = project.supercov(&["runs", "--limit", "1", "--json"]).json();
+    let run = listed["data"]["runs"][0]["id"].as_str().unwrap();
+    let archive = project
+        .root
+        .join(".supercov/runs")
+        .join(run)
+        .join("evidence.raw.gz");
+    let mut entries = read_archive(&archive).unwrap();
+    change(&mut entries);
+    let written = write_archive(entries, &archive).unwrap();
+    let record = format!(".supercov/runs/{run}/run.json");
+    let mut metadata: serde_json::Value = serde_json::from_str(&project.read(&record)).unwrap();
+    metadata["rawEvidence"]["compressedBytes"] = written.compressed_bytes.into();
+    project.write(&record, &metadata.to_string());
+}
+
+/// A run's source record read back for a query: absent, of another schema,
+/// not a record, naming a file it cannot hold, or with statement exclusions
+/// that are not a list. Each is refused, saying why.
+#[test]
+fn a_run_whose_source_record_cannot_be_read_back_is_refused() {
+    type Change = fn(&mut serde_json::Value);
+    let cases: [(Option<Change>, &str); 5] = [
+        (None, "This run has no source manifest"),
+        (
+            Some(|manifest| manifest["schemaVersion"] = 99.into()),
+            "Unsupported source manifest schema",
+        ),
+        (
+            Some(|manifest| manifest["files"] = "none".into()),
+            "invalid type",
+        ),
+        (
+            Some(|manifest| {
+                let files = manifest["files"].as_object_mut().unwrap();
+                let (_, file) = files.iter_mut().next().unwrap();
+                file["sha256"] = "short".into();
+            }),
+            "Invalid source manifest",
+        ),
+        (Some(|_| {}), "invalid type"),
+    ];
+    for (number, (change, said)) in cases.into_iter().enumerate() {
+        let project = Project::cart("source-record");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        rewrite_evidence(&project, |entries| {
+            let at = entries
+                .iter()
+                .position(|entry| entry.path == "source-inputs.json")
+                .expect("the run keeps its source record");
+            match change {
+                None => {
+                    entries.remove(at);
+                }
+                Some(change) => {
+                    let mut manifest: serde_json::Value =
+                        serde_json::from_slice(&entries[at].contents).unwrap();
+                    change(&mut manifest);
+                    entries[at].contents = serde_json::to_vec(&manifest).unwrap();
+                }
+            }
+            // The last case keeps the record and garbles its exclusions.
+            if number == 4 {
+                entries.retain(|entry| entry.path != "statement-exclusions.json");
+                entries.push(supercov_engine::evidence_archive::EvidenceArchiveEntry {
+                    path: "statement-exclusions.json".into(),
+                    contents: b"{}".to_vec(),
+                });
+            }
+        });
+        let ran = project.supercov(&["runs", "latest", "source", "src/cart.js"]);
+        assert_ne!(ran.code(), 0, "{said}: {}", ran.stderr());
+        assert!(ran.stderr().contains(said), "{said}: {}", ran.stderr());
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
 #[test]
 fn an_import_reads_what_the_run_stored() {
-    use supercov_engine::evidence_archive::{read_archive, write_archive};
     for (entry, said) in [
         ("manifest.json", "its manifest is invalid"),
         ("frontend.json", "its frontend declaration is invalid"),
@@ -13604,31 +13687,10 @@ fn an_import_reads_what_the_run_stored() {
     ] {
         let project = Project::cart("import-stored");
         project.supercov(&["--", "node", "--test"]).succeeds();
-        let listed = project.supercov(&["runs", "--limit", "1", "--json"]).json();
-        let run = listed["data"]["runs"][0]["id"].as_str().unwrap();
-        let archive = project
-            .root
-            .join(".supercov/runs")
-            .join(run)
-            .join("evidence.raw.gz");
-        let entries = read_archive(&archive)
-            .unwrap()
-            .into_iter()
-            .map(|mut stored| {
-                if stored.path == entry {
-                    stored.contents = b"{".to_vec();
-                }
-                stored
-            })
-            .collect::<Vec<_>>();
-        assert!(entries.iter().any(|stored| stored.path == entry), "{entry}");
-        let written = write_archive(entries, &archive).unwrap();
-        // The record names the archive's length; a rewritten one would
-        // not be listed at all.
-        let record = format!(".supercov/runs/{run}/run.json");
-        let mut metadata: serde_json::Value = serde_json::from_str(&project.read(&record)).unwrap();
-        metadata["rawEvidence"]["compressedBytes"] = written.compressed_bytes.into();
-        project.write(&record, &metadata.to_string());
+        rewrite_evidence(&project, |entries| {
+            let stored = entries.iter_mut().find(|stored| stored.path == entry);
+            stored.expect("the run keeps the entry").contents = b"{".to_vec();
+        });
         project.write("lcov.info", "TN:\nSF:src/cart.js\nDA:2,1\nend_of_record\n");
         let ran = project.supercov(&["import", "lcov.info", "--test", "device"]);
         assert_eq!(ran.code(), 2, "{entry}: {}", ran.stderr());
