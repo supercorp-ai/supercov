@@ -14234,6 +14234,54 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
     assert!(refused);
 }
 
+/// `runs <run> source` refuses a run that is not stored, no file, an offset
+/// that is no number and a word it does not know, and says when its reply
+/// cannot fit; `runs check` refuses a floor too large to read.
+#[test]
+fn source_and_check_refuse_what_they_cannot_read() {
+    let project = Project::cart("source-check-refusals");
+    project.measure(&[]);
+    for (arguments, said) in [
+        (
+            &["runs", "run_0000000000000009", "source", "src/cart.js"][..],
+            "run_0000000000000009",
+        ),
+        (&["runs", "latest", "source"][..], "source"),
+        (
+            &["runs", "latest", "source", "src/cart.js", "--offset", "x"][..],
+            "Invalid --offset",
+        ),
+        (
+            &["runs", "latest", "source", "src/cart.js", "--wat"][..],
+            "Unexpected argument: --wat",
+        ),
+    ] {
+        let ran = project.supercov(arguments);
+        let text = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_ne!(ran.code(), 0, "{arguments:?}: {text}");
+        assert!(text.contains(said), "{arguments:?}: {text}");
+    }
+    let large = project.supercov_with(
+        &["runs", "latest", "source", "src/cart.js", "--json"],
+        &[("SUPERCOV_TEST_FAULT", "reply-too-large")],
+    );
+    assert_eq!(large.code(), 2, "{}", large.stdout());
+    assert!(
+        large.stdout().contains("RESPONSE_TOO_LARGE"),
+        "{}",
+        large.stdout()
+    );
+    let huge = project.supercov(&[
+        "runs",
+        "latest",
+        "check",
+        "--min-lines",
+        "99999999999999999999",
+    ]);
+    let text = format!("{}{}", huge.stdout(), huge.stderr());
+    assert!(text.contains("is too large"), "{text}");
+}
+
 /// A line asked about after its file was cut short is past its end; after
 /// the file was removed, it is answered from the run, with no source.
 #[test]
