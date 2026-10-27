@@ -2194,6 +2194,16 @@ func classify(a int, b bool) string {
         assert_eq!(stand_in_for_new_values(""), None);
         assert_eq!(closing_parenthesis(b"(", 1), None);
         assert!(!in_function_body(parse("package p\n").unwrap().root_node()));
+        // A constant holds no call, so its logical value is no decision.
+        let constant = "package p\n\nconst c = true && false\n";
+        let obligations =
+            build_go_obligations("m.go", constant, &mut next, &mut decisions).expect("go");
+        assert!(
+            obligations
+                .edits
+                .iter()
+                .all(|edit| !edit.text.contains(".CV("))
+        );
     }
 
     #[test]
