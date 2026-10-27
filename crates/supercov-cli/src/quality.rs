@@ -3222,15 +3222,15 @@ fn run_health(
             let health =
                 catalog::health(values).expect("a validated answer has every file question");
             weighted.push((answer.bytes, health));
-            // Every ancestor directory, so a tree can be read at any depth.
-            let mut directory = Path::new(&answer.path).parent();
-            while let Some(current) = directory {
+            // Every ancestor directory, so a tree can be read at any depth:
+            // a file at the top has the root, `""`.
+            let ancestors = std::iter::successors(Path::new(&answer.path).parent(), |d| d.parent());
+            ancestors.for_each(|directory| {
                 by_directory
-                    .entry(current.to_string_lossy().replace('\\', "/"))
+                    .entry(directory.to_string_lossy().replace('\\', "/"))
                     .or_default()
                     .push((answer.bytes, health));
-                directory = current.parent();
-            }
+            });
         }
         let mut record = scored(answer, instrument);
         if let Some(handlers) = handlers_by_file.get(&answer.path) {
@@ -3777,7 +3777,9 @@ fn human_security(report: &Value) -> String {
             out.push_str(&format!(
                 "    {credited} of its lines are asserted (a test is judged to catch a change to them)\n"
             ));
-            for finding in file["present"].as_array().unwrap_or(&empty) {
+            // A flagged file: it has findings.
+            let present = file["present"].as_array().unwrap_or(&empty);
+            present.iter().for_each(|finding| {
                 for line in finding["lines"].as_array().unwrap_or(&empty) {
                     if line["asserted"] == true {
                         out.push_str(&format!(
@@ -3786,7 +3788,7 @@ fn human_security(report: &Value) -> String {
                         ));
                     }
                 }
-            }
+            });
         }
     }
     if flagged as usize > shown.len() {

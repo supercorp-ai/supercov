@@ -3564,7 +3564,8 @@ fn reports_render_whatever_they_hold() {
             {"path": "src/a.js", "status": "failed", "error": "HTTP 400", "present": [finding("injection_sink")]},
             {"path": "src/b.js", "present": [finding("a"), finding("b"), finding("c"), finding("d")],
              "assertions": {"lines_credited": 0}, "flagged_and_unasserted": true, "unchecked_lines": 2},
-            {"path": "src/c.js", "present": [finding("e")], "assertions": {"lines_credited": 1}}
+            {"path": "src/c.js", "present": [finding("e")], "assertions": {"lines_credited": 1}},
+            {"path": "src/clean.js", "present": []}
         ],
         "paths": [{"value": 0.9, "check": "injection_sink",
                    "caller": {"file": "a.js", "line": 1, "function": "f"},
