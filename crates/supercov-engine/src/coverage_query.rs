@@ -2933,14 +2933,10 @@ pub fn coverage_diff_query(
     }
     // Each run picks its own tests; a filter neither run has a test for is
     // refused, and one only a run has compares that run with nothing.
-    let select = |index: &CoverageIndex<'_>| match selected_test_ids(
-        &index.test_summaries(options.view)?,
-        options.kind,
-        options.runner,
-    ) {
-        Ok(selected) => Ok(Some(selected)),
-        Err(QueryError::TestFilterEmpty { .. }) => Ok(None),
-        Err(error) => Err(error),
+    // A filter that names no test is the one thing selecting refuses.
+    let select = |index: &CoverageIndex<'_>| {
+        let tests = index.test_summaries(options.view)?;
+        Ok::<_, QueryError>(selected_test_ids(&tests, options.kind, options.runner).ok())
     };
     let (older_selected, newer_selected) = (select(older)?, select(newer)?);
     if older_selected.is_none() && newer_selected.is_none() {
@@ -5614,6 +5610,29 @@ mod tests {
             summary(Some("unit"), Some("playwright")),
             Err(QueryError::TestFilterEmpty { .. })
         ));
+
+        // The tests together, under a kind filter, are the kind's tests.
+        let (together, _) = coverage_dimension_query(
+            &index,
+            CoverageDimensionQueryOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                dimension: CoverageDimension::Tests,
+                filters: CoverageQueryFilters {
+                    outcome: "all".into(),
+                    kind: Some("e2e".into()),
+                    runner: None,
+                },
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        let CoverageDimensionQueryData::Kinds(together) = together else {
+            panic!("{together:?}");
+        };
+        assert_eq!(together.kinds.len(), 1, "{:?}", together.kinds);
+        assert_eq!(together.kinds[0].tests, 1);
 
         let without = |kind, runner| {
             tests_without_evidence_query(
