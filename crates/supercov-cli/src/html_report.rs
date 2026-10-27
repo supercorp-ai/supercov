@@ -341,10 +341,8 @@ fn collect_sources(
             omitted.push(file.file.clone());
             continue;
         };
-        let Ok(length) = usize::try_from(metadata.len()) else {
-            omitted.push(file.file.clone());
-            continue;
-        };
+        // A length no usize holds is beyond any limit below.
+        let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         if !metadata.is_file()
             || length > MAX_SOURCE_BYTES
             || total.saturating_add(length) > MAX_TOTAL_SOURCE_BYTES
@@ -653,10 +651,7 @@ fn collect_quality_sources(
             omit(&mut omitted);
             continue;
         };
-        let Ok(length) = usize::try_from(metadata.len()) else {
-            omit(&mut omitted);
-            continue;
-        };
+        let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         if !metadata.is_file()
             || length > MAX_SOURCE_BYTES
             || total.saturating_add(length) > MAX_TOTAL_SOURCE_BYTES
@@ -1191,6 +1186,41 @@ mod tests {
         let (sources, omitted) = collect_quality_sources(&root, &assessed);
         assert_eq!(sources.len(), 16);
         assert_eq!(omitted, ["f16.js"]);
+        // An entry that names no path or digest is no source; one outside the
+        // root, absent, a directory, unreadable as text or changed since the
+        // assessment is named as left out.
+        fs::create_dir_all(root.join("directory")).unwrap();
+        fs::write(root.join("binary.js"), [0xff, 0xfe]).unwrap();
+        let assessed = serde_json::json!([
+            {"path": "f0.js"},
+            {"path": "../outside.js", "sha256": sha256},
+            {"path": "absent.js", "sha256": sha256},
+            {"path": "directory", "sha256": sha256},
+            {"path": "binary.js", "sha256": sha256},
+            {"path": "f0.js", "sha256": "changed"},
+        ]);
+        let (sources, omitted) = collect_quality_sources(&root, &assessed);
+        assert!(sources.is_empty());
+        assert_eq!(
+            omitted,
+            [
+                "../outside.js",
+                "absent.js",
+                "directory",
+                "binary.js",
+                "f0.js"
+            ]
+        );
+        let gaps = ["../outside.js", "absent.js"]
+            .map(|name| IndexedFileGap {
+                file: name.to_owned(),
+                ..gaps[0].clone()
+            })
+            .to_vec();
+        assert_eq!(
+            collect_sources(&root, &gaps, true).1,
+            ["../outside.js", "absent.js"]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
