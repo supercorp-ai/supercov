@@ -488,13 +488,7 @@ impl<'a> PythonObligationCollector<'a> {
     ) -> Option<ConditionTree> {
         let (operand, not) = Self::strip_not(expr);
         if let Expr::BoolOp(boolean) = operand {
-            let mut items = Vec::with_capacity(boolean.values.len());
-            let mut groups = Vec::with_capacity(boolean.values.len());
-            for value in &boolean.values {
-                let first = leaves.len();
-                items.push(self.tree(value, leaves, boolops)?);
-                groups.push((first..leaves.len()).collect());
-            }
+            let (items, groups) = self.trees(&boolean.values, leaves, boolops)?;
             boolops.push((boolean.range, groups));
             return Some(ConditionTree::Node {
                 op: match boolean.op {
@@ -508,6 +502,23 @@ impl<'a> PythonObligationCollector<'a> {
         let span = self.span(operand.range())?;
         leaves.push(ConditionPlan { span, not });
         Some(ConditionTree::Leaf(leaves.len() - 1))
+    }
+
+    /// The trees of a BoolOp's operands, each with the leaves it added.
+    fn trees(
+        &mut self,
+        values: &[Expr],
+        leaves: &mut Vec<ConditionPlan>,
+        boolops: &mut Vec<(TextRange, Vec<Vec<usize>>)>,
+    ) -> Option<(Vec<ConditionTree>, Vec<Vec<usize>>)> {
+        values
+            .iter()
+            .map(|value| {
+                let first = leaves.len();
+                let item = self.tree(value, leaves, boolops)?;
+                Some((item, (first..leaves.len()).collect()))
+            })
+            .collect()
     }
 
     fn decision(&mut self, test: &Expr, kind: &str) {
@@ -541,8 +552,7 @@ impl<'a> PythonObligationCollector<'a> {
         let mut boolops = Vec::new();
         build(self, &mut leaves, &mut boolops)?;
         let tree = boolops.clone();
-        let mut conditions = Vec::with_capacity(leaves.len());
-        for leaf in &leaves {
+        let conditions = leaves.iter().map(|leaf| {
             let leaf_range = TextRange::new(
                 self.locations.line_starts[leaf.span.start[0] - 1]
                     .saturating_add(leaf.span.start[1])
@@ -553,17 +563,20 @@ impl<'a> PythonObligationCollector<'a> {
                     .try_into()
                     .unwrap_or_default(),
             );
-            match self.locations.text(leaf_range) {
-                Ok(text) => conditions.push(if leaf.not % 2 == 1 {
+            self.locations.text(leaf_range).map(|text| {
+                if leaf.not % 2 == 1 {
                     format!("not {text}")
                 } else {
                     text
-                }),
-                Err(error) => {
-                    return self.fail(error);
                 }
+            })
+        });
+        let conditions = match conditions.collect::<Result<Vec<_>, _>>() {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                return self.fail(error);
             }
-        }
+        };
         for (boolop_range, groups) in boolops {
             let (start, end) = match self.locations.range(boolop_range) {
                 Ok(bounds) => bounds,
@@ -640,12 +653,7 @@ impl<'a> PythonObligationCollector<'a> {
                         true,
                         Heads::default(),
                         |this, leaves, boolops| {
-                            let mut groups = Vec::with_capacity(left.len());
-                            for value in left {
-                                let first = leaves.len();
-                                this.tree(value, leaves, boolops)?;
-                                groups.push((first..leaves.len()).collect());
-                            }
+                            let (_, groups) = this.trees(left, leaves, boolops)?;
                             boolops.push((range, groups.clone()));
                             regrouped = groups;
                             Some(())
@@ -822,80 +830,82 @@ impl<'a> PythonObligationCollector<'a> {
             BoolOp::Or => "or",
         };
         let last = boolean.values.len() - 1;
-        for (index, value) in boolean.values.iter().enumerate().skip(1) {
-            let Some(id) = self.branch(
-                value.range(),
-                &format!("logical-{op}-{index}"),
-                [
-                    ("short-circuit", "short-circuited"),
-                    ("evaluated", "right operand evaluated"),
-                ],
-            ) else {
-                continue;
-            };
-            // Regrouped as `(a or b) or c`: the operands but the last are the
-            // inner BoolOp's, judged from its decision's vectors; the last is
-            // the outer one's second operand.
-            let (decision_id, previous_leaves, operand_leaves, boolop, operand) =
-                match (&decision, &regrouped) {
-                    (Some((decision_id, groups)), _) => (
-                        Some(decision_id.clone()),
-                        Some(groups[index - 1].clone()),
-                        Some(groups[index].clone()),
-                        boolop_span,
-                        index,
-                    ),
-                    (None, Some((decision_id, groups, inner))) if index < last => (
-                        Some(decision_id.clone()),
-                        Some(groups[index - 1].clone()),
-                        Some(groups[index].clone()),
-                        *inner,
-                        index,
-                    ),
-                    (None, Some(_)) => (None, None, None, boolop_span, 1),
-                    (None, None) => (None, None, None, boolop_span, index),
+        boolean
+            .values
+            .iter()
+            .enumerate()
+            .skip(1)
+            .for_each(|(index, value)| {
+                let Some(id) = self.branch(
+                    value.range(),
+                    &format!("logical-{op}-{index}"),
+                    [
+                        ("short-circuit", "short-circuited"),
+                        ("evaluated", "right operand evaluated"),
+                    ],
+                ) else {
+                    return;
                 };
-            self.plan.logical.push(LogicalPlan {
-                short_circuit: format!("{id}:short-circuit"),
-                evaluated: format!("{id}:evaluated"),
-                id,
-                boolop,
-                operand,
-                decision: decision_id,
-                previous_leaves,
-                operand_leaves,
+                // Regrouped as `(a or b) or c`: the operands but the last are the
+                // inner BoolOp's, judged from its decision's vectors; the last is
+                // the outer one's second operand.
+                let (decision_id, previous_leaves, operand_leaves, boolop, operand) =
+                    match (&decision, &regrouped) {
+                        (Some((decision_id, groups)), _) => (
+                            Some(decision_id.clone()),
+                            Some(groups[index - 1].clone()),
+                            Some(groups[index].clone()),
+                            boolop_span,
+                            index,
+                        ),
+                        (None, Some((decision_id, groups, inner))) if index < last => (
+                            Some(decision_id.clone()),
+                            Some(groups[index - 1].clone()),
+                            Some(groups[index].clone()),
+                            *inner,
+                            index,
+                        ),
+                        (None, Some(_)) => (None, None, None, boolop_span, 1),
+                        (None, None) => (None, None, None, boolop_span, index),
+                    };
+                self.plan.logical.push(LogicalPlan {
+                    short_circuit: format!("{id}:short-circuit"),
+                    evaluated: format!("{id}:evaluated"),
+                    id,
+                    boolop,
+                    operand,
+                    decision: decision_id,
+                    previous_leaves,
+                    operand_leaves,
+                });
             });
-        }
     }
 
     fn match_statement(&mut self, statement: &ruff_python_ast::StmtMatch) {
         let Some(span) = self.span(statement.range) else {
             return;
         };
-        let mut cases = Vec::with_capacity(statement.cases.len());
-        for (index, case) in statement.cases.iter().enumerate() {
+        let cases = statement.cases.iter().enumerate().map(|(index, case)| {
             let kind = format!("match-case-{index}");
-            let Some(id) = self.branch(
+            let id = self.branch(
                 case.range,
                 &kind,
                 [("missed", "not selected"), ("selected", "selected")],
-            ) else {
-                return;
-            };
+            )?;
             if let Some(guard) = &case.guard {
                 self.decision(guard, "match-guard");
             }
-            let Some(case_span) = self.span(case.range) else {
-                return;
-            };
-            cases.push(MatchCasePlan {
+            Some(MatchCasePlan {
                 missed: format!("{id}:missed"),
                 selected: format!("{id}:selected"),
                 id,
-                span: case_span,
+                span: self.span(case.range)?,
                 irrefutable: case.guard.is_none() && case.pattern.is_irrefutable(),
-            });
-        }
+            })
+        });
+        let Some(cases) = cases.collect::<Option<Vec<_>>>() else {
+            return;
+        };
         let no_case = if statement
             .cases
             .iter()
