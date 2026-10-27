@@ -1893,10 +1893,9 @@ impl Population {
                             .copied()
                             .unwrap_or(0)
                             .max(to.saturating_add(CONTEXT_LINES));
-                        if lo <= hi {
-                            for &l in r.range(lo..=hi) {
-                                show.extend(around(l, CONTEXT_LINES));
-                            }
+                        // A kept range runs forward, so `lo` is at most `hi`.
+                        for &l in r.range(lo..=hi) {
+                            show.extend(around(l, CONTEXT_LINES));
                         }
                     }
                 }
