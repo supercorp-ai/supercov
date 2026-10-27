@@ -6481,10 +6481,10 @@ impl<'a> LogicalValueTransformer<'a, '_> {
                         // Leaves are numbered in evaluation order and the
                         // deciders come in that order, each once, so every
                         // one is past the end of the table so far.
-                        for (leaf, points) in deciders {
+                        deciders.iter().for_each(|(leaf, points)| {
                             by_leaf.resize(*leaf + 1, Vec::new());
                             by_leaf[*leaf] = points.clone();
-                        }
+                        });
                     }
                     by_leaf
                 })
@@ -6977,19 +6977,20 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
         output: &mut oxc_allocator::Vec<'a, Statement<'a>>,
     ) {
         if let Some(Declaration::VariableDeclaration(declaration)) = &mut export.declaration {
-            for declarator in &mut declaration.declarations {
+            // A declaration declares a binding at least.
+            declaration.declarations.iter_mut().for_each(|declarator| {
                 let Some(name) = binding_identifier_name(&declarator.id) else {
-                    continue;
+                    return;
                 };
                 if !self.is_handler_name(&name) {
-                    continue;
+                    return;
                 }
                 if let Some(initializer) = &mut declarator.init {
                     let original = initializer.take_in(self.ast.allocator);
                     *initializer = self.wrap_expression(original);
                     self.used = true;
                 }
-            }
+            });
             output.push(Statement::ExportNamedDeclaration(export));
             return;
         }
@@ -8335,12 +8336,12 @@ fn syntactic_boolean_outcome(expression: &Expression<'_>) -> Option<bool> {
                     (Some(true), value) | (value, Some(true)) => value,
                     _ => None,
                 },
-                LogicalOperator::Or => match (left, right) {
+                // The guard leaves `||`.
+                _ => match (left, right) {
                     (Some(true), _) | (_, Some(true)) => Some(true),
                     (Some(false), value) | (value, Some(false)) => value,
                     _ => None,
                 },
-                LogicalOperator::Coalesce => None,
             }
         }
         _ => None,
@@ -8966,15 +8967,16 @@ impl<'a> Traverse<'a, ()> for ExtendedCollector<'_> {
 /// runs and is never reported again. Over-asking is recoverable; this is not.
 fn provably_entered_loops(program: &Program<'_>) -> HashSet<SpanKey> {
     let semantic = SemanticBuilder::new().build(program).semantic;
-    let mut found = HashSet::new();
-    for node in semantic.nodes() {
-        if let AstKind::ForOfStatement(loop_node) = node.kind()
-            && never_empty(&loop_node.right, &semantic)
-        {
-            found.insert(span_key(loop_node.span));
-        }
-    }
-    found
+    semantic
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.kind() {
+            AstKind::ForOfStatement(loop_node) if never_empty(&loop_node.right, &semantic) => {
+                Some(span_key(loop_node.span))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether an iterable cannot be empty: a non-empty array literal, or a
@@ -9276,9 +9278,10 @@ impl<'a> Traverse<'a, ()> for DefaultCollector<'_> {
             });
             return;
         }
-        for declaration in &node.declarations {
-            self.collect_binding_pattern(&declaration.id, false);
-        }
+        // A declaration declares a binding at least.
+        node.declarations
+            .iter()
+            .for_each(|declaration| self.collect_binding_pattern(&declaration.id, false));
     }
 }
 
@@ -9706,11 +9709,11 @@ impl<'a> Traverse<'a, ()> for LogicalAssignmentCollector<'_> {
         if self.unsafe_function_depth > 0 || self.with_depth > 0 || !node.operator.is_logical() {
             return;
         }
+        // `is_logical` above leaves these three.
         let operator = match node.operator {
             AssignmentOperator::LogicalAnd => "&&=",
             AssignmentOperator::LogicalOr => "||=",
-            AssignmentOperator::LogicalNullish => "??=",
-            _ => unreachable!("logical assignment filter must be exhaustive"),
+            _ => "??=",
         };
         let id = stable_id(
             self.source,
@@ -10869,6 +10872,24 @@ export const r = v && w && q;
             "m4() {  return 4; }",
             "m5() {  return 5; }",
             "m6() {  return 6; }",
+        ] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+
+        // A function written as a computed key or in a template becomes text
+        // there, so it keeps its own.
+        let source = concat!(
+            "export const t = `${function a() {  return 1; }}`;\n",
+            "export const o = { [function b() {  return 2; }]: 1 };\n",
+            "export class C { [function c() {  return 3; }] = 1; }\n",
+            "export class D { accessor [function d() {  return 4; }] = 1; }\n",
+        );
+        let output = instrument_direct_candidate(source, "src/keys.js").unwrap();
+        for text in [
+            "a() {  return 1; }",
+            "b() {  return 2; }",
+            "c() {  return 3; }",
+            "d() {  return 4; }",
         ] {
             assert!(output.code.contains(text), "{text}\n{}", output.code);
         }
