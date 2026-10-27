@@ -13664,6 +13664,13 @@ fn a_run_whose_program_cannot_start_anywhere_says_so_and_recovers() {
     }
 }
 
+/// [`small_crate`] in edition 2024, whose doctests are merged into one
+/// harness that lists and runs them through Supercov.
+fn small_merged_crate(project: &Project) {
+    small_crate(project);
+    project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
+}
+
 fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usize {
     fail_each_place_of_a_runner_in(label, small_crate, &format!("{role}/fs"), command)
 }
@@ -13731,10 +13738,7 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
     // run as Supercov's children.
     let reached = fail_each_place_of_a_runner_in(
         "runner-faults-merged",
-        |project| {
-            small_crate(project);
-            project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
-        },
+        small_merged_crate,
         &format!(
             "env:{}/fs",
             supercov_engine::rust_owned_doctests::CHILD_DIR_ENV
@@ -13742,6 +13746,17 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
         &["--", "cargo", "test", "-q"],
     );
     assert!(reached >= 2, "{reached}");
+    // And a doctest's runner as the merged harness lists and runs them.
+    let reached = fail_each_place_of_a_runner_in(
+        "runner-faults-harness",
+        small_merged_crate,
+        &format!(
+            "{}/fs",
+            supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT
+        ),
+        &["--", "cargo", "test", "-q"],
+    );
+    assert!(reached > 3, "{reached}");
     // And rustdoc's stand-in, told by its variable (it starts rustdoc
     // without it, so the doctests' runners are not).
     let reached = fail_each_place_of_a_runner_in(
@@ -13762,7 +13777,8 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
 #[test]
 fn a_test_runner_whose_program_cannot_start_says_so() {
     let doctests = supercov_engine::rust_owned_doctests::WRAPPER_ROOT_ENV;
-    // rustdoc's stand-in starts rustdoc; a doctest's runner its doctest.
+    // rustdoc's stand-in starts rustdoc; a doctest's runner its doctest, or
+    // a merged harness that lists or runs them.
     let reached = fail_each_place_of_a_runner_in(
         "runner-spawn-rustdoc",
         small_crate,
@@ -13781,11 +13797,18 @@ fn a_test_runner_whose_program_cannot_start_says_so() {
     );
     assert!(reached > 0, "{reached}");
     let reached = fail_each_place_of_a_runner_in(
+        "runner-spawn-harness",
+        small_merged_crate,
+        &format!(
+            "{}/spawn",
+            supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT
+        ),
+        &["--", "cargo", "test", "-q"],
+    );
+    assert!(reached > 0, "{reached}");
+    let reached = fail_each_place_of_a_runner_in(
         "runner-spawn-merged",
-        |project| {
-            small_crate(project);
-            project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
-        },
+        small_merged_crate,
         &format!(
             "env:{}/spawn",
             supercov_engine::rust_owned_doctests::CHILD_DIR_ENV
