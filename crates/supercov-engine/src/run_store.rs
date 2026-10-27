@@ -1305,6 +1305,15 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_that_does_not_parse_is_a_metadata_error() {
+        let error = serde_json::from_str::<u8>("x").unwrap_err();
+        assert!(matches!(
+            RunIndexError::from(error),
+            RunIndexError::Metadata(_)
+        ));
+    }
+
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},

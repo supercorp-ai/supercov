@@ -353,7 +353,6 @@ impl ExplicitSourceRoots {
         root_contains(&self.roots, &lexical_normalize(&self.root.join(relative)))
     }
 
-
     /// Refuse roots that left a frontend nothing to measure. A typo in the
     /// variable must not become a green run over zero files -- the failure mode
     /// most likely to pass unnoticed in an agent loop.

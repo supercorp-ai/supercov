@@ -33,7 +33,6 @@ pub struct FrontendIntegrityInputs {
 }
 
 impl FrontendIntegrityInputs {
-
     pub fn embedded_javascript() -> Self {
         Self {
             language: "javascript".into(),

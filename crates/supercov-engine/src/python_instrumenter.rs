@@ -1107,6 +1107,18 @@ pub fn build_python_manifest(
 
 #[cfg(test)]
 mod tests {
+    /// A plan's span is written and read as two pairs.
+    #[test]
+    fn a_plan_span_is_read_back_as_it_is_written() {
+        let span = PlanSpan {
+            start: [1, 2],
+            end: [3, 4],
+        };
+        let written = serde_json::to_string(&span).unwrap();
+        assert_eq!(written, "[[1,2],[3,4]]");
+        assert_eq!(serde_json::from_str::<PlanSpan>(&written).unwrap(), span);
+    }
+
     use super::*;
 
     const SOURCE: &str = r#"async def classify[T](items, flag=True):

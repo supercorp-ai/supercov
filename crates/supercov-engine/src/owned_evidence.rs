@@ -902,6 +902,19 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_owned_evidence_error_says_what_failed() {
+        assert_eq!(
+            OwnedEvidenceError::Truncated("header").to_string(),
+            "Coverage evidence ended in the middle of its header"
+        );
+        assert!(
+            OwnedEvidenceError::NoTests
+                .to_string()
+                .contains("no test announced itself")
+        );
+    }
+
     use super::*;
 
     fn write(values: &[u64]) -> Vec<u8> {

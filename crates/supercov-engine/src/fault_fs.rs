@@ -157,7 +157,6 @@ pub fn open<P: AsRef<Path>>(path: P) -> io::Result<File> {
     checked(|| File::open(path))
 }
 
-
 /// `options.open(path)`.
 #[track_caller]
 pub fn open_with<P: AsRef<Path>>(options: &OpenOptions, path: P) -> io::Result<File> {

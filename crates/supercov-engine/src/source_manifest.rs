@@ -1359,6 +1359,19 @@ fn byte_column_in(
 
 #[cfg(test)]
 mod tests {
+    /// An execution recorded before attribution was a question is exact.
+    #[test]
+    fn an_execution_that_says_nothing_of_attribution_is_exact() {
+        let execution = serde_json::from_str::<Execution>(
+            r#"{"test":{"file":"t.js","name":"n"},"passed":true,"files":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            execution.attribution,
+            crate::coverage_report::ATTRIBUTION_EXACT
+        );
+    }
+
     #[test]
     fn a_shard_is_a_number_and_anything_else_is_an_entrys_own_name() {
         assert_eq!(

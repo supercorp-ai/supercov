@@ -1724,6 +1724,16 @@ fn build_from_evidence(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// An outcome written before records named their runner is RSpec's.
+    #[test]
+    fn an_outcome_that_names_no_runner_is_rspecs() {
+        let record = serde_json::from_str::<Record>(
+            r#"{"t":"outcome","worker":"w","test":"t","retry":0,"phase":"call","outcome":"passed","xfail":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(record, Record::Outcome { runner, .. } if runner == RSPEC_RUNNER));
+    }
+
     use super::*;
     use crate::{
         coverage_analysis::PointKind, frontend_protocol::validate_frontend_report_request,
