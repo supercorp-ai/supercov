@@ -111,6 +111,7 @@ Settings, in the environment of the measured command:
   SUPERCOV_RUN_ID_FILE=<file>          write the recorded run's id to a file
   SUPERCOV_SOURCE_TOOLS=<names>        run these linters on your files, not the copy
   SUPERCOV_KEEP_WORKSPACE=1            keep the instrumented copy after the run
+  SUPERCOV_COMMAND_TIMEOUT_MS=<ms>     stop the test command after this long
   supercov docs cli                    what each does
 
 Guides:

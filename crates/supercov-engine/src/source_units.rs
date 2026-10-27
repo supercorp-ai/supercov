@@ -226,10 +226,10 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     {
         return None;
     }
-    let source_type =
-        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
-    let allocator = oxc_allocator::Allocator::default();
     // `code` read the same source with the same parser: it parses cleanly.
+    let source_type = crate::js_instrumenter::project_source_type(std::path::Path::new(path))
+        .expect("`code` read this path as JavaScript");
+    let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     // Names a statement binds, where all it does is define functions.
     fn functions(declaration: &Declaration<'_>) -> Option<Vec<String>> {
@@ -237,7 +237,15 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
             Declaration::FunctionDeclaration(function)
                 if !function.declare && function.body.is_some() =>
             {
-                Some(vec![function.id.as_ref()?.name.to_string()])
+                // Only `export default` declares a function without a name.
+                Some(vec![
+                    function
+                        .id
+                        .as_ref()
+                        .expect("a statement names its function")
+                        .name
+                        .to_string(),
+                ])
             }
             Declaration::VariableDeclaration(variables) if !variables.declare => variables
                 .declarations
@@ -435,7 +443,8 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
     {
         return None;
     }
-    let parsed = ruff_python_parser::parse_module(source).ok()?;
+    let parsed =
+        ruff_python_parser::parse_module(source).expect("`code` parsed this source as Python");
     let body = &parsed.syntax().body;
     let top = added
         .iter()
@@ -963,8 +972,9 @@ fn javascript(path: &str, source: &str) -> Option<Outline> {
     use oxc_ast_visit::{Visit, walk};
     use oxc_span::GetSpan;
 
-    let source_type =
-        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
+    // `code` sends only the extensions oxc reads.
+    let source_type = crate::js_instrumenter::project_source_type(std::path::Path::new(path))
+        .expect("a JavaScript or TypeScript extension");
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
@@ -2960,6 +2970,20 @@ mod tests {
         );
         let shared = "import { Button } from 'pkg';\nimport { Icon } from 'icons';\n\nexport function Page() {\n  return <Icon><Button /></Icon>;\n}\n\nexport function More() {\n  return <Icon />;\n}\n";
         assert_eq!(only_added(&before, "h.tsx", shared), None);
+        // Markup elsewhere naming the addition in lower case reads it too.
+        let tag = code("t.tsx", "export function Page() {\n  return <row />;\n}\n").unwrap();
+        let named = "export function Page() {\n  return <row />;\n}\n\nexport function row() {\n  return 1;\n}\n";
+        assert_eq!(only_added(&tag, "t.tsx", named), None);
+        // An import kept only for what loading it does stays as it was.
+        let loads = code("l.ts", "import './setup';\n\nexport function a() {}\n").unwrap();
+        assert_eq!(
+            only_added(
+                &loads,
+                "l.ts",
+                "import './setup';\n\nexport function a() {}\n\nexport function b() {}\n"
+            ),
+            Some(vec!["b".to_owned()])
+        );
     }
 
     /// A Python helper is only added to where nothing else moved: a
