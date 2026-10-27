@@ -2239,6 +2239,74 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// An explicit toolchain is refused at whichever step of finding its
+    /// Cargo fails: an empty selector, a proxy that is nowhere, a Cargo
+    /// rustup names that is not there or cannot be read, and a proxy or a
+    /// selected Cargo that cannot say its version.
+    #[cfg(unix)]
+    #[test]
+    fn an_explicit_toolchain_fails_at_each_step_it_takes() {
+        let root = fixture();
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let selected = root.join("selected-cargo");
+        let setup = |proxy: &str, rustup: &str, chosen: &str| {
+            write_script(&bin.join("cargo"), &format!("#!/bin/sh\n{proxy}\n"));
+            write_script(&bin.join("rustup"), &format!("#!/bin/sh\n{rustup}\n"));
+            write_script(&selected, &format!("#!/bin/sh\n{chosen}\n"));
+        };
+        let select = |program: &Path, arguments: &[&str]| {
+            selected_cargo_program(&CargoTestInvocation {
+                program: program.display().to_string(),
+                kind: crate::rust_test_runner::RustCargoCommandKind::CargoTest,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+                runner_arguments: Vec::new(),
+            })
+            .map_err(|error| error.to_string())
+        };
+        let names = format!("echo '{}'", selected.display());
+        let same = "echo 'cargo 1.95.0 (same)'";
+        setup(same, &names, same);
+        assert!(select(&bin.join("cargo"), &["+stable", "test"]).is_ok());
+        let failing = |faults: &str| {
+            crate::fault::during(faults, || select(&bin.join("cargo"), &["+stable", "test"]))
+        };
+        // Reading the named Cargo fails after it was found.
+        assert!(failing("fs@2").unwrap_err().contains("selected-cargo"));
+        assert!(
+            select(&bin.join("cargo"), &["+", "test"])
+                .unwrap_err()
+                .contains("the rustup toolchain selector is empty")
+        );
+        assert!(
+            select(&root.join("nowhere/cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("could not resolve the Cargo proxy")
+        );
+        setup(same, "echo '/nowhere/supercov-cargo'", same);
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("/nowhere/supercov-cargo")
+        );
+        setup("exit 3", &names, same);
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("verifying the explicit rustup Cargo selection")
+        );
+        setup(same, &names, "exit 3");
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("verifying the resolved Cargo executable")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Each way a configuration or the environment can be written wrong is
     /// refused by what is wrong in it, before anything runs.
     #[test]
