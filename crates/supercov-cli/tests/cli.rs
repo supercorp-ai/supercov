@@ -12720,6 +12720,32 @@ fn fail_each_place_of_a_run(label: &str, write: fn(&Project), command: &[&str]) 
     reached.into_inner()
 }
 
+/// A Python source that does not parse carries no obligations, and the run
+/// says which file it was.
+#[test]
+fn a_python_source_that_does_not_parse_is_named() {
+    let project = Project::empty("python-unparsed");
+    project.write("pkg/__init__.py", "");
+    project.write("pkg/w.py", "def double(n):\n    return n * 2 if n else 0\n");
+    std::fs::write(project.root.join("pkg/binary.py"), [0xff, 0xfe, b'\n']).unwrap();
+    project.write("tests/__init__.py", "");
+    project.write(
+        "tests/test_w.py",
+        "import unittest\nfrom pkg.w import double\n\nclass W(unittest.TestCase):\n    def test_doubles(self):\n        self.assertEqual(double(2), 4)\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("python");
+    let ran = project.supercov(&[
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ]);
+    let said = ran.stderr();
+    ran.succeeds();
+    assert!(
+        said.contains("[supercov] could not parse pkg/binary.py: source is not valid UTF-8"),
+        "{said}"
+    );
+}
+
 #[test]
 fn a_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let javascript = fail_each_place_of_a_run(

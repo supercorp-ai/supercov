@@ -888,6 +888,21 @@ mod tests {
         );
     }
     use super::*;
+
+    /// A list the user set is kept, with ours after it; an empty one is
+    /// none.
+    #[test]
+    fn an_appended_list_keeps_what_was_set() {
+        assert_eq!(
+            append_list(Some("-X dev".into()), "-X utf8", " "),
+            OsString::from("-X dev -X utf8")
+        );
+        assert_eq!(
+            append_list(Some("".into()), "-X utf8", " "),
+            OsString::from("-X utf8")
+        );
+        assert_eq!(append_list(None, "-X utf8", " "), OsString::from("-X utf8"));
+    }
     use crate::source_discovery::{ExplicitSourceRoots, fold_roots_into_configuration};
 
     fn fixture(name: &str) -> PathBuf {
