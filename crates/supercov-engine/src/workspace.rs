@@ -1789,27 +1789,34 @@ fn jvm_build_state(workspace: &Path, relative: &Path) -> bool {
         return true;
     }
     let mut module = workspace.to_path_buf();
-    for (index, part) in parts.iter().enumerate() {
-        let output = match part.as_str() {
-            "target" => module.join("pom.xml").is_file(),
-            "build" => [
-                "build.gradle",
-                "build.gradle.kts",
-                "settings.gradle",
-                "settings.gradle.kts",
-            ]
-            .iter()
-            .any(|file| module.join(file).is_file()),
-            _ => false,
-        };
-        if output {
-            return !parts[index + 1..]
+    // A file's path has a part at least.
+    parts
+        .iter()
+        .enumerate()
+        .find_map(|(index, part)| {
+            let output = match part.as_str() {
+                "target" => module.join("pom.xml").is_file(),
+                "build" => [
+                    "build.gradle",
+                    "build.gradle.kts",
+                    "settings.gradle",
+                    "settings.gradle.kts",
+                ]
                 .iter()
-                .any(|inside| JVM_REPORTS.contains(&inside.as_str()));
-        }
-        module.push(part);
-    }
-    false
+                .any(|file| module.join(file).is_file()),
+                _ => false,
+            };
+            if output {
+                return Some(
+                    !parts[index + 1..]
+                        .iter()
+                        .any(|inside| JVM_REPORTS.contains(&inside.as_str())),
+                );
+            }
+            module.push(part);
+            None
+        })
+        .unwrap_or(false)
 }
 
 /// What a run leaves in the copy that is no output of the command's own:
@@ -2542,6 +2549,25 @@ mod tests {
                 .unwrap()
                 .contains(&copy)
         );
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// A copy with no file in it returns nothing.
+    #[test]
+    fn an_empty_copy_returns_nothing() {
+        let (root, workspace) = writeback_fixture("empty-copy");
+        fs::remove_dir_all(&workspace).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        let sync = sync_outputs_of(
+            CommandOutputs::Go,
+            &root,
+            &workspace,
+            &baseline,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(sync, CommandOutputSync::default());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
@@ -4406,6 +4432,19 @@ mod tests {
             [".supercov/vitest.config.mjs"]
         );
         assert!(workspace.join(".supercov/helpers.js").is_dir());
+        // An empty copy, and one whose generated directory is empty.
+        fs::remove_dir_all(workspace.join(".supercov")).unwrap();
+        assert!(
+            prune_cached_workspace_sources(&root, &lock)
+                .unwrap()
+                .is_empty()
+        );
+        fs::create_dir(workspace.join(".supercov")).unwrap();
+        assert!(
+            prune_cached_workspace_sources(&root, &lock)
+                .unwrap()
+                .is_empty()
+        );
         lock.release().unwrap();
         crate::lifecycle::sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
