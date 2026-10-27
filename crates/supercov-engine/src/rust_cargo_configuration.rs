@@ -2418,7 +2418,7 @@ mod tests {
                 "cannot be empty",
             ),
             (
-                "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n",
+                "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n[target.x86_64-pc-windows-msvc]\nrunner='../../outside/run'\n",
                 &["test"][..],
                 "outside/run",
             ),

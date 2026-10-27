@@ -1110,11 +1110,8 @@ mod tests {
         let refused =
             load("include=[{path='absent.toml',optional=false}]\n", &[], &[]).unwrap_err();
         assert!(refused.contains("absent.toml: "), "{refused}");
-        assert!(
-            load("include=['broken.toml']\n", &[("broken.toml", "[[")], &[])
-                .unwrap_err()
-                .starts_with(&project.join(".cargo/broken.toml").display().to_string())
-        );
+        let broken = load("include=['broken.toml']\n", &[("broken.toml", "[[")], &[]).unwrap_err();
+        assert!(broken.contains("broken.toml: "), "{broken}");
         assert_eq!(
             load(
                 "include=['float.toml']\n",

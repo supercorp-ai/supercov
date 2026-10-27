@@ -261,6 +261,19 @@ pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(),
     Err(LifecycleError::LockUnavailable)
 }
 
+/// Remove a publication's staging, as [`remove_stored_tree_deferred`] does;
+/// the fault site `publication-clean-up` fails it.
+#[track_caller]
+fn clear_staging(root: &Path, staging: &Path) -> Result<Option<PathBuf>, LifecycleError> {
+    if crate::fault::injected("publication-clean-up") {
+        return Err(io_error(
+            staging,
+            io::Error::other("injected fault at publication-clean-up"),
+        ));
+    }
+    remove_stored_tree_deferred(root, staging)
+}
+
 #[track_caller]
 pub fn remove_stored_tree_deferred(
     project_root: &Path,
@@ -954,13 +967,13 @@ pub(crate) fn publish_run_with_fault(
         .join("run-publication");
     reject_linked_ancestors(root, &staging, true)?;
     if fs::symlink_metadata(&staging).is_ok() {
-        remove_stored_tree_deferred(root, &staging)?;
+        clear_staging(root, &staging)?;
     }
     let evidence_sha256 = file_sha256(evidence_source)?;
     fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
     let copied = copy_regular_file(evidence_source, &staging.join("evidence.raw.gz"))?;
     if copied != metadata.raw_evidence.compressed_bytes {
-        remove_stored_tree_deferred(root, &staging)?;
+        clear_staging(root, &staging)?;
         return Err(LifecycleError::EvidenceLength {
             expected: metadata.raw_evidence.compressed_bytes,
             actual: copied,
@@ -974,7 +987,7 @@ pub(crate) fn publish_run_with_fault(
         || file_sha256(&staging.join("evidence.raw.gz")),
     )? != evidence_sha256
     {
-        remove_stored_tree_deferred(root, &staging)?;
+        clear_staging(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
     let mut json = serde_json::to_vec_pretty(metadata).expect("plain data serializes");
@@ -3003,6 +3016,39 @@ mod tests {
             |root, (evidence, metadata)| publish_run(root, metadata, evidence).map(drop),
         );
         assert!(operations > 5, "{operations}");
+    }
+
+    /// A publication's staging that cannot be cleared -- left by an earlier
+    /// publication, or holding evidence of the wrong length or that changed
+    /// -- is refused by what failed, and nothing is published.
+    #[test]
+    fn a_publication_whose_staging_cannot_be_cleared_is_refused() {
+        let id = "2026-01-01T00-00-00-100Z";
+        for (case, faults) in [
+            ("staged", "publication-clean-up"),
+            ("short", "publication-clean-up"),
+            ("changed", "published-copy-differs,publication-clean-up"),
+        ] {
+            let root = project();
+            let (evidence, mut metadata) = analysable_evidence(&root, id);
+            match case {
+                "staged" => {
+                    fs::create_dir_all(root.join(".supercov/work").join(id).join("run-publication"))
+                        .unwrap()
+                }
+                "short" => metadata.raw_evidence.compressed_bytes += 1,
+                _ => {}
+            }
+            let refused = crate::fault::during(faults, || publish_run(&root, &metadata, &evidence))
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("publication-clean-up"),
+                "{case}: {refused}"
+            );
+            assert!(!root.join(".supercov/runs").join(id).exists(), "{case}");
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// Two file operations of a publication failing, the second most often
