@@ -33,6 +33,15 @@ use crate::{
 /// depends on `wasm-bindgen`. A Worker's crate, which `worker-build` builds,
 /// is measured by `rust_worker` instead.
 fn wasm_crates(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    wasm_crates_under(root, 0, &mut found);
+    found.sort();
+    found
+}
+
+/// The wasm libraries at most six directories below `directory`, which is
+/// `depth` below the root, added to `found`.
+fn wasm_crates_under(directory: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     const SKIPPED: &[&str] = &[
         "node_modules",
         "target",
@@ -43,34 +52,28 @@ fn wasm_crates(root: &Path) -> Vec<PathBuf> {
         ".supercov",
         ".wrangler",
     ];
-    let mut found = Vec::new();
-    let mut directories = vec![(root.to_path_buf(), 0)];
-    while let Some((directory, depth)) = directories.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Ok(kind) = fs::file_type(&entry) else {
-                continue;
-            };
-            if kind.is_dir() {
-                if depth < 6 && !SKIPPED.contains(&name) {
-                    directories.push((path, depth + 1));
-                }
-                continue;
+        let Ok(kind) = fs::file_type(&entry) else {
+            continue;
+        };
+        if kind.is_dir() {
+            if depth < 6 && !SKIPPED.contains(&name) {
+                wasm_crates_under(&path, depth + 1, found);
             }
-            if kind.is_file() && name == "Cargo.toml" && is_wasm_library(&path) {
-                found.push(path);
-            }
+            continue;
+        }
+        if kind.is_file() && name == "Cargo.toml" && is_wasm_library(&path) {
+            found.push(path);
         }
     }
-    found.sort();
-    found
 }
 
 fn is_wasm_library(manifest: &Path) -> bool {
@@ -483,6 +486,14 @@ mod tests {
         .unwrap();
         fs::write(directory.join("b.jsonl"), "{\"regions\": []}\n").unwrap();
         fs::write(directory.join("notes.txt"), "{\"regions\": []}\n").unwrap();
+        fs::write(directory.join("c.jsonl"), "").unwrap();
+        assert!(read_records(&directory.join("absent")).unwrap().is_empty());
+        // No wasm library in the workspace is no server to prepare.
+        assert!(
+            RustWasmServer::prepare(&directory, &directory, &directory, "run", &[])
+                .unwrap()
+                .is_empty()
+        );
         let owners = read_records(&directory)
             .unwrap()
             .into_iter()
