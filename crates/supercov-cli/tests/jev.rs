@@ -5292,3 +5292,39 @@ fn security_follows_each_kind_of_import() {
         ],
     );
 }
+
+/// A project whose files the scope leaves out has nothing to assess, and a
+/// file one line of which is over the request budget is named as unreadable,
+/// saying why, rather than sent.
+#[test]
+fn nothing_in_scope_is_assessed_and_a_line_too_long_to_ask_is_named() {
+    let (base, _seen) = gateway(MODEL, answer_yes);
+    let jev = through(&base);
+    let tests_only = Project::empty("jev-tests-only");
+    tests_only.write("package.json", r#"{ "name": "t", "type": "module" }"#);
+    tests_only.write(
+        "test/a.test.js",
+        "import test from \"node:test\";\ntest(\"a\", () => {});\n",
+    );
+    tests_only.git(&["init", "-q"]);
+    contains_all(
+        &tests_only.supercov_with(&["quality"], &jev).succeeds(),
+        &[
+            "Quality not scored: no file was assessed.\n",
+            "1 of 1 not assessed are test or generated",
+        ],
+    );
+    let minified = Project::empty("jev-minified");
+    minified.write("package.json", r#"{ "name": "m", "type": "module" }"#);
+    minified.write(
+        "src/blob.js",
+        &format!("export const blob = \"{}\";\n", "x".repeat(3_000_000)),
+    );
+    minified.git(&["init", "-q"]);
+    assert!(
+        minified
+            .supercov_with(&["quality", "src/blob.js"], &jev)
+            .exits(2)
+            .contains("error  src/blob.js  (file is over the request budget and line 1 alone is too; it is probably minified or embeds data)")
+    );
+}

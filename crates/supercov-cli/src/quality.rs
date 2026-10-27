@@ -2994,7 +2994,8 @@ fn resolve_ambiguity(
         .entries
         .iter_mut()
         .filter(|e| e.status == scope::Status::Ambiguous);
-    for (index, found) in ambiguous.enumerate() {
+    // There are some: none, and nothing was asked.
+    ambiguous.enumerate().for_each(|(index, found)| {
         let value = noul(&entry.response, &format!("f{index}"))
             .expect("validated: each ambiguous path is asked as a noul");
         if value >= catalog::PRESENT_AT {
@@ -3005,7 +3006,7 @@ fn resolve_ambiguity(
             found.status = scope::Status::Excluded;
             found.reason = "the model reads it as not part of the product".into();
         }
-    }
+    });
     Some(json!({
         "asked": asking.len(), "ships": ships, "does_not": asking.len() - ships,
         "basis": "paths and the whole tree, no file contents",
@@ -3116,7 +3117,7 @@ fn run_health(
                     None => match catalog_windows(&relative, &source, instrument) {
                         Ok(windows) => {
                             let count = windows.len();
-                            for (window, text) in windows {
+                            windows.into_iter().for_each(|(window, text)| {
                                 subjects.push(Subject {
                                     bytes: text.len() as u64,
                                     request: instrument.file_request(&relative, &text),
@@ -3130,7 +3131,7 @@ fn run_health(
                                         window.index, window.of
                                     )),
                                 });
-                            }
+                            });
                         }
                         Err(e) => unreadable.push(json!({
                             "path": relative, "status": "failed", "error": e
