@@ -1677,9 +1677,10 @@ fn render_patch(
     }
     if !patch.missing_from_run.is_empty() {
         out.push_str("  Changed but not measured by this run:\n");
-        for file in &patch.missing_from_run {
-            out.push_str(&format!("    {file}\n"));
-        }
+        patch
+            .missing_from_run
+            .iter()
+            .for_each(|file| out.push_str(&format!("    {file}\n")));
     }
     match (floor, passed) {
         (Some(ppm), false) => out.push_str(&format!("\nFAIL: below {}\n", render_floor(ppm))),
@@ -2953,12 +2954,15 @@ fn execute_public_query(
             ..
         } => {
             let inventory = public_run_inventory(root).map_err(run_store_agent_error)?;
-            let view = match filter.as_str() {
-                "all" => supercov_engine::coverage_index::CoverageViewId::All,
-                "passed" => supercov_engine::coverage_index::CoverageViewId::Passed,
-                "failed" => supercov_engine::coverage_index::CoverageViewId::Failed,
-                _ => unreachable!("public parser validates coverage filters"),
-            };
+            use supercov_engine::coverage_index::CoverageViewId;
+            let view = [
+                CoverageViewId::All,
+                CoverageViewId::Passed,
+                CoverageViewId::Failed,
+            ]
+            .into_iter()
+            .find(|view| view.name() == filter)
+            .expect("the public parser validates coverage filters");
             let (data, page) = run_list_query(
                 &inventory,
                 &|run| current_integrity_for_run(root, run),
