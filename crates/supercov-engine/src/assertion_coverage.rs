@@ -4802,6 +4802,17 @@ mod helper_shape_tests {
         assert_eq!(flipped_code("is_true(x) || true"), "is_true(x) || false");
         assert_eq!(flipped_code("trueish = false"), "trueish = true");
         assert_eq!(flipped_code("x = True"), "x = False");
+        // Nothing to flip leaves the line; a Rust value written without `=`
+        // is said as the value it assigns.
+        assert_eq!(flipped_code("work()"), "work()");
+        assert_eq!(
+            rust_question("total += x", Change::ValueUndefined, "0"),
+            "`total += x` becomes `total += 0;`"
+        );
+        assert!(
+            rust_question("push(x)", Change::ValueUndefined, "0")
+                .contains("the value it assigns becomes `0`")
+        );
         assert_eq!(
             brace_end_within(&["fn a() {", "  let x = 1 / 2; // }", "}", "after"], 0, 10),
             2,
