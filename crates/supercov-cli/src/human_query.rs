@@ -63,12 +63,12 @@ fn number(value: f64) -> String {
 fn count(value: usize) -> String {
     let digits = value.to_string();
     let mut output = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
+    digits.chars().enumerate().for_each(|(index, character)| {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
             output.push(',');
         }
         output.push(character);
-    }
+    });
     output
 }
 

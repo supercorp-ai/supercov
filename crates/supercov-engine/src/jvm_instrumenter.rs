@@ -350,25 +350,28 @@ impl Collector<'_> {
     /// behaviour: it is the branch the program already took.
     fn record_arms(&mut self, node: Node, language: JvmLanguage, probes: &[u64]) {
         let (consequence, alternative) = arms(node, language);
-        for (arm, probe) in [consequence, alternative].into_iter().zip(probes) {
-            match arm {
-                // `ensure_block` has already braced an unbraced arm, and a
-                // store ranked above that brace lands inside it.
-                Some(arm) if arm.kind() == "block" => self.store(arm.start_byte() + 1, *probe),
-                Some(arm) => self.store(arm.start_byte(), *probe),
-                // Ranked above the brace `ensure_block` may have added at
-                // this same offset. Edits at one offset are applied highest
-                // rank first and each pushes the last to the right, so a
-                // lower rank here would put the `else` inside the braces
-                // rather than after them -- which is what an unbraced arm on
-                // one line produced, and it is not Kotlin.
-                None => self.edit(
-                    node.end_byte(),
-                    70,
-                    format!(" else {{ {HITS}[{probe}] = 2; }}"),
-                ),
-            }
-        }
+        [consequence, alternative]
+            .into_iter()
+            .zip(probes)
+            .for_each(|(arm, probe)| {
+                match arm {
+                    // `ensure_block` has already braced an unbraced arm, and a
+                    // store ranked above that brace lands inside it.
+                    Some(arm) if arm.kind() == "block" => self.store(arm.start_byte() + 1, *probe),
+                    Some(arm) => self.store(arm.start_byte(), *probe),
+                    // Ranked above the brace `ensure_block` may have added at
+                    // this same offset. Edits at one offset are applied highest
+                    // rank first and each pushes the last to the right, so a
+                    // lower rank here would put the `else` inside the braces
+                    // rather than after them -- which is what an unbraced arm on
+                    // one line produced, and it is not Kotlin.
+                    None => self.edit(
+                        node.end_byte(),
+                        70,
+                        format!(" else {{ {HITS}[{probe}] = 2; }}"),
+                    ),
+                }
+            });
     }
 
     /// Braces a loop's body, where it has one: a Kotlin `while` may not.
@@ -434,12 +437,11 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
                 .unwrap_or("");
             if operator == "&&" || operator == "||" {
                 // The grammar gives every binary expression both operands.
-                for operand in ["left", "right"]
+                // A binary expression has both its operands.
+                ["left", "right"]
                     .into_iter()
                     .filter_map(|field| node.child_by_field_name(field))
-                {
-                    condition_nodes(operand, source, out);
-                }
+                    .for_each(|operand| condition_nodes(operand, source, out));
                 return;
             }
             out.push(node);
