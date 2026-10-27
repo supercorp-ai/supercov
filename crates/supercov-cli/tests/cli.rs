@@ -13332,6 +13332,41 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
 /// time (`role/fs#N`, every runner failing its Nth): each run ends, a runner
 /// that failed saying so, and never panics; the sweep stops at the first N no
 /// runner reached, and a run with no fault then succeeds. How many it made.
+/// A Python or Ruby run measured under the source roots it was given is
+/// read back under the same roots, and is current while the project is.
+#[test]
+fn a_run_under_given_source_roots_is_read_back_under_them() {
+    let python = Project::empty("roots-py");
+    python_project(&python);
+    python.git(&["init", "-q"]);
+    python.commit("fixture");
+    python
+        .supercov_with(
+            &[
+                "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+            ],
+            &[("SUPERCOV_SOURCE_ROOTS", "pkg")],
+        )
+        .succeeds();
+    let read = python.supercov(&["runs", "latest", "--json"]).json();
+    assert_eq!(read["ok"], true, "{read}");
+    #[cfg(unix)]
+    if let Some(ruby) = ruby() {
+        let project = Project::empty("roots-rb");
+        ruby_project(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        project
+            .supercov_with(
+                &["--", ruby.as_str(), "-Ilib", "test/w_test.rb"],
+                &[("SUPERCOV_SOURCE_ROOTS", "lib")],
+            )
+            .succeeds();
+        let read = project.supercov(&["runs", "latest", "--json"]).json();
+        assert_eq!(read["ok"], true, "{read}");
+    }
+}
+
 /// A run, once for every place it starts a program, with that start
 /// failing: each ends, never panicking, and without a fault it succeeds.
 #[test]
