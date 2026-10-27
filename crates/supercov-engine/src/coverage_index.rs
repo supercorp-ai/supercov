@@ -5533,6 +5533,49 @@ mod tests {
         Ok(read)
     }
 
+    /// Every query a command asks of an index, by kind and runner and as
+    /// a diff with itself, each on its own: how many refused.
+    fn query_each(index: &CoverageIndex<'_>) -> usize {
+        let mut refused = 0;
+        for command in [
+            "files",
+            "gaps",
+            "file-decisions",
+            "kinds",
+            "runners",
+            "summary",
+            "scope",
+            "line",
+            "test",
+            "decision",
+            "file-detail",
+            "minimize",
+            "tests-without-evidence",
+            "diff",
+        ] {
+            for (kind, runner) in [(None, None), (Some("unit"), Some("node:test"))] {
+                let request: crate::indexed_query::IndexedQueryRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "runId": "run", "filter": "all", "command": command,
+                        "kind": kind, "runner": runner, "file": "src/a.js", "line": 2,
+                        "selector": "test", "sort": null, "valid": true,
+                        "testExitCode": 0, "stale": false, "staleReasons": null,
+                        "target": null, "maxStates": null,
+                    }))
+                    .unwrap();
+                let newer = crate::indexed_query::NewerQuery {
+                    run_id: "newer",
+                    index,
+                };
+                refused += usize::from(
+                    crate::indexed_query::query_indexed(index, None, &request, Some(newer))
+                        .is_err(),
+                );
+            }
+        }
+        refused
+    }
+
     /// Every reader, in every view, each on its own: one refusing does not
     /// keep the others from reading.
     fn read_each(index: &CoverageIndex<'_>) -> usize {
@@ -5648,31 +5691,44 @@ mod tests {
                 let (_root, container) = index_of(&report, &|_| {});
                 read_everything(&CoverageIndex::new(&container).unwrap()).unwrap();
             }
-            let mut refused = 0;
-            for section in &sections {
-                let size = section.record_size as usize;
-                if size == 0 || section.count == 0 || section.kind == SECTION_STRING_BYTES {
-                    continue;
-                }
-                let records = (section.count as usize).min(3);
-                for (offset, value) in
-                    (0..size * records).flat_map(|offset| [(offset, 0xffu8), (offset, 0x01)])
-                {
-                    let (kind, original) = (section.kind, section.bytes[offset]);
-                    let (_root, container) = index_of(&report, &move |s: &mut Vec<
-                        QueryIndexSection,
-                    >| {
-                        let section = s.iter_mut().find(|section| section.kind == kind).unwrap();
-                        section.bytes[offset] = if original == value { 0 } else { value };
+            // Each section is swept on a thread of its own.
+            let refused = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for section in &sections {
+                    let size = section.record_size as usize;
+                    if size == 0 || section.count == 0 || section.kind == SECTION_STRING_BYTES {
+                        continue;
+                    }
+                    let (report, refused) = (&report, &refused);
+                    scope.spawn(move || {
+                        let records = (section.count as usize).min(3);
+                        for (offset, value) in (0..size * records)
+                            .flat_map(|offset| [(offset, 0xffu8), (offset, 0x01)])
+                        {
+                            let (kind, original) = (section.kind, section.bytes[offset]);
+                            let (_root, container) =
+                                index_of(report, &move |s: &mut Vec<QueryIndexSection>| {
+                                    let section =
+                                        s.iter_mut().find(|section| section.kind == kind).unwrap();
+                                    section.bytes[offset] =
+                                        if original == value { 0 } else { value };
+                                });
+                            // The queries above the readers are swept over the first
+                            // record's bytes only: every one of them over every byte
+                            // took minutes, and they read what the readers read.
+                            let queries = offset < size && value == 0xff;
+                            let counted = match CoverageIndex::new(&container) {
+                                Ok(index) if queries => read_each(&index) + query_each(&index),
+                                Ok(index) => read_each(&index),
+                                Err(_) => 1,
+                            };
+                            refused.fetch_add(counted, std::sync::atomic::Ordering::Relaxed);
+                        }
                     });
-                    refused += match CoverageIndex::new(&container) {
-                        Ok(index) => read_each(&index),
-                        Err(_) => 1,
-                    };
                 }
-            }
+            });
             assert!(
-                refused > 0
+                refused.into_inner() > 0
                     || sections.iter().all(|section| section.count == 0
                         || section.record_size == 0
                         || section.kind == SECTION_STRING_BYTES)
