@@ -293,12 +293,37 @@ fn used(expression: Node) -> bool {
     match parent.kind() {
         // A statement of its own, unless it ends a block that is a value.
         "block" => yields_value(expression),
-        "statements" | "source_file" | "class_body" | "lambda_literal" => false,
+        "statements" | "source_file" | "class_body" => false,
+        // The lambda's value, when it ends the lambda and the lambda's value
+        // is taken.
+        "lambda_literal" => ends(parent, expression) && lambda_value_used(parent),
         // `else if`: the outer `if` decides.
         "if_expression" => used(parent),
         "when_entry" => parent.parent().is_some_and(used),
         // Assigned, returned, passed, an expression body, an operand.
         _ => true,
+    }
+}
+
+/// Whether `node` is the last of `body`'s statements, comments aside.
+fn ends(body: Node, node: Node) -> bool {
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .filter(|child| !child.kind().contains("comment"))
+        .last()
+        .is_some_and(|last| last.id() == node.id())
+}
+
+/// Whether what a lambda returns is used. A trailing lambda's result is its
+/// call's to use (`val x = run { .. }`, not `run { .. }` on its own); any
+/// other lambda is a value, whose result is taken wherever it is taken.
+fn lambda_value_used(lambda: Node) -> bool {
+    match lambda.parent() {
+        Some(trailing) if trailing.kind() == "annotated_lambda" => trailing
+            .parent()
+            .filter(|call| call.kind() == "call_expression")
+            .is_some_and(used),
+        _ => used(lambda),
     }
 }
 
@@ -587,6 +612,45 @@ mod tests {
         let starts = statement_starts("F.kt", kotlin);
         assert_eq!(change_at(&starts, 6, "2", j), Some(Change::ReturnUndefined));
         assert_eq!(change_at(&starts, 13, "4", j), Some(Change::Skip));
+        // One whose value is taken, by the call it trails or as the lambda's
+        // own value, is a value; one that does not end its lambda is not.
+        let taken = concat!(
+            "fun g(c: Boolean): Int {\n",
+            "    val x = run {\n",
+            "        if (c) {\n",
+            "            log()\n",
+            "            4\n",
+            "        } else {\n",
+            "            5\n",
+            "        }\n",
+            "    }\n",
+            "    val f: () -> Int = {\n",
+            "        if (c) {\n",
+            "            log()\n",
+            "            6\n",
+            "        } else {\n",
+            "            7\n",
+            "        }\n",
+            "    }\n",
+            "    val y = run {\n",
+            "        if (c) {\n",
+            "            log()\n",
+            "            8\n",
+            "        } else {\n",
+            "            9\n",
+            "        }\n",
+            "        10\n",
+            "    }\n",
+            "    return x + f() + y\n",
+            "}\n",
+        );
+        let starts = statement_starts("G.kt", taken);
+        assert_eq!(change_at(&starts, 5, "4", j), Some(Change::ReturnUndefined));
+        assert_eq!(
+            change_at(&starts, 13, "6", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(change_at(&starts, 21, "8", j), Some(Change::Skip));
     }
 
     /// Forge's `stringBuilder.toString()` ending a `when` branch: the value
