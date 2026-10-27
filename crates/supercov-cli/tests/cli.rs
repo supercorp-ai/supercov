@@ -13062,6 +13062,30 @@ fn a_run_whose_output_stops_being_read_goes_on_without_a_panic() {
     }
 }
 
+/// A nextest run refuses an option it cannot tell the selected tests from,
+/// and a Cargo configuration it cannot read, before running anything.
+#[test]
+fn a_nextest_run_refuses_what_it_cannot_read() {
+    if !nextest_installed() {
+        return;
+    }
+    let project = Project::empty("nextest-refuses");
+    small_crate(&project);
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let option = project.supercov(&["--", "cargo", "nextest", "run", "--wat"]);
+    assert_ne!(option.code(), 0);
+    assert!(option.stderr().contains("--wat"), "{}", option.stderr());
+    project.write(".cargo/config.toml", "[build\n");
+    let configuration = project.supercov(&["--", "cargo", "nextest", "run"]);
+    assert_ne!(configuration.code(), 0);
+    assert!(
+        !configuration.stderr().contains("panicked at"),
+        "{}",
+        configuration.stderr()
+    );
+}
+
 /// Whether `cargo nextest` runs here.
 fn nextest_installed() -> bool {
     std::process::Command::new("cargo")
