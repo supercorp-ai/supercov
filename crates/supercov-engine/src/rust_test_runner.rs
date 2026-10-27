@@ -4014,6 +4014,24 @@ mod tests {
         );
     }
 
+    /// `-Z` and its feature as two words keep both, as one does.
+    #[test]
+    fn an_unstable_flag_and_its_feature_as_two_words_are_kept_together() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::CargoTest,
+            arguments: vec!["test".into()],
+            runner_arguments: ["-Z", "unstable-options", "--exclude-should-panic"]
+                .map(str::to_owned)
+                .to_vec(),
+        };
+        let selection = rust_libtest_selection(&invocation).unwrap();
+        assert_eq!(
+            selection.list_arguments,
+            ["-Z", "unstable-options", "--exclude-should-panic"]
+        );
+    }
+
     #[test]
     fn cargo_test_options_are_not_mistaken_for_the_test_name_filter() {
         let invocation = CargoTestInvocation {
