@@ -3239,6 +3239,8 @@ mod tests {
             "    let Some(y) = b else { return 0 };\n",
             "    while let Some(z) = b && z > 1 { break; }\n",
             "    { let _ = 1; }\n",
+            "    #[allow(unused)] { let _z = 1; }\n",
+            "    #[allow(unused)] let _w = { 1 };\n",
             "    let h = || -> u8 { 2 };\n",
             "    g(y) + h()\n",
             "}\n",
@@ -3249,7 +3251,7 @@ mod tests {
             |()| instrument_rust_file("src/lib.rs", source, "crate::rt", false, None).map(drop),
             |()| {},
         );
-        assert!(reached > 7, "{reached}");
+        assert!(reached > 9, "{reached}");
         for fault in ["rust-insertions", "rust-unparsable-transform"] {
             let refused = crate::fault::during(fault, || {
                 instrument_rust_file("src/lib.rs", source, "crate::rt", false, None)
