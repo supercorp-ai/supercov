@@ -56,10 +56,10 @@ pub(super) fn statement_starts(source: &str) -> Starts {
         for statement in list.statements() {
             let change = match &statement {
                 ast::Stmt::LetStmt(s) => s.initializer().map(|_| Change::ValueUndefined),
-                ast::Stmt::ExprStmt(s) => Some(match s.expr() {
-                    Some(e) => expression(&e, false),
-                    None => Change::Skip,
-                }),
+                // One that lost its expression to a parse error is skipped.
+                ast::Stmt::ExprStmt(s) => {
+                    Some(s.expr().map_or(Change::Skip, |e| expression(&e, false)))
+                }
                 ast::Stmt::Item(_) => None,
             };
             push(statement.syntax(), change);
@@ -1762,6 +1762,15 @@ mod tests {
             change_at(&starts, 12, "z * 2", rs),
             Some(Change::ReturnUndefined)
         );
+    }
+
+    /// An item declared inside a function is no statement to change.
+    #[test]
+    fn an_item_inside_a_function_is_no_statement_to_change() {
+        let source = "fn f() {\n    fn inner() {}\n    inner();\n}\n";
+        let starts = statement_starts(source);
+        assert_eq!(starts[&2], [("fn inner() {}".to_owned(), None)]);
+        assert_eq!(starts[&3], [("inner();".to_owned(), Some(Change::Skip))]);
     }
 
     /// An integration test's helpers are the modules it declares, as a
