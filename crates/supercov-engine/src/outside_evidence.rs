@@ -422,7 +422,8 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
         .unwrap_or_else(|_| request.root.to_owned());
     let mut by_file = BTreeMap::<String, RecordedFile>::new();
     let mut skipped = Vec::new();
-    for (path, file) in recorded {
+    // A tracefile names a file at least.
+    recorded.into_iter().for_each(|(path, file)| {
         match project_path(request.root, &canonical_root, &path, &measured) {
             Ok(project) => {
                 let merged = by_file.entry(project).or_default();
@@ -435,7 +436,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             }
             Err(reason) => skipped.push((path, reason)),
         }
-    }
+    });
 
     let skipped_paths = skipped.len();
     let mut hits = BTreeSet::<String>::new();
@@ -1016,6 +1017,17 @@ mod tests {
             1,
             "{background:?}"
         );
+        // Records with no line add their file with no statement and credit
+        // nothing.
+        let empty = root.join("empty.info");
+        std::fs::write(
+            &empty,
+            "SF:src/app.js\nend_of_record\nSF:src/new.js\nend_of_record\n",
+        )
+        .unwrap();
+        let nothing = import("run-a", Credit::Background, "run-g", &empty).unwrap();
+        assert_eq!(nothing.lines_run, 0);
+        assert_eq!(nothing.added_files, ["src/new.js"]);
         let profile = root.join("default.profraw");
         std::fs::write(
             &profile,
