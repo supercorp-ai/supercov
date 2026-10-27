@@ -2984,6 +2984,37 @@ mod tests {
         assert!(operations > 5, "{operations}");
     }
 
+    /// A run id that is no run's, a path outside the store or climbing out
+    /// of it, and a rename or write at a root with no directory above it,
+    /// are each refused.
+    #[test]
+    fn what_a_store_cannot_hold_is_refused() {
+        let root = std::env::temp_dir();
+        assert!(matches!(
+            ProjectLock::acquire(&root, "not/a run", "now"),
+            Err(LifecycleError::InvalidRunId(_))
+        ));
+        for (path, leaf) in [(Path::new("/elsewhere"), true), (&root.join("../b"), true)] {
+            assert!(matches!(
+                reject_linked_ancestors(&root, path, leaf),
+                Err(LifecycleError::UnsafePath(_))
+            ));
+        }
+        let root_dir = Path::new("/");
+        assert!(matches!(
+            atomic_rename(root_dir, &root.join("x")),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            atomic_rename(&root.join("x"), root_dir),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            atomic_write(&root, root_dir, b""),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+    }
+
     #[test]
     fn a_root_without_a_name_is_never_locked() {
         assert!(matches!(
