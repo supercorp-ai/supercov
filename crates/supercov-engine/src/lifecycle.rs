@@ -1569,6 +1569,40 @@ mod tests {
         test_run_metadata(id, bytes)
     }
 
+    /// An id that could name a path outside the store is refused wherever
+    /// one is taken: a state written or read, a run published or
+    /// finalized, and a directory found in the store.
+    #[test]
+    fn an_id_that_is_no_run_id_is_refused_everywhere() {
+        let root = project();
+        let bad = "../escape";
+        let refused = |result: Result<(), LifecycleError>| {
+            assert!(
+                matches!(result, Err(LifecycleError::InvalidRunId(ref id)) if id == bad),
+                "{result:?}"
+            );
+        };
+        refused(write_run_state(
+            &root,
+            &state(&root, bad, RunStateStatus::Testing, 1),
+        ));
+        refused(update_run_state(&root, bad, RunStateStatus::Failed, "now", None).map(|_| ()));
+        refused(finalize_published_run(&root, bad).map(|_| ()));
+        let evidence = root.join("evidence.raw.gz");
+        fs::write(&evidence, b"").unwrap();
+        refused(publish_run(&root, &metadata(bad, 0), &evidence).map(|_| ()));
+        // A control character is no part of a run id, though a name holds it.
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(root.join(".supercov/runs/run\u{1}")).unwrap();
+            assert!(matches!(
+                child_directories(&root.join(".supercov/runs")),
+                Err(LifecycleError::InvalidRunId(id)) if id == "run\u{1}"
+            ));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn evidence(root: &Path) -> (PathBuf, u64) {
         use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
         let mut entries = ["manifest.json", "frontend.json", "coverage-model.json"]
