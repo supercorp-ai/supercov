@@ -290,10 +290,10 @@ impl Terminal {
 #[cfg(unix)]
 fn one_place(left: &std::fs::File, right: &std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (left.metadata(), right.metadata()) {
-        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-        _ => false,
-    }
+    left.metadata()
+        .ok()
+        .zip(right.metadata().ok())
+        .is_some_and(|(left, right)| left.dev() == right.dev() && left.ino() == right.ino())
 }
 
 #[cfg(not(unix))]
