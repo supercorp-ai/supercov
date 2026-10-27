@@ -2569,6 +2569,28 @@ mod tests {
         assert!(text.contains("    Not asked: 130 test(s). No test was asked from 7 file(s) that run it: relay.test.js (40), safety.test.js (22), a.test.js (9), b.test.js (8), c.test.js (7), and 2 more\n"), "{text}");
     }
 
+    /// A line with no statement, and a statement no test answered, render
+    /// as such; each change has its name.
+    #[test]
+    fn an_empty_statement_view_and_each_change_name_render() {
+        let none = render(
+            &json!({"view": "statement", "run": "r", "file": "a.js", "line": 3, "statements": []}),
+        );
+        assert!(none.contains("a.js"), "{none}");
+        let unanswered = render(
+            &json!({"view": "statement", "run": "r", "file": "a.js", "line": 3,
+            "statements": [{"line": 3, "text": "x()", "change": "skipped", "asserted": false, "answers": []}]}),
+        );
+        assert!(unanswered.contains("x()"), "{unanswered}");
+        for (change, name) in [
+            (Change::Skip, "skipped"),
+            (Change::Flip, "boolean flipped"),
+            (Change::BareError, "throws a bare Error"),
+        ] {
+            assert_eq!(change_name_js(change), name);
+        }
+    }
+
     /// Each option is refused where it does not belong, without its value,
     /// or beside a second target; the rest set what they say.
     #[test]
