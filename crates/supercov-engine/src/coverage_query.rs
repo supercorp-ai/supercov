@@ -4606,6 +4606,59 @@ mod tests {
         }
     }
 
+    /// Each metric reads its own count, of a file's gap and of a place's
+    /// dimensions, and an obligation's metric is the public one of its name.
+    #[test]
+    fn each_metric_reads_its_own_count() {
+        let dimensions = IndexedGapDimensions {
+            lines: 1,
+            statements: 2,
+            functions: 3,
+            branches: 4,
+            mcdc_conditions: 5,
+        };
+        let gap = IndexedFileGap {
+            view: CoverageViewId::All,
+            file: "f".into(),
+            uncovered_lines: 1,
+            uncovered_statements: 2,
+            uncovered_functions: 3,
+            missing_branches: 4,
+            missing_mcdc_conditions: 5,
+            measurement_limitations: 0,
+            limitation_kinds: Vec::new(),
+            covered_by_other_tests: NO_DIMENSIONS,
+            uncovered_everywhere: NO_DIMENSIONS,
+            totals: NO_DIMENSIONS,
+            covered: NO_DIMENSIONS,
+            score: 6,
+        };
+        for (metric, dimension, value) in [
+            (MinimizeMetric::All, 1, 6),
+            (MinimizeMetric::Lines, 1, 1),
+            (MinimizeMetric::Statements, 2, 2),
+            (MinimizeMetric::Functions, 3, 3),
+            (MinimizeMetric::Branches, 4, 4),
+            (MinimizeMetric::Mcdc, 5, 5),
+        ] {
+            assert_eq!(
+                dimension_for_metric(&dimensions, metric),
+                dimension,
+                "{metric:?}"
+            );
+            assert_eq!(gap_metric_value(&gap, metric), value, "{metric:?}");
+        }
+        for (obligation, metric) in [
+            (ObligationMetric::Lines, MinimizeMetric::Lines),
+            (ObligationMetric::Statements, MinimizeMetric::Statements),
+            (ObligationMetric::Functions, MinimizeMetric::Functions),
+            (ObligationMetric::Branches, MinimizeMetric::Branches),
+            (ObligationMetric::Mcdc, MinimizeMetric::Mcdc),
+        ] {
+            assert_eq!(obligation.public(), metric);
+        }
+    }
+
     #[test]
     fn a_needed_run_is_one_the_decision_can_produce() {
         use crate::coverage_analysis::McdcVector;
