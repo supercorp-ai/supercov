@@ -2538,6 +2538,17 @@ impl<'a> CoverageIndex<'a> {
             .expect("every section a reader asks for was found when the index was opened")
     }
 
+    /// Nothing, or the error a test fault makes the read `operation` fail
+    /// with where the caller of a `#[track_caller]` reader is: every record
+    /// was checked when the index was opened, so only a fault fails one.
+    #[track_caller]
+    fn readable(&self, operation: &'static str) -> Result<(), CoverageIndexError> {
+        if crate::fault::injected_here("coverage-index-read", operation) {
+            return Err(CoverageIndexError::InvalidRecord("injected"));
+        }
+        Ok(())
+    }
+
     pub fn new(index: &'a QueryIndex) -> Result<Self, CoverageIndexError> {
         // A test fault refuses every index, so each command's answer to one
         // it cannot read runs under test.
@@ -2588,7 +2599,9 @@ impl<'a> CoverageIndex<'a> {
         Ok(Self { index })
     }
 
+    #[track_caller]
     pub fn model(&self) -> Result<IndexedCoverageModel, CoverageIndexError> {
+        self.readable("model")?;
         let descriptor = self.section(SECTION_COVERAGE_MODEL);
         if descriptor.count != 1 {
             return Err(CoverageIndexError::InvalidRecord(
@@ -2639,7 +2652,9 @@ impl<'a> CoverageIndex<'a> {
             .map_err(|_| CoverageIndexError::InvalidUtf8)
     }
 
+    #[track_caller]
     pub fn summary(&self, view: CoverageViewId) -> Result<CoverageSummary, CoverageIndexError> {
+        self.readable("summary")?;
         let descriptor = self.section(SECTION_VIEW_SUMMARIES);
         if descriptor.count != 3 {
             return Err(CoverageIndexError::InvalidRecord("summary view count"));
@@ -2712,12 +2727,14 @@ impl<'a> CoverageIndex<'a> {
         found.ok_or(CoverageIndexError::InvalidRecord("missing coverage view"))
     }
 
+    #[track_caller]
     pub fn file_gaps(
         &self,
         view: CoverageViewId,
         kind: Option<&str>,
         runner: Option<&str>,
     ) -> Result<Vec<IndexedFileGap>, CoverageIndexError> {
+        self.readable("file_gaps")?;
         let descriptor = self.section(SECTION_FILE_GAPS);
         let mut gaps = Vec::new();
         for index in 0..descriptor.count {
@@ -2868,12 +2885,14 @@ impl<'a> CoverageIndex<'a> {
             .collect()
     }
 
+    #[track_caller]
     pub fn projection(
         &self,
         view: CoverageViewId,
         kind: Option<&str>,
         runner: Option<&str>,
     ) -> Result<IndexedProjection, CoverageIndexError> {
+        self.readable("projection")?;
         let descriptor = self.section(SECTION_PROJECTIONS);
         let mut found = None;
         for index in 0..descriptor.count {
@@ -3065,6 +3084,7 @@ impl<'a> CoverageIndex<'a> {
         ))
     }
 
+    #[track_caller]
     pub fn decision_gaps(
         &self,
         view: CoverageViewId,
@@ -3072,6 +3092,7 @@ impl<'a> CoverageIndex<'a> {
         runner: Option<&str>,
         file: &str,
     ) -> Result<Vec<IndexedDecisionGap>, CoverageIndexError> {
+        self.readable("decision_gaps")?;
         let descriptor = self.section(SECTION_DECISION_GAPS);
         let mut decisions = Vec::new();
         for index in 0..descriptor.count {
@@ -3119,11 +3140,13 @@ impl<'a> CoverageIndex<'a> {
         Ok(decisions)
     }
 
+    #[track_caller]
     pub fn dimensions(
         &self,
         view: CoverageViewId,
         dimension: CoverageDimension,
     ) -> Result<Vec<IndexedDimensionCoverage>, CoverageIndexError> {
+        self.readable("dimensions")?;
         let descriptor = self.section(SECTION_DIMENSIONS);
         let mut values = Vec::new();
         for index in 0..descriptor.count {
@@ -3158,10 +3181,12 @@ impl<'a> CoverageIndex<'a> {
         Ok(values)
     }
 
+    #[track_caller]
     pub fn scope_entries(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedScopeEntry>, CoverageIndexError> {
+        self.readable("scope_entries")?;
         let descriptor = self.section(SECTION_SCOPE_ENTRIES);
         let mut entries = Vec::new();
         for index in 0..descriptor.count {
@@ -3250,12 +3275,14 @@ impl<'a> CoverageIndex<'a> {
         })
     }
 
+    #[track_caller]
     pub fn line(
         &self,
         view: CoverageViewId,
         file: &str,
         line: usize,
     ) -> Result<Option<IndexedLine>, CoverageIndexError> {
+        self.readable("line")?;
         let descriptor = self.section(SECTION_LINES);
         let mut found = None;
         for index in 0..descriptor.count {
@@ -3287,16 +3314,20 @@ impl<'a> CoverageIndex<'a> {
         Ok(found)
     }
 
+    #[track_caller]
     pub fn lines(&self, view: CoverageViewId) -> Result<Vec<IndexedLine>, CoverageIndexError> {
+        self.readable("lines")?;
         self.lines_where(view, None)
     }
 
     /// `lines`, of one file only: records of other files are skipped before anything in them is decoded.
+    #[track_caller]
     pub fn lines_in_file(
         &self,
         view: CoverageViewId,
         file: &str,
     ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
+        self.readable("lines_in_file")?;
         self.lines_where(view, Some(file))
     }
 
@@ -3333,10 +3364,12 @@ impl<'a> CoverageIndex<'a> {
         Ok(lines)
     }
 
+    #[track_caller]
     pub fn test_summaries(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedTestSummary>, CoverageIndexError> {
+        self.readable("test_summaries")?;
         let descriptor = self.section(SECTION_TEST_SUMMARIES);
         let mut tests = Vec::new();
         for index in 0..descriptor.count {
@@ -3426,10 +3459,12 @@ impl<'a> CoverageIndex<'a> {
         })
     }
 
+    #[track_caller]
     pub fn test_details(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedTestDetail>, CoverageIndexError> {
+        self.readable("test_details")?;
         let summaries = self.test_summaries(view)?;
         let positions = summaries
             .iter()
@@ -3551,19 +3586,23 @@ impl<'a> CoverageIndex<'a> {
         Ok(details)
     }
 
+    #[track_caller]
     pub fn hit_metadata(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
+        self.readable("hit_metadata")?;
         self.hit_metadata_where(view, None)
     }
 
     /// `hit_metadata`, of one file only: records of other files are skipped before anything in them is decoded.
+    #[track_caller]
     pub fn hit_metadata_in_file(
         &self,
         view: CoverageViewId,
         file: &str,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
+        self.readable("hit_metadata_in_file")?;
         self.hit_metadata_where(view, Some(file))
     }
 
@@ -3615,19 +3654,23 @@ impl<'a> CoverageIndex<'a> {
         Ok(metadata)
     }
 
+    #[track_caller]
     pub fn limitations(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedLimitation>, CoverageIndexError> {
+        self.readable("limitations")?;
         self.limitations_where(view, None)
     }
 
     /// `limitations`, of one file only: records of other files are skipped before anything in them is decoded.
+    #[track_caller]
     pub fn limitations_in_file(
         &self,
         view: CoverageViewId,
         file: &str,
     ) -> Result<Vec<IndexedLimitation>, CoverageIndexError> {
+        self.readable("limitations_in_file")?;
         self.limitations_where(view, Some(file))
     }
 
@@ -3667,10 +3710,12 @@ impl<'a> CoverageIndex<'a> {
         Ok(limitations)
     }
 
+    #[track_caller]
     pub fn decision_metadata(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<crate::coverage_report::DecisionMeta>, CoverageIndexError> {
+        self.readable("decision_metadata")?;
         let descriptor = self.section(SECTION_DECISION_METADATA);
         let mut metadata = Vec::new();
         for index in 0..descriptor.count {
@@ -3753,20 +3798,24 @@ impl<'a> CoverageIndex<'a> {
         })
     }
 
+    #[track_caller]
     pub fn decision_details(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<crate::coverage_report::DecisionResult>, CoverageIndexError> {
+        self.readable("decision_details")?;
         self.decision_details_where(view, None)
     }
 
     /// `decision_details`, of one file only: a decision of another file is
     /// skipped before its vectors and conditions are decoded.
+    #[track_caller]
     pub fn decision_details_in_file(
         &self,
         view: CoverageViewId,
         file: &str,
     ) -> Result<Vec<crate::coverage_report::DecisionResult>, CoverageIndexError> {
+        self.readable("decision_details_in_file")?;
         self.decision_details_where(view, Some(file))
     }
 
@@ -3859,10 +3908,12 @@ impl<'a> CoverageIndex<'a> {
         Ok(decisions)
     }
 
+    #[track_caller]
     pub fn phase_summaries(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedPhaseSummary>, CoverageIndexError> {
+        self.readable("phase_summaries")?;
         let descriptor = self.section(SECTION_PHASE_SUMMARIES);
         let mut phases = Vec::new();
         for index in 0..descriptor.count {
@@ -3890,12 +3941,14 @@ impl<'a> CoverageIndex<'a> {
         Ok(phases)
     }
 
+    #[track_caller]
     pub fn anchors(
         &self,
         view: CoverageViewId,
         file: &str,
         line: usize,
     ) -> Result<Vec<IndexedAnchor>, CoverageIndexError> {
+        self.readable("anchors")?;
         let descriptor = self.section(SECTION_ANCHORS);
         let mut anchors = Vec::new();
         for index in 0..descriptor.count {

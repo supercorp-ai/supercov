@@ -13496,6 +13496,67 @@ fn a_command_started_in_a_removed_directory_says_so() {
     }
 }
 
+/// Each query fails at every place it reads its index, one at a time, and
+/// says so: every record was checked when the index was opened, so only a
+/// fault fails a read.
+#[test]
+fn each_query_says_so_wherever_a_read_of_its_index_fails() {
+    let project = Project::cart("index-read-faults");
+    project.measure(&[]);
+    let older = project.latest();
+    project.measure(&[]);
+    let commands: &[&[&str]] = &[
+        &["runs", "latest"],
+        &["runs", "latest", "--json"],
+        &["runs", "latest", "gaps"],
+        &["runs", "latest", "gaps", "--json"],
+        &["runs", "latest", "file", "src/cart.js"],
+        &["runs", "latest", "file", "src/cart.js", "--json"],
+        &["runs", "latest", "line", "src/cart.js:2"],
+        &["runs", "latest", "line", "src/cart.js:2", "--json"],
+        &["runs", "latest", "tests"],
+        &["runs", "latest", "tests", "--json"],
+        &["runs", "latest", "scope", "--json"],
+        &["runs", "latest", "summary", "--json"],
+        &["runs", "--json"],
+        &["runs", "check", "--json"],
+        &["runs", "latest", "tests", "affected", "--json"],
+        &["runs", "latest", "tests", "without-evidence", "--json"],
+        &["runs", "latest", "kinds", "--json"],
+        &["runs", "latest", "runners", "--json"],
+        &["runs", "latest", "files", "--json"],
+        &[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--json",
+        ],
+        &["runs", "latest", "decision", "src/cart.js:6", "--json"],
+        &["runs", "latest", "test", "total", "--json"],
+        &["runs", "latest", "minimize", "--json"],
+        &["diff", &older, "latest", "--json"],
+        &["report", "--no-open", "--output", "r.html"],
+    ];
+    let mut places = 0;
+    for command in commands {
+        for nth in 1.. {
+            let fault = format!("coverage-index-read#{nth}");
+            let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
+            let said = format!("{}{}", ran.stdout(), ran.stderr());
+            assert!(!said.contains("panicked at"), "{fault} {command:?}: {said}");
+            if !said.contains("test fault at coverage-index-read") {
+                break;
+            }
+            places += 1;
+            assert!(nth < 100, "{command:?} kept reading");
+        }
+    }
+    assert!(places > commands.len(), "{places}");
+}
+
 /// With every index refused, and with no room for any reply, each query
 /// says what failed: a fault the engine injects stands in for an index from
 /// another version and for an answer too large to send.

@@ -117,6 +117,14 @@ pub fn injected(site: &str) -> bool {
     failing(site).is_some()
 }
 
+/// [`injected`], for the call `operation` made where the caller of a
+/// `#[track_caller]` function is: `site#N` counts the places it is called
+/// from.
+#[track_caller]
+pub fn injected_here(site: &str, operation: &'static str) -> bool {
+    failing_at(site, Some((std::panic::Location::caller(), operation))).is_some()
+}
+
 #[cfg(any(test, debug_assertions))]
 thread_local! {
     static DURING: std::cell::RefCell<Vec<Fault>> = const { std::cell::RefCell::new(Vec::new()) };
