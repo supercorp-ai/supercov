@@ -141,73 +141,73 @@ fn elides_type_imports_in(
 ) -> bool {
     let root_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     let root = root_path.as_path();
-    let commands = [expanded_command(root, command)];
-    let text = commands.join(" ");
+    let text = expanded_command(root, command);
     let tokens = text
         .split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
         .collect::<Vec<_>>();
     // A compiler name in an arbitrary argument is not evidence of execution.
     // Recognize direct invocations and Node's explicit TS loader options.
-    let recognized = commands.iter().any(|command| {
-        command.split(['\n', ';', '&', '|']).any(|part| {
-            let words = part.split_whitespace().collect::<Vec<_>>();
-            let executable = words
-                .first()
-                .and_then(|s| Path::new(s).file_name())
-                .and_then(|s| s.to_str());
-            matches!(executable, Some("tsc" | "tsx" | "ts-node"))
-                || (executable == Some("node")
-                    && words.iter().enumerate().any(|(i, word)| {
-                        matches!(
-                            *word,
-                            "--import=tsx"
-                                | "--loader=ts-node/esm"
-                                | "--experimental-loader=ts-node/esm"
-                        ) || (matches!(*word, "--import" | "--loader" | "--experimental-loader")
-                            && words
-                                .get(i + 1)
-                                .is_some_and(|s| matches!(*s, "tsx" | "ts-node/esm")))
-                    }))
-        })
+    let recognized = text.split(['\n', ';', '&', '|']).any(|part| {
+        let words = part.split_whitespace().collect::<Vec<_>>();
+        let executable = words
+            .first()
+            .and_then(|s| Path::new(s).file_name())
+            .and_then(|s| s.to_str());
+        matches!(executable, Some("tsc" | "tsx" | "ts-node"))
+            || (executable == Some("node")
+                && words.iter().enumerate().any(|(i, word)| {
+                    matches!(
+                        *word,
+                        "--import=tsx"
+                            | "--loader=ts-node/esm"
+                            | "--experimental-loader=ts-node/esm"
+                    ) || (matches!(*word, "--import" | "--loader" | "--experimental-loader")
+                        && words
+                            .get(i + 1)
+                            .is_some_and(|s| matches!(*s, "tsx" | "ts-node/esm")))
+                }))
     });
     if !recognized {
         return false;
     }
     let mut explicit_configs = Vec::new();
-    for command in &commands {
-        let words = command.split_whitespace().collect::<Vec<_>>();
-        for (index, word) in words.iter().enumerate() {
-            let value = if matches!(*word, "-p" | "--project" | "--tsconfig") {
-                let Some(value) = words.get(index + 1) else {
-                    return false;
-                };
-                Some(*value)
-            } else {
-                word.strip_prefix("--project=")
-                    .or_else(|| word.strip_prefix("--tsconfig="))
-                    .or_else(|| word.strip_prefix("-p="))
+    // A recognized command has its executable's word at least.
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    let readable = words.iter().enumerate().all(|(index, word)| {
+        let value = if matches!(*word, "-p" | "--project" | "--tsconfig") {
+            let Some(value) = words.get(index + 1) else {
+                return false;
             };
-            if let Some(value) = value {
-                let path = root.join(value);
-                let Ok(path) = fs::canonicalize(path) else {
-                    return false;
-                };
-                // Root-local named tsconfigs are included in the input fingerprint.
-                // Other explicit config layouts remain conservative for now.
-                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if path.parent() != Some(root)
-                    || !name.starts_with("tsconfig")
-                    || !name.ends_with(".json")
-                {
-                    return false;
-                }
-                explicit_configs.push(path);
-            } else if word.starts_with("-p") {
-                // `-pconfig.json`, a form not read. (No word starting `-p`
-                // starts `--`, so `--project` never reaches here.)
+            Some(*value)
+        } else {
+            word.strip_prefix("--project=")
+                .or_else(|| word.strip_prefix("--tsconfig="))
+                .or_else(|| word.strip_prefix("-p="))
+        };
+        if let Some(value) = value {
+            let path = root.join(value);
+            let Ok(path) = fs::canonicalize(path) else {
+                return false;
+            };
+            // Root-local named tsconfigs are included in the input fingerprint.
+            // Other explicit config layouts remain conservative for now.
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if path.parent() != Some(root)
+                || !name.starts_with("tsconfig")
+                || !name.ends_with(".json")
+            {
                 return false;
             }
+            explicit_configs.push(path);
+            true
+        } else {
+            // `-pconfig.json`, a form not read. (No word starting `-p`
+            // starts `--`, so `--project` never reaches here.)
+            !word.starts_with("-p")
         }
+    });
+    if !readable {
+        return false;
     }
     // CLI/environment overrides may select a different config or import policy.
     if [
@@ -478,6 +478,25 @@ mod tests {
         );
         assert!(!elides("src/nested/deep.ts", "tsx src/nested/deep.ts"));
         assert!(elides("src/main.ts", "tsx src/main.ts"));
+        fs::remove_file(root.join("src/nested/tsconfig.json")).unwrap();
+        // An empty extends list adds nothing; a missing base is no path.
+        write("tsconfig.json", r#"{"extends":[]}"#);
+        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        write("tsconfig.json", r#"{"extends":"./missing"}"#);
+        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        assert!(
+            !config_paths(&root, &["src/main.ts".to_owned()])
+                .iter()
+                .any(|path| path.ends_with("missing.json"))
+        );
+        write("tsconfig.json", "{}");
+        // A package script the command names, and a package manager alone.
+        write("package.json", r#"{"scripts":{"start":"tsx src/main.ts"}}"#);
+        assert!(elides("src/main.ts", "npm start"));
+        assert!(!elides("src/main.ts", "npm"));
+        // A file outside the project has no tsconfig of it.
+        assert!(!elides("/elsewhere/main.ts", "tsx /elsewhere/main.ts"));
+        assert!(config_paths(&root, &["/elsewhere/main.ts".to_owned()]).is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 }
