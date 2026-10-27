@@ -729,9 +729,9 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
         buckets[rank].push(test);
     }
     // Most likely to fail first, as within one run.
-    for bucket in &mut buckets[..2] {
+    buckets[..2].iter_mut().for_each(|bucket| {
         bucket.sort_by_key(|entry| std::cmp::Reverse(entry["nameMatch"].as_u64().unwrap_or(0)));
-    }
+    });
     let [affected, undetermined, unaffected] = buckets;
     let total = affected.len() + undetermined.len() + unaffected.len();
     Ok(json!({

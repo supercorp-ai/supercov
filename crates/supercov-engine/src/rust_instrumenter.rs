@@ -912,16 +912,17 @@ impl<'a> RustObligationCollector<'a> {
         };
         let mut condition_ranges = Vec::new();
         Self::atomic_condition_ranges(test, &mut condition_ranges);
-        let mut conditions = Vec::with_capacity(condition_ranges.len());
-        for condition in condition_ranges {
-            match self.locations.text(condition) {
-                Ok(source) => conditions.push(source),
-                Err(error) => {
-                    self.error.get_or_insert(error);
-                    return;
-                }
+        let conditions = match condition_ranges
+            .into_iter()
+            .map(|condition| self.locations.text(condition))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return;
             }
-        }
+        };
         self.manifest.decisions.push(DecisionMeta {
             id: id.clone(),
             file: self.file.into(),
@@ -2234,7 +2235,8 @@ fn instrument_let_chain(
             format!("{runtime_path}::reached(&mut {frame}, 0) && "),
         );
     }
-    for (index, atom) in atoms.iter().enumerate() {
+    // A chain holds at least one condition.
+    atoms.iter().enumerate().for_each(|(index, atom)| {
         if lets.contains(atom) {
             if index > 0 {
                 push_direct(
@@ -2253,7 +2255,7 @@ fn instrument_let_chain(
                 format!("), &mut {frame}, {index})"),
             );
         }
-    }
+    });
     let mut entry = String::new();
     if broke.is_some() {
         entry.push_str(&format!(" {mark}"));
