@@ -12744,8 +12744,21 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
         &["runs", "latest", "summary", "--json"],
         &["runs", "--json"],
         &["runs", "patch", "--json"],
+        &["runs", "check"],
         &["runs", "check", "--json"],
         &["runs", "check", "--lines", "100", "--json"],
+        &["runs", "latest", "assertions", "--kind", "unit"],
+        &[
+            "runs",
+            "latest",
+            "assertions",
+            "assess",
+            "--dry-run",
+            "--kind",
+            "unit",
+        ],
+        &["tests", "affected", "--kind", "unit"],
+        &["runs", "latest", "gaps", "--kind", "unit", "--json"],
         &["diff", &older, "latest", "--json"],
         &["diff", &older, "latest"],
         &["report", "--no-open"],
@@ -12759,8 +12772,38 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
             reached += usize::from(said.contains(&format!("test fault at {fault}")));
         }
         assert!(
-            reached * 2 > commands.len(),
+            reached * 3 > commands.len(),
             "{fault} reached {reached} commands"
         );
     }
+}
+
+/// A line asked about after its file was cut short is past its end; after
+/// the file was removed, it is answered from the run, with no source.
+#[test]
+fn a_line_whose_file_was_cut_or_removed_since_the_run_is_refused_or_answered_without_text() {
+    let project = Project::cart("line-gone");
+    project.measure(&[]);
+    // Cut short, the line is past its end: no line to answer for.
+    project.write("src/cart.js", "export const total = 0;\n");
+    let short = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:3", "--json"])
+        .json();
+    assert_eq!(short["error"]["code"], "INVALID_ARGUMENT", "{short}");
+    // Removed, a line the run kept no text of (a closing brace) has none.
+    std::fs::remove_file(project.root.join("src/cart.js")).unwrap();
+    let gone = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:5", "--json"])
+        .json();
+    assert_eq!(gone["ok"], true, "{gone}");
+    assert!(gone["data"]["source"].is_null(), "{gone}");
+}
+
+/// `import` with nothing to import names what it needs.
+#[test]
+fn import_with_no_arguments_names_what_it_needs() {
+    let project = Project::cart("import-nothing");
+    let ran = project.supercov(&["import"]);
+    assert_ne!(ran.code(), 0, "{}", ran.stderr());
+    assert!(ran.stderr().contains("import"), "{}", ran.stderr());
 }

@@ -186,11 +186,17 @@ fn hydrate_line_source_from_working_tree(
         return;
     }
     // The query answers only for a file the run recorded, which is always
-    // a path within the project.
-    let Ok(contents) = fs::read_to_string(root.join(&location.file)) else {
-        return;
-    };
-    let Some(line) = contents.lines().nth(location.line.saturating_sub(1)) else {
+    // a path within the project; one removed since, or cut short, has no
+    // text to give.
+    let Some(line) = fs::read_to_string(root.join(&location.file))
+        .ok()
+        .and_then(|contents| {
+            contents
+                .lines()
+                .nth(location.line.saturating_sub(1))
+                .map(str::to_owned)
+        })
+    else {
         return;
     };
     let changed = file_changed_since_run(root, recorded, &location.file);
@@ -987,7 +993,7 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
     // measurements. Their source, tests and configuration may differ in
     // files they do not measure: what that takes was judged above.
     let mut sets = Vec::<Vec<&StoredRun>>::new();
-    for run in current {
+    current.into_iter().for_each(|run| {
         let measured = |run: &StoredRun| {
             let fingerprint = &run.metadata.integrity.fingerprint;
             (
@@ -1004,9 +1010,10 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
             Some(set) => set.push(run),
             None => sets.push(vec![run]),
         }
-    }
+    });
+    // There are runs on the current source, so there is a set of them.
     let mut groups = Vec::new();
-    for set in sets {
+    sets.into_iter().for_each(|set| {
         let ids = set.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
         if let [only] = set.as_slice() {
             println!(
@@ -1014,7 +1021,7 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                 only.id,
                 only.metadata.command.join(" ")
             );
-            continue;
+            return;
         }
         // The same runs merged before are that merge.
         let wanted = ids.iter().collect::<std::collections::BTreeSet<_>>();
@@ -1030,17 +1037,17 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                 merged.id
             );
             println!("{} runs {}", launcher_command(), merged.id);
-            continue;
+            return;
         }
         println!(
             "[supercov] merging {} runs on the source as it is now:",
             ids.len()
         );
-        for run in &set {
-            println!("  {}  {}", run.id, run.metadata.command.join(" "));
-        }
+        // A set of more than one run.
+        set.iter()
+            .for_each(|run| println!("  {}  {}", run.id, run.metadata.command.join(" ")));
         groups.push(ids);
-    }
+    });
     Ok(groups)
 }
 
@@ -1222,7 +1229,8 @@ fn render_check(
         Outcome::Pass => out.push_str("\nPASS: every floor is met.\n"),
         Outcome::Fail { violations } => {
             out.push_str(&format!("\nFAIL: {} floor(s) not met.\n", violations.len()));
-            for violation in violations {
+            // A failed check has a floor it did not meet.
+            violations.into_iter().for_each(|violation| {
                 let scope = violation.file.as_deref().unwrap_or("(whole run)");
                 out.push_str(&format!(
                     "  {scope}: {} {}  {}/{} below {}\n",
@@ -1250,13 +1258,14 @@ fn render_check(
                         }
                     ));
                 }
-            }
+            });
         }
         Outcome::Error { reasons } => {
             out.push_str("\nERROR: this run cannot answer the question asked.\n");
-            for reason in reasons {
-                out.push_str(&format!("  {reason}\n"));
-            }
+            // An error has its reasons.
+            reasons
+                .iter()
+                .for_each(|reason| out.push_str(&format!("  {reason}\n")));
         }
     }
     out.push_str(&uncounted_note(view));
@@ -3925,6 +3934,7 @@ mod docs_command_tests {
         let native = localize_guide(GUIDE, "supercov");
         assert!(native.contains("`supercov security`"));
         assert!(native.contains("```sh\nsupercov -- npm test"));
+        assert_eq!(localize_guide("", "supercov"), "");
     }
 }
 
