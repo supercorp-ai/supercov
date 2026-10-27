@@ -3407,18 +3407,20 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
 fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_named() {
     let project = Project::empty("probe-observed");
     project.write("package.json", r#"{"name":"observed","type":"module"}"#);
-    // A function that reaches nothing dangerous, and one no route calls.
+    // A function that reaches nothing dangerous, one no route calls, and a
+    // sink no test runs; and a module of no functions the tests run.
     project.write(
         "src/db.js",
-        "export function sinkRun(db, v) {\n  return db.query(\"q\" + v);\n}\nexport function quietLog(db, v) {\n  return console.log(v);\n}\n",
+        "export function sinkRun(db, v) {\n  return db.query(\"q\" + v);\n}\nexport function quietLog(db, v) {\n  return console.log(v);\n}\nexport function sinkUnused(db, v) {\n  return db.query(\"u\" + v);\n}\n",
     );
+    project.write("src/consts.js", "export const limit = 1;\n");
     project.write(
         "src/fmt.js",
         "export function formatRow(v) {\n  return String(v);\n}\n",
     );
     project.write("src/handler.js", "import { sinkRun } from \"./db.js\";\nexport function takeHandler(req, db) {\n  return sinkRun(db, req.q);\n}\n");
     let mut tests = String::from(
-        "import test from \"node:test\";\nimport { sinkRun, quietLog } from \"../src/db.js\";\nimport { formatRow } from \"../src/fmt.js\";\nimport { takeHandler } from \"../src/handler.js\";\n",
+        "import test from \"node:test\";\nimport { sinkRun, quietLog } from \"../src/db.js\";\nimport { formatRow } from \"../src/fmt.js\";\nimport { takeHandler } from \"../src/handler.js\";\nimport { limit } from \"../src/consts.js\";\n",
     );
     for i in 1..=9 {
         project.write(&format!("src/route{i}.js"), &format!("export function takeRoute{i}(req, deps) {{\n  return deps.sinkRun(deps.db, req.p);\n}}\n"));
@@ -3433,7 +3435,7 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
         ));
     }
     tests.push_str("test(\"route 1 again\", () => { takeRoute1({ p: 2 }, { db, sinkRun }); });\n");
-    tests.push_str("test(\"handler\", () => { takeHandler({ q: 1 }, db); });\n");
+    tests.push_str("test(\"handler\", () => { takeHandler({ q: limit }, db); });\n");
     project.write("test/all.test.js", &tests);
     project.git(&["init", "-q"]);
     project.measure(&[]);
@@ -3449,10 +3451,14 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
         &report,
         &[
             "Cross-file paths confirmed: 4\n  0.90  injection_sink  src/handler.js:3 takeHandler -> src/db.js:1 sinkRun\n",
-            "(observed in a test)  src/route1.js:1 takeRoute1 -> src/db.js:1 sinkRun\n",
             "6 more caller(s) ran with a flagged function in a test and were not asked, three being asked per function:\n",
             " -> src/db.js:1 sinkRun\n  ... and 1 more\n",
         ],
+    );
+    assert_eq!(
+        report.matches("(observed in a test)").count(),
+        3,
+        "{report}"
     );
     assert_eq!(report.matches("takeRoute1 -> ").count(), 1, "{report}");
     assert_eq!(

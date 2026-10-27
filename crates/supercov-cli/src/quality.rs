@@ -2434,17 +2434,6 @@ fn confirm_paths(
 ) -> (Vec<Value>, Vec<Value>, Usage, Usage) {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
-    let body = |source: &str, f: &candidates::FunctionSpan| -> String {
-        source
-            .lines()
-            .skip(f.start.saturating_sub(1))
-            .take(f.end.saturating_sub(f.start) + 1)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .take(40_000)
-            .collect()
-    };
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
     let mut unasked = Vec::new();
@@ -2475,7 +2464,7 @@ fn confirm_paths(
                 if answer.labels[i].takes_outside < cut {
                     return;
                 }
-                let caller_body = body(source, caller);
+                let caller_body = function_body(source, caller);
                 for (j, callee) in callee_structure
                     .functions
                     .iter()
@@ -2522,7 +2511,7 @@ fn confirm_paths(
                             file: target.clone(),
                             function: callee.name.clone(),
                             line: callee.start,
-                            source: body(callee_source, callee),
+                            source: function_body(callee_source, callee),
                         },
                         &label.sink_kind,
                     );
@@ -2590,9 +2579,9 @@ fn confirm_pending(
         pending.len() > 4,
     );
     let mut confirmed = Vec::new();
-    for ((index, _), result) in answered {
+    answered.into_iter().for_each(|((index, _), result)| {
         let Ok((_, entry, hit, _)) = result else {
-            continue;
+            return;
         };
         let counted = if hit { &mut reused } else { &mut usage };
         counted.input_tokens += entry.response.usage.input_tokens;
@@ -2602,7 +2591,7 @@ fn confirm_pending(
             path["value"] = json!(value);
             confirmed.push(path);
         }
-    }
+    });
     confirmed.sort_by(|a, b| {
         b["value"]
             .as_f64()
@@ -2610,6 +2599,52 @@ fn confirm_pending(
             .total_cmp(&a["value"].as_f64().unwrap_or(0.0))
     });
     (confirmed, usage, reused)
+}
+
+/// What each test ran: test, then file, then the lines executed. A run's
+/// points are the lines its tests ran, each with the tests that ran it.
+fn lines_by_test(
+    points: &[(String, usize, Vec<String>)],
+) -> BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> {
+    points
+        .iter()
+        .flat_map(|(file, line, tests)| tests.iter().map(move |test| (test, file, *line)))
+        .fold(BTreeMap::new(), |mut by_test, (test, file, line)| {
+            by_test
+                .entry(test.as_str())
+                .or_insert_with(BTreeMap::new)
+                .entry(file.as_str())
+                .or_insert_with(BTreeSet::new)
+                .insert(line);
+            by_test
+        })
+}
+
+/// Each labelled function of the files with an answer: its file, its span,
+/// its label and its file's source.
+fn labelled_functions<'a>(
+    structures: &'a BTreeMap<String, (candidates::Structure, String)>,
+    by_path: &'a BTreeMap<&str, &Answers>,
+) -> impl Iterator<
+    Item = (
+        &'a String,
+        &'a candidates::FunctionSpan,
+        &'a FunctionLabel,
+        &'a str,
+    ),
+> {
+    structures
+        .iter()
+        .flat_map(move |(file, (structure, source))| {
+            let labels = by_path
+                .get(file.as_str())
+                .map_or(&[][..], |answer| &answer.labels[..]);
+            structure
+                .functions
+                .iter()
+                .zip(labels)
+                .map(move |(function, label)| (file, function, label, source.as_str()))
+        })
 }
 
 fn run_paths(
@@ -2623,154 +2658,125 @@ fn run_paths(
 ) -> (Vec<Value>, Vec<Value>, Usage, Usage) {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
-    // test -> file -> executed lines
-    let mut by_test: BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> = BTreeMap::new();
-    for (file, line, tests) in points {
-        for test in tests {
-            by_test
-                .entry(test.as_str())
-                .or_default()
-                .entry(file.as_str())
-                .or_default()
-                .insert(*line);
-        }
-    }
-    let body = |source: &str, f: &candidates::FunctionSpan| -> String {
-        source
-            .lines()
-            .skip(f.start.saturating_sub(1))
-            .take(f.end.saturating_sub(f.start) + 1)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .take(40_000)
-            .collect()
+    let by_test = lines_by_test(points);
+    // The paths the imports found, which a run does not ask again: each was
+    // written with both ends named.
+    let end = |path: &Value, side: &str| {
+        format!(
+            "{}#{}",
+            path[side]["file"].as_str().unwrap_or_default(),
+            path[side]["function"].as_str().unwrap_or_default()
+        )
     };
     let known: BTreeSet<(String, String)> = already
         .iter()
-        .filter_map(|p| {
-            Some((
-                format!(
-                    "{}#{}",
-                    p["caller"]["file"].as_str()?,
-                    p["caller"]["function"].as_str()?
-                ),
-                format!(
-                    "{}#{}",
-                    p["callee"]["file"].as_str()?,
-                    p["callee"]["function"].as_str()?
-                ),
-            ))
-        })
+        .map(|path| (end(path, "caller"), end(path, "callee")))
         .collect();
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut unasked = Vec::new();
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
-    for (callee_file, (callee_structure, callee_source)) in structures {
-        let Some(callee_answer) = by_path.get(callee_file.as_str()) else {
-            continue;
-        };
-        for (j, callee) in callee_structure
-            .functions
+    let sinks = labelled_functions(structures, &by_path).filter(|(_, _, label, _)| {
+        label.reaches_sink >= cut && label.sanitises < cut && label.sink_kind != "none"
+    });
+    for (callee_file, callee, label, callee_source) in sinks {
+        // Tests that executed a line of this function.
+        let tests: Vec<&str> = by_test
             .iter()
-            .enumerate()
-            .take(callee_answer.labels.len())
-        {
-            let label = &callee_answer.labels[j];
-            if label.reaches_sink < cut || label.sanitises >= cut || label.sink_kind == "none" {
-                continue;
-            }
-            // Tests that executed a line of this function.
-            let tests: Vec<&str> = by_test
-                .iter()
-                .filter(|(_, files)| {
-                    files.get(callee_file.as_str()).is_some_and(|lines| {
-                        lines.range(callee.start..=callee.end).next().is_some()
-                    })
-                })
-                .map(|(t, _)| *t)
-                .collect();
-            let mut callers = 0;
-            for test in tests {
-                for (caller_file, lines) in &by_test[test] {
-                    if *caller_file == callee_file.as_str() {
+            .filter(|(_, files)| {
+                files
+                    .get(callee_file.as_str())
+                    .is_some_and(|lines| lines.range(callee.start..=callee.end).next().is_some())
+            })
+            .map(|(t, _)| *t)
+            .collect();
+        let mut callers = 0;
+        for test in tests {
+            // Every test ran a line of some file.
+            by_test[test].iter().for_each(|(caller_file, lines)| {
+                if *caller_file == callee_file.as_str() {
+                    return;
+                }
+                let Some((caller_structure, caller_source)) = structures.get(*caller_file) else {
+                    return;
+                };
+                let Some(caller_answer) = by_path.get(caller_file) else {
+                    return;
+                };
+                for (caller, caller_label) in caller_structure.functions.iter().zip(&caller_answer.labels) {
+                    if caller_label.takes_outside < cut
+                        || lines.range(caller.start..=caller.end).next().is_none()
+                    {
                         continue;
                     }
-                    let Some((caller_structure, caller_source)) = structures.get(*caller_file)
-                    else {
+                    let pair = (
+                        format!("{caller_file}#{}", caller.name),
+                        format!("{callee_file}#{}", callee.name),
+                    );
+                    if known.contains(&pair) || !seen.insert(pair) {
                         continue;
-                    };
-                    let Some(caller_answer) = by_path.get(caller_file) else {
-                        continue;
-                    };
-                    for (i, caller) in caller_structure
-                        .functions
-                        .iter()
-                        .enumerate()
-                        .take(caller_answer.labels.len())
-                    {
-                        if caller_answer.labels[i].takes_outside < cut
-                            || lines.range(caller.start..=caller.end).next().is_none()
-                        {
-                            continue;
-                        }
-                        let pair = (
-                            format!("{caller_file}#{}", caller.name),
-                            format!("{callee_file}#{}", callee.name),
-                        );
-                        if known.contains(&pair) || !seen.insert(pair) {
-                            continue;
-                        }
-                        // Three callers a function are asked about; the rest
-                        // are named, not dropped.
-                        if callers >= 3 {
-                            unasked.push(json!({
-                                "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
-                                "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
-                                "reason": "three per function",
-                            }));
-                            continue;
-                        }
-                        callers += 1;
-                        let request = catalog::security::path_request(
-                            &catalog::security::PathEnd {
-                                file: (*caller_file).to_owned(),
-                                function: caller.name.clone(),
-                                line: caller.start,
-                                source: body(caller_source, caller),
-                            },
-                            &catalog::security::PathEnd {
-                                file: callee_file.clone(),
-                                function: callee.name.clone(),
-                                line: callee.start,
-                                source: body(callee_source, callee),
-                            },
-                            &label.sink_kind,
-                        );
-                        let ends = json!({
+                    }
+                    // Three callers a function are asked about; the rest
+                    // are named, not dropped.
+                    if callers >= 3 {
+                        unasked.push(json!({
                             "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
                             "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
-                        });
-                        match within_budget(&request) {
-                            Some(bytes) => {
-                                let index = candidates_found.len();
-                                let mut found = ends;
-                                found["check"] = json!(label.sink_kind);
-                                found["via"] = json!("run");
-                                found["test"] = json!(test);
-                                candidates_found.push(found);
-                                pending.push(((index, None), request, bytes));
-                            }
-                            None => unasked.push(too_large_to_ask(ends)),
+                            "reason": "three per function",
+                        }));
+                        continue;
+                    }
+                    callers += 1;
+                    let request = catalog::security::path_request(
+                        &catalog::security::PathEnd {
+                            file: (*caller_file).to_owned(),
+                            function: caller.name.clone(),
+                            line: caller.start,
+                            source: function_body(caller_source, caller),
+                        },
+                        &catalog::security::PathEnd {
+                            file: callee_file.clone(),
+                            function: callee.name.clone(),
+                            line: callee.start,
+                            source: function_body(callee_source, callee),
+                        },
+                        &label.sink_kind,
+                    );
+                    let ends = json!({
+                        "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
+                        "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
+                    });
+                    match within_budget(&request) {
+                        Some(bytes) => {
+                            let index = candidates_found.len();
+                            let mut found = ends;
+                            found["check"] = json!(label.sink_kind);
+                            found["via"] = json!("run");
+                            found["test"] = json!(test);
+                            candidates_found.push(found);
+                            pending.push(((index, None), request, bytes));
                         }
+                        None => unasked.push(too_large_to_ask(ends)),
                     }
                 }
-            }
+            });
         }
     }
     let (paths, usage, reused) = confirm_pending(root, key, refresh, pending, candidates_found);
     (paths, unasked, usage, reused)
+}
+
+/// A function's lines, as much of them as one request holds.
+fn function_body(source: &str, f: &candidates::FunctionSpan) -> String {
+    source
+        .lines()
+        .skip(f.start.saturating_sub(1))
+        .take(f.end.saturating_sub(f.start) + 1)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(40_000)
+        .collect()
 }
 
 /// Guards a run observed. For every function that takes outside data, the
@@ -2787,34 +2793,12 @@ fn run_guards(
 ) -> BTreeMap<String, Vec<Value>> {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
-    let mut by_test: BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> = BTreeMap::new();
-    for (file, line, tests) in points {
-        for test in tests {
-            by_test
-                .entry(test.as_str())
-                .or_default()
-                .entry(file.as_str())
-                .or_default()
-                .insert(*line);
-        }
-    }
+    let by_test = lines_by_test(points);
     // Guard functions: every labelled function that sanitises or authorises.
-    let mut guards: Vec<(&str, &candidates::FunctionSpan)> = Vec::new();
-    for (file, (structure, _)) in structures {
-        let Some(answer) = by_path.get(file.as_str()) else {
-            continue;
-        };
-        for (i, f) in structure
-            .functions
-            .iter()
-            .enumerate()
-            .take(answer.labels.len())
-        {
-            if answer.labels[i].sanitises >= cut {
-                guards.push((file.as_str(), f));
-            }
-        }
-    }
+    let guards: Vec<(&str, &candidates::FunctionSpan)> = labelled_functions(structures, &by_path)
+        .filter(|(_, _, label, _)| label.sanitises >= cut)
+        .map(|(file, f, _, _)| (file.as_str(), f))
+        .collect();
     let guard_ran = |files: &BTreeMap<&str, BTreeSet<usize>>| -> Option<String> {
         guards.iter().find_map(|(file, f)| {
             files
@@ -2824,43 +2808,30 @@ fn run_guards(
         })
     };
     let mut out: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for (file, (structure, _)) in structures {
-        let Some(answer) = by_path.get(file.as_str()) else {
+    let handlers = labelled_functions(structures, &by_path)
+        .filter(|(_, _, label, _)| label.takes_outside >= cut);
+    for (file, handler, _, _) in handlers {
+        let mut guarded = Vec::new();
+        let mut unguarded = Vec::new();
+        // The tests that ran the handler, with a guard or without.
+        let ran = by_test.iter().filter(|(_, files)| {
+            files
+                .get(file.as_str())
+                .is_some_and(|lines| lines.range(handler.start..=handler.end).next().is_some())
+        });
+        ran.for_each(|(test, files)| match guard_ran(files) {
+            Some(guard) => guarded.push(json!({ "test": test, "guard": guard })),
+            None => unguarded.push(json!(test)),
+        });
+        if guarded.is_empty() && unguarded.is_empty() {
             continue;
-        };
-        for (i, handler) in structure
-            .functions
-            .iter()
-            .enumerate()
-            .take(answer.labels.len())
-        {
-            if answer.labels[i].takes_outside < cut {
-                continue;
-            }
-            let mut guarded = Vec::new();
-            let mut unguarded = Vec::new();
-            for (test, files) in &by_test {
-                let ran = files
-                    .get(file.as_str())
-                    .is_some_and(|lines| lines.range(handler.start..=handler.end).next().is_some());
-                if !ran {
-                    continue;
-                }
-                match guard_ran(files) {
-                    Some(guard) => guarded.push(json!({ "test": test, "guard": guard })),
-                    None => unguarded.push(json!(test)),
-                }
-            }
-            if guarded.is_empty() && unguarded.is_empty() {
-                continue;
-            }
-            out.entry(file.clone()).or_default().push(json!({
-                "function": handler.name, "line": handler.start,
-                "tests_with_a_guard": guarded.len(), "tests_without": unguarded.len(),
-                "guard_example": guarded.first().map(|g| g["guard"].clone()),
-                "unguarded_tests": unguarded.iter().take(3).collect::<Vec<_>>(),
-            }));
         }
+        out.entry(file.clone()).or_default().push(json!({
+            "function": handler.name, "line": handler.start,
+            "tests_with_a_guard": guarded.len(), "tests_without": unguarded.len(),
+            "guard_example": guarded.first().map(|g| g["guard"].clone()),
+            "unguarded_tests": unguarded.iter().take(3).collect::<Vec<_>>(),
+        }));
     }
     out
 }
