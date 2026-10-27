@@ -873,10 +873,11 @@ fn files_under(
     for entry in walker {
         let entry =
             entry.map_err(|error| io_error(directory, io::Error::other(error.to_string())))?;
-        let Some(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_symlink() || !kind.is_file() {
+        // Files alone: not a link, a directory, or an entry with no type.
+        if !entry
+            .file_type()
+            .is_some_and(|kind| !kind.is_symlink() && kind.is_file())
+        {
             continue;
         }
         let name = entry

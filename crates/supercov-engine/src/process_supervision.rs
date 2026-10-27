@@ -2817,6 +2817,33 @@ mod tests {
         }
     }
 
+    /// A line with no end -- a prompt -- reaches the terminal once the
+    /// command has paused a moment, not when the terminal's size is next
+    /// asked for.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_reaches_the_terminal_after_a_short_pause() {
+        let (mut screen, users) = user_terminal();
+        let (terminal, mut theirs) = Terminal::like(users).expect("a terminal");
+        let started = Instant::now();
+        let ended = relay_terminal(terminal, ConsoleNames::default());
+        theirs.write_all(b"continue? ").unwrap();
+        let mut seen = Vec::new();
+        let mut buffer = [0_u8; 64];
+        while !seen.ends_with(b"continue? ") {
+            let read = screen.read(&mut buffer).unwrap();
+            seen.extend_from_slice(&buffer[..read]);
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(theirs);
+        drop(screen);
+        let _ = ended.recv_timeout(Duration::from_secs(10));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_line_longer_than_the_limit_reaches_the_terminal_whole() {

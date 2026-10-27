@@ -252,12 +252,11 @@ fn test_api_candidates(directory: &Path, output: &mut Vec<TestApiCandidate>) {
             continue;
         }
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+        // A link is not followed, and an entry whose type cannot be read is
+        // passed over as one.
+        let Some(file_type) = entry.file_type().ok().filter(|kind| !kind.is_symlink()) else {
             continue;
         };
-        if file_type.is_symlink() {
-            continue;
-        }
         if file_type.is_dir() {
             test_api_candidates(&path, output);
         } else if file_type.is_file()
@@ -335,12 +334,11 @@ fn nested_playwright_configs(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
+            // A link is not followed, and an entry whose type cannot be read is
+            // passed over as one.
+            let Some(file_type) = entry.file_type().ok().filter(|kind| !kind.is_symlink()) else {
                 continue;
             };
-            if file_type.is_symlink() {
-                continue;
-            }
             if file_type.is_dir() {
                 visit(&path, depth + 1, found);
             } else if file_type.is_file() && playwright_config_name(name) {
@@ -608,12 +606,11 @@ fn tests_require_build_output(root: &Path, manifest: &Value) -> bool {
                 continue;
             }
             let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
+            // A link is not followed, and an entry whose type cannot be read is
+            // passed over as one.
+            let Some(file_type) = entry.file_type().ok().filter(|kind| !kind.is_symlink()) else {
                 continue;
             };
-            if file_type.is_symlink() {
-                continue;
-            }
             if file_type.is_dir() && visit(&path, build_output_scripts) {
                 return true;
             }
