@@ -2046,6 +2046,8 @@ mod tests {
             ),
             Some(11)
         );
+        // A name the code never mentions is declared nowhere.
+        assert_eq!(helper_declaration("var x = 1;", "h_1", global, false), None);
     }
 
     // Each directly served file carries a copy, so it carries no comments.
