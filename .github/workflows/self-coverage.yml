@@ -250,8 +250,11 @@ jobs:
           # and overhead tests, the longest test binaries of slice 0.
           moved="$(tests_of crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')
           $(for file in jvm_run jvm_frontend jvm_overhead go_overhead; do tests_of "crates/supercov-engine/tests/$file.rs"; done)"
+          # The Kotlin corpus test parses projects `kotlin-grammar` checks
+          # out; it measures the vendored C grammar, not Supercov.
+          corpus="every_file_of_the_corpus_parses_or_is_known_not_to"
           if [ "$slice" = 0 ]; then
-            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $moved)
+            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $moved $corpus)
             echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
           elif [ "$slice" = 9 ]; then
             # The whole workspace builds here too; only these tests run.

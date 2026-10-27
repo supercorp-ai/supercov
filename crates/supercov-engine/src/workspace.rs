@@ -818,9 +818,8 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 omit_escaping_link(&from, &link);
                 continue;
             }
-            let local_target = lexical_target
-                .strip_prefix(roots.source)
-                .map_err(|_| WorkspaceError::UnsafePath(lexical_target.clone()))?;
+            let local_target = lexical_target.strip_prefix(roots.source);
+            let local_target = local_target.expect("a link that stays is inside the project");
             let relocated = roots.destination.join(local_target);
             let Some(canonical_target) = canonical_target else {
                 // Windows link creation needs the target's type, which a
@@ -831,7 +830,7 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 #[cfg(not(windows))]
                 {
                     let isolated_link = if link.is_absolute() {
-                        pathdiff(&to, &relocated)?
+                        pathdiff(&to, &relocated)
                     } else {
                         link
                     };
@@ -847,13 +846,13 @@ fn copy_tree<Operations: WorkspaceOperations>(
             let isolated_link = if target_metadata.is_dir() {
                 roots.final_destination.join(local_target)
             } else if link.is_absolute() {
-                pathdiff(&to, &relocated)?
+                pathdiff(&to, &relocated)
             } else {
                 link
             };
             #[cfg(not(windows))]
             let isolated_link = if link.is_absolute() {
-                pathdiff(&to, &relocated)?
+                pathdiff(&to, &relocated)
             } else {
                 link
             };
@@ -889,11 +888,12 @@ fn link_loop(_error: &io::Error) -> bool {
     false
 }
 
-fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
-    let from = from
+/// `to` as a link at `from` names it: relative to the link's directory, or
+/// `to` itself where the two have nothing in common.
+fn pathdiff(from: &Path, to: &Path) -> PathBuf {
+    let from_components = from
         .parent()
-        .ok_or_else(|| WorkspaceError::UnsafePath(from.into()))?;
-    let from_components = from.components().collect::<Vec<_>>();
+        .map_or_else(Vec::new, |directory| directory.components().collect());
     let to_components = to.components().collect::<Vec<_>>();
     let common = from_components
         .iter()
@@ -901,10 +901,10 @@ fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
         .take_while(|(left, right)| left == right)
         .count();
     if common == 0 {
-        return Err(WorkspaceError::UnsafePath(to.into()));
+        return to.to_owned();
     }
     let up = std::iter::repeat_n(Component::ParentDir, from_components.len() - common);
-    Ok(up.chain(to_components[common..].iter().copied()).collect())
+    up.chain(to_components[common..].iter().copied()).collect()
 }
 
 /// One entry of the root `node_modules`. A package of the project's own
@@ -961,7 +961,7 @@ fn link_package(
     {
         let copy = workspace.join(local);
         if fs::symlink_metadata(&copy).is_ok() {
-            return create_link(&pathdiff(to, &copy)?, to, true)
+            return create_link(&pathdiff(to, &copy), to, true)
                 .map_err(|error| io_error(to, error));
         }
     }
@@ -3693,21 +3693,18 @@ mod tests {
         assert!(!inside(&path("/r"), &path("/r/../x")));
         assert!(!inside(&path("/r"), &path("/rx")));
         assert_eq!(
-            pathdiff(&path("/r/a/link"), &path("/r/b/target")).unwrap(),
+            pathdiff(&path("/r/a/link"), &path("/r/b/target")),
             path("../b/target")
         );
         assert_eq!(
-            pathdiff(&path("/r/link"), &path("/r/target")).unwrap(),
+            pathdiff(&path("/r/link"), &path("/r/target")),
             path("target")
         );
-        assert!(matches!(
+        assert_eq!(
             pathdiff(&path("a/link"), &path("b/target")),
-            Err(WorkspaceError::UnsafePath(_))
-        ));
-        assert!(matches!(
-            pathdiff(&path("/"), &path("/x")),
-            Err(WorkspaceError::UnsafePath(_))
-        ));
+            path("b/target")
+        );
+        assert_eq!(pathdiff(&path("/"), &path("/x")), path("/x"));
     }
 
     /// The workspace container is Supercov's only where it holds the marker
@@ -3997,6 +3994,23 @@ mod tests {
             release,
         );
         assert!(operations > 20, "{operations}");
+    }
+
+    /// A name that is not UTF-8 is refused: the copy could not be judged by
+    /// it. Linux allows one; macOS's file systems do not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_stops_the_copy() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = project();
+        fs::write(root.join(std::ffi::OsStr::from_bytes(b"src/\xff.js")), "x").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        assert!(matches!(
+            prepare_isolated_workspace(&root, "run", &lock),
+            Err(WorkspaceError::UnsafePath(path)) if path.ends_with(std::ffi::OsStr::from_bytes(b"\xff.js"))
+        ));
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A link that stays in the project by its path but leaves it through
