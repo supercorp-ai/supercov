@@ -1272,18 +1272,17 @@ impl Population {
                 .files
                 .lock()
                 .expect("the file cache is only read and filled");
-            for (file, text) in files {
-                cache.insert(file, Some(text.into()));
-            }
+            cache.extend(
+                files
+                    .into_iter()
+                    .map(|(file, text)| (file, Some(text.into()))),
+            );
         }
         // Test code found before is code of the files replaced.
-        for code in self
-            .test_codes
+        self.test_codes
             .iter_mut()
             .chain(&mut self.unnumbered_test_codes)
-        {
-            *code = std::sync::OnceLock::new();
-        }
+            .for_each(|code| *code = std::sync::OnceLock::new());
         self.views = Default::default();
         self
     }
@@ -1378,8 +1377,10 @@ impl Population {
         if all.len() <= k {
             return all;
         }
+        // More tests than `k`, so neither these groups nor the files they
+        // fall in are empty.
         let mut groups = Vec::<((String, String), Vec<usize>)>::new();
-        for &t in &all {
+        all.iter().for_each(|&t| {
             let g = (
                 self.tests[t].file.clone(),
                 describe(
@@ -1391,14 +1392,14 @@ impl Population {
                 Some((_, v)) => v.push(t),
                 None => groups.push((g, vec![t])),
             }
-        }
+        });
         let mut by_file = Vec::<(String, Vec<Vec<usize>>)>::new();
-        for ((file, _), members) in groups {
+        groups.into_iter().for_each(|((file, _), members)| {
             match by_file.iter_mut().find(|(f, _)| *f == file) {
                 Some((_, v)) => v.push(members),
                 None => by_file.push((file, vec![members])),
             }
-        }
+        });
         by_file.sort_by_key(|(f, _)| {
             (
                 !Path::new(f)
@@ -1430,21 +1431,20 @@ impl Population {
         }
         let mut depth = 0;
         while picked.len() < k && by_file.iter().any(|(_, g)| g.len() > depth) {
-            for (_, g) in &by_file {
+            by_file.iter().for_each(|(_, g)| {
                 if depth < g.len() && picked.len() < k && !picked.contains(&g[depth][0]) {
                     picked.push(g[depth][0]);
                 }
-            }
+            });
             depth += 1;
         }
-        for t in all {
-            if picked.len() >= k {
-                break;
-            }
-            if !picked.contains(&t) {
-                picked.push(t);
-            }
-        }
+        // The rest in order, until `k` are picked.
+        let rest = all
+            .into_iter()
+            .filter(|t| !picked.contains(t))
+            .take(k.saturating_sub(picked.len()))
+            .collect::<Vec<_>>();
+        picked.extend(rest);
         picked
     }
 
