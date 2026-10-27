@@ -236,6 +236,7 @@ fn strip_jsonc(text: &str) -> String {
                 }
             }
             '/' if characters.peek() == Some(&'/') => {
+                characters.next();
                 for inner in characters.by_ref() {
                     if inner == '\n' {
                         out.push('\n');
@@ -2064,6 +2065,7 @@ mod tests {
         assert_eq!(strip_jsonc(""), "");
         assert_eq!(strip_jsonc("\""), "\"");
         assert_eq!(strip_jsonc("{}/*"), "{}");
+        assert_eq!(strip_jsonc("{}//"), "{}");
         assert_eq!(strip_jsonc("// only a comment"), "");
     }
 
