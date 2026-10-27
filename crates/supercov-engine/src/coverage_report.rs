@@ -3590,6 +3590,12 @@ mod tests {
     fn no_result_passes_or_fails() {
         assert!(super::passing_coverage_results(&[]).is_empty());
         assert!(super::failed_coverage_results(&[]).is_empty());
+        // And no evidence file holds no record.
+        assert!(
+            super::parse_json_lines::<serde_json::Value>(std::iter::empty())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
