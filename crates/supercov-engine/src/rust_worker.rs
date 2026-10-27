@@ -2192,6 +2192,10 @@ mod tests {
             |root| {
                 wrap_config(&root.join("wrangler.toml"), None, 0)?;
                 wrap_config(&root.join("wrangler.jsonc"), None, 1)?;
+                for name in ["wrangler.toml", "wrangler.jsonc"] {
+                    let config = parse_config(&root.join(name)).ok_or("unread")?;
+                    point_at_entry(&config, Some(9444))?;
+                }
                 let tools = root.join("tools");
                 fs::create_dir_all(&tools).map_err(|error| error.to_string())?;
                 write_stand_in(&tools, Path::new("/bin/supercov"))?;
