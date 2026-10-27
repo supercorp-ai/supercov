@@ -9,7 +9,7 @@ use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::BTreeSet,
     io::{self, BufReader, BufWriter, Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -35,7 +35,6 @@ pub enum EvidenceArchiveError {
     Truncated(&'static str),
     TrailingCompressedData,
     UnsupportedSource(PathBuf),
-    PathOutsideSource { source: PathBuf, path: PathBuf },
 }
 
 impl std::fmt::Display for EvidenceArchiveError {
@@ -92,12 +91,6 @@ impl std::fmt::Display for EvidenceArchiveError {
                     path.display()
                 )
             }
-            Self::PathOutsideSource { source, path } => write!(
-                formatter,
-                "evidence path {} is outside source {}",
-                path.display(),
-                source.display(),
-            ),
         }
     }
 }
@@ -246,24 +239,16 @@ fn validate_prefix(prefix: &str) -> Result<(), EvidenceArchiveError> {
     validate_archive_path(prefix)
 }
 
+/// A walked file's path below the directory walked, as the archive names
+/// it: its parts, each a name (a walk meets no `..` or root), joined by `/`;
+/// refused where a part is not UTF-8 or not a name the archive allows.
 fn path_from_relative(path: &Path) -> Result<String, EvidenceArchiveError> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part
-                    .to_str()
-                    .ok_or_else(|| EvidenceArchiveError::InvalidPath(path.display().to_string()))?;
-                parts.push(part);
-            }
-            _ => {
-                return Err(EvidenceArchiveError::InvalidPath(
-                    path.display().to_string(),
-                ));
-            }
-        }
-    }
-    let archive_path = parts.join("/");
+    let archive_path = path
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| EvidenceArchiveError::InvalidPath(path.display().to_string()))?
+        .join("/");
     validate_archive_path(&archive_path)?;
     Ok(archive_path)
 }
@@ -286,18 +271,15 @@ fn collect_directory(
         if !metadata.is_file() {
             return Err(EvidenceArchiveError::UnsupportedSource(path));
         }
-        let relative =
+        let relative = path_from_relative(
             path.strip_prefix(root)
-                .map_err(|_| EvidenceArchiveError::PathOutsideSource {
-                    source: root.to_owned(),
-                    path: path.clone(),
-                })?;
-        let relative = path_from_relative(relative)?;
+                .expect("a walked file lies under the directory walked"),
+        )?;
+        // A valid prefix and a valid path make a valid path.
         let archive_path = match prefix {
             Some(prefix) => format!("{prefix}/{relative}"),
             None => relative,
         };
-        validate_archive_path(&archive_path)?;
         entries.push(EvidenceArchiveEntry {
             path: archive_path,
             contents: fs::read(path)?,
@@ -1164,6 +1146,37 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A file whose name the archive cannot carry -- a backslash in it, or,
+    /// where the system allows one, a name that is not UTF-8 -- is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_named_what_the_archive_cannot_carry_is_refused() {
+        let collect = |name: &std::ffi::OsStr| {
+            let root = temporary_directory("archive-names");
+            let evidence = root.join("evidence");
+            fs::create_dir_all(&evidence).unwrap();
+            fs::write(evidence.join(name), b"{}\n").unwrap();
+            let collected = collect_sources(&[EvidenceArchiveSource::Directory {
+                directory: evidence,
+                prefix: None,
+            }]);
+            fs::remove_dir_all(root).unwrap();
+            collected
+        };
+        assert!(matches!(
+            collect(std::ffi::OsStr::new("a\\b")),
+            Err(EvidenceArchiveError::InvalidPath(_))
+        ));
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(matches!(
+                collect(std::ffi::OsStr::from_bytes(b"\xff")),
+                Err(EvidenceArchiveError::InvalidPath(_))
+            ));
+        }
+    }
+
     #[test]
     fn deterministic_gzip_header_has_no_clock_or_host_identity() {
         let mut first = Vec::new();
@@ -1294,10 +1307,6 @@ mod tests {
             EvidenceArchiveError::Truncated("header"),
             EvidenceArchiveError::TrailingCompressedData,
             EvidenceArchiveError::UnsupportedSource(PathBuf::from("raw/link")),
-            EvidenceArchiveError::PathOutsideSource {
-                source: PathBuf::from("raw"),
-                path: PathBuf::from("other/file"),
-            },
         ]
         .map(|error| error.to_string());
         assert_eq!(
@@ -1316,7 +1325,6 @@ mod tests {
                 "truncated Supercov evidence archive header",
                 "Supercov evidence archive contains trailing compressed data",
                 "unsupported raw evidence entry: raw/link",
-                "evidence path other/file is outside source raw",
             ]
         );
     }
