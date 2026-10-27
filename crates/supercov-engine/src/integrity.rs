@@ -523,9 +523,7 @@ fn walk_files(
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&path, source))?;
+        let file_type = fs::file_type(&entry).map_err(|source| io_error(&path, source))?;
         if file_type.is_symlink() {
             continue;
         }

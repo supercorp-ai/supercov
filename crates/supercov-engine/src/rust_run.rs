@@ -101,7 +101,7 @@ fn collect_project_inputs(
         {
             continue;
         }
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let file_type = fs::file_type(&entry).map_err(|error| error.to_string())?;
         if file_type.is_dir() {
             // What a build wrote, wherever it lies: a Cargo target directory
             // of a crate in a subdirectory, the wasm wasm-bindgen generated.

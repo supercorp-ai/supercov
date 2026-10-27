@@ -192,8 +192,7 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let file_type = entry
-            .file_type()
+        let file_type = crate::fault_fs::file_type(&entry)
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
             if EXCLUDED_DIRECTORIES.contains(&name.as_str()) || name.starts_with('.') {

@@ -108,7 +108,7 @@ fn walk(root: &Path, directory: &Path, files: &mut RubyFiles) -> Result<(), Stri
             .file_name()
             .into_string()
             .map_err(|_| format!("Ruby project contains a non-UTF-8 path: {}", path.display()))?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let file_type = fs::file_type(&entry).map_err(|error| error.to_string())?;
         let relative = path
             .strip_prefix(root)
             .map_err(|_| format!("path escaped root: {}", path.display()))?

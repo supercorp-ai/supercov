@@ -1204,7 +1204,7 @@ pub fn builds_images(root: &Path) -> bool {
             .flatten()
             .flatten()
             .any(|entry| {
-                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                fs::file_type(&entry).is_ok_and(|kind| kind.is_dir())
                     && !entry.file_name().to_string_lossy().starts_with('.')
                     && entry.file_name() != "node_modules"
                     && named(&entry.path())

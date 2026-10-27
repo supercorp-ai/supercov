@@ -392,7 +392,7 @@ fn refresh_directory(
         }
         let path = local.join(&name);
         let (from, to) = (workspace.join(&path), view.join(&path));
-        let file_type = entry.file_type()?;
+        let file_type = fs::file_type(&entry)?;
         present.insert(name.clone());
         if name == "node_modules" {
             let target = if local.as_os_str().is_empty() && dependencies.is_dir() {
@@ -480,7 +480,7 @@ fn reconcile_directory(
         let entry = entry?;
         let path = local.join(entry.file_name());
         let (from, to) = (view.join(&path), workspace.join(&path));
-        let file_type = entry.file_type()?;
+        let file_type = fs::file_type(&entry)?;
         if path == Path::new(BOUNDARY) && fs::symlink_metadata(&to).is_err() {
             continue;
         }
@@ -663,7 +663,7 @@ fn apply_directory(
     for entry in fs::read_dir(directory.join(local))? {
         let entry = entry?;
         let path = local.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if fs::file_type(&entry)?.is_dir() {
             apply_directory(root, workspace, directory, &path, changes)?;
             continue;
         }

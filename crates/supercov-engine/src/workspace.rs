@@ -658,7 +658,7 @@ fn hard_link_tree(source: &Path, destination: &Path) -> bool {
             let entry = entry?;
             let from = entry.path();
             let to = destination.join(entry.file_name());
-            let file_type = entry.file_type()?;
+            let file_type = fs::file_type(&entry)?;
             if file_type.is_dir() {
                 link(&from, &to)?;
             } else if file_type.is_symlink() {
@@ -1070,9 +1070,7 @@ fn link_node_modules<Operations: WorkspaceOperations>(
         link_package(root, workspace, &target, &to)?;
         #[cfg(windows)]
         {
-            let file_type = entry
-                .file_type()
-                .map_err(|error| io_error(&target, error))?;
+            let file_type = fs::file_type(&entry).map_err(|error| io_error(&target, error))?;
             let resolved = if file_type.is_symlink() {
                 canonicalize_simplified(&target).map_err(|error| io_error(&target, error))?
             } else {
@@ -1179,9 +1177,7 @@ pub fn recover_cached_workspace(
         if name.starts_with(&staging_prefix) {
             staging.push(entry.path());
         } else if name.starts_with(&previous_prefix) {
-            let metadata = entry
-                .file_type()
-                .map_err(|error| io_error(&entry.path(), error))?;
+            let metadata = fs::file_type(&entry).map_err(|error| io_error(&entry.path(), error))?;
             if metadata.is_dir() {
                 let modified = entry
                     .metadata()
@@ -2247,7 +2243,7 @@ pub fn prune_cached_workspace_sources(
                     "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "jsx" | "tsx"
                 )
             });
-            if script && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            if script && fs::file_type(&entry).is_ok_and(|kind| kind.is_file()) {
                 fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
                 removed.push(format!(".supercov/{}", entry.file_name().to_string_lossy()));
             }

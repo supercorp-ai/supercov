@@ -917,7 +917,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
                 .into_string()
                 .map_err(|name| SourceDiscoveryError::NonUtf8Path(directory.join(name)))?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|error| io_error(&path, error))?;
+            let file_type = fs::file_type(&entry).map_err(|error| io_error(&path, error))?;
             // An entry's type is the link's own, never its target's: a link
             // to a directory is no directory here.
             if !file_type.is_dir()

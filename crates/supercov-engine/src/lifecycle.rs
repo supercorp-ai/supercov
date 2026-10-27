@@ -1137,9 +1137,7 @@ fn child_directories(path: &Path) -> Result<Vec<String>, LifecycleError> {
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| io_error(path, source))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&entry.path(), source))?;
+        let file_type = fs::file_type(&entry).map_err(|source| io_error(&entry.path(), source))?;
         if file_type.is_symlink() {
             return Err(LifecycleError::UnsafePath(entry.path()));
         }
@@ -1208,7 +1206,7 @@ fn copy_evidence(source: &Path, destination: &Path, files: &mut usize) -> std::i
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let target = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if fs::file_type(&entry)?.is_dir() {
             fs::create_dir_all(&target)?;
             copy_evidence(&entry.path(), &target, files)?;
         } else {

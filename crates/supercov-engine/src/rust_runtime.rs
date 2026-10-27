@@ -403,9 +403,8 @@ pub fn read_rust_cfg_settlement(
         };
         for entry in entries {
             let entry = entry.map_err(|error| RustProbeReadError::Io(error.to_string()))?;
-            let kind = entry
-                .file_type()
-                .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+            let kind =
+                fs::file_type(&entry).map_err(|error| RustProbeReadError::Io(error.to_string()))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if kind.is_dir() {
                 directories.push(entry.path());
@@ -448,8 +447,7 @@ pub fn read_rust_region_directory(
         if !name.starts_with(&format!("{token}-")) || !name.ends_with(".region") {
             continue;
         }
-        if !entry
-            .file_type()
+        if !fs::file_type(&entry)
             .map_err(|error| RustProbeReadError::Io(error.to_string()))?
             .is_file()
         {

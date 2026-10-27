@@ -69,6 +69,13 @@ impl Iterator for ReadDir {
     }
 }
 
+/// An entry's type, as [`DirEntry::file_type`] reads it, unless the test
+/// fails it.
+#[track_caller]
+pub fn file_type(entry: &DirEntry) -> io::Result<FileType> {
+    checked(|| entry.file_type())
+}
+
 #[track_caller]
 pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
     let place = std::panic::Location::caller();

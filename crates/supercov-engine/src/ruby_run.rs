@@ -97,8 +97,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     for entry in fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))? {
         let entry = entry.map_err(|error| error.to_string())?;
         let target = destination.join(entry.file_name());
-        if entry
-            .file_type()
+        if fs::file_type(&entry)
             .map_err(|error| error.to_string())?
             .is_dir()
         {
