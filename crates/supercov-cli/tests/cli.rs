@@ -3284,6 +3284,10 @@ fn the_html_report_says_what_it_could_not_embed() {
     let fresh = report_data(&project.read("fresh.html"));
     let run = &fresh["runs"][0];
     assert_eq!(
+        run["fileTotals"]["src/cart.js"],
+        serde_json::json!({"branches": 8, "functions": 4, "statements": 10})
+    );
+    assert_eq!(
         run["omittedSources"],
         serde_json::json!(["src/big.js"]),
         "{run}"
@@ -3315,6 +3319,22 @@ fn the_html_report_says_what_it_could_not_embed() {
         .supercov(&["report", "--no-open", "--output", "reports"])
         .succeeds();
     report_data(&project.read("reports/supercov-report.html"));
+
+    // A run that left nothing uncovered has no file to detail.
+    let whole = Project::empty("html-whole");
+    whole.git(&["init", "-q"]);
+    whole.write("package.json", r#"{"type":"module"}"#);
+    whole.write("src/one.js", "export function one() {\n  return 1;\n}\n");
+    whole.write(
+        "test/one.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { one } from \"../src/one.js\";\n\ntest(\"one\", () => assert.equal(one(), 1));\n",
+    );
+    whole.supercov(&["--", "node", "--test"]).succeeds();
+    whole
+        .supercov(&["report", "--no-open", "--output", "whole.html"])
+        .succeeds();
+    let data = report_data(&whole.read("whole.html"));
+    assert_eq!(data["runs"][0]["fileDetails"], serde_json::json!({}), "{data}");
 
     let empty = Project::empty("html-nothing");
     empty.git(&["init", "-q"]);

@@ -332,14 +332,15 @@ fn collect_sources(
     let mut sources = BTreeMap::new();
     let mut omitted = Vec::new();
     let mut total = 0_usize;
-    for file in files {
+    // A stored run measured a file at least.
+    files.iter().for_each(|file| {
         let Some(path) = safe_relative_source(root, &file.file) else {
             omitted.push(file.file.clone());
-            continue;
+            return;
         };
         let Ok(metadata) = fs::metadata(&path) else {
             omitted.push(file.file.clone());
-            continue;
+            return;
         };
         // A length no usize holds is beyond any limit below.
         let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
@@ -348,11 +349,11 @@ fn collect_sources(
             || total.saturating_add(length) > MAX_TOTAL_SOURCE_BYTES
         {
             omitted.push(file.file.clone());
-            continue;
+            return;
         }
         let Ok(contents) = fs::read_to_string(&path) else {
             omitted.push(file.file.clone());
-            continue;
+            return;
         };
         total += contents.len();
         sources.insert(
@@ -362,7 +363,7 @@ fn collect_sources(
                 contents,
             },
         );
-    }
+    });
     (sources, omitted)
 }
 
@@ -462,19 +463,20 @@ fn build_run(
     }
 
     let mut file_totals: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for hit in read.points() {
+    // A stored run measured a file, and so a point, at least.
+    read.points().iter().for_each(|hit| {
+        // The index knows these three obligations only.
         let kind = match hit.obligation.as_str() {
             "statement" => "statements",
             "function" => "functions",
-            "branch" => "branches",
-            _ => continue,
+            _ => "branches",
         };
         *file_totals
             .entry(hit.file.clone())
             .or_default()
             .entry(kind.into())
             .or_default() += 1;
-    }
+    });
 
     let decisions = read.decisions();
     let tests = read
