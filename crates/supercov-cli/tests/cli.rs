@@ -2183,6 +2183,9 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
     assert_eq!(timed["files"], 1);
     let instrumented = feed("__instrument-js", source.as_bytes()).json();
     assert_eq!(instrumented.as_array().unwrap().len(), 1);
+    // No case is a batch of nothing.
+    assert_eq!(feed("__benchmark-js-transform", b"[]").json()["files"], 0);
+    assert_eq!(feed("__instrument-js", b"[]").json(), serde_json::json!([]));
     let broken = r#"[{"file":"broken.js","source":"let = ;"}]"#;
     for command in ["__benchmark-js-transform", "__instrument-js"] {
         assert!(
