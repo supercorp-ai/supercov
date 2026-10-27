@@ -616,32 +616,40 @@ fn run_pass(
             continue;
         }
         let replies = ask(pass, &batch)?;
-        for ((t, asked), reply) in batch.iter().zip(replies) {
-            sent.requests += 1;
-            let (answers, tokens) = match reply {
-                Ok(reply) => reply,
-                Err(e) => {
-                    failures += 1;
-                    if failures > MAX_FAILURES {
-                        // Only the pass that sends requests has one fail,
-                        // and it keeps its answers.
-                        cache.save()?;
-                        return Err(format!("stopped after {failures} failed requests: {e}"));
+        // The batch is some, and each request asks of a statement at least.
+        batch
+            .iter()
+            .zip(replies)
+            .try_for_each(|((t, asked), reply)| {
+                sent.requests += 1;
+                let (answers, tokens) = match reply {
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        failures += 1;
+                        if failures > MAX_FAILURES {
+                            // Only the pass that sends requests has one fail,
+                            // and it keeps its answers.
+                            cache.save()?;
+                            return Err(format!("stopped after {failures} failed requests: {e}"));
+                        }
+                        return Ok(());
                     }
-                    continue;
-                }
-            };
-            failures = 0;
-            sent.tokens += tokens;
-            for (&s, p) in asked.iter().zip(answers) {
-                let Some(p) = p else { continue };
-                pass.answers[s].push((*t, p));
-                if asking.keep {
-                    let k = pass.key(s, *t);
-                    cache.answers.insert(k, p);
-                }
-            }
-        }
+                };
+                failures = 0;
+                sent.tokens += tokens;
+                asked
+                    .iter()
+                    .zip(answers)
+                    .filter_map(|(&s, p)| Some((s, p?)))
+                    .for_each(|(s, p)| {
+                        pass.answers[s].push((*t, p));
+                        if asking.keep {
+                            let k = pass.key(s, *t);
+                            cache.answers.insert(k, p);
+                        }
+                    });
+                Ok(())
+            })?;
         if asking.keep {
             cache.save()?;
         }
@@ -930,25 +938,26 @@ fn assess_changed(
         let endpoint = quality::endpoint()?;
         let agent = quality::client();
         let results = send_all(&agent, endpoint, &key, &bodies, options.workers);
-        for ((t, asked), result) in plan.iter().zip(results) {
+        // Each request of the plan asks of a statement at least.
+        plan.iter().zip(results).for_each(|((t, asked), result)| {
             let Ok(response) = result else {
                 failed += 1;
-                continue;
+                return;
             };
             tokens += response.usage.input_tokens;
-            for (i, &s) in asked.iter().enumerate() {
+            asked.iter().enumerate().for_each(|(i, &s)| {
                 let p = (0..2)
                     .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
                         Some(quality::Answer::Noul { noul }) => Some(*noul),
                         _ => None,
                     })
                     .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))));
-                let Some(p) = p else { continue };
+                let Some(p) = p else { return };
                 answers.entry(s).or_default().push((*t, p));
                 // Every pair planned was keyed above.
                 cache.answers.insert(keys[&(s, *t)].clone(), p);
-            }
-        }
+            });
+        });
         cache.save()?;
     }
     let statements = changed
@@ -1003,7 +1012,8 @@ fn send_all(
     let next = AtomicUsize::new(0);
     let out = std::sync::Mutex::new((0..bodies.len()).map(|_| None).collect::<Vec<_>>());
     std::thread::scope(|scope| {
-        for _ in 0..workers.min(bodies.len()) {
+        // Some bodies: a batch is sent only when it has a request.
+        (0..workers.min(bodies.len())).for_each(|_| {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
@@ -1012,7 +1022,7 @@ fn send_all(
                     out.lock().expect("results are only locked to store one")[i] = Some(r);
                 }
             });
-        }
+        });
     });
     out.into_inner()
         .expect("results are only locked to store one")
