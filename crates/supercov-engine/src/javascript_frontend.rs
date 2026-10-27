@@ -2589,6 +2589,17 @@ mod tests {
             instrument_with_import_policy(source, "src/a.ts", "./capability.mjs", false).unwrap();
         assert!(output.runtime.is_some());
         let mut runtime_only = output.clone();
+        // No runtime to load, or no helper to load it before: nothing goes in.
+        let mut unprobed = output.clone();
+        unprobed.runtime = None;
+        bootstrap_loader(&mut unprobed, "src/a.ts").unwrap();
+        assert_eq!(unprobed.code, output.code);
+        let mut helperless = output.clone();
+        let begin = helperless.runtime.as_ref().unwrap().mcdc_begin.clone();
+        helperless.code = helperless.code.replace(&begin, "renamed");
+        let before = helperless.code.clone();
+        bootstrap_loader(&mut helperless, "src/a.ts").unwrap();
+        assert_eq!(helperless.code, before);
         // Past the last line the map has, the map has nothing to move.
         output.map.as_mut().unwrap()["mappings"] = serde_json::Value::from("");
         output.code = format!("\n\n\n{}", output.code);
