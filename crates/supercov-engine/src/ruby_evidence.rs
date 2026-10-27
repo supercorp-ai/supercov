@@ -925,7 +925,8 @@ fn snapshot(
             return Err(RubyEvidenceError::UnknownObligation(id.clone()));
         };
         let mut observed = Vec::new();
-        for (values, outcome) in vectors {
+        // A decision is observed with a vector at least.
+        vectors.iter().try_for_each(|(values, outcome)| {
             if values.len() != meta.conditions.len() {
                 return Err(RubyEvidenceError::InvalidVector {
                     id: id.clone(),
@@ -947,7 +948,8 @@ fn snapshot(
             });
             clock += 1;
             observed.push(vector);
-        }
+            Ok(())
+        })?;
         decisions.push(DecisionSnapshot {
             meta: (*meta).clone(),
             vectors: observed,

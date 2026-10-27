@@ -1548,20 +1548,23 @@ fn snapshot(
         let Some(meta) = index.decisions.get(id.as_str()) else {
             return Err(PythonEvidenceError::UnknownObligation(id.clone()));
         };
-        let mut observed = Vec::new();
-        for (values, outcome) in vectors {
-            if values.len() != meta.conditions.len() {
-                return Err(PythonEvidenceError::InvalidVector {
-                    id: id.clone(),
-                    expected: meta.conditions.len(),
-                    actual: values.len(),
-                });
-            }
-            observed.push(McdcVector {
-                values: values.clone(),
-                outcome: *outcome,
-            });
-        }
+        // A decision is observed with a vector at least.
+        let observed = vectors
+            .iter()
+            .map(|(values, outcome)| {
+                if values.len() != meta.conditions.len() {
+                    return Err(PythonEvidenceError::InvalidVector {
+                        id: id.clone(),
+                        expected: meta.conditions.len(),
+                        actual: values.len(),
+                    });
+                }
+                Ok(McdcVector {
+                    values: values.clone(),
+                    outcome: *outcome,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         decisions.push(DecisionSnapshot {
             meta: (*meta).clone(),
             vectors: observed,
