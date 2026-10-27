@@ -562,9 +562,8 @@ fn read_metadata(path: &Path) -> Result<RunMetadata, RunStoreError> {
     if metadata.len() > MAX_RUN_METADATA_BYTES {
         return Err(RunStoreError::InvalidRun("run metadata is too large"));
     }
-    let capacity =
-        usize::try_from(metadata.len()).map_err(|_| RunStoreError::InvalidRun("metadata size"))?;
-    let mut bytes = Vec::with_capacity(capacity);
+    // Below the limit just checked, so within what a usize holds.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
     fs::open(path)?
         .take(MAX_RUN_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)?;
@@ -1322,6 +1321,31 @@ mod tests {
     use crate::evidence_archive::{EvidenceArchiveEntry, read_archive, write_archive};
 
     use super::*;
+
+    #[test]
+    fn each_run_index_error_says_what_failed() {
+        let said = [
+            RunIndexError::RunStore(RunStoreError::InvalidRun("run metadata JSON")),
+            RunIndexError::Report(ReportError::NoEvidence("x".into())),
+            RunIndexError::Report(ReportError::NoTestMatches("--title x".into())),
+            RunIndexError::Report(ReportError::InvalidArchive("x".into())),
+            RunIndexError::Metadata(serde_json::from_str::<u8>("x").unwrap_err()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(said[1], "no coverage evidence was published");
+        assert_eq!(said[2], "no test of the run matches --title x");
+        assert!(
+            said[3].starts_with("coverage analysis failed: InvalidArchive"),
+            "{}",
+            said[3]
+        );
+        assert!(
+            said[4].starts_with("run integrity is invalid: "),
+            "{}",
+            said[4]
+        );
+        assert!(!said[0].is_empty());
+    }
 
     /// A stored run is refused for metadata too large to be one, a
     /// directory name no run has, and evidence metadata that does not
