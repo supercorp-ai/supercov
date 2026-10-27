@@ -2608,7 +2608,11 @@ impl<'a> Collector<'a> {
         // `jump_exposed` holds only for a jump or the constructs above, or
         // for parentheses: nothing else reaches this point.
         // Parentheses hold statements (see `jump_exposed`).
-        self.arm_targets(node.as_parentheses_node()?.body()?.as_statements_node())
+        let body = node
+            .as_parentheses_node()
+            .and_then(|parentheses| parentheses.body())
+            .expect("only parentheses holding statements are exposed here");
+        self.arm_targets(body.as_statements_node())
     }
 
     fn arm_targets<'n>(&self, statements: Option<StatementsNode<'n>>) -> Option<Vec<Node<'n>>> {
@@ -4000,6 +4004,10 @@ end
             ("begin\nrescue\n return 2\nend", false),
             ("begin\n return 1\nrescue\nend", false),
             ("(return 1)", true),
+            ("case c\nwhen 1 then return 1\nelse\nend", false),
+            ("case c\nin 1 then return 1\nelse\nend", false),
+            ("begin\n return 1\nensure\n 2\nend", true),
+            ("begin\n 1\nensure\n 2\nend", true),
         ] {
             let source = format!("def m(c, d)\n  begin\n{last}\n  rescue\n    nil\n  end\nend\n");
             let (obligations, _) = probed(&source);
