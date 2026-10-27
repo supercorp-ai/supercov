@@ -1485,6 +1485,42 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A target specification named in UTF-8 that leads to a file or a
+    /// directory whose name is not is refused by what it is. (macOS names
+    /// none.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_target_specification_that_leads_to_no_utf8_name_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = fixture();
+        let odd = std::ffi::OsStr::from_bytes(b"\xff");
+        fs::write(root.join(odd).with_extension("json"), "{}").unwrap();
+        std::os::unix::fs::symlink(
+            root.join(odd).with_extension("json"),
+            root.join("stem.json"),
+        )
+        .unwrap();
+        fs::create_dir(root.join(odd)).unwrap();
+        fs::write(root.join(odd).join("spec.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(root.join(odd).join("spec.json"), root.join("path.json"))
+            .unwrap();
+        for (target, said) in [
+            ("stem.json", "no UTF-8 file stem"),
+            ("path.json", "path is not UTF-8"),
+        ] {
+            let error = resolve_with_inputs(
+                &root,
+                &root,
+                &invocation(&["test", "--target", target]),
+                model_inputs(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(said), "{target}: {error}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A target table that is not one, and a key that only begins like a
     /// cfg, set no runner.
     #[test]
