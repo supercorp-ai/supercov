@@ -305,13 +305,41 @@ jobs:
           SUPERCOV_REQUIRE_RUST_WORKER: "1"
           # Each gate's time, kept with the slice's run.
           SUPERCOV_GATE_TIMINGS: ${{ runner.temp }}/out/gate-timings.tsv
+          # And each test's, which the merged libtest report sums per binary.
+          TEST_SECONDS: ${{ runner.temp }}/out/test-seconds.tsv
         run: |
           chmod +x "$RUNNER_TEMP/self/supercov"
           echo "${{ steps.tests.outputs.command }}"
           mkdir -p "$RUNNER_TEMP/out"
           log="$RUNNER_TEMP/out/measure.log"
+          # Supercov runs each test as its binary given `--exact NAME`, through
+          # the target runner a command configures: this one times each.
+          # Given only on the command line, it reaches no project a test
+          # runs Cargo in itself.
+          timer="$RUNNER_TEMP/time-test.sh"
+          cat > "$timer" <<'EOF'
+          #!/usr/bin/env bash
+          name=""; previous=""
+          for argument in "$@"; do
+            [ "$argument" = --list ] && exec "$@"
+            [ "$previous" = --exact ] && name=$argument
+            previous=$argument
+          done
+          [ -n "$name" ] || exec "$@"
+          # Bash 5's clock, or Perl's where bash is older (macOS's 3.2).
+          now() { [ -n "$EPOCHREALTIME" ] && echo "$EPOCHREALTIME" || perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
+          start=$(now)
+          "$@"
+          status=$?
+          awk -v name="$name" -v start="$start" -v end="$(now)" \
+            'BEGIN { printf "%s\t%.1f\n", name, end - start }' >> "$TEST_SECONDS"
+          exit $status
+          EOF
+          chmod +x "$timer"
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          command="${{ steps.tests.outputs.command }}"
           # A failing test still leaves a run to merge; the merge says it failed.
-          "$RUNNER_TEMP/self/supercov" -- ${{ steps.tests.outputs.command }} 2>&1 | tee "$log"
+          "$RUNNER_TEMP/self/supercov" -- cargo test --config "target.$host.runner=\"$timer\"" ${command#cargo test } 2>&1 | tee "$log"
           echo "exit ${PIPESTATUS[0]}" | tee -a "$log"
       - name: Keep the run
         if: always()
