@@ -10544,6 +10544,48 @@ mod tests {
         );
     }
 
+    /// Shapes no other source holds -- labelled statements, an empty
+    /// switch and export list, computed keys, a template's expressions, a
+    /// constant operand of `||`, `??` and `??=`, a non-null assertion -- are
+    /// instrumented and stay a module that parses.
+    #[test]
+    fn every_rarer_shape_is_instrumented_into_a_module_that_parses() {
+        let source = r#"export {};
+export { };
+const k = "key";
+const o = { [k]: 1, plain: 2 };
+class C { [k] = 1; static t = `a${k ? 1 : 2}b`; }
+outer: try { o.plain++; } catch { o.plain--; }
+around: for (let i = 0; i < 2; i++) { if (i) break around; }
+choice: switch (o.plain) { case 1: break choice; default: break; }
+switch (k) {}
+const v = (false || o.plain) && (o.missing ?? k);
+const w = (o as { plain?: number })!.plain;
+let q: number | undefined;
+q ??= 1;
+q ||= 2;
+export const r = v && w && q;
+"#;
+        let output = instrument_candidate(source, "src/shapes.ts").unwrap();
+        assert!(!output.points.is_empty());
+        let allocator = oxc_allocator::Allocator::default();
+        let reparsed = oxc_parser::Parser::new(
+            &allocator,
+            &output.code,
+            oxc_span::SourceType::from_path("shapes.ts").unwrap(),
+        )
+        .parse();
+        assert!(
+            reparsed.errors.is_empty(),
+            "{:?}\n{}",
+            reparsed.errors,
+            output.code
+        );
+        // Nothing to instrument is nothing changed.
+        let empty = instrument_candidate("", "src/empty.ts").unwrap();
+        assert!(empty.points.is_empty());
+    }
+
     #[test]
     fn javascript_with_jsx_is_measured_in_every_javascript_extension() {
         // TodoMVC's React app keeps JSX in `src/index.js`; the run failed on
