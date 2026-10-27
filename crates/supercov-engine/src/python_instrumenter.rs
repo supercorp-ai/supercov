@@ -1487,6 +1487,49 @@ mod tests {
         assert!(obligations_of("a.py", "if a_long_name:\n    pass\n", parsed.suite()).is_ok());
     }
 
+    /// A tree read against its source cut short anywhere: wherever the
+    /// first range falls past the end, the whole file is refused, never
+    /// half of its obligations.
+    #[test]
+    fn a_tree_read_against_any_shorter_source_is_refused_whole() {
+        let source = concat!(
+            "def f(a, b, c):\n",
+            "    if a and (b or not c):\n",
+            "        return [x for x in a if x]\n",
+            "    for item in b:\n",
+            "        print(item)\n",
+            "    while c:\n",
+            "        c -= 1\n",
+            "    try:\n",
+            "        g()\n",
+            "    except ValueError:\n",
+            "        pass\n",
+            "    except (KeyError, TypeError):\n",
+            "        pass\n",
+            "    finally:\n",
+            "        h()\n",
+            "    match a:\n",
+            "        case 1 if b:\n",
+            "            pass\n",
+            "        case _:\n",
+            "            pass\n",
+            "    x = a or b or c\n",
+            "    y = 1 if a else 2\n",
+            "    assert a, 'a'\n",
+            "    return x and y\n",
+        );
+        let parsed = parse_module(source).unwrap();
+        assert!(obligations_of("a.py", source, parsed.suite()).is_ok());
+        // Short of the last character any range can end at.
+        for cut in 0..source.trim_end().len() {
+            assert_eq!(
+                obligations_of("a.py", &source[..cut], parsed.suite()),
+                Err(PythonInstrumenterError::InvalidRange),
+                "cut at {cut}"
+            );
+        }
+    }
+
     #[test]
     fn a_source_longer_than_ruff_can_address_is_too_large() {
         assert_eq!(within_text_size(u32::MAX as usize), Ok(()));
