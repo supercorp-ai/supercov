@@ -75,25 +75,6 @@ pub struct RustCargoTargetRunnerPlan {
     pub underlying_runner: Option<RustCargoUnderlyingRunner>,
 }
 
-impl RustCargoTargetRunnerPlan {
-    pub fn resolve(&self, workspace: &Path) -> RustCargoResolvedTargetRunner {
-        RustCargoResolvedTargetRunner {
-            target: self.target.clone(),
-            underlying_runner: self
-                .underlying_runner
-                .as_ref()
-                .map(|runner| runner.resolve(workspace)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RustCargoResolvedTargetRunner {
-    pub target: String,
-    pub underlying_runner: Option<RustCargoResolvedRunner>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCargoRunnerPlan {
