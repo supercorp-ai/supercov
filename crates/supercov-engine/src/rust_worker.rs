@@ -2169,6 +2169,42 @@ mod tests {
         fs::remove_dir_all(&directory).unwrap();
     }
 
+    /// Wrapping a configuration, putting the stand-in and its hook in place,
+    /// and turning a poller's windows into region files each survive any
+    /// file operation failing.
+    #[test]
+    fn wrapping_standing_in_and_reading_windows_survive_any_file_operation_failing() {
+        let fixture = || {
+            let root = temporary("worker-faults");
+            fs::write(root.join("wrangler.toml"), "main = \"./harness.mjs\"\n").unwrap();
+            fs::write(root.join("wrangler.jsonc"), "{ \"main\": \"m.mjs\" }\n").unwrap();
+            let mut region = vec![0_u8; 4096 + 256];
+            region[56..62].copy_from_slice(b"abc123");
+            let segment = json!([0, base64::engine::general_purpose::STANDARD.encode(&region)]);
+            let line = json!({"start": 1, "end": 2, "regions": [["abc123k1", region.len(), [segment]]]});
+            fs::create_dir_all(root.join("windows")).unwrap();
+            fs::write(root.join("windows/worker-1.windows"), format!("{line}\n")).unwrap();
+            root
+        };
+        let steps = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |root| {
+                wrap_config(&root.join("wrangler.toml"), None, 0)?;
+                wrap_config(&root.join("wrangler.jsonc"), None, 1)?;
+                let tools = root.join("tools");
+                fs::create_dir_all(&tools).map_err(|error| error.to_string())?;
+                write_stand_in(&tools, Path::new("/bin/supercov"))?;
+                write_hook(&tools)?;
+                materialize_worker_windows(&root.join("windows"), "abc123").map(drop)
+            },
+            |root| {
+                let _ = fs::remove_dir_all(root);
+            },
+        );
+        assert!(steps > 10, "{steps}");
+    }
+
     /// A workspace with a Worker and a `wrangler` on PATH gets the stand-in,
     /// and its configuration points at Supercov's entry once: a copy kept
     /// from an earlier run is not pointed at itself. Without a `wrangler`,
@@ -2228,9 +2264,11 @@ mod tests {
     }
 
     fn temporary(name: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "supercov-rust-worker-{}-{}-{name}",
+            "supercov-rust-worker-{}-{}-{}-{name}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
