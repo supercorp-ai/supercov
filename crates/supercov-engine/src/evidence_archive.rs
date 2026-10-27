@@ -1387,4 +1387,110 @@ mod tests {
         assert_eq!(kept.len(), 4);
         cleanup(directory);
     }
+
+    /// A stream that fails at its `left`th call and every one after, a byte
+    /// read at a time.
+    struct Failing<'a> {
+        input: &'a [u8],
+        left: usize,
+        failed: bool,
+    }
+
+    impl Failing<'_> {
+        fn spend(&mut self) -> io::Result<()> {
+            if self.left == 0 {
+                self.failed = true;
+                return Err(io::Error::other("closed"));
+            }
+            self.left -= 1;
+            Ok(())
+        }
+    }
+
+    impl Read for Failing<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.spend()?;
+            let end = buffer.len().min(1);
+            self.input.read(&mut buffer[..end])
+        }
+    }
+
+    impl Write for Failing<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.spend()?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.spend()
+        }
+    }
+
+    /// Framing an archive's entries, and reading them back keeping all or
+    /// none, over a stream that fails at each call in turn, and from the
+    /// framed bytes cut short anywhere: every failure is an error and every
+    /// cut a refusal, and the whole reads back as written.
+    #[test]
+    fn framed_entries_whose_stream_fails_or_is_cut_are_refused() {
+        let entries = vec![
+            entry("coverage-model.json", b"{}"),
+            entry("frontend.json", b"{}"),
+            entry("manifest.json", b"{}"),
+        ];
+        let (framed, _) = write_framed_with_magic(&entries, Vec::new(), "").unwrap();
+        for left in 0.. {
+            let mut stream = Failing {
+                input: b"",
+                left,
+                failed: false,
+            };
+            let written = write_framed_with_magic(&entries, &mut stream, "").map(|_| ());
+            if !stream.failed {
+                assert!(written.is_ok());
+                break;
+            }
+            assert!(written.is_err(), "failing at {left}");
+        }
+        for keep in [true, false] {
+            for left in 0.. {
+                let mut stream = Failing {
+                    input: &framed,
+                    left,
+                    failed: false,
+                };
+                let read = read_framed_entries(&mut stream, |_| keep, |_| Ok(()));
+                if !stream.failed {
+                    assert!(read.is_ok());
+                    break;
+                }
+                assert!(
+                    matches!(read, Err(EvidenceArchiveError::Io(_))),
+                    "{left}: {read:?}"
+                );
+            }
+        }
+        for cut in 0..framed.len() {
+            assert!(
+                read_framed_entries(&mut &framed[..cut], |_| true, |_| Ok(())).is_err(),
+                "cut at {cut}"
+            );
+        }
+        let mut read = Vec::new();
+        read_framed_entries(
+            &mut &framed[..],
+            |_| true,
+            |entry| {
+                read.push(entry);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(read, entries);
+        // A header that is no JSON, and one naming a path no archive holds.
+        for header in [&b"not json\n"[..], b"{\"path\":\"../x\",\"bytes\":0}\n"] {
+            let mut bytes = (header.len() as u32).to_be_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            assert!(read_framed_entries(&mut &bytes[..], |_| true, |_| Ok(())).is_err());
+        }
+    }
 }
