@@ -455,9 +455,7 @@ fn validate_cli_dotted_key(argument: &str) -> Result<(), CargoConfigModelError> 
         ))
     })?;
     let mut table = document.as_table();
-    let mut root = true;
-    while table.is_dotted() || root {
-        root = false;
+    loop {
         if table.len() != 1 {
             break;
         }
@@ -467,7 +465,7 @@ fn validate_cli_dotted_key(argument: &str) -> Result<(), CargoConfigModelError> 
                 // A table's key holds nothing but whitespace around it and
                 // its dots: TOML allows nothing else there, and a comment
                 // before a dotted assignment is its last key's, read below.
-                if has_decor(next.decor()) {
+                if has_decor(next.decor()) || !next.is_dotted() {
                     break;
                 }
                 table = next;
@@ -499,11 +497,9 @@ fn load_cli_value(cwd: &Path, argument: &str) -> Result<CargoConfigValue, CargoC
     })?;
     reject_cli_secrets(&parsed)?;
     let mut value = CargoConfigValue::from_toml(parsed, &CargoConfigDefinition::CliValue)?;
+    // One assignment: either `include`, which leaves nothing beside the
+    // files it names, or a value with nothing included.
     let include_values = includes(&mut value)?;
-    let mut root = CargoConfigValue {
-        kind: CargoConfigKind::Table(BTreeMap::new()),
-        definition: CargoConfigDefinition::CliValue,
-    };
     let mut seen = HashSet::new();
     for include in include_values {
         let path = include.definition.include_root(cwd).join(&include.path);
@@ -511,10 +507,9 @@ fn load_cli_value(cwd: &Path, argument: &str) -> Result<CargoConfigValue, CargoC
             continue;
         }
         let included = load_file(&path, cwd, &mut seen, LoadKind::Cli)?;
-        root.merge(included, true, &mut Vec::new())?;
+        value.merge(included, true, &mut Vec::new())?;
     }
-    root.merge(value, true, &mut Vec::new())?;
-    Ok(root)
+    Ok(value)
 }
 
 fn reject_cli_secrets(value: &toml::Value) -> Result<(), CargoConfigModelError> {
@@ -971,6 +966,193 @@ mod tests {
         assert_eq!(
             refused("registry.secret-key='not-allowed'"),
             "registry.secret-key cannot be set through --config for security reasons"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every value kind reads as itself, every reader refuses another kind,
+    /// and every malformed layer, include or merge is named.
+    #[test]
+    fn each_kind_reads_as_itself_and_each_malformed_layer_is_named() {
+        let definition = CargoConfigDefinition::CliValue;
+        let value = |text: &str| {
+            CargoConfigValue::from_toml(toml::from_str(text).unwrap(), &definition)
+                .map_err(|error| error.to_string())
+        };
+        let config = value("flag=true\nnumber=1\nnames=['a','b']\nmixed=['a',1]\n").unwrap();
+        assert_eq!(config.at(&[]), Some(&config));
+        assert_eq!(
+            config.at(&["flag"]).unwrap().kind,
+            CargoConfigKind::Boolean(true)
+        );
+        assert_eq!(config.at(&["flag", "deeper"]), None);
+        assert_eq!(config.at(&["absent"]), None);
+        assert!(config.table().is_some());
+        assert_eq!(config.at(&["number"]).unwrap().table(), None);
+        assert_eq!(config.at(&["number"]).unwrap().string(), None);
+        assert_eq!(
+            config.at(&["names"]).unwrap().string_list(),
+            Some(vec!["a", "b"])
+        );
+        assert_eq!(config.at(&["mixed"]).unwrap().string_list(), None);
+        assert_eq!(config.at(&["number"]).unwrap().string_list(), None);
+        let cwd = Path::new("/work");
+        let refusal = |path: &[&str]| {
+            config
+                .at(path)
+                .unwrap()
+                .program_and_arguments(cwd)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            refusal(&["mixed"]),
+            "Cargo executable path and arguments must all be strings"
+        );
+        assert_eq!(
+            refusal(&["number"]),
+            "Cargo executable path and arguments must be a string or string array"
+        );
+        assert_eq!(
+            value("program=' '")
+                .unwrap()
+                .at(&["program"])
+                .unwrap()
+                .program_and_arguments(cwd)
+                .unwrap_err()
+                .to_string(),
+            "Cargo executable path and arguments cannot be empty"
+        );
+        assert_eq!(
+            config
+                .at(&["number"])
+                .unwrap()
+                .program_path(cwd)
+                .unwrap_err()
+                .to_string(),
+            "Cargo compiler and wrapper paths must be strings"
+        );
+        assert_eq!(
+            value("program=''")
+                .unwrap()
+                .at(&["program"])
+                .unwrap()
+                .program_path(cwd)
+                .unwrap(),
+            PathBuf::new()
+        );
+        let unsupported =
+            "Cargo configuration supports only integers, strings, lists, tables and booleans";
+        assert_eq!(value("ratio=1.5").unwrap_err(), unsupported);
+        assert_eq!(value("ratios=[1.5]").unwrap_err(), unsupported);
+        assert_eq!(value("table={ratio=1.5}").unwrap_err(), unsupported);
+        let mut number = value("number=1").unwrap().at(&["number"]).unwrap().clone();
+        assert_eq!(
+            includes(&mut number).unwrap_err().to_string(),
+            "Cargo configuration root is not a table"
+        );
+        let merged = |current: &str, incoming: &str| {
+            let mut current = value(current).unwrap();
+            current
+                .merge(value(incoming).unwrap(), true, &mut Vec::new())
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            merged("a=1", "a=[1]"),
+            "cannot merge integer and array at a"
+        );
+        assert_eq!(
+            merged("a={b=1}", "a=true"),
+            "cannot merge table and boolean at a"
+        );
+
+        let root = fixture();
+        let project = root.join("project");
+        let load = |config: &str, files: &[(&str, &str)], cli: &[&str]| {
+            for (name, contents) in files {
+                fs::write(project.join(".cargo").join(name), contents).unwrap();
+            }
+            fs::write(project.join(".cargo/config.toml"), config).unwrap();
+            let cli = cli
+                .iter()
+                .map(|argument| (*argument).to_owned())
+                .collect::<Vec<_>>();
+            load_cargo_configuration(&project, None, &cli).map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            load("include='a.toml'\n", &[], &[]).unwrap_err(),
+            "expected an array at include, found string"
+        );
+        assert_eq!(
+            load("include=[{}]\n", &[], &[]).unwrap_err(),
+            "missing include[0].path"
+        );
+        assert_eq!(
+            load("include=[{path=1}]\n", &[], &[]).unwrap_err(),
+            "include[0].path is not a string"
+        );
+        assert_eq!(
+            load("include=[{path='a.toml',optional='yes'}]\n", &[], &[]).unwrap_err(),
+            "include[0].optional is not a boolean"
+        );
+        assert_eq!(
+            load("include=[1]\n", &[], &[]).unwrap_err(),
+            "include[0] is not a string or table"
+        );
+        let absent = project.join(".cargo/absent.toml");
+        assert!(
+            load("include=[{path='absent.toml',optional=false}]\n", &[], &[])
+                .unwrap_err()
+                .starts_with(&format!("{}: ", absent.display()))
+        );
+        assert!(
+            load("include=['broken.toml']\n", &[("broken.toml", "[[")], &[])
+                .unwrap_err()
+                .starts_with(&project.join(".cargo/broken.toml").display().to_string())
+        );
+        assert_eq!(
+            load(
+                "include=['float.toml']\n",
+                &[("float.toml", "ratio=1.5")],
+                &[]
+            )
+            .unwrap_err(),
+            unsupported
+        );
+        assert_eq!(
+            load("include=['bad.toml']\n", &[("bad.toml", "include=1")], &[]).unwrap_err(),
+            "expected an array at include, found integer"
+        );
+        let lists = [("list.toml", "a=[1]"), ("table.toml", "a={b=1}")];
+        assert_eq!(
+            load("include=['list.toml','table.toml']\n", &lists, &[]).unwrap_err(),
+            "cannot merge array and table at a"
+        );
+        assert_eq!(
+            load("include=['list.toml']\na={b=1}\n", &lists, &[]).unwrap_err(),
+            "cannot merge array and table at a"
+        );
+        assert_eq!(load("", &[], &["a=1979-05-27"]).unwrap_err(), unsupported);
+        assert_eq!(
+            load("", &[], &["include='a.toml'"]).unwrap_err(),
+            "expected an array at include, found string"
+        );
+        fs::write(project.join("list.toml"), "a=[1]").unwrap();
+        fs::write(project.join("table.toml"), "a={b=1}").unwrap();
+        assert_eq!(
+            load("", &[], &["include=['list.toml','table.toml']"]).unwrap_err(),
+            "cannot merge array and table at a"
+        );
+        fs::write(project.join("broken.toml"), "[[").unwrap();
+        assert!(
+            load("", &[], &["broken.toml"])
+                .unwrap_err()
+                .contains("broken.toml")
+        );
+        assert_eq!(
+            load("a=[1]\n", &[], &["a.b=1"]).unwrap_err(),
+            "cannot merge array and table at a"
         );
         fs::remove_dir_all(root).unwrap();
     }
