@@ -515,13 +515,14 @@ fn render_security(view: &Value) -> String {
         }
         listed += 1;
         out.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
-        for finding in fired {
+        // Not empty, as checked above.
+        fired.iter().for_each(|finding| {
             out.push_str(&format!(
                 "    {:.2}  {}\n",
                 finding["value"].as_f64().unwrap_or(0.0),
                 finding["check"].as_str().unwrap_or("?")
             ));
-        }
+        });
     }
     let total = view["total"].as_u64().unwrap_or(0) as usize;
     if total > files.len() {
@@ -543,7 +544,8 @@ fn render_gaps(view: &Value) -> String {
         super::files(view["total"].as_u64().unwrap_or(0)),
         view["clean"].as_u64().unwrap_or(0)
     ));
-    for file in files {
+    // Not empty, as checked above.
+    files.iter().for_each(|file| {
         out.push_str(&format!("{}\n", file["path"].as_str().unwrap_or("?")));
         for finding in file["present"].as_array().unwrap_or(&empty) {
             out.push_str(&format!(
@@ -552,7 +554,7 @@ fn render_gaps(view: &Value) -> String {
                 finding["check"].as_str().unwrap_or("?")
             ));
         }
-    }
+    });
     let total = view["total"].as_u64().unwrap_or(0) as usize;
     if total > files.len() {
         out.push_str(&format!(
@@ -726,7 +728,8 @@ fn render_quality_diff(view: &Value) -> String {
             return;
         }
         out.push_str(&format!("\n{title}\n"));
-        for row in rows {
+        // Not empty, as checked above.
+        rows.iter().for_each(|row| {
             let movement = row["movement"].as_f64().unwrap_or(0.0);
             out.push_str(&format!(
                 "  {movement:+.2}  {}\n",
@@ -751,7 +754,7 @@ fn render_quality_diff(view: &Value) -> String {
                     "          the file did not change, so this is the model's own variation\n",
                 );
             }
-        }
+        });
         more(out, key, rows.len());
     };
     section(
@@ -855,7 +858,8 @@ fn render_snapshots(view: &Value) -> String {
         if view["total"] == 1 { "" } else { "s" },
         view["shown"]
     );
-    for row in rows {
+    // Not empty, as checked above.
+    rows.iter().for_each(|row| {
         let counts = &row["counts"];
         text.push_str(&format!(
             "\n{} — {}\n   {} assessed, {} errors; scanned {}\n",
@@ -882,6 +886,6 @@ fn render_snapshots(view: &Value) -> String {
                         .join(" ")),
             ));
         }
-    }
+    });
     text
 }
