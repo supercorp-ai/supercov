@@ -574,6 +574,7 @@ fn normal(path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+#[track_caller]
 fn read_json(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&crate::source_discovery::strip_trailing_commas(

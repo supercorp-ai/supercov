@@ -30,8 +30,10 @@ struct Fault {
     place: Option<(usize, std::sync::Mutex<Vec<Place>>)>,
 }
 
-/// Where in the code a call was made.
-pub type Place = &'static std::panic::Location<'static>;
+/// Where in the code a call was made, and which call it was: a helper marked
+/// `#[track_caller]` hands its caller's place to the calls it makes, and two
+/// different calls from there are two places.
+pub type Place = (&'static std::panic::Location<'static>, &'static str);
 
 #[cfg(any(test, debug_assertions))]
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
@@ -224,15 +226,22 @@ pub fn io<T>(
     }
 }
 
-/// [`io`], for a call made where the caller of a `#[track_caller]` function
-/// is: `site#N` counts the places it is called from.
+/// [`io`], for the call `operation` made where the caller of a
+/// `#[track_caller]` function is: `site#N` counts the places it is called
+/// from.
 #[track_caller]
 pub fn io_here<T>(
     site: &str,
+    operation: &'static str,
     kind: io::ErrorKind,
     call: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    io_at(site, kind, std::panic::Location::caller(), call)
+    io_at(
+        site,
+        kind,
+        (std::panic::Location::caller(), operation),
+        call,
+    )
 }
 
 /// [`io_here`], for a call made at `place`.

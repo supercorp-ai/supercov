@@ -18,11 +18,9 @@
 //!   snapshots/<id>/files.json      per file and window: grades and identities
 //! ```
 
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+use supercov_engine::fault_fs as fs;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -84,7 +82,7 @@ fn ignore_store(path: &Path) -> Result<(), String> {
         .create_new(true)
         .open(&ignore)
     {
-        Ok(mut file) => file.write_all(b"*\n").map_err(|e| e.to_string()),
+        Ok(mut file) => fs::write_all(&mut file, b"*\n").map_err(|e| e.to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(format!("{}: {error}", ignore.display())),
     }
@@ -103,8 +101,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .create(true)
             .truncate(true)
             .open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        fs::write_all(&mut file, bytes)?;
+        fs::sync_all(&file)?;
         fs::rename(&temp, path)
     })()
     .map_err(|e| format!("{}: {e}", path.display()));

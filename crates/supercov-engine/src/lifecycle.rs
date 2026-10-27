@@ -393,8 +393,8 @@ impl TrashLock {
                 fs::open_with(OpenOptions::new().write(true).create_new(true), &path)
             }) {
                 Ok(mut file) => {
-                    write!(file, "{}", std::process::id())
-                        .and_then(|_| file.sync_all())
+                    fs::write_all(&mut file, std::process::id().to_string().as_bytes())
+                        .and_then(|_| fs::sync_all(&file))
                         .map_err(|source| io_error(&path, source))?;
                     return Ok(Some(Self { path }));
                 }
@@ -832,7 +832,7 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     );
     if cloned {
         fs::open(destination)
-            .and_then(|file| file.sync_all())
+            .and_then(|file| fs::sync_all(&file))
             .map_err(|error| io_error(destination, error))?;
         return fs::symlink_metadata(destination)
             .map(|metadata| metadata.len())
@@ -842,9 +842,7 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     let mut output = fs::open_with(OpenOptions::new().write(true).create_new(true), destination)
         .map_err(|error| io_error(destination, error))?;
     let copied = io::copy(&mut input, &mut output).map_err(|error| io_error(destination, error))?;
-    output
-        .sync_all()
-        .map_err(|error| io_error(destination, error))?;
+    fs::sync_all(&output).map_err(|error| io_error(destination, error))?;
     Ok(copied)
 }
 

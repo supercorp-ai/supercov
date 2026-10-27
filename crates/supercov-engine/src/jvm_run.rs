@@ -303,6 +303,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
+#[track_caller]
 fn write(path: &Path, contents: &str) -> Result<(), String> {
     // Every path written is a name joined onto a directory.
     let parent = path.parent().unwrap_or(path);

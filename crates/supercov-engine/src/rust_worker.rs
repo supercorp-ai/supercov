@@ -171,6 +171,7 @@ fn collect_worker_configs(directory: &Path, depth: usize, found: &mut Vec<PathBu
 }
 
 /// A configuration as JSON whatever it was written in.
+#[track_caller]
 fn read_config(path: &Path) -> Option<(String, Value)> {
     let text = fs::read_to_string(path).ok()?;
     let document = if path
@@ -663,6 +664,7 @@ pub const INSPECTORS_ENV: &str = "SUPERCOV_WRANGLER_INSPECTORS";
 const HOOK_FILE: &str = "supercov-wrangler-hook.cjs";
 
 /// Writes the hook into `directory`, and says where it is.
+#[track_caller]
 fn write_hook(directory: &Path) -> Result<PathBuf, String> {
     let hook = directory.join(HOOK_FILE);
     fs::write(&hook, INSPECTOR_HOOK).map_err(|error| format!("{}: {error}", hook.display()))?;

@@ -547,6 +547,7 @@ fn owned_workspace_store(path: &Path) -> bool {
 /// clone, a submodule, or an agent worktree such as `.claude/worktrees/*` —
 /// not this project's source. Treating its files as ambiguous first-party
 /// code turned one real project's report into 1,032 blocking limitations.
+#[track_caller]
 fn nested_checkout(path: &Path) -> bool {
     fs::symlink_metadata(path.join(".git")).is_ok()
 }
@@ -891,6 +892,7 @@ fn files_under(
     Ok(())
 }
 
+#[track_caller]
 fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }

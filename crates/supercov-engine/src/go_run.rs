@@ -177,6 +177,7 @@ fn package_name(source: &str) -> Option<String> {
     None
 }
 
+#[track_caller]
 fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -228,6 +229,7 @@ fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
 
 const LINE_DIRECTIVE: &str = "/*line ";
 
+#[track_caller]
 fn write(path: &Path, contents: &str) -> Result<(), String> {
     // Every path written is a name joined onto a directory.
     let parent = path.parent().unwrap_or(path);

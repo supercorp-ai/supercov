@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[track_caller]
 fn json(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&strip_trailing_commas(&strip_jsonc_comments(&text))).ok()

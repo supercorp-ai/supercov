@@ -116,6 +116,7 @@ impl std::fmt::Display for ProjectDiscoveryError {
 
 impl std::error::Error for ProjectDiscoveryError {}
 
+#[track_caller]
 fn package_json(root: &Path) -> Value {
     fs::read(root.join("package.json"))
         .ok()
@@ -127,6 +128,7 @@ fn script<'a>(manifest: &'a Value, name: &str) -> Option<&'a str> {
     manifest.get("scripts")?.get(name)?.as_str()
 }
 
+#[track_caller]
 fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_file())
@@ -147,6 +149,7 @@ fn source_file(path: &Path) -> bool {
     .any(|extension| lower.ends_with(extension))
 }
 
+#[track_caller]
 fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, ProjectDiscoveryError> {
     let mut entries = fs::read_dir(path)
         .map_err(|source| ProjectDiscoveryError::Io {

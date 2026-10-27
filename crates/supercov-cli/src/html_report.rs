@@ -933,10 +933,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         )
     })?;
     let result = (|| -> Result<(), String> {
-        file.write_all(bytes)
+        fs::write_all(&mut file, bytes)
             .map_err(|error| format!("{}: {error}", temporary_path.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("{}: {error}", temporary_path.display()))?;
+        fs::sync_all(&file).map_err(|error| format!("{}: {error}", temporary_path.display()))?;
         drop(file);
         fs::rename(&temporary_path, path)
             .map_err(|error| format!("{}: {error}", path.display()))?;

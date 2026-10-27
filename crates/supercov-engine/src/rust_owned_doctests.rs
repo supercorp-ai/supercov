@@ -1063,6 +1063,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
     Ok(exit_code)
 }
 
+#[track_caller]
 fn fail_package(package_dir: &Path, reason: String) -> Result<i32, RustTestRunnerError> {
     let error_path = package_dir.parent().unwrap_or(package_dir).join(format!(
         "{}.error",

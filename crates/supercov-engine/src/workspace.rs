@@ -476,9 +476,8 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
             match crate::fault::io("workspace-file", io::ErrorKind::PermissionDenied, || {
                 fs::open_with(OpenOptions::new().write(true).create_new(true), &path)
             }) {
-                Ok(mut file) => file
-                    .write_all(contents)
-                    .and_then(|_| file.sync_all())
+                Ok(mut file) => fs::write_all(&mut file, contents)
+                    .and_then(|_| fs::sync_all(&file))
                     .map_err(|source| io_error(&path, source))?,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     // The marker's contents were checked as the container
@@ -2354,7 +2353,7 @@ mod tests {
             crate::fault::io_at(
                 "errno",
                 io::ErrorKind::Other,
-                std::panic::Location::caller(),
+                (std::panic::Location::caller(), "test"),
                 || Ok(()),
             )
         });

@@ -465,8 +465,8 @@ fn write_archive_version(
             .into_inner()
             .map_err(|error| EvidenceArchiveError::Io(error.into_error()))?;
         let file = faulting.inner;
-        file.sync_all()?;
-        let compressed_bytes = file.metadata()?.len();
+        fs::sync_all(&file)?;
+        let compressed_bytes = fs::file_metadata(&file)?.len();
         drop(file);
         fs::rename(&temporary, destination)?;
         sync_directory(parent);

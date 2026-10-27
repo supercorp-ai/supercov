@@ -152,6 +152,7 @@ struct CargoTarget {
     src_path: PathBuf,
 }
 
+#[track_caller]
 fn canonical_directory(path: &Path) -> Result<PathBuf, RustProjectError> {
     fs::canonicalize(path).map_err(|error| RustProjectError::Io {
         path: path.to_owned(),

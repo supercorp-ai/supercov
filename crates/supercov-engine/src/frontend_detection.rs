@@ -65,6 +65,7 @@ fn has_sequence(tokens: &[String], sequence: &[&str]) -> bool {
     })
 }
 
+#[track_caller]
 fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }

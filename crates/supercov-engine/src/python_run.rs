@@ -88,6 +88,7 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
     ]
 }
 
+#[track_caller]
 fn write_runtime(directory: &Path) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     // The runtime has its files.

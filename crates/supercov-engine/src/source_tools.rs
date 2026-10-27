@@ -156,6 +156,7 @@ pub fn launching_binary() -> Option<PathBuf> {
 /// Write a launcher where `path` is, replacing what is there. Never through
 /// it: in a workspace whose dependencies are hard links, the file there is
 /// the project's own.
+#[track_caller]
 pub fn write_launcher(path: &Path, text: &str) -> io::Result<()> {
     remove(path)?;
     fs::write(path, text)?;
@@ -236,6 +237,7 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
 }
 
 #[cfg(unix)]
+#[track_caller]
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path)
@@ -243,6 +245,7 @@ fn executable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
+#[track_caller]
 fn executable(path: &Path) -> bool {
     path.is_file()
 }
@@ -312,6 +315,7 @@ fn link_to(target: &Path, link: &Path) -> io::Result<()> {
     crate::workspace::create_link(target, link, target.is_dir())
 }
 
+#[track_caller]
 fn remove(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(path),

@@ -6,7 +6,7 @@
 
 use crate::fault_fs as fs;
 use std::{
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, SeekFrom, Write},
     path::Path,
     time::Instant,
 };
@@ -99,9 +99,9 @@ fn publish_captured_output(
     if failed || verbose {
         let result = (|| -> std::io::Result<()> {
             let mut file = fs::open(path)?;
-            let length = file.metadata()?.len();
+            let length = fs::file_metadata(&file)?.len();
             if length > CAPTURED_OUTPUT_LIMIT {
-                file.seek(SeekFrom::End(-(CAPTURED_OUTPUT_LIMIT as i64)))?;
+                fs::seek(&mut file, SeekFrom::End(-(CAPTURED_OUTPUT_LIMIT as i64)))?;
                 writeln!(
                     writer,
                     "[supercov] {phase} output truncated to the final {} bytes",

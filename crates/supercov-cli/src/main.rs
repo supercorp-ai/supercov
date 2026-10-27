@@ -672,6 +672,7 @@ fn import_command(arguments: Vec<String>) -> ExitCode {
 /// for a script that has to name it, its id in the file
 /// `SUPERCOV_RUN_ID_FILE` names. Guessing the newest run is wrong when two
 /// commands record runs side by side.
+#[track_caller]
 fn published(run_directory: &Path) {
     println!(
         "[coverage] evidence: {}",

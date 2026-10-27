@@ -10,43 +10,43 @@ pub use std::fs::*;
 /// `call`, unless the test fails it; at the place the wrapper was called
 /// from, for `fs#N`.
 #[track_caller]
-fn checked<T>(call: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
-    crate::fault::io_here("fs", io::ErrorKind::Other, call)
+fn checked<T>(operation: &'static str, call: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    crate::fault::io_here("fs", operation, io::ErrorKind::Other, call)
 }
 
 #[track_caller]
 pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<std::path::PathBuf> {
-    checked(|| std::fs::canonicalize(path))
+    checked("canonicalize", || std::fs::canonicalize(path))
 }
 
 #[track_caller]
 pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
-    checked(|| std::fs::copy(from, to))
+    checked("copy", || std::fs::copy(from, to))
 }
 
 #[track_caller]
 pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    checked(|| std::fs::create_dir(path))
+    checked("create_dir", || std::fs::create_dir(path))
 }
 
 #[track_caller]
 pub fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    checked(|| std::fs::create_dir_all(path))
+    checked("create_dir_all", || std::fs::create_dir_all(path))
 }
 
 #[track_caller]
 pub fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
-    checked(|| std::fs::hard_link(original, link))
+    checked("hard_link", || std::fs::hard_link(original, link))
 }
 
 #[track_caller]
 pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
-    checked(|| std::fs::metadata(path))
+    checked("metadata", || std::fs::metadata(path))
 }
 
 #[track_caller]
 pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
-    checked(|| std::fs::read(path))
+    checked("read", || std::fs::read(path))
 }
 
 /// A directory's entries, the first of which a test can fail as reading
@@ -73,13 +73,15 @@ impl Iterator for ReadDir {
 /// fails it.
 #[track_caller]
 pub fn file_type(entry: &DirEntry) -> io::Result<FileType> {
-    checked(|| entry.file_type())
+    checked("file_type", || entry.file_type())
 }
 
 #[track_caller]
 pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
-    let place = std::panic::Location::caller();
-    checked(|| std::fs::read_dir(path)).map(|entries| ReadDir {
+    // The listing's first entry is a place of its own, apart from the call
+    // that opened it.
+    let place = (std::panic::Location::caller(), "read_dir entry");
+    checked("read_dir", || std::fs::read_dir(path)).map(|entries| ReadDir {
         entries,
         first: Some(place),
     })
@@ -87,78 +89,110 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
 
 #[track_caller]
 pub fn read_link<P: AsRef<Path>>(path: P) -> io::Result<std::path::PathBuf> {
-    checked(|| std::fs::read_link(path))
+    checked("read_link", || std::fs::read_link(path))
 }
 
 #[track_caller]
 pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
-    checked(|| std::fs::read_to_string(path))
+    checked("read_to_string", || std::fs::read_to_string(path))
 }
 
 #[track_caller]
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    checked(|| std::fs::remove_dir(path))
+    checked("remove_dir", || std::fs::remove_dir(path))
 }
 
 #[track_caller]
 pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    checked(|| std::fs::remove_dir_all(path))
+    checked("remove_dir_all", || std::fs::remove_dir_all(path))
 }
 
 #[track_caller]
 pub fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    checked(|| std::fs::remove_file(path))
+    checked("remove_file", || std::fs::remove_file(path))
 }
 
 #[track_caller]
 pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
-    checked(|| std::fs::rename(from, to))
+    checked("rename", || std::fs::rename(from, to))
 }
 
 #[track_caller]
 pub fn set_permissions<P: AsRef<Path>>(path: P, permissions: Permissions) -> io::Result<()> {
-    checked(|| std::fs::set_permissions(path, permissions))
+    checked("set_permissions", || {
+        std::fs::set_permissions(path, permissions)
+    })
 }
 
 #[track_caller]
 pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
-    checked(|| std::fs::symlink_metadata(path))
+    checked("symlink_metadata", || std::fs::symlink_metadata(path))
 }
 
 #[track_caller]
 pub fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> io::Result<()> {
-    checked(|| std::fs::write(path, contents))
+    checked("write", || std::fs::write(path, contents))
 }
 
 /// `std::os::unix::fs::symlink`.
 #[cfg(unix)]
 #[track_caller]
 pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
-    checked(|| std::os::unix::fs::symlink(original, link))
+    checked("symlink", || std::os::unix::fs::symlink(original, link))
 }
 
 /// `std::os::windows::fs::symlink_file`.
 #[cfg(windows)]
 #[track_caller]
 pub fn symlink_file<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
-    checked(|| std::os::windows::fs::symlink_file(original, link))
+    checked("symlink_file", || {
+        std::os::windows::fs::symlink_file(original, link)
+    })
 }
 
 /// `std::os::windows::fs::symlink_dir`.
 #[cfg(windows)]
 #[track_caller]
 pub fn symlink_dir<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
-    checked(|| std::os::windows::fs::symlink_dir(original, link))
+    checked("symlink_dir", || {
+        std::os::windows::fs::symlink_dir(original, link)
+    })
 }
 
 /// `File::open`.
 #[track_caller]
 pub fn open<P: AsRef<Path>>(path: P) -> io::Result<File> {
-    checked(|| File::open(path))
+    checked("open", || File::open(path))
 }
 
 /// `options.open(path)`.
 #[track_caller]
 pub fn open_with<P: AsRef<Path>>(options: &OpenOptions, path: P) -> io::Result<File> {
-    checked(|| options.open(path))
+    checked("open_with", || options.open(path))
+}
+
+/// `file.sync_all()`.
+#[track_caller]
+pub fn sync_all(file: &File) -> io::Result<()> {
+    checked("sync_all", || file.sync_all())
+}
+
+/// `file.metadata()`, of a file already open.
+#[track_caller]
+pub fn file_metadata(file: &File) -> io::Result<Metadata> {
+    checked("file_metadata", || file.metadata())
+}
+
+/// `file.write_all(bytes)`, to a file already open.
+#[track_caller]
+pub fn write_all(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    checked("write_all", || file.write_all(bytes))
+}
+
+/// `file.seek(position)`.
+#[track_caller]
+pub fn seek(file: &mut File, position: io::SeekFrom) -> io::Result<u64> {
+    use std::io::Seek;
+    checked("seek", || file.seek(position))
 }

@@ -462,6 +462,7 @@ fn read_evidence_directory_with(
 /// tracker is one -- can close between the listing and this read. It harvested
 /// its slot into its transport first, so a slot that is gone holds nothing to
 /// miss. Anything else missing is still an error.
+#[track_caller]
 fn entry_metadata(name: &str, path: &Path) -> Result<Option<fs::Metadata>, PythonEvidenceError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(metadata)),
@@ -574,6 +575,7 @@ fn shared_slot_bytes(_name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceErro
 /// A slot, or None when it is gone by the time it is opened: taken back by a
 /// process that closed after the directory was listed, and so already
 /// harvested into its transport.
+#[track_caller]
 fn map_slot(path: &Path) -> Result<Option<Mmap>, PythonEvidenceError> {
     match fs::open(path) {
         Ok(file) => unsafe { MmapOptions::new().map(&file) }
@@ -584,6 +586,7 @@ fn map_slot(path: &Path) -> Result<Option<Mmap>, PythonEvidenceError> {
     }
 }
 
+#[track_caller]
 fn map_evidence(path: &Path) -> Result<Mmap, PythonEvidenceError> {
     let file = fs::open(path).map_err(|error| PythonEvidenceError::Io(error.to_string()))?;
     // The file is immutable from Supercov's perspective after the wrapped

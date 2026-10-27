@@ -502,6 +502,7 @@ impl std::fmt::Display for RunStoreError {
 
 impl std::error::Error for RunStoreError {}
 
+#[track_caller]
 fn regular_file(path: &Path) -> Result<fs::Metadata, RunStoreError> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
@@ -772,6 +773,7 @@ fn compare_run_integrity_to(
     }
 }
 
+#[track_caller]
 pub(crate) fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError> {
     let metadata = regular_file(path)?;
     let mut file = fs::open(path)?;
@@ -840,6 +842,7 @@ fn identity_with(
 /// moves the status-change time, which no tool can set back, so a file with
 /// the same stamp holds the same bytes. `None` where there is no such time.
 #[cfg(unix)]
+#[track_caller]
 fn change_stamp(path: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     fs::symlink_metadata(path).ok().and_then(|metadata| {
@@ -866,6 +869,7 @@ fn stamp(file: [u64; 3], modified: (i64, i64), changed: (i64, i64)) -> Option<St
 }
 
 #[cfg(not(unix))]
+#[track_caller]
 fn change_stamp(_: &Path) -> Option<String> {
     None
 }
@@ -883,6 +887,7 @@ fn verified_record(index: &Path) -> PathBuf {
 /// evidence's stamp is taken before it was read, so a change while it was
 /// read is one the next open sees. A record that cannot be written costs
 /// the next open its full check, nothing more.
+#[track_caller]
 fn record_verified(index: &Path, evidence: Option<&str>) {
     let record = evidence
         .zip(change_stamp(index))
