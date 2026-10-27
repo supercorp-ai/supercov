@@ -273,6 +273,10 @@ fn run_direct_rust_timed(
     if request.command.is_empty() {
         return Err("test command must not be empty".into());
     }
+    // Read before anything is started, as every language's run reads them:
+    // a value that is no number of milliseconds is refused here.
+    let supervision = crate::process_supervision::SupervisionOptions::from_environment()
+        .map_err(|error| error.to_string())?;
     // The shared probe runtime maps its evidence file and hooks thread and
     // process creation on macOS, Linux and Windows; on any other host every
     // probe is a no-op, so a run there would report zero coverage without a
@@ -443,6 +447,10 @@ fn run_direct_rust_timed(
         )?;
         let before = crate::workspace::workspace_output_baseline(&workspace)
             .map_err(|error| error.to_string())?;
+        let deadline = crate::child_signal_guard::Deadline::start(
+            supervision.timeout,
+            supervision.termination_grace,
+        );
         let run = run_prepared_rust_tests(
             &project,
             command,
@@ -451,8 +459,28 @@ fn run_direct_rust_timed(
             rust_workers.as_ref(),
             &runner_environment,
             diagnostics,
-        )
-        .map_err(|error| error.to_string())?;
+        );
+        // Past the deadline the tests that ran are the run, and it ends as
+        // a supervised command that timed out does.
+        let run = match (run, deadline.passed()) {
+            (Ok(mut run), Some(milliseconds)) => {
+                let _ = writeln!(
+                    diagnostics,
+                    "[supercov] command timed out after {milliseconds} ms: the tests still running were stopped, and no other was started"
+                );
+                run.exit_code = supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE;
+                run
+            }
+            (Ok(run), None) => run,
+            (Err(_), Some(milliseconds)) => {
+                return Err(format!(
+                    "the test command exited {} before any test reported an outcome: it ran past SUPERCOV_COMMAND_TIMEOUT_MS ({milliseconds} ms), and no run was published",
+                    supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE
+                ));
+            }
+            (Err(error), None) => return Err(error.to_string()),
+        };
+        drop(deadline);
         // A snapshot a test accepted, a report: they stayed in the copy, and
         // the project had the old ones or none.
         let outputs = crate::workspace::sync_outputs_of(

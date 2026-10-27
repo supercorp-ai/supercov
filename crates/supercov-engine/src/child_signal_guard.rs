@@ -22,7 +22,8 @@
 use crate::fault_process::Launch;
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// How many children can be registered at once. The runner runs at most one
 /// child per worker thread, and machines with more cores than this are rare;
@@ -46,6 +47,101 @@ pub fn signal_registered_children(signal: i32) {
             let _ = signal;
         }
     });
+}
+
+/// Whether the run's deadline has passed: nothing more is started.
+static EXPIRED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the deadline a [`Deadline`] keeps has passed.
+pub fn deadline_passed() -> bool {
+    EXPIRED.load(Ordering::SeqCst)
+}
+
+/// A run's `SUPERCOV_COMMAND_TIMEOUT_MS`, kept as a supervised command's is
+/// (contracts/v1/process-supervision.md): past it, it asks every
+/// registered child to stop, makes it stop after `grace`, and starts no
+/// other. Dropping it before then ends the watch.
+pub struct Deadline {
+    timeout: Option<Duration>,
+    cancel: Option<std::sync::mpsc::Sender<()>>,
+    watch: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Deadline {
+    /// A deadline `timeout` from now, or none.
+    pub fn start(timeout: Option<Duration>, grace: Duration) -> Self {
+        use std::sync::mpsc::RecvTimeoutError::Timeout;
+        EXPIRED.store(false, Ordering::SeqCst);
+        let Some(limit) = timeout else {
+            return Self {
+                timeout,
+                cancel: None,
+                watch: None,
+            };
+        };
+        let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+        let watch = std::thread::spawn(move || {
+            if cancelled.recv_timeout(limit) != Err(Timeout) {
+                return;
+            }
+            // The run says so on its own diagnostics: the caller holds
+            // standard error while it runs, and a write from here would wait
+            // for it forever.
+            EXPIRED.store(true, Ordering::SeqCst);
+            #[cfg(unix)]
+            {
+                signal_registered_children(libc::SIGTERM);
+                // A child that ignores SIGTERM is killed; one the run
+                // waited for in the meantime is gone already.
+                if cancelled.recv_timeout(grace) == Err(Timeout) {
+                    signal_registered_children(libc::SIGKILL);
+                }
+            }
+            // Windows has no signal to ask with: the run's Job Object takes
+            // the children down when it ends.
+            #[cfg(not(unix))]
+            let _ = grace;
+        });
+        Self {
+            timeout,
+            cancel: Some(cancel),
+            watch: Some(watch),
+        }
+    }
+
+    /// The milliseconds allowed, when the deadline has passed.
+    pub fn passed(&self) -> Option<u128> {
+        self.timeout
+            .filter(|_| deadline_passed())
+            .map(|timeout| timeout.as_millis())
+    }
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        drop(self.cancel.take());
+        if let Some(watch) = self.watch.take() {
+            let _ = watch.join();
+        }
+    }
+}
+
+/// Start `command`, unless the run's deadline has passed.
+trait Start {
+    fn start(&mut self) -> io::Result<Child>;
+}
+
+impl Start for Command {
+    #[track_caller]
+    fn start(&mut self) -> io::Result<Child> {
+        if deadline_passed() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the command's deadline passed",
+            ));
+        }
+        self.launch()
+    }
 }
 
 /// A child's registration; dropping it removes the child from the table.
@@ -121,7 +217,7 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .launch()?;
+        .start()?;
     let _registered = register(&child);
     child.wait_with_output()
 }
@@ -150,7 +246,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .launch()?;
+        .start()?;
     let _registered = register(&child);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -194,7 +290,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
 
 /// `Command::status()`, with the child registered while it runs.
 pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
-    let mut child = command.launch()?;
+    let mut child = command.start()?;
     let _registered = register(&child);
     child.wait()
 }

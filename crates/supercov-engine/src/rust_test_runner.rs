@@ -2393,6 +2393,10 @@ pub fn run_prepared_rust_tests(
         (0..workers).for_each(|_| {
             scope.spawn(|| {
                 loop {
+                    // Past the run's deadline no other test is started.
+                    if crate::child_signal_guard::deadline_passed() {
+                        break;
+                    }
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     let Some(task) = tasks.get(index) else { break };
                     let run = |command: &mut Command| {
@@ -2620,8 +2624,10 @@ pub fn run_prepared_rust_tests(
             server: Vec::new(),
         });
     }
-    // A nextest run has returned above: this is `cargo test`.
-    let doctest_results = if selection.run_doctests {
+    // A nextest run has returned above: this is `cargo test`. Past the
+    // run's deadline its doctests are not started either.
+    let doctest_results = if selection.run_doctests && !crate::child_signal_guard::deadline_passed()
+    {
         crate::rust_owned_doctests::run_doctests(
             project,
             &invocation,

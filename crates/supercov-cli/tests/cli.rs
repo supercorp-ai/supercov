@@ -13488,7 +13488,6 @@ type LanguageRun = (&'static str, fn(&Project), Vec<String>);
 
 /// A run of each language refuses a source root that is not there and a
 /// timeout that is no number of milliseconds, before it measures anything.
-/// A Rust run reads no timeout of its own.
 #[test]
 fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout() {
     let python = [
@@ -13547,14 +13546,54 @@ fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout() {
             ("SUPERCOV_SOURCE_ROOTS", "missing"),
             ("SUPERCOV_COMMAND_TIMEOUT_MS", "soon"),
         ] {
-            if label == "refuse-rs" && name == "SUPERCOV_COMMAND_TIMEOUT_MS" {
-                continue;
-            }
             let ran = project.supercov_with(&command, &[(name, value)]);
             let said = ran.stderr();
             assert!(!said.contains("panicked at"), "{label} {name}: {said}");
             assert_ne!(ran.code(), 0, "{label} {name}: {said}");
         }
+    }
+}
+
+/// A Rust run keeps `SUPERCOV_COMMAND_TIMEOUT_MS` as every supervised command
+/// does: past it, the test still running is stopped, no other starts, and
+/// the run ends 124, saying why. One well inside it runs as it would.
+#[cfg(unix)]
+#[test]
+fn a_rust_run_past_its_timeout_is_stopped_and_ends_124() {
+    let project = Project::empty("rust-timeout");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn one() -> u32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hangs() {\n        std::thread::sleep(std::time::Duration::from_secs(120));\n    }\n    #[test]\n    fn is_one() {\n        assert_eq!(super::one(), 1);\n    }\n}\n",
+    );
+    project.write(".gitignore", "target/\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    // Built once without a deadline, so the next run's time goes to its tests.
+    project
+        .supercov_with(
+            &["--", "cargo", "test", "-q", "is_one"],
+            &[("SUPERCOV_COMMAND_TIMEOUT_MS", "600000")],
+        )
+        .succeeds();
+    let started = std::time::Instant::now();
+    let ran = project.supercov_with(
+        &["--", "cargo", "test", "-q"],
+        &[("SUPERCOV_COMMAND_TIMEOUT_MS", "20000")],
+    );
+    assert_eq!(ran.code(), 124, "{}", ran.stderr());
+    assert!(ran.stderr().contains("20000 ms"), "{}", ran.stderr());
+    assert!(started.elapsed() < std::time::Duration::from_secs(90));
+    // Past the build, what ran is published, as the command that timed out.
+    if ran
+        .stderr()
+        .contains("the tests still running were stopped")
+    {
+        let run = project.supercov(&["runs", "latest", "--json"]).json();
+        assert_eq!(run["data"]["testExitCode"], 124, "{run}");
     }
 }
 

@@ -9,6 +9,7 @@
 
 **Fixed**
 
+- A Rust run ignored `SUPERCOV_COMMAND_TIMEOUT_MS` and `SUPERCOV_DIAGNOSTIC_INTERVAL_MS`: a hung test kept it running for good, and a value that is no number of milliseconds was not refused. It now refuses such a value before starting anything and keeps the deadline as other languages' runs do: past it, the tests still running are stopped, no other is started, what ran is published, and the run exits `124`.
 - Supercov panicked when its output stopped being read part way, as `supercov -- npm test 2>&1 | head` or `supercov runs latest gaps | head` stops reading it; it goes on without printing what is no longer read.
 - A JavaScript or TypeScript file Supercov could not parse was reported one column to the right of the error.
 - `security` read a line question the provider refused as finding nothing on those lines; their lines are counted as not checked one by one, as lines whose question did not fit already were.
