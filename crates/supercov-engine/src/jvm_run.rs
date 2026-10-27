@@ -2899,6 +2899,66 @@ mod tests {
         );
     }
 
+    /// Each place instrumenting a JVM workspace touches a file fails in
+    /// turn, its first call there: the instrumenting stops with an error
+    /// that names the file, never a panic, for a Maven, a Gradle and a plain
+    /// project, a module of each kind among them.
+    #[test]
+    fn instrumenting_a_workspace_survives_any_file_operation_failing() {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let fixture = |build: &'static str| {
+            move || {
+                let root = std::env::temp_dir().join(format!(
+                    "supercov-jvm-faults-{build}-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                java_module(&root, "app", true);
+                java_module(&root, "docs", false);
+                match build {
+                    "maven" => {
+                        write(
+                            &root.join("pom.xml"),
+                            "<project><modules><module>app</module></modules></project>",
+                        )
+                        .unwrap();
+                        write(
+                            &root.join("app/pom.xml"),
+                            "<project><dependencies><dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.10.0</version></dependency></dependencies></project>",
+                        )
+                        .unwrap();
+                        write(
+                            &root.join("app/src/test/resources/junit-platform.properties"),
+                            "junit.jupiter.execution.parallel.enabled=true\n",
+                        )
+                        .unwrap();
+                    }
+                    "gradle" => {
+                        write(&root.join("settings.gradle"), "include 'app'\n").unwrap();
+                        write(
+                            &root.join("app/build.gradle"),
+                            "dependencies { testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0' }\ntest { useJUnitPlatform() }\n",
+                        )
+                        .unwrap();
+                    }
+                    _ => {}
+                }
+                root
+            }
+        };
+        for build in ["maven", "gradle", "plain"] {
+            let steps = crate::fault::fail_each_call(
+                "fs",
+                fixture(build),
+                |root| instrument_workspace(root, &root.join("evidence"), true, None).map(drop),
+                |root| {
+                    let _ = fs::remove_dir_all(root);
+                },
+            );
+            assert!(steps > 3, "{build}: {steps}");
+        }
+    }
+
     fn temporary_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "supercov-{name}-{}-{}",
