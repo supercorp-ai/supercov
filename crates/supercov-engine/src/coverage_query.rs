@@ -4293,13 +4293,11 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
         });
     }
     for branch in &view.branches {
-        for alternative in &branch.alternatives {
-            obligations.push(Obligation {
-                id: format!("branch:{}:{}", branch.meta.id, alternative.id),
-                metric: ObligationMetric::Branches,
-                options: choices(&alternative.tests),
-            });
-        }
+        obligations.extend(branch.alternatives.iter().map(|alternative| Obligation {
+            id: format!("branch:{}:{}", branch.meta.id, alternative.id),
+            metric: ObligationMetric::Branches,
+            options: choices(&alternative.tests),
+        }));
     }
     for decision in &view.decisions {
         for condition in 0..decision.meta.conditions.len() {
@@ -4311,13 +4309,14 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
                     if !is_independence_pair(&first.vector, &second.vector, condition) {
                         continue;
                     }
-                    for first_choice in choices(&first.tests) {
-                        for second_choice in choices(&second.tests) {
+                    let seconds = choices(&second.tests);
+                    options.extend(choices(&first.tests).into_iter().flat_map(|first_choice| {
+                        seconds.iter().map(move |second_choice| {
                             let mut combined = first_choice.clone();
-                            combined.extend(second_choice);
-                            options.push(combined);
-                        }
-                    }
+                            combined.extend(second_choice.iter().cloned());
+                            combined
+                        })
+                    }));
                 }
             }
             obligations.push(Obligation {
@@ -4505,9 +4504,9 @@ pub fn minimum_test_set(
         .cloned()
         .collect::<Vec<_>>();
     let mut totals = BTreeMap::<ObligationMetric, usize>::new();
-    for obligation in &obligations {
-        *totals.entry(obligation.metric).or_default() += 1;
-    }
+    obligations
+        .iter()
+        .for_each(|obligation| *totals.entry(obligation.metric).or_default() += 1);
     let metrics = [
         ObligationMetric::Lines,
         ObligationMetric::Statements,
@@ -4542,15 +4541,16 @@ pub fn minimum_test_set(
     if let Some(target) = target {
         let full_expanded = model.expand(&candidate_tests);
         let full_summary = coverage_summary_for_tests(view, &full_expanded)?;
-        for selected_metric in &metrics {
-            let reachable = percentage(*selected_metric, &full_summary);
-            if reachable + 1e-9 < target {
-                return Err(QueryError::TargetUnreachable {
-                    metric: selected_metric.public(),
-                    target,
-                    reachable,
-                });
-            }
+        if let Some((selected_metric, reachable)) = metrics
+            .iter()
+            .map(|selected_metric| (selected_metric, percentage(*selected_metric, &full_summary)))
+            .find(|(_, reachable)| reachable + 1e-9 < target)
+        {
+            return Err(QueryError::TargetUnreachable {
+                metric: selected_metric.public(),
+                target,
+                reachable,
+            });
         }
     }
     let mut search = Search {
