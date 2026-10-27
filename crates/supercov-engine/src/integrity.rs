@@ -33,17 +33,6 @@ pub struct FrontendIntegrityInputs {
 }
 
 impl FrontendIntegrityInputs {
-    pub fn javascript(root: PathBuf, runtime_files: Vec<PathBuf>) -> Self {
-        Self {
-            language: "javascript".into(),
-            version: "javascript-v1".into(),
-            root,
-            instrumenter_files: runtime_files.clone(),
-            execution_files: runtime_files,
-            engine_instrumenter_sha256: env!("SUPERCOV_JS_FRONTEND_SOURCE_SHA256").into(),
-            engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
-        }
-    }
 
     pub fn embedded_javascript() -> Self {
         Self {

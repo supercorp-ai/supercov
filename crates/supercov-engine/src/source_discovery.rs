@@ -353,12 +353,6 @@ impl ExplicitSourceRoots {
         root_contains(&self.roots, &lexical_normalize(&self.root.join(relative)))
     }
 
-    /// The roots exactly as they were written, including any that name nothing.
-    /// An error about roots quotes these, because the one that does not exist
-    /// is usually the typo the person needs to see.
-    pub fn configured(&self) -> &[String] {
-        &self.configured
-    }
 
     /// Refuse roots that left a frontend nothing to measure. A typo in the
     /// variable must not become a green run over zero files -- the failure mode

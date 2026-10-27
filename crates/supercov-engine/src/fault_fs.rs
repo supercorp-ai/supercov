@@ -157,11 +157,6 @@ pub fn open<P: AsRef<Path>>(path: P) -> io::Result<File> {
     checked(|| File::open(path))
 }
 
-/// `File::create`.
-#[track_caller]
-pub fn create<P: AsRef<Path>>(path: P) -> io::Result<File> {
-    checked(|| File::create(path))
-}
 
 /// `options.open(path)`.
 #[track_caller]
