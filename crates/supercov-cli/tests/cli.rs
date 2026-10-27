@@ -12696,6 +12696,8 @@ fn a_doctest_stand_in_missing_what_it_needs_says_so() {
     let missing = project.root.join("missing");
     let missing = missing.to_str().unwrap();
     let root = project.root.to_str().unwrap();
+    // A program that prints and exits, as a doctest binary does.
+    let supercov = env!("CARGO_BIN_EXE_supercov");
     for (args, env, said) in [
         (
             &["__doctest-runner", "only"][..],
@@ -12706,6 +12708,17 @@ fn a_doctest_stand_in_missing_what_it_needs_says_so() {
             &["__doctest-runner", root, "bogus", missing],
             &[],
             "unknown doctest runtool mode bogus",
+        ),
+        // A per-name pass needs the run's token and the doctest's name.
+        (
+            &["__doctest-runner", root, "named", supercov],
+            &[],
+            "has no instrumentation token",
+        ),
+        (
+            &["__doctest-runner", root, "named", supercov],
+            &[("SUPERCOV_RUST_PROBE_TOKEN", "doctests")],
+            "did not name its doctest",
         ),
         (
             &[],
