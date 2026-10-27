@@ -202,19 +202,18 @@ fn announce(site: &str) {
     #[cfg(unix)]
     if let Some(path) = LOG.as_ref() {
         // SAFETY: an open of a live C string, writes of live buffers to the
-        // descriptor it gave, and its close.
+        // descriptor it gave, and its close. A log that could not be opened
+        // is descriptor -1, which the writes and the close refuse.
         unsafe {
             let log = libc::open(
                 path.as_ptr(),
                 libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
                 0o644,
             );
-            if log >= 0 {
-                for part in [site.as_bytes(), b"\n"] {
-                    libc::write(log, part.as_ptr().cast(), part.len());
-                }
-                libc::close(log);
+            for part in [site.as_bytes(), b"\n"] {
+                libc::write(log, part.as_ptr().cast(), part.len());
             }
+            libc::close(log);
         }
     }
     #[cfg(not(unix))]
