@@ -1485,7 +1485,7 @@ fn wrap_config(
         if let (Some(name), Some(_)) = (environment, &environment_main) {
             document["env"][name]["main"] = json!(entry);
         }
-        serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?
+        serde_json::to_string_pretty(&document).expect("plain data serializes")
     };
     let extension = if toml { "toml" } else { "json" };
     let copy = directory.join(format!("{name}.{extension}"));
@@ -2422,6 +2422,31 @@ mod tests {
         assert_eq!(document["main"], ENTRY_FILE);
         assert_eq!(document["dev"]["inspector_port"], 9555);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A configuration that no longer reads as TOML or JSON is not
+    /// rewritten, and says which file it was.
+    #[test]
+    fn a_configuration_that_no_longer_reads_is_not_rewritten() {
+        let root = temporary("unreadable-config");
+        for (name, text) in [
+            ("wrangler.toml", "main = "),
+            ("wrangler.jsonc", "{\"main\": "),
+        ] {
+            let path = root.join(name);
+            fs::write(&path, text).unwrap();
+            let config = WorkerConfig {
+                path: path.clone(),
+                main: "shim.mjs".into(),
+                inspector_port: None,
+            };
+            let refused = rewrite_config(&config, ENTRY_FILE, Some(9444)).unwrap_err();
+            assert!(
+                refused.starts_with(&path.display().to_string()),
+                "{refused}"
+            );
+        }
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
