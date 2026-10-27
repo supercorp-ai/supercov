@@ -1379,10 +1379,15 @@ mod tests {
             ("run-files", &|v: &mut serde_json::Value| {
                 v["rawEvidence"]["files"] = 0.into()
             }),
+            ("run-fingerprint", &|v: &mut serde_json::Value| {
+                v["integrity"]["fingerprint"]["algorithm"] = "md5".into()
+            }),
         ] {
             create_analyzable_test_run(&root, id);
             edit(id, change);
         }
+        create_analyzable_test_run(&root, "run-json");
+        fs::write(root.join(".supercov/runs/run-json/run.json"), "{").unwrap();
         create_analyzable_test_run(&root, "run-large");
         fs::write(
             root.join(".supercov/runs/run-large/run.json"),
@@ -1407,6 +1412,8 @@ mod tests {
             ("run-file", "raw evidence metadata"),
             ("run-files", "raw evidence metadata"),
             ("run-large", "run metadata is too large"),
+            ("run-json", "run metadata JSON"),
+            ("run-fingerprint", "integrity fingerprint"),
             ("bad\u{1}id", "run directory name"),
         ] {
             if id.starts_with("bad") && !bad_name {
