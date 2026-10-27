@@ -2272,6 +2272,54 @@ mod tests {
         fs::remove_dir_all(generated).unwrap();
     }
 
+    /// Preparing the frontend, then reading it back from its cache, survives
+    /// any file operation failing.
+    #[test]
+    fn preparing_and_reloading_the_frontend_survive_any_file_operation_failing() {
+        let fixture = || {
+            let source_root = temporary("faults-source");
+            let workspace = temporary("faults-workspace");
+            for root in [&source_root, &workspace] {
+                fs::create_dir_all(root.join("src")).unwrap();
+                fs::create_dir_all(root.join("test")).unwrap();
+                fs::write(
+                    root.join("src/example.mjs"),
+                    "export function value(a, b) { if (a || b) return 1; return 0; }\n",
+                )
+                .unwrap();
+                fs::write(
+                    root.join("test/example.test.mjs"),
+                    "import test from 'node:test';\nimport assert from 'node:assert';\nimport { value } from '../src/example.mjs';\ntest('v', () => assert.equal(value(1, 0), 1));\n",
+                )
+                .unwrap();
+                fs::write(root.join("package.json"), "{\"type\":\"module\"}\n").unwrap();
+            }
+            fs::create_dir_all(workspace.join(".supercov")).unwrap();
+            let project = discover_coverage_project(
+                &source_root,
+                &BTreeMap::new(),
+                &["node".into(), "--test".into()],
+            )
+            .unwrap();
+            (source_root, workspace, project)
+        };
+        let steps = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |(_, workspace, project)| {
+                prepare_javascript_frontend(workspace, project, "collector", "cache", &[])?;
+                let cache = read_javascript_frontend_cache(workspace, "cache")
+                    .ok_or(JavascriptFrontendError::UnsafeSourcePath("no cache".into()))?;
+                load_cached_javascript_frontend(workspace, &cache).map(drop)
+            },
+            |(source_root, workspace, _)| {
+                let _ = fs::remove_dir_all(source_root);
+                let _ = fs::remove_dir_all(workspace);
+            },
+        );
+        assert!(steps > 20, "{steps}");
+    }
+
     #[test]
     fn prepares_sorted_complete_manifest_without_touching_source_project() {
         let source_root = temporary("source");
