@@ -896,11 +896,12 @@ pub fn descendant_process_tree(root_pid: u32) -> Vec<ProcessSnapshot> {
     let mut descendants = std::collections::BTreeSet::from([root_pid]);
     loop {
         let before = descendants.len();
-        for process in &inventory {
+        // This process is among them wherever processes can be listed.
+        inventory.iter().for_each(|process| {
             if descendants.contains(&process.parent_pid) {
                 descendants.insert(process.pid);
             }
-        }
+        });
         if descendants.len() == before {
             break;
         }
@@ -937,7 +938,8 @@ pub fn format_process_diagnostic(
         output.push_str(&format!("\n  pid={root_pid} process details unavailable"));
         return output;
     }
-    for process in tree {
+    // Not empty, as just checked.
+    tree.iter().for_each(|process| {
         output.push_str(&format!(
             "\n  pid={} ppid={} exe={}",
             process.pid, process.parent_pid, process.executable
@@ -948,7 +950,7 @@ pub fn format_process_diagnostic(
         if let Some(cpu_tenths) = process.cpu_tenths {
             output.push_str(&format!(" cpu={}.{}s", cpu_tenths / 10, cpu_tenths % 10));
         }
-    }
+    });
     output
 }
 
