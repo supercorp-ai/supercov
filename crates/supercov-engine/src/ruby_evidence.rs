@@ -2595,6 +2595,8 @@ pub(crate) mod tests {
         let root = Path::new(&project);
         assert_eq!(relative(root, &project), None);
         assert_eq!(relative(root, "../lib/m.rb"), None);
+        let elsewhere = crate::test_directory::native("/elsewhere/m.rb");
+        assert_eq!(relative(root, &elsewhere), None);
         assert_eq!(relative(root, "./lib/m.rb").as_deref(), Some("lib/m.rb"));
         let base = temporary("entries");
         let read = |directory: &Path| match read_evidence_directory(directory, "run-1") {
