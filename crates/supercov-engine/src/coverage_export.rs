@@ -257,6 +257,24 @@ mod tests {
     };
     use std::collections::BTreeSet;
 
+    #[test]
+    fn xml_escapes_what_markup_reads_and_drops_what_it_cannot_carry() {
+        assert_eq!(xml(""), "");
+        assert_eq!(
+            xml("a & b < c > d \" e ' f\u{1}\tg"),
+            "a &amp; b &lt; c &gt; d &quot; e &apos; f\tg"
+        );
+    }
+
+    /// A run with no file exports a report of nothing in each format.
+    #[test]
+    fn a_view_of_no_file_exports_nothing_measured() {
+        let mut view = fixture();
+        view.files.clear();
+        assert_eq!(lcov(&view), "");
+        assert!(cobertura(&view, 0).contains("<packages>"));
+    }
+
     fn metric(metric: Metric, covered: usize, eligible: usize) -> MetricView {
         MetricView {
             metric,

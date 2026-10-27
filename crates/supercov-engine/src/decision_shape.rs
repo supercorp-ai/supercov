@@ -167,7 +167,7 @@ pub fn possible_vectors(source: &str, conditions: &[&str]) -> Option<Vec<McdcVec
     }
     let shape = parse(source, conditions)?;
     let mut vectors = Vec::<McdcVector>::new();
-    for assignment in 0..(1_u32 << conditions.len()) {
+    (0..(1_u32 << conditions.len())).for_each(|assignment| {
         let values = (0..conditions.len())
             .map(|index| assignment & (1 << index) != 0)
             .collect::<Vec<_>>();
@@ -180,13 +180,25 @@ pub fn possible_vectors(source: &str, conditions: &[&str]) -> Option<Vec<McdcVec
         if !vectors.contains(&vector) {
             vectors.push(vector);
         }
-    }
+    });
     Some(vectors)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decision that does not parse as its conditions joined by operators
+    /// -- cut short, unbalanced, or an operator where a condition belongs --
+    /// has no possible vectors to offer; one of no condition has one.
+    #[test]
+    fn a_decision_that_does_not_parse_offers_no_vectors() {
+        for source in [
+            "", "(", "(a", "!", "a &&", "a ||", "&& a", ")", "a b", "!(a",
+        ] {
+            assert_eq!(possible_vectors(source, &["a", "b"]), None, "{source:?}");
+        }
+    }
 
     fn text(vector: &McdcVector) -> String {
         let mut text = vector

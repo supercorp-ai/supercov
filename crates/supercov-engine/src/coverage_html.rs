@@ -217,7 +217,7 @@ pub fn html(view: &RunView, sources: &BTreeMap<String, String>, source_reason: &
     let payload = embed_json(&serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into()));
 
     let mut cards = String::new();
-    for metric in Metric::ALL {
+    Metric::ALL.into_iter().for_each(|metric| {
         let counts = view.metric(metric);
         let _ = write!(
             cards,
@@ -228,7 +228,7 @@ pub fn html(view: &RunView, sources: &BTreeMap<String, String>, source_reason: &
             counts.eligible,
             escape(state_label(&counts.applicability)),
         );
-    }
+    });
 
     let mut notes = String::new();
     if !view.suite_passed {
@@ -296,6 +296,30 @@ mod tests {
     use super::*;
     use crate::run_view::{FileView, MetricView, RUN_VIEW_SCHEMA_VERSION, RunView};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn text_is_escaped_and_each_state_named() {
+        assert_eq!(escape(""), "");
+        assert_eq!(escape("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&#39;f");
+        assert_eq!(state_label(&Applicability::Measured), "measured");
+        assert_eq!(state_label(&Applicability::NotApplicable), "not applicable");
+        assert_eq!(
+            state_label(&Applicability::Incomplete { unmeasured: 1 }),
+            "partly measured"
+        );
+    }
+
+    /// A run's limitations are noted on the page, each escaped.
+    #[test]
+    fn a_run_s_limitations_are_noted() {
+        let mut limited = view();
+        limited.limitations = vec!["half <measured>".into()];
+        let page = html(&limited, &BTreeMap::new(), "");
+        assert!(
+            page.contains("<p class=\"note\">half &lt;measured&gt;</p>"),
+            "{page}"
+        );
+    }
 
     fn view() -> RunView {
         RunView {
