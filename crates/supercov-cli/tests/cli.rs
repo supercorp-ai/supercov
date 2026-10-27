@@ -12843,6 +12843,38 @@ fn a_python_source_that_does_not_parse_is_named() {
     );
 }
 
+/// A Ruby source that does not parse carries no obligations, and the run
+/// says which file it was, under the roots it was told to measure.
+#[cfg(unix)]
+#[test]
+fn a_ruby_source_that_does_not_parse_is_named() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-unparsed");
+    project.write(
+        "lib/w.rb",
+        "module W\n  def self.double(n) = n ? n * 2 : 0\nend\n",
+    );
+    project.write("lib/broken.rb", "def (\n");
+    project.write(
+        "test/w_test.rb",
+        "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_doubles\n    assert_equal 4, W.double(2)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("ruby");
+    let ran = project.supercov_with(
+        &["--", ruby.as_str(), "-Ilib", "test/w_test.rb"],
+        &[("SUPERCOV_SOURCE_ROOTS", "lib")],
+    );
+    let said = ran.stderr();
+    ran.succeeds();
+    assert!(
+        said.contains("[supercov] could not parse lib/broken.rb"),
+        "{said}"
+    );
+}
+
 #[test]
 fn a_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let javascript = fail_each_place_of_a_run(
