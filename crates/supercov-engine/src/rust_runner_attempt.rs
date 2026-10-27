@@ -418,6 +418,56 @@ mod tests {
         assert_eq!(attempt.test_name, "tests::flaky");
     }
 
+    /// Each part of a whole attempt identity, empty in turn, is refused by
+    /// name; so is a value that is not UTF-8, and each part of a version
+    /// that is missing or no number.
+    #[test]
+    fn each_part_of_an_attempt_identity_is_required() {
+        let mut whole = nextest_base();
+        whole.extend([
+            ("NEXTEST_TEST_NAME", "tests::flaky"),
+            ("NEXTEST_ATTEMPT", "1"),
+            ("NEXTEST_TOTAL_ATTEMPTS", "1"),
+            (
+                "NEXTEST_ATTEMPT_ID",
+                "2ae19189-240a-433a-a31d-acc411fe8e1f:fixture::integration$tests::flaky",
+            ),
+            ("NEXTEST_STRESS_CURRENT", "none"),
+            ("NEXTEST_STRESS_TOTAL", "none"),
+        ]);
+        assert!(classify_rust_runner_environment_from(environment(&whole)).is_ok());
+        for index in 1..whole.len() {
+            let mut values = whole.clone();
+            values[index].1 = "";
+            let error = classify_rust_runner_environment_from(environment(&values))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(values[index].0),
+                "{}: {error}",
+                values[index].0
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let odd = vec![(OsString::from("NEXTEST"), OsString::from_vec(vec![0xff]))];
+            let error = classify_rust_runner_environment_from(odd)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("non-UTF-8"), "{error}");
+        }
+        for (version, said) in [
+            ("x.1.2", "invalid major"),
+            ("1.x.2", "invalid minor"),
+            ("1.2.x", "invalid patch"),
+            ("1.2", "lacks patch"),
+        ] {
+            let error = parse_version(version).unwrap_err().to_string();
+            assert!(error.contains(said), "{version}: {error}");
+        }
+    }
+
     /// Each malformed identity is refused with its own reason: a nextest
     /// key without `NEXTEST`, a `NEXTEST` other than 1, a value that is
     /// empty, oversized or multi-line, a run id that is not a canonical
