@@ -596,19 +596,20 @@ fn coverage_invocation(
                     "Usage: supercov runs <run-id> line <source-file:line>... [--from-file <path>]",
                 ));
             }
-            let mut locations = Vec::with_capacity(selectors.len());
-            for selector in &selectors {
-                let Some(location) = parse_location(selector) else {
-                    let mut error = PublicQueryError::invalid(
-                        Some(&agent_command),
-                        json_output,
-                        "Expected <source-file>:<line>, with lines counted from 1",
-                    );
-                    error.error.details = Some(json!({ "selector": selector }));
-                    return Err(error);
-                };
-                locations.push(location);
-            }
+            let mut locations = selectors
+                .iter()
+                .map(|selector| {
+                    parse_location(selector).ok_or_else(|| {
+                        let mut error = PublicQueryError::invalid(
+                            Some(&agent_command),
+                            json_output,
+                            "Expected <source-file>:<line>, with lines counted from 1",
+                        );
+                        error.error.details = Some(json!({ "selector": selector }));
+                        error
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let (file, line) = locations.remove(0);
             request.file = Some(file);
             request.line = Some(line);
@@ -899,5 +900,74 @@ mod tests {
             error.error.message,
             "--limit must be a number of entries, or 0 for all of them"
         );
+    }
+
+    /// Each option missing what it needs, or given where it means nothing,
+    /// is refused with what it needs.
+    #[test]
+    fn an_option_missing_its_value_or_out_of_place_says_what_it_needs() {
+        for (arguments, message) in [
+            (&["run-1", "--run"][..], "--run requires a run ID"),
+            (&["run-1", "--kind"], "--kind requires a test kind"),
+            (&["run-1", "--runner"], "--runner requires a runner name"),
+            (&["run-1", "--tag", ""], "--tag requires a tag"),
+            (&["run-1", "--title"], "--title requires text"),
+            (&["run-1", "--test-file", ""], "--test-file requires"),
+            (
+                &["run-1", "files", "--files"],
+                "--files is only supported by",
+            ),
+            (
+                &["run-1", "line", "--from-file"],
+                "--from-file needs a file",
+            ),
+            (
+                &["run-1", "file", "a.rs", "--group", "dir"],
+                "--group must be decision",
+            ),
+            (&["run-1", "files", "--group"], "--group must be dir"),
+            (
+                &["run-1", "gaps", "--group", "dir"],
+                "--group is only supported by",
+            ),
+            (
+                &["run-1", "file"],
+                "Usage: supercov runs <run-id> file <source-file>",
+            ),
+            (
+                &["run-1", "line", "a.rs:x"],
+                "Expected <source-file>:<line>",
+            ),
+            (
+                &["run-1", "line", "--from-file", "/nonexistent/locations"],
+                "Could not read /nonexistent/locations",
+            ),
+        ] {
+            let error = parse_public_query("runs", &args(arguments)).unwrap_err();
+            assert_eq!(
+                error.error.code,
+                ErrorCode::InvalidArgument,
+                "{arguments:?}"
+            );
+            assert!(
+                error.error.message.contains(message),
+                "{arguments:?}: {}",
+                error.error.message
+            );
+        }
+        let error = parse_public_query("diff", &args(&["run-1"])).unwrap_err();
+        assert_eq!(
+            error.error.message,
+            "Usage: supercov diff <older-run> <newer-run>"
+        );
+        let error = parse_public_query("diff", &args(&["run-1", "--kind"])).unwrap_err();
+        assert_eq!(error.error.message, "--kind requires a test kind");
+        let PublicQueryInvocation::Coverage { request, .. } =
+            parse_public_query("runs", &args(&["run-1", "minimize", "--target", "90"])).unwrap()
+        else {
+            panic!("expected a minimize query");
+        };
+        assert_eq!(request.command, "minimize");
+        assert_eq!(request.max_states, Some(DEFAULT_MAX_STATES));
     }
 }
