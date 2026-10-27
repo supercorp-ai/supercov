@@ -162,11 +162,20 @@ fn io_error(path: &Path, error: impl std::fmt::Display) -> RustCargoConfiguratio
     }
 }
 
-fn command_targets(
+/// What a Cargo command line itself says: its `--target`s, its `--config`
+/// values, and whether it names a rustup toolchain.
+#[derive(Debug, PartialEq)]
+struct CommandLine {
+    targets: Vec<String>,
+    config: Vec<String>,
+    toolchain: bool,
+}
+
+fn command_line(
     invocation: &CargoTestInvocation,
-) -> Result<Vec<String>, RustCargoConfigurationError> {
+) -> Result<CommandLine, RustCargoConfigurationError> {
     let command_position = invocation.command_position();
-    toolchain_selector(invocation, command_position)?;
+    let toolchain = toolchain_selector(invocation, command_position)?.is_some();
     if invocation.arguments[..command_position]
         .iter()
         .any(|argument| argument == "-Z" || argument.starts_with("-Z"))
@@ -177,15 +186,15 @@ fn command_targets(
         ));
     }
     let mut targets = Vec::new();
+    let mut config = Vec::new();
     let mut index = 0;
     while index < invocation.arguments.len() {
         let argument = &invocation.arguments[index];
         if argument == "--config" {
-            if invocation.arguments.get(index + 1).is_none() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--config has no value".into(),
-                ));
-            }
+            let value = invocation.arguments.get(index + 1).ok_or_else(|| {
+                RustCargoConfigurationError::Invalid("--config has no value".into())
+            })?;
+            config.push(value.clone());
             index += 2;
             continue;
         }
@@ -195,6 +204,7 @@ fn command_targets(
                     "--config has no value".into(),
                 ));
             }
+            config.push(value.to_owned());
             index += 1;
             continue;
         }
@@ -216,35 +226,11 @@ fn command_targets(
         }
         index += 1;
     }
-    Ok(targets)
-}
-
-fn command_config_arguments(
-    invocation: &CargoTestInvocation,
-) -> Result<Vec<String>, RustCargoConfigurationError> {
-    let mut values = Vec::new();
-    let mut index = 0;
-    while index < invocation.arguments.len() {
-        let argument = &invocation.arguments[index];
-        if argument == "--config" {
-            let value = invocation.arguments.get(index + 1).ok_or_else(|| {
-                RustCargoConfigurationError::Invalid("--config has no value".into())
-            })?;
-            values.push(value.clone());
-            index += 2;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--config=") {
-            if value.is_empty() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--config has no value".into(),
-                ));
-            }
-            values.push(value.to_owned());
-        }
-        index += 1;
-    }
-    Ok(values)
+    Ok(CommandLine {
+        targets,
+        config,
+        toolchain,
+    })
 }
 
 fn toolchain_selector(
@@ -1037,10 +1023,11 @@ fn resolve_targets(
     let root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
     let execution_root =
         fs::canonicalize(execution_root).map_err(|error| io_error(execution_root, error))?;
-    let command_targets = command_targets(invocation)?;
-    let command_config = command_config_arguments(invocation)?;
-    let command_position = invocation.command_position();
-    let explicit_toolchain = toolchain_selector(invocation, command_position)?.is_some();
+    let CommandLine {
+        targets: command_targets,
+        config: command_config,
+        toolchain: explicit_toolchain,
+    } = command_line(invocation)?;
     let selected_cargo = selected_cargo_program(invocation)?;
     let model = load_cargo_configuration(&root, model_inputs.cargo_home.clone(), &command_config)
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
@@ -1153,12 +1140,22 @@ mod tests {
     #[test]
     fn command_line_configuration_and_toolchains_are_read_exactly() {
         assert_eq!(
-            command_config_arguments(&invocation(&["--config", "a=1", "test", "--config=b=2"]))
-                .unwrap(),
-            ["a=1", "b=2"]
+            command_line(&invocation(&[
+                "+nightly",
+                "--config",
+                "a=1",
+                "test",
+                "--config=b=2"
+            ]))
+            .unwrap(),
+            CommandLine {
+                targets: Vec::new(),
+                config: vec!["a=1".into(), "b=2".into()],
+                toolchain: true,
+            }
         );
-        assert!(command_config_arguments(&invocation(&["test", "--config"])).is_err());
-        assert!(command_config_arguments(&invocation(&["test", "--config="])).is_err());
+        assert!(command_line(&invocation(&["test", "--config"])).is_err());
+        assert!(command_line(&invocation(&["test", "--config="])).is_err());
         let selector = |arguments: &[&str]| {
             let invocation = invocation(arguments);
             let position = invocation.command_position();
@@ -1171,8 +1168,8 @@ mod tests {
         assert_eq!(selector(&["test"]).unwrap(), None);
         assert!(selector(&["+", "test"]).is_err());
         assert!(selector(&["-v", "+nightly", "test"]).is_err());
-        assert!(command_targets(&invocation(&["-Zunstable-options", "test"])).is_err());
-        assert!(command_targets(&invocation(&["-Z", "x", "test"])).is_err());
+        assert!(command_line(&invocation(&["-Zunstable-options", "test"])).is_err());
+        assert!(command_line(&invocation(&["-Z", "x", "test"])).is_err());
     }
 
     fn invocation(arguments: &[&str]) -> CargoTestInvocation {
@@ -1836,7 +1833,7 @@ mod tests {
             .to_string();
         assert!(error.contains("several matching instances"), "{error}");
         assert!(
-            command_targets(&invocation(&["--quiet", "+nightly", "test"]))
+            command_line(&invocation(&["--quiet", "+nightly", "test"]))
                 .unwrap_err()
                 .to_string()
                 .contains("must be the first")
