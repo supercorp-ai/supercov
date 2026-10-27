@@ -182,12 +182,19 @@ jobs:
       - run: npm ci
       # The browsers of every pinned Playwright, kept while no lockfile
       # changes; the system libraries they need are installed each time.
+      # The lockfiles hashed once, before the tests: a cache's post step
+      # evaluates its key again, and `hashFiles('**/...')` then walks
+      # whatever the tests left in the checkout and fails the slice.
+      - name: Hash the lockfiles
+        id: locks
+        run: echo "hash=$(git ls-files -s '*package-lock.json' | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
             ~/Library/Caches/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
+          restore-keys: playwright-${{ runner.os }}-${{ runner.arch }}-
       # The system libraries the browsers need are 142 MB of packages a
       # slice fetched every run; one run's mirror gave them at 74 kB/s, 32
       # minutes. Kept, and apt installs from what is kept.
@@ -195,7 +202,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/apt-archives
-          key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
+          key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
+          restore-keys: apt-playwright-${{ runner.os }}-${{ runner.arch }}-
       # Each fixture pins its own Playwright, and each version launches its
       # own browser builds: install them for every version a lockfile names.
       - name: Install every pinned Playwright's browsers
