@@ -683,7 +683,8 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
     let mut tests = BTreeMap::<(String, String), (usize, Value)>::new();
     let mut changed = BTreeMap::<String, Value>::new();
     let mut meaning = Value::Null;
-    for parent in parents {
+    // Not empty, as just checked.
+    parents.iter().try_for_each(|parent| -> Result<(), String> {
         let Some(stored) = inventory.runs.iter().find(|stored| stored.id == *parent) else {
             return Err(format!(
                 "Run {} was merged from {parent}, which is no longer stored, and a merge is answered from the runs it was merged from. Ask the others, or measure the suite again",
@@ -723,11 +724,13 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
         if meaning.is_null() {
             meaning = report["meaning"].clone();
         }
-    }
+        Ok(())
+    })?;
     let mut buckets = BUCKETS.map(|_| Vec::new());
-    for (rank, test) in tests.into_values() {
+    // Each run merged has a test at least.
+    tests.into_values().for_each(|(rank, test)| {
         buckets[rank].push(test);
-    }
+    });
     // Most likely to fail first, as within one run.
     buckets[..2].iter_mut().for_each(|bucket| {
         bucket.sort_by_key(|entry| std::cmp::Reverse(entry["nameMatch"].as_u64().unwrap_or(0)));
