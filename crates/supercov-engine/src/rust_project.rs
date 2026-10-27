@@ -205,29 +205,41 @@ pub fn compiled_source_files(
     target_directory: &Path,
 ) -> Option<BTreeSet<String>> {
     let mut compiled = BTreeSet::new();
-    let mut depinfo_files = 0;
-    let mut directories = vec![target_directory.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+    let depinfo_files = collect_depinfo_files(target_directory, workspace, &mut compiled);
+    (depinfo_files > 0).then_some(compiled)
+}
+
+/// Read every depinfo file under `directory` into `compiled`; how many
+/// there were.
+fn collect_depinfo_files(
+    directory: &Path,
+    workspace: &Path,
+    compiled: &mut BTreeSet<String>,
+) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
             let path = entry.path();
             match entry.file_type() {
-                Ok(file_type) if file_type.is_dir() => directories.push(path),
-                Ok(file_type) if file_type.is_file() => {
-                    if path.extension().is_some_and(|extension| extension == "d")
-                        && let Ok(text) = fs::read_to_string(&path)
-                    {
-                        depinfo_files += 1;
-                        collect_depinfo_sources(&text, workspace, &mut compiled);
-                    }
+                Ok(file_type) if file_type.is_dir() => {
+                    collect_depinfo_files(&path, workspace, compiled)
                 }
-                _ => {}
+                Ok(file_type)
+                    if file_type.is_file()
+                        && path.extension().is_some_and(|extension| extension == "d") =>
+                {
+                    fs::read_to_string(&path).map_or(0, |text| {
+                        collect_depinfo_sources(&text, workspace, compiled);
+                        1
+                    })
+                }
+                _ => 0,
             }
-        }
-    }
-    (depinfo_files > 0).then_some(compiled)
+        })
+        .sum()
 }
 
 /// The prerequisites of every rule in a depinfo file, as workspace-relative
@@ -552,21 +564,17 @@ fn string_literal(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
 fn proc_macro_crate_roots(
     packages: &[CargoPackage],
 ) -> Result<BTreeSet<PathBuf>, RustProjectError> {
-    let mut roots = BTreeSet::new();
-    for package in packages {
-        for target in &package.targets {
-            if !target.kind.iter().any(|kind| kind == "proc-macro") {
-                continue;
-            }
-            let root =
-                fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
-                    path: target.src_path.clone(),
-                    reason: error.to_string(),
-                })?;
-            roots.insert(root);
-        }
-    }
-    Ok(roots)
+    packages
+        .iter()
+        .flat_map(|package| &package.targets)
+        .filter(|target| target.kind.iter().any(|kind| kind == "proc-macro"))
+        .map(|target| {
+            fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
+                path: target.src_path.clone(),
+                reason: error.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn crate_roots(
@@ -574,29 +582,32 @@ fn crate_roots(
     packages: &[CargoPackage],
 ) -> Result<BTreeSet<PathBuf>, RustProjectError> {
     let mut roots = BTreeSet::new();
-    for package in packages {
-        let directory = package.manifest_path.parent().ok_or_else(|| {
-            RustProjectError::UnsafePath(package.manifest_path.display().to_string())
-        })?;
+    packages.iter().try_for_each(|package| {
+        let directory = package
+            .manifest_path
+            .parent()
+            .expect("Cargo names a manifest by its absolute path");
         let directory = canonical_directory(directory)?;
         confined_relative(workspace, &directory).or_else(|error| {
             (directory == workspace)
                 .then_some(String::new())
                 .ok_or(error)
         })?;
-        for target in &package.targets {
-            if target.kind.iter().any(|kind| kind == "custom-build") {
-                continue;
-            }
-            let root =
-                fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
-                    path: target.src_path.clone(),
-                    reason: error.to_string(),
-                })?;
-            confined_relative(workspace, &root)?;
-            roots.insert(root);
-        }
-    }
+        package
+            .targets
+            .iter()
+            .filter(|target| !target.kind.iter().any(|kind| kind == "custom-build"))
+            .try_for_each(|target| {
+                let root =
+                    fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
+                        path: target.src_path.clone(),
+                        reason: error.to_string(),
+                    })?;
+                confined_relative(workspace, &root)?;
+                roots.insert(root);
+                Ok(())
+            })
+    })?;
     Ok(roots)
 }
 
@@ -723,8 +734,8 @@ fn decline_proc_macro_obligations(
             .and_then(|file| file.as_str())
             .is_none_or(|file| !files.contains(file))
     });
-    for file in files {
-        manifest.limitations.push(serde_json::json!({
+    manifest.limitations.extend(files.into_iter().map(|file| {
+        serde_json::json!({
             "id": format!("rust-proc-macro-runs-in-the-compiler#{file}"),
             "kind": "source-scope",
             "file": file,
@@ -733,8 +744,8 @@ fn decline_proc_macro_obligations(
             "source": "",
             "blocking": false,
             "reason": "This crate compiles to a compiler plugin: rustc loads it and runs it while building the crate under test, so no test process executes it"
-        }));
-    }
+        })
+    }));
     Ok(())
 }
 
@@ -1224,6 +1235,41 @@ fn integration_choice() {
         )
         .unwrap();
         root
+    }
+
+    /// Nothing to read is nothing read: no depinfo line, a rule with no
+    /// prerequisite, and a path with no component.
+    #[test]
+    fn empty_depinfo_and_paths_name_nothing() {
+        let mut compiled = BTreeSet::new();
+        collect_depinfo_sources("", Path::new("/w"), &mut compiled);
+        collect_depinfo_sources("target/x: \n", Path::new("/w"), &mut compiled);
+        assert!(compiled.is_empty());
+        assert_eq!(normalize(Path::new("")), PathBuf::new());
+        assert_eq!(normalize(Path::new("./a/../b")), PathBuf::from("b"));
+    }
+
+    /// Preparing a workspace, once for every file operation it makes with
+    /// that one failing: each run ends with an error or without, never a
+    /// panic, and the run no fault reaches prepares it.
+    #[test]
+    fn preparing_a_workspace_whose_file_operation_fails_ends_cleanly() {
+        let calls = crate::fault::fail_each_call(
+            "fs",
+            || {
+                let root = fixture();
+                fs::write(
+                    root.join("src/lib.rs"),
+                    "mod helper;\npub fn entry(flag: bool) -> i32 { if flag { helper::one() } else { 2 } }\n",
+                )
+                .unwrap();
+                fs::write(root.join("src/helper.rs"), "pub fn one() -> i32 { 1 }\n").unwrap();
+                root
+            },
+            |root| prepare_rust_project(root, None).map(|_| ()),
+            |root| fs::remove_dir_all(root).unwrap(),
+        );
+        assert!(calls > 5, "{calls}");
     }
 
     #[test]
