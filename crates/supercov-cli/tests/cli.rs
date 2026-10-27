@@ -12061,6 +12061,58 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         output.contains("merged doctest child 5 ran for a case the harness did not report"),
         "{output}"
     );
+    // Each mode, once for every file operation it makes with that one
+    // failing: it may fail, but says why and never panics.
+    for (mode, binary, files) in [
+        (
+            "list",
+            "bin/harness-list",
+            &[("merged", "src/lib.rs - a (line 1): test\n")][..],
+        ),
+        (
+            "named",
+            "bin/doctest",
+            &[("doctest.out", "test src/lib.rs - s (line 3) ... ok\n")],
+        ),
+        (
+            "merged",
+            "bin/harness",
+            &[
+                ("merged-order.json", order),
+                ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
+            ],
+        ),
+    ] {
+        for nth in 1.. {
+            let package = format!("faults-{mode}-{nth}");
+            for (file, contents) in files {
+                project.write(&format!("{package}/{file}"), contents);
+            }
+            let directory = project.root.join(&package);
+            let fault = format!("fs@{nth}");
+            let ran = project.supercov_with(
+                &[
+                    "__doctest-runner",
+                    directory.to_str().unwrap(),
+                    mode,
+                    project.root.join(binary).to_str().unwrap(),
+                ],
+                &[
+                    ("FAKE_RUSTDOC_DIR", directory.to_str().unwrap()),
+                    ("SUPERCOV_DOCTEST_NAME", "src/lib.rs - s (line 3)"),
+                    ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
+                    ("SUPERCOV_TEST_FAULT", &fault),
+                ],
+            );
+            let said = ran.stderr();
+            assert!(!said.contains("panicked at"), "{mode} {fault}: {said}");
+            if !said.contains("[supercov] test fault at fs") {
+                ran.succeeds();
+                assert!(nth > 2, "{mode} reached {nth} calls");
+                break;
+            }
+        }
+    }
 }
 
 #[test]
