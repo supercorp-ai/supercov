@@ -3350,6 +3350,45 @@ fn the_html_report_says_what_it_could_not_embed() {
 
     let empty = Project::empty("html-nothing");
     empty.git(&["init", "-q"]);
+    // The report opens in the browser the system names, and says when none
+    // could be started; `-h` among its options is its help.
+    #[cfg(unix)]
+    {
+        let tools = project.root.with_extension("open-tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let git = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(git.trim(), tools.join("git")).unwrap();
+        let path = tools.to_str().unwrap();
+        let unopened = project
+            .supercov_with(&["report", "--output", "unopened.html"], &[("PATH", path)])
+            .succeeds();
+        let said = format!("{unopened}{}", project.read("unopened.html").len());
+        assert!(said.contains("wrote"), "{said}");
+        for opener in ["open", "xdg-open"] {
+            use std::os::unix::fs::PermissionsExt;
+            let script = tools.join(opener);
+            std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let opened = project
+            .supercov_with(&["report", "--output", "opened.html"], &[("PATH", path)])
+            .succeeds();
+        assert!(
+            opened.contains("opened the report in your browser"),
+            "{opened}"
+        );
+        let help = project.supercov(&["report", "--no-open", "-h"]).succeeds();
+        assert!(help.contains("Usage: supercov report"), "{help}");
+        std::fs::remove_dir_all(tools).unwrap();
+    }
+
     let nothing = empty.supercov(&["report", "--no-open"]).exits(2);
     assert!(
         nothing.contains("no local coverage runs and no saved assessments to report"),
