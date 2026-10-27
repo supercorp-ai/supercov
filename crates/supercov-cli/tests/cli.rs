@@ -13877,9 +13877,10 @@ fn a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     assert!(reached > 50, "{reached}");
 }
 
-/// A Python test skipped where it is declared is in the run, skipped.
+/// A Python test skipped where it is declared, or a Ruby one as it runs, is
+/// in the run, skipped.
 #[test]
-fn a_skipped_python_test_is_counted_skipped() {
+fn a_skipped_python_or_ruby_test_is_counted_skipped() {
     let project = Project::empty("python-skips");
     python_project(&project);
     project.write(
@@ -13896,6 +13897,29 @@ fn a_skipped_python_test_is_counted_skipped() {
     let run = project.supercov(&["runs", "latest", "--json"]).json();
     assert_eq!(run["data"]["testOutcomes"]["skipped"], 1, "{run}");
     assert_eq!(run["data"]["testOutcomes"]["passed"], 1, "{run}");
+    // And a Ruby test skipped as it runs.
+    #[cfg(unix)]
+    if let Some(ruby) = ruby() {
+        let project = Project::empty("ruby-skips");
+        ruby_project(&project);
+        project.write(
+            "test/later_test.rb",
+            "require 'minitest/autorun'\nrequire 'w'\n\nclass LaterTest < Minitest::Test\n  def test_later\n    skip 'later'\n  end\nend\n",
+        );
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        project
+            .supercov(&[
+                "--",
+                ruby.as_str(),
+                "-Ilib",
+                "-e",
+                "Dir['test/*_test.rb'].each { |f| require_relative f }",
+            ])
+            .succeeds();
+        let run = project.supercov(&["runs", "latest", "--json"]).json();
+        assert_eq!(run["data"]["testOutcomes"]["skipped"], 1, "{run}");
+    }
 }
 
 /// A Python test whose process ends during it reported no outcome, but what
