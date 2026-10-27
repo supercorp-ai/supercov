@@ -12979,6 +12979,18 @@ fn fail_each_place_at(
     command: &[&str],
     code: i32,
 ) -> usize {
+    fail_each_place_at_with(site, label, write, command, code, &[])
+}
+
+/// [`fail_each_place_at`] with `environment` set for every run.
+fn fail_each_place_at_with(
+    site: &str,
+    label: &str,
+    write: fn(&Project),
+    command: &[&str],
+    code: i32,
+    environment: &[(&str, &str)],
+) -> usize {
     const PROJECTS: usize = 4;
     let reached = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -12993,7 +13005,9 @@ fn fail_each_place_at(
                 loop {
                     let fault = format!("{site}#{nth}");
                     forget_reused_builds(&project.root.join(".supercov/workspaces"));
-                    let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
+                    let mut variables = environment.to_vec();
+                    variables.push(("SUPERCOV_TEST_FAULT", &fault));
+                    let ran = project.supercov_with(command, &variables);
                     let said = ran.stderr();
                     assert!(
                         !said.contains("panicked at") && ran.code() != 101,
@@ -13005,7 +13019,7 @@ fn fail_each_place_at(
                     reached.fetch_max(nth, std::sync::atomic::Ordering::Relaxed);
                     nth += PROJECTS;
                 }
-                project.supercov(command).exits(code);
+                project.supercov_with(command, environment).exits(code);
             });
         }
     });
@@ -13530,6 +13544,31 @@ fn a_run_under_given_source_roots_is_read_back_under_them() {
             .succeeds();
         let read = project.supercov(&["runs", "latest", "--json"]).json();
         assert_eq!(read["ok"], true, "{read}");
+    }
+}
+
+/// A Python or Ruby run asked to keep its work copies its evidence aside,
+/// and each file operation of that failing in turn ends the run cleanly.
+#[test]
+fn a_run_keeping_its_work_survives_any_file_operation_failing() {
+    let keep = [("SUPERCOV_KEEP_WORK", "1")];
+    let python = fail_each_place_at_with(
+        "fs",
+        "keep-faults-py",
+        python_project,
+        &[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ],
+        0,
+        &keep,
+    );
+    assert!(python > 50, "{python}");
+    #[cfg(unix)]
+    if let Some(ruby) = ruby() {
+        let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
+        let reached =
+            fail_each_place_at_with("fs", "keep-faults-rb", ruby_project, &command, 0, &keep);
+        assert!(reached > 50, "{reached}");
     }
 }
 

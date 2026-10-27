@@ -48,6 +48,7 @@ a_failed_projection_of_a_passing_run_reads_as_empty_and_names_what_it_leaves_out
 a_failing_run_whose_file_operation_fails_anywhere_says_so_and_recovers	45.2	75.3
 a_failing_suite_keeps_its_exit_status_and_cannot_pass_a_gate	0.8	0.6
 a_failing_system_call_while_starting_a_command_is_named_or_retried	22.6	8.2
+a_file_a_rust_test_writes_comes_back_to_the_project	8.0	14.0
 a_file_a_test_deletes_in_the_copy_is_named_and_kept	1.7	1.2
 a_file_every_window_of_which_is_refused_is_one_error	46.2	26.4
 a_file_query_warns_of_staleness_only_for_what_it_reads	0.8	0.7
@@ -98,6 +99,7 @@ a_mocking_test_resolves_paths_a_later_preload_maps	0.4	0.4
 a_multi_package_module_runs_and_publishes_what_each_test_reached	0.7	1.1
 a_multi_project_gradle_build_reaches_every_subproject	5.7	4.2
 a_nested_module_does_not_break_the_build_around_it	0.6	0.7
+a_nextest_run_refuses_what_it_cannot_read	6.0	10.0
 a_one_line_helper_that_returns_a_check_is_still_awaited	8.9	3.9
 a_package_of_nothing_but_examples_publishes_what_it_measured	0.6	0.7
 a_package_of_nothing_but_fuzz_targets_publishes_what_it_measured	0.7	0.8
@@ -138,6 +140,7 @@ a_ruby_run_whose_file_operation_fails_anywhere_says_so_and_recovers	13.4	16.1
 a_ruby_source_that_does_not_parse_is_named	1.1	0.3
 a_ruby_test_whose_process_ends_during_it_is_failed_and_credited	0.8	0.4
 a_run_in_which_no_test_ran_is_marked_in_the_listing	2.7	1.1
+a_run_keeping_its_work_survives_any_file_operation_failing	30.0	50.0
 a_run_left_out_of_a_merge_or_read_stale_says_what_moved	3.8	3.5
 a_run_of_a_new_test_alone_is_added_to_the_runs_before_it	5.4	2.8
 a_run_of_another_release_is_named_for_what_it_is	0.8	0.8
