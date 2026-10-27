@@ -1356,9 +1356,9 @@ fn walk_output_files(
     {
         let path = entry.path();
         let name = entry.file_name();
-        let relative = path
-            .strip_prefix(workspace)
-            .map_err(|_| WorkspaceError::UnsafePath(path.clone()))?
+        let relative = path.strip_prefix(workspace);
+        let relative = relative
+            .expect("a walked path is in the workspace")
             .to_owned();
         // Supercov's generated state never flows back, `.git` is not a
         // command output, and symlinks (the node_modules link above all) point
@@ -1368,26 +1368,17 @@ fn walk_output_files(
         {
             continue;
         }
-        let metadata = entry.metadata().map_err(|error| io_error(&path, error))?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
         // Dependencies are never command outputs. Nested node_modules may be
         // materialised clones (see copy_tree), and a tool's cache inside any
         // node_modules must not flow back into the project's dependency tree.
-        if metadata.is_dir() && name.to_str() == Some("node_modules") {
-            continue;
-        }
-        if fs::symlink_metadata(&path)
-            .map_err(|error| io_error(&path, error))?
-            .file_type()
-            .is_symlink()
-        {
+        if metadata.is_symlink() || metadata.is_dir() && name.to_str() == Some("node_modules") {
             continue;
         }
         if metadata.is_dir() {
             walk_output_files(workspace, &path, entries)?;
         } else if metadata.is_file() {
-            let modified = metadata
-                .modified()
-                .map_err(|error| io_error(&path, error))?;
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
             entries.insert(relative, (metadata.len(), modified));
         }
     }
@@ -2619,11 +2610,15 @@ mod tests {
             "dep",
         )
         .unwrap();
+        // Only a directory of that name is a dependency tree.
+        fs::create_dir_all(workspace.join("notes")).unwrap();
+        fs::write(workspace.join("notes/node_modules"), "a file").unwrap();
         let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
-        assert_eq!(sync.synced, 0);
+        assert_eq!(sync.synced, 1);
         assert!(sync.deleted_in_workspace.is_empty());
         assert!(!root.join("node_modules").exists());
         assert!(!root.join("packages").exists());
+        assert!(root.join("notes/node_modules").is_file());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
