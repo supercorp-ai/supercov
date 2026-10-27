@@ -889,3 +889,17 @@ fn render_snapshots(view: &Value) -> String {
     });
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No limit lists every row; a file not yet judged has no band.
+    #[test]
+    fn no_limit_lists_all_and_no_health_has_no_band() {
+        assert_eq!(limited(vec![1, 2, 3], 0), (3, vec![1, 2, 3]));
+        assert_eq!(limited(vec![1, 2, 3], 2), (3, vec![1, 2]));
+        assert_eq!(band(None), "—");
+        assert_eq!(band(Some(4.94)), "weak");
+    }
+}
