@@ -952,17 +952,22 @@ impl RustWorkerServer {
                 })
             };
             let mut pollers = Vec::new();
-            for (number, config) in configs.iter().enumerate() {
-                let port = match config.inspector_port {
-                    Some(port) => port,
-                    None => free_port()?,
-                };
-                point_at_entry(config, Some(port))?;
-                pollers.push(Poller::start(
-                    port,
-                    evidence.join(format!("{number:04}.windows")),
-                ));
-            }
+            // Grouped from the configurations, so a workspace has one at least.
+            configs
+                .iter()
+                .enumerate()
+                .try_for_each(|(number, config)| -> Result<(), String> {
+                    let port = match config.inspector_port {
+                        Some(port) => port,
+                        None => free_port()?,
+                    };
+                    point_at_entry(config, Some(port))?;
+                    pollers.push(Poller::start(
+                        port,
+                        evidence.join(format!("{number:04}.windows")),
+                    ));
+                    Ok(())
+                })?;
             servers.push(Self {
                 project,
                 pollers,
@@ -1023,9 +1028,12 @@ impl RustWorkerServer {
         served: &[ServedTest],
         diagnostics: &mut dyn Write,
     ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
-        for poller in std::mem::take(&mut self.pollers) {
-            poller.finish();
-        }
+        // One per configuration, and there is one at least.
+        std::mem::take(&mut self.pollers)
+            .into_iter()
+            .for_each(|poller| {
+                poller.finish();
+            });
         self.others.finish();
         let evidence_directory = self.directory.join("evidence");
         let result = read_windows(&evidence_directory).and_then(|windows| {
