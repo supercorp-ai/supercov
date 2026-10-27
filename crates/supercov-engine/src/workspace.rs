@@ -129,6 +129,7 @@ fn omit_escaping_link(path: &Path, target: &Path) {
 /// misjudge every link, and the prefix shows up in every diagnostic. Canonical
 /// paths are simplified back to the ordinary form at the one place they are
 /// made, so nothing downstream ever sees the verbatim spelling.
+#[track_caller]
 pub(crate) fn canonicalize_simplified<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     fs::canonicalize(path).map(simplified)
 }
