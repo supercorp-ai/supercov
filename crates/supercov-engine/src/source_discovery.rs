@@ -1489,6 +1489,48 @@ mod tests {
         assert_eq!(targets, ["./x.js", "./y.js"]);
     }
 
+    /// No package declares no setup; a Jest setup named by one string under
+    /// a `rootDir` is test infrastructure; `.` in a path is no step.
+    #[test]
+    fn a_jest_setup_is_read_from_any_form_of_its_field() {
+        assert!(declared_test_setup(&[]).is_empty());
+        assert_eq!(lexical_normalize(Path::new("/a/./b")), Path::new("/a/b"));
+        let root = std::env::temp_dir().join(format!(
+            "supercov-jest-setup-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config/setup.js"), "").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"jest": {"rootDir": "<rootDir>/config", "globalSetup": "<rootDir>/setup.js", "setupFiles": 5}}"#,
+        )
+        .unwrap();
+        let setup = declared_test_setup(std::slice::from_ref(&root));
+        assert_eq!(setup.len(), 1, "{setup:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A project the repository around it ignores is ignored, unless a
+    /// deeper rule takes it back.
+    #[test]
+    fn an_enclosing_repository_ignores_a_project_until_a_deeper_rule_keeps_it() {
+        let repository = std::env::temp_dir().join(format!(
+            "supercov-enclosing-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let project = repository.join("tmp/copy");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(repository.join(".gitignore"), "tmp/\n").unwrap();
+        assert!(ignored_by_enclosing_repository(&project));
+        fs::write(repository.join("tmp/.gitignore"), "!copy/\n").unwrap();
+        assert!(!ignored_by_enclosing_repository(&project));
+        fs::remove_dir_all(repository).unwrap();
+    }
+
     /// An empty pnpm workspace declares no package.
     #[test]
     fn an_empty_pnpm_workspace_declares_nothing() {
