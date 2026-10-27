@@ -1028,6 +1028,10 @@ mod tests {
         fs::hard_link(tools.join("jest"), copy.join("jest")).unwrap();
 
         place_launchers(&tools, &copy).unwrap();
+        // An empty `.bin` gets none.
+        let empty = dependencies.join("empty");
+        fs::create_dir(&empty).unwrap();
+        place_launchers(&empty, &copy).unwrap();
 
         assert!(
             fs::read_to_string(copy.join("oxlint"))
@@ -1053,6 +1057,8 @@ mod tests {
             Path::new("/w/workspaces/source/p"),
         );
         assert_eq!(translated, "--config=/w/workspaces/source/p/biome.json");
+        // No workspace, nothing to translate.
+        assert_eq!(in_view(OsStr::new("x"), &[], Path::new("/v")), "x");
         // A workspace whose path is no text is mentioned in no text.
         use std::os::unix::ffi::OsStrExt;
         let unnamed = Path::new(OsStr::from_bytes(b"/w/\xff/p"));
