@@ -1993,8 +1993,11 @@ fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
 /// every block at its `{` but a `try` written without one, which is a parse
 /// error and so never instrumented; were one reached, its probe would have
 /// nowhere to go, and the file is refused rather than probed wrongly.
+/// A test fault (`rust-block-entry`) stands in for such a block, so each
+/// place that would refuse the file runs under test.
 fn block_entry(block: &ast::BlockExpr) -> Result<usize, RustInstrumenterError> {
-    block_entry_offset(block).ok_or(RustInstrumenterError::InvalidRange)
+    crate::fault::or("rust-block-entry", || None, || block_entry_offset(block))
+        .ok_or(RustInstrumenterError::InvalidRange)
 }
 
 /// A node's range without its outer attributes: a wrapper placed here stays
@@ -3209,6 +3212,34 @@ mod tests {
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    /// A block with nowhere to put its probe, at each place a block is
+    /// entered, refuses the file rather than probing it wrongly.
+    #[test]
+    fn a_block_with_no_entry_refuses_its_file() {
+        let source = concat!(
+            "pub fn f(a: bool, b: Option<u8>, c: &[u8]) -> u8 {\n",
+            "    if a && b.is_some() { 1 } else if let Some(x) = b && x > 2 { x } else { 0 };\n",
+            "    let g = |n: u8| { n + 1 };\n",
+            "    while a { break; }\n",
+            "    for _ in c { continue; }\n",
+            "    loop { break; }\n",
+            "    match b { Some(1) => { 1 } Some(_) if a => 2, _ => { 3 } };\n",
+            "    let Some(y) = b else { return 0 };\n",
+            "    while let Some(z) = b && z > 1 { break; }\n",
+            "    { let _ = 1; }\n",
+            "    let h = || -> u8 { 2 };\n",
+            "    g(y) + h()\n",
+            "}\n",
+        );
+        let reached = crate::fault::fail_each_call(
+            "rust-block-entry",
+            || (),
+            |()| instrument_rust_file("src/lib.rs", source, "crate::rt", false, None).map(drop),
+            |()| {},
+        );
+        assert!(reached > 7, "{reached}");
+    }
 
     #[test]
     fn each_instrumenter_error_says_what_failed() {
