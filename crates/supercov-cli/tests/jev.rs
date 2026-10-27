@@ -659,6 +659,15 @@ fn tests_judged_not_to_catch_a_change_are_left_out_when_asked() {
     let project = Project::cart("not-asserted");
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
+    // A key is only sent over TLS or to this machine: an http:// endpoint
+    // elsewhere is refused before anything is asked.
+    let refused = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess"],
+            &through("http://jev.example.com"),
+        )
+        .exits(2);
+    assert!(refused.contains("must be an https:// URL"), "{refused}");
     let assessed = project
         .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
         .succeeds();
@@ -700,6 +709,21 @@ fn tests_judged_not_to_catch_a_change_are_left_out_when_asked() {
         )
         .succeeds();
     assert!(changed.contains("2 changed statement(s)"), "{changed}");
+    // So does a pass over what changed.
+    let refused = project
+        .supercov_with(
+            &[
+                "runs",
+                &run,
+                "assertions",
+                "assess",
+                "--changed",
+                "--refresh",
+            ],
+            &through("http://jev.example.com"),
+        )
+        .exits(2);
+    assert!(refused.contains("must be an https:// URL"), "{refused}");
 }
 
 const HANDLER: &str = r#"import { exec } from "node:child_process";
