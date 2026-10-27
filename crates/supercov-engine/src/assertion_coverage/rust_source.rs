@@ -1792,7 +1792,7 @@ mod tests {
         std::fs::create_dir_all(root.join("crates/x/tests/common")).unwrap();
         std::fs::write(root.join("crates/x/tests/common/mod.rs"), "").unwrap();
         std::fs::write(root.join("crates/x/tests/util.rs"), "").unwrap();
-        let text = "mod common;\npub mod util;\nmod missing;\nuse std::fmt;\n";
+        let text = "mod common;\npub mod util;\nmod missing;\nmod inline {}\nuse std::fmt;\n";
         assert_eq!(
             helpers(&root, "crates/x/tests/it.rs", text),
             ["crates/x/tests/common/mod.rs", "crates/x/tests/util.rs"]
@@ -2624,6 +2624,35 @@ fn h(e: E) -> Result<Made, E> {
         assert_eq!(starts[&3].len(), 1);
     }
 
+    /// Source the parser only half reads: a field or function with no
+    /// name, an `impl` of no type, `Some()` with nothing in it, blocks and
+    /// branches with no value, and `?` on what nothing types. Each gets the
+    /// change its shape alone allows.
+    #[test]
+    fn half_parsed_shapes_fall_back_to_their_text() {
+        let source = r#"struct S { : u8, y: u8 }
+impl {
+    fn m() -> u8 { 1 }
+}
+fn (a: bool) {}
+fn f(a: bool) -> u8 {
+    let s = Some();
+    let b = { 1; };
+    let d = if a { 1; } else if a { 2; } else { 3 };
+    let t = unknown?;
+    let r = S { y: 1 };
+    0
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(7), "None");
+        assert_eq!(at(8), "Default::default()");
+        assert_eq!(at(10), "Default::default()");
+        assert_eq!(at(11), "S { y: 0 }", "the named field alone");
+    }
+
     /// Text read word by word, brackets that close early, the output of a
     /// callable type, and a doctest's item past more documentation.
     #[test]
@@ -2633,6 +2662,7 @@ fn h(e: E) -> Result<Made, E> {
         assert_eq!(enclosed("(a) (b)", '(', ')'), None);
         assert_eq!(tuple("(a) (b)"), None);
         assert_eq!(callable_output("u8"), None);
+        assert_eq!(callable_output("implFn()"), None, "no output written");
         assert_eq!(callable_output("Box<dynFn()->u8>"), Some("u8"));
         assert_eq!(float_literal_value("2f32"), Some(2.0));
         assert!(boolean("!ready"));
