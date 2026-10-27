@@ -679,14 +679,25 @@ fn tests_judged_not_to_catch_a_change_are_left_out_when_asked() {
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
     // A key is only sent over TLS or to this machine: an http:// endpoint
-    // elsewhere is refused before anything is asked.
-    let refused = project
-        .supercov_with(
-            &["runs", &run, "assertions", "assess"],
-            &through("http://jev.example.com"),
-        )
-        .exits(2);
-    assert!(refused.contains("must be an https:// URL"), "{refused}");
+    // elsewhere is refused before anything is asked, by every lane; and a
+    // lane with no key says where to put one.
+    for arguments in [
+        &["runs", &run, "assertions", "assess"][..],
+        &["quality"][..],
+        &["security"][..],
+    ] {
+        let refused = project.supercov_with(arguments, &through("http://jev.example.com"));
+        let said = format!("{}{}", refused.stdout(), refused.stderr());
+        assert_ne!(refused.code(), 0, "{arguments:?}: {said}");
+        assert!(
+            said.contains("must be an https:// URL"),
+            "{arguments:?}: {said}"
+        );
+    }
+    let keyless = project.supercov_with(&["quality"], &[("TYPESAFE_API_KEY", "")]);
+    let said = format!("{}{}", keyless.stdout(), keyless.stderr());
+    assert_ne!(keyless.code(), 0, "{said}");
+    assert!(said.contains("needs a TypeSafe AI API key"), "{said}");
     let assessed = project
         .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
         .succeeds();
