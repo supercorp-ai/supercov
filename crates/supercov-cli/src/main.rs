@@ -4110,6 +4110,39 @@ mod tests {
         );
     }
 
+    /// A file that cannot be made, written or put in place says which, and
+    /// leaves no temporary file behind.
+    #[test]
+    fn an_atomic_write_that_fails_says_where() {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-cli-atomic-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("file"), "a file").unwrap();
+        let refused = write_atomically(&root.join("file/report.json"), "{}", false).unwrap_err();
+        assert!(refused.starts_with("could not create "), "{refused}");
+        let occupied = root.join("occupied.json");
+        fs::create_dir_all(
+            occupied.with_extension(format!("json.supercov-{}", std::process::id())),
+        )
+        .unwrap();
+        let refused = write_atomically(&occupied, "{}", false).unwrap_err();
+        assert!(refused.starts_with("could not write "), "{refused}");
+        let directory = root.join("directory");
+        fs::create_dir_all(directory.join("inside")).unwrap();
+        let refused = write_atomically(&directory, "{}", true).unwrap_err();
+        assert!(refused.starts_with("could not replace "), "{refused}");
+        assert!(
+            !root
+                .join(format!("directory.tmp.supercov-{}", std::process::id()))
+                .exists()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn public_run_ids_are_short_opaque_and_unique() {
         let (first, first_started_at) = public_run_identity();
