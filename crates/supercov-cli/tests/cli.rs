@@ -13211,52 +13211,71 @@ fn browser_project(project: &Project) {
 /// Rust Worker and Java -- which it prepares in the copy: once for every
 /// place it makes a file operation, with that one failing, it ends saying so
 /// and never panics, and then succeeds.
+/// A Playwright project beside a server of every kind Supercov prepares.
+#[cfg(unix)]
+fn browser_servers_project(project: &Project) {
+    browser_project(project);
+    project.write(
+        "app/server.py",
+        "def handle(n):\n    return n * 2 if n else 0\n",
+    );
+    project.write(
+        "app/server.rb",
+        "def handle(n)\n  n.zero? ? 0 : n * 2\nend\n",
+    );
+    if go().is_some() {
+        project.write("go.mod", "module example.com/server\n\ngo 1.22\n");
+        project.write(
+                "server.go",
+                "package main\n\nfunc handle(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n\nfunc main() { _ = handle(1) }\n",
+            );
+    }
+    project.write(
+        "worker/wrangler.toml",
+        "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
+    );
+    project.write(
+            "worker/Cargo.toml",
+            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[workspace]\n",
+        );
+    project.write(
+        "worker/src/lib.rs",
+        "pub fn handle(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n",
+    );
+    project.write(
+            "pom.xml",
+            "<project><modelVersion>4.0.0</modelVersion><groupId>w</groupId><artifactId>w</artifactId><version>1</version></project>\n",
+        );
+    project.write(
+            "src/main/java/w/App.java",
+            "package w;\n\npublic class App {\n    public static int handle(int n) {\n        if (n == 0) {\n            return 0;\n        }\n        return n * 2;\n    }\n}\n",
+        );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_browser_run_preparing_servers_whose_file_operation_fails_says_so_and_recovers() {
     let reached = fail_each_place_of_a_run(
         "run-faults-browser",
-        |project| {
-            browser_project(project);
-            project.write(
-                "app/server.py",
-                "def handle(n):\n    return n * 2 if n else 0\n",
-            );
-            project.write(
-                "app/server.rb",
-                "def handle(n)\n  n.zero? ? 0 : n * 2\nend\n",
-            );
-            if go().is_some() {
-                project.write("go.mod", "module example.com/server\n\ngo 1.22\n");
-                project.write(
-                    "server.go",
-                    "package main\n\nfunc handle(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n\nfunc main() { _ = handle(1) }\n",
-                );
-            }
-            project.write(
-                "worker/wrangler.toml",
-                "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
-            );
-            project.write(
-                "worker/Cargo.toml",
-                "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[workspace]\n",
-            );
-            project.write(
-                "worker/src/lib.rs",
-                "pub fn handle(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n",
-            );
-            project.write(
-                "pom.xml",
-                "<project><modelVersion>4.0.0</modelVersion><groupId>w</groupId><artifactId>w</artifactId><version>1</version></project>\n",
-            );
-            project.write(
-                "src/main/java/w/App.java",
-                "package w;\n\npublic class App {\n    public static int handle(int n) {\n        if (n == 0) {\n            return 0;\n        }\n        return n * 2;\n    }\n}\n",
-            );
-        },
+        browser_servers_project,
         &["--", "npx", "playwright", "test"],
     );
     assert!(reached > 50, "{reached}");
+}
+
+/// The same run, once for every place it starts a program, with that start
+/// failing.
+#[cfg(unix)]
+#[test]
+fn a_browser_run_preparing_servers_whose_program_cannot_start_says_so_and_recovers() {
+    let reached = fail_each_place_at(
+        "spawn",
+        "spawn-faults-browser",
+        browser_servers_project,
+        &["--", "npx", "playwright", "test"],
+        0,
+    );
+    assert!(reached > 3, "{reached}");
 }
 
 /// A crate with a unit test and a doctest.
