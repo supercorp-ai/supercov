@@ -2380,6 +2380,13 @@ mod tests {
             crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
         });
         assert!(set.is_err());
+        // Two entries for one site fail each of their calls.
+        let failed = crate::fault::during("named@1,named@3", || {
+            (0..4)
+                .map(|_| crate::fault::io("named", io::ErrorKind::Other, || Ok(())).is_err())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(failed, [true, false, true, false]);
     }
 
     fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {

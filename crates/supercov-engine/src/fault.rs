@@ -175,6 +175,31 @@ pub fn fail_each_call<Fixture, E: std::fmt::Debug>(
     }
 }
 
+/// [`fail_each_call`] for each pair of calls at `site`, both failing
+/// (`site@N,site@M`): what a failure's own clean-up does when it fails too.
+/// The number of pairs.
+#[cfg(any(test, debug_assertions))]
+pub fn fail_each_pair_of_calls<Fixture, E: std::fmt::Debug>(
+    site: &str,
+    setup: impl Fn() -> Fixture,
+    scenario: impl Fn(&Fixture) -> Result<(), E>,
+    cleanup: impl Fn(Fixture),
+) -> usize {
+    let calls = fail_each_call(site, &setup, &scenario, &cleanup);
+    let mut pairs = 0;
+    for first in 1..calls {
+        for second in first + 1..=calls {
+            let fixture = setup();
+            let _ = during(&format!("{site}@{first},{site}@{second}"), || {
+                scenario(&fixture)
+            });
+            cleanup(fixture);
+            pairs += 1;
+        }
+    }
+    pairs
+}
+
 /// When the call at `site` fails this time, the errno the test chose for
 /// it, if any.
 fn failing(site: &str) -> Option<Option<i32>> {
@@ -245,7 +270,12 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
         })
         .is_ok()
     };
-    faults.iter().find(|fault| fault.site == site).map(|fault| {
+    // Every entry naming the site counts its own calls, so `fs@3,fs@7`
+    // fails the third and the seventh.
+    let mut named = false;
+    let mut failed = None;
+    for fault in faults.iter().filter(|fault| fault.site == site) {
+        named = true;
         let fails = match (&fault.place, place) {
             // The first call from a place not seen before, when it is the Nth.
             (Some((nth, seen)), Some(place)) => {
@@ -265,9 +295,10 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
         };
         if fails {
             fault.fired.store(true, Ordering::SeqCst);
+            failed.get_or_insert(fault.errno);
         }
-        fails.then_some(fault.errno)
-    })
+    }
+    named.then_some(failed)
 }
 
 /// `call`'s value, or `failed`'s when the call at `site` fails.

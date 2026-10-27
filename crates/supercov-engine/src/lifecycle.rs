@@ -2973,6 +2973,27 @@ mod tests {
         assert!(operations > 5, "{operations}");
     }
 
+    /// Two file operations of a publication failing, the second most often
+    /// in the clean-up after the first: it ends, and never panics.
+    #[test]
+    fn publishing_survives_any_two_file_operations_failing() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let pairs = crate::fault::fail_each_pair_of_calls(
+            "fs",
+            || {
+                let root = project();
+                let evidence = analysable_evidence(&root, id);
+                (root, evidence)
+            },
+            |(root, (evidence, metadata))| publish_run(root, metadata, evidence).map(drop),
+            |(root, _)| {
+                let _ = sweep_trash(&root);
+                fs::remove_dir_all(root).unwrap();
+            },
+        );
+        assert!(pairs > 10, "{pairs}");
+    }
+
     #[test]
     fn recovering_runs_survives_any_file_operation_failing() {
         let operations = fail_each_file_operation(

@@ -1065,6 +1065,7 @@ lifecycle::tests::publication_refuses_evidence_of_another_length_and_clears_old_
 lifecycle::tests::publication_writes_the_query_index_a_first_query_would_have_built	0.0	0.0
 lifecycle::tests::publishes_both_required_files_with_one_visible_rename	0.0	0.0
 lifecycle::tests::publishing_survives_any_file_operation_failing	0.3	0.2
+lifecycle::tests::publishing_survives_any_two_file_operations_failing	5.0	5.0
 lifecycle::tests::recovering_runs_survives_any_file_operation_failing	1.0	0.7
 lifecycle::tests::recovers_dead_unpublished_and_fully_published_runs_from_derived_paths	0.0	0.0
 lifecycle::tests::refuses_linked_storage_ancestors_instead_of_renaming_external_data	0.0	0.0
