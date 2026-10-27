@@ -2397,7 +2397,10 @@ mod tests {
             ),
             ("true", "decision never true"),
             ("false", "decision never false"),
-            ("something new", "branch outcome not observed: something new"),
+            (
+                "something new",
+                "branch outcome not observed: something new",
+            ),
         ] {
             assert_eq!(branch_need(label), said, "{label}");
         }
