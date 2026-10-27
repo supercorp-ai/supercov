@@ -93,8 +93,9 @@ fn mcdc_records(conditions: &[ConditionRecord], out: &mut String) -> (usize, usi
         let apart = sizes.windows(2).all(|pair| pair[0] != pair[1]);
         let mut groups = if apart { decisions } else { vec![line] };
         groups.sort_by_key(|group| group.len());
-        for group in groups {
-            for (index, condition) in group.iter().enumerate() {
+        // A line chunk holds a condition, so each group does.
+        groups.into_iter().for_each(|group| {
+            group.iter().enumerate().for_each(|(index, condition)| {
                 let named = condition
                     .source
                     .split_whitespace()
@@ -116,8 +117,8 @@ fn mcdc_records(conditions: &[ConditionRecord], out: &mut String) -> (usize, usi
                         group.len()
                     );
                 }
-            }
-        }
+            });
+        });
     }
     (found, hit)
 }
