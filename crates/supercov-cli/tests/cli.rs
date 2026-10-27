@@ -13392,14 +13392,15 @@ fn a_run_whose_program_cannot_start_anywhere_says_so_and_recovers() {
 }
 
 fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usize {
-    fail_each_place_of_a_runner_in(label, small_crate, role, command)
+    fail_each_place_of_a_runner_in(label, small_crate, &format!("{role}/fs"), command)
 }
 
-/// [`fail_each_place_of_a_runner`] over the project `write` makes.
+/// [`fail_each_place_of_a_runner`] over the project `write` makes, failing
+/// `site`, a fault site with the role it applies in (`__doctest-runner/fs`).
 fn fail_each_place_of_a_runner_in(
     label: &str,
     write: fn(&Project),
-    role: &str,
+    site: &str,
     command: &[&str],
 ) -> usize {
     let project = Project::empty(label);
@@ -13410,7 +13411,7 @@ fn fail_each_place_of_a_runner_in(
     let mut nth = 1;
     loop {
         let _ = std::fs::remove_file(&log);
-        let fault = format!("{role}/fs#{nth}");
+        let fault = format!("{site}#{nth}");
         let ran = project.supercov_with(
             command,
             &[
@@ -13462,12 +13463,64 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
             project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
         },
         &format!(
-            "env:{}",
+            "env:{}/fs",
             supercov_engine::rust_owned_doctests::CHILD_DIR_ENV
         ),
         &["--", "cargo", "test", "-q"],
     );
     assert!(reached >= 2, "{reached}");
+    // And rustdoc's stand-in, which the doctests' runners inherit.
+    let reached = fail_each_place_of_a_runner_in(
+        "runner-faults-rustdoc",
+        small_crate,
+        &format!(
+            "env:{}/fs",
+            supercov_engine::rust_owned_doctests::WRAPPER_ROOT_ENV
+        ),
+        &["--", "cargo", "test", "-q"],
+    );
+    assert!(reached > 3, "{reached}");
+}
+
+/// Each of a run's helper processes -- rustdoc's stand-in, a doctest's
+/// runner, a merged doctest's child, nextest's runner -- failing to start a
+/// program at each place it starts one.
+#[test]
+fn a_test_runner_whose_program_cannot_start_says_so() {
+    let doctests = supercov_engine::rust_owned_doctests::WRAPPER_ROOT_ENV;
+    let reached = fail_each_place_of_a_runner_in(
+        "runner-spawn-doctest",
+        small_crate,
+        &format!("env:{doctests}/spawn"),
+        &["--", "cargo", "test", "-q"],
+    );
+    // Each starts one program: rustdoc, or the doctest it runs.
+    assert!(reached > 0, "{reached}");
+    let reached = fail_each_place_of_a_runner_in(
+        "runner-spawn-merged",
+        |project| {
+            small_crate(project);
+            project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
+        },
+        &format!(
+            "env:{}/spawn",
+            supercov_engine::rust_owned_doctests::CHILD_DIR_ENV
+        ),
+        &["--", "cargo", "test", "-q"],
+    );
+    assert!(reached > 0, "{reached}");
+    if nextest_installed() {
+        let reached = fail_each_place_of_a_runner_in(
+            "runner-spawn-nextest",
+            small_crate,
+            &format!(
+                "{}/spawn",
+                supercov_engine::rust_owned_nextest::RUNNER_MODE_ARGUMENT
+            ),
+            &["--", "cargo", "nextest", "run"],
+        );
+        assert!(reached > 0, "{reached}");
+    }
 }
 
 /// `runs patch` reads the change from git: each git call failing in turn
