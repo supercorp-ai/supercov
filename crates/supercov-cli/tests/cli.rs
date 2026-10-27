@@ -13048,7 +13048,8 @@ fn fail_each_place_at(
 /// fails the first call from every place no earlier run failed
 /// (`site#*`): a failure the run goes on from costs no run of its own, and
 /// what the run then does fails in the same run. Four projects side by side
-/// each take a share of the places. How many places failed.
+/// each take a share of the places; a last pass over all of them fails what
+/// only one share's failure leads to. How many places failed.
 fn fail_each_place_at_with(
     site: &str,
     label: &str,
@@ -13058,59 +13059,72 @@ fn fail_each_place_at_with(
     environment: &[(&str, &str)],
 ) -> usize {
     const SHARES: usize = 4;
-    let reached = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for share in 0..SHARES {
-            let reached = &reached;
-            scope.spawn(move || {
-                let project = Project::empty(&format!("{label}-{share}"));
-                write(&project);
-                project.git(&["init", "-q"]);
-                project.commit("fixture");
-                let skip = project.root.with_extension("skip");
-                let shard = format!("{share}/{SHARES}");
-                let fault = format!("{site}#*");
-                let announced = format!("[supercov] test fault at {site} ");
-                let mut failed = std::collections::BTreeSet::new();
-                loop {
-                    std::fs::write(
-                        &skip,
-                        failed.iter().cloned().collect::<Vec<String>>().join("\n"),
-                    )
-                    .unwrap();
-                    forget_reused_builds(&project.root.join(".supercov/workspaces"));
-                    let mut variables = environment.to_vec();
-                    variables.extend([
-                        ("SUPERCOV_TEST_FAULT", fault.as_str()),
-                        ("SUPERCOV_TEST_FAULT_SKIP", skip.to_str().unwrap()),
-                        ("SUPERCOV_TEST_FAULT_SHARD", shard.as_str()),
-                    ]);
-                    let ran = project.supercov_with(command, &variables);
-                    let said = ran.stderr();
-                    // Several failures in one run can fail a test, and
-                    // `cargo test` exits 101 for that: a panic is told by
-                    // its own words.
-                    assert!(
-                        !said.contains("panicked at"),
-                        "{label} with {fault} past {} places panicked:\n{said}",
-                        failed.len()
-                    );
-                    let before = failed.len();
-                    failed.extend(
-                        said.lines()
-                            .filter_map(|line| line.split_once(announced.as_str()))
-                            .map(|(_, place)| place.to_owned()),
-                    );
-                    if failed.len() == before {
-                        break;
-                    }
+    let fresh = |name: String| {
+        let project = Project::empty(&name);
+        write(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        project
+    };
+    // Runs until one fails no place outside `failed`, adding what each fails.
+    let converge =
+        |project: &Project, shard: &str, failed: &mut std::collections::BTreeSet<String>| {
+            let skip = project.root.with_extension("skip");
+            let fault = format!("{site}#*");
+            let announced = format!("[supercov] test fault at {site} ");
+            loop {
+                std::fs::write(
+                    &skip,
+                    failed.iter().cloned().collect::<Vec<String>>().join("\n"),
+                )
+                .unwrap();
+                forget_reused_builds(&project.root.join(".supercov/workspaces"));
+                let mut variables = environment.to_vec();
+                variables.extend([
+                    ("SUPERCOV_TEST_FAULT", fault.as_str()),
+                    ("SUPERCOV_TEST_FAULT_SKIP", skip.to_str().unwrap()),
+                    ("SUPERCOV_TEST_FAULT_SHARD", shard),
+                ]);
+                let ran = project.supercov_with(command, &variables);
+                let said = ran.stderr();
+                // Several failures in one run can fail a test, and `cargo test`
+                // exits 101 for that: a panic is told by its own words.
+                assert!(
+                    !said.contains("panicked at"),
+                    "{label} with {fault} past {} places panicked:\n{said}",
+                    failed.len()
+                );
+                let before = failed.len();
+                failed.extend(
+                    said.lines()
+                        .filter_map(|line| line.split_once(announced.as_str()))
+                        .map(|(_, place)| place.to_owned()),
+                );
+                if failed.len() == before {
+                    break;
                 }
-                reached.fetch_add(failed.len(), std::sync::atomic::Ordering::Relaxed);
-                project.supercov_with(command, environment).exits(code);
-            });
-        }
+            }
+        };
+    let mut failed = std::thread::scope(|scope| {
+        (0..SHARES)
+            .map(|share| {
+                scope.spawn(move || {
+                    let project = fresh(format!("{label}-{share}"));
+                    let mut failed = std::collections::BTreeSet::new();
+                    converge(&project, &format!("{share}/{SHARES}"), &mut failed);
+                    project.supercov_with(command, environment).exits(code);
+                    failed
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|share| share.join().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
     });
-    reached.into_inner()
+    let project = fresh(format!("{label}-all"));
+    converge(&project, "0/1", &mut failed);
+    project.supercov_with(command, environment).exits(code);
+    failed.len()
 }
 
 /// A run that succeeds and then cannot release its copy: each language
