@@ -8903,6 +8903,12 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     );
     assert_eq!(json["data"]["summary"]["tests"], 3);
     assert_eq!(json["data"]["summary"]["unaffected"], 2);
+    // A run it was merged from that is no longer stored cannot answer.
+    std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
+    let gone = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .exits(2);
+    assert!(gone.contains("which is no longer stored"), "{gone}");
 }
 
 /// Output sent to one file for both streams (`> log 2>&1`) arrives through
