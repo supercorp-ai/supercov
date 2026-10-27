@@ -1396,6 +1396,21 @@ mod tests {
             collect_sources(&[]),
             Err(EvidenceArchiveError::MissingManifest)
         ));
+        // A prefix or a file's place in the archive that leaves it is refused.
+        assert!(matches!(
+            collect_sources(&[EvidenceArchiveSource::Directory {
+                directory: PathBuf::from("."),
+                prefix: Some("../out".into()),
+            }]),
+            Err(EvidenceArchiveError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            collect_sources(&[EvidenceArchiveSource::File {
+                file: PathBuf::from("."),
+                path: "../out.json".into(),
+            }]),
+            Err(EvidenceArchiveError::InvalidPath(_))
+        ));
         let directory = fixture();
         let path = directory.join("empty-entry.raw.gz");
         let mut with_empty = entries();
