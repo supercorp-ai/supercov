@@ -456,6 +456,10 @@ mod tests {
         assert!(tampered(&|metadata| metadata.manifest.points.clear()).is_none());
         assert!(tampered(&|metadata| metadata.source_files.reverse()).is_none());
         assert!(tampered(&|_| {}).is_some());
+        // Nor is one whose built artifact has changed since.
+        fs::write(target.join("debug/test-bin"), b"rebuilt").unwrap();
+        assert!(tampered(&|_| {}).is_none());
+        fs::write(target.join("debug/test-bin"), b"binary").unwrap();
         // A record that is no JSON is no cache, and a source that cannot be
         // read is not cached at all.
         fs::write(workspace.join(CACHE_FILE), "{").unwrap();
