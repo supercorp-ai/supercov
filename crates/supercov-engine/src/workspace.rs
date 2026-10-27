@@ -2474,10 +2474,14 @@ mod tests {
             fs::create_dir_all(root.join("venv")).unwrap();
             fs::write(root.join("venv/pyvenv.cfg"), "").unwrap();
         };
-        let dependencies = |root: &Path| {
-            fs::create_dir_all(root.join("pkg/node_modules/dep")).unwrap();
+        // One entry a level, so the order a listing gives them in is one.
+        let tools = |root: &Path| {
             fs::create_dir_all(root.join("pkg/node_modules/.bin")).unwrap();
             fs::write(root.join("pkg/node_modules/.bin/tool"), "").unwrap();
+        };
+        let package = |root: &Path| {
+            fs::create_dir_all(root.join("pkg/node_modules/dep")).unwrap();
+            fs::write(root.join("pkg/node_modules/dep/index.js"), "").unwrap();
         };
         // A nested `node_modules` that can be neither cloned nor hard-linked.
         let unlinkable = "directory-clone,fs.hard_link";
@@ -2493,15 +2497,16 @@ mod tests {
             (&environment, "fs.symlink".to_owned()),
             // The root and `pkg` make two directories and listings first, and
             // the hard links tried list `node_modules` and its `.bin`.
-            (&dependencies, format!("{unlinkable},fs.create_dir_all@3")),
-            (&dependencies, format!("{unlinkable},fs.read_dir@5")),
-            (&dependencies, format!("{unlinkable},fs.create_dir_all@4")),
-            (&dependencies, format!("{unlinkable},fs.read_dir@6")),
-            (&dependencies, format!("{unlinkable},fs.symlink")),
+            (&tools, format!("{unlinkable},fs.create_dir_all@3")),
+            (&tools, format!("{unlinkable},fs.read_dir@5")),
+            (&tools, format!("{unlinkable},fs.create_dir_all@4")),
+            (&tools, format!("{unlinkable},fs.read_dir@6")),
+            (&package, format!("{unlinkable},fs.symlink")),
         ] {
             assert!(copied(entries, &fault).is_err(), "{fault}");
         }
-        assert!(copied(&dependencies, unlinkable).is_ok());
+        assert!(copied(&tools, unlinkable).is_ok());
+        assert!(copied(&package, unlinkable).is_ok());
     }
 
     /// Making a project's container refuses each step that fails: the store,
