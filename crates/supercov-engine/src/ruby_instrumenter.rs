@@ -527,6 +527,10 @@ fn probe_keys_in(text: &str) -> Vec<u64> {
     keys
 }
 
+/// What Prism gives a `case`'s conditions, and a `case ... in`'s.
+const WHEN: &str = "a case's conditions are whens";
+const IN: &str = "a case-in's conditions are ins";
+
 /// Every id a probe target names, so implications keyed by any of them can
 /// be found when the probe is dropped.
 fn target_ids(target: &ProbeTarget) -> Vec<String> {
@@ -1805,9 +1809,7 @@ impl<'a> Collector<'a> {
         let mut clauses = Vec::new();
         let mut clause_ids = Vec::new();
         for (index, condition) in node.conditions().iter().enumerate() {
-            let when = condition
-                .as_when_node()
-                .expect("a case's conditions are its whens");
+            let when = condition.as_when_node().expect(WHEN);
             let Some(id) = self.branch(
                 when.location().start_offset(),
                 when.location().end_offset(),
@@ -1836,14 +1838,11 @@ impl<'a> Collector<'a> {
             // its own after the last condition.
             let (offset, before) = match when.then_keyword_loc() {
                 Some(then) => (then.end_offset(), " "),
-                None => (
-                    when.conditions()
-                        .iter()
-                        .last()
-                        .map(|condition| condition.location().end_offset())
-                        .unwrap_or_else(|| when.location().end_offset()),
-                    " then ",
-                ),
+                None => {
+                    let last = when.conditions().iter().last();
+                    let last = last.expect("a when has a condition");
+                    (last.location().end_offset(), " then ")
+                }
             };
             self.claim_line_at(offset);
             self.body_proves(&when.statements(), proven, offset, before, "");
@@ -2003,9 +2002,7 @@ impl<'a> Collector<'a> {
         let mut clauses = Vec::new();
         let mut clause_ids = Vec::new();
         for (index, condition) in node.conditions().iter().enumerate() {
-            let in_node = condition
-                .as_in_node()
-                .expect("a pattern match's conditions are its ins");
+            let in_node = condition.as_in_node().expect(IN);
             let Some(id) = self.branch(
                 in_node.location().start_offset(),
                 in_node.location().end_offset(),
@@ -2495,28 +2492,20 @@ impl<'a> Collector<'a> {
             return false;
         }
         if let Some(case_node) = node.as_case_node() {
-            return case_node
-                .conditions()
-                .iter()
-                .any(|condition| match condition.as_when_node() {
-                    Some(when_node) => self.arm_jump_exposed(when_node.statements()),
-                    None => false,
-                })
-                || case_node
-                    .else_clause()
-                    .is_some_and(|else_node| self.arm_jump_exposed(else_node.statements()));
+            return case_node.conditions().iter().any(|condition| {
+                let when_node = condition.as_when_node().expect(WHEN);
+                self.arm_jump_exposed(when_node.statements())
+            }) || case_node
+                .else_clause()
+                .is_some_and(|else_node| self.arm_jump_exposed(else_node.statements()));
         }
         if let Some(case_node) = node.as_case_match_node() {
-            return case_node
-                .conditions()
-                .iter()
-                .any(|condition| match condition.as_in_node() {
-                    Some(in_node) => self.arm_jump_exposed(in_node.statements()),
-                    None => false,
-                })
-                || case_node
-                    .else_clause()
-                    .is_some_and(|else_node| self.arm_jump_exposed(else_node.statements()));
+            return case_node.conditions().iter().any(|condition| {
+                let in_node = condition.as_in_node().expect(IN);
+                self.arm_jump_exposed(in_node.statements())
+            }) || case_node
+                .else_clause()
+                .is_some_and(|else_node| self.arm_jump_exposed(else_node.statements()));
         }
         if let Some(parentheses) = node.as_parentheses_node() {
             return match parentheses.body() {
@@ -2574,20 +2563,28 @@ impl<'a> Collector<'a> {
             return Some(targets);
         }
         if let Some(case_node) = node.as_case_node() {
-            let mut targets = Vec::new();
-            for condition in case_node.conditions().iter() {
-                let when_node = condition.as_when_node()?;
-                targets.extend(self.arm_targets(when_node.statements())?);
-            }
+            let mut targets = case_node
+                .conditions()
+                .iter()
+                .map(|condition| {
+                    self.arm_targets(condition.as_when_node().expect(WHEN).statements())
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
             targets.extend(self.arm_targets(case_node.else_clause()?.statements())?);
             return Some(targets);
         }
         if let Some(case_node) = node.as_case_match_node() {
-            let mut targets = Vec::new();
-            for condition in case_node.conditions().iter() {
-                let in_node = condition.as_in_node()?;
-                targets.extend(self.arm_targets(in_node.statements())?);
-            }
+            let mut targets = case_node
+                .conditions()
+                .iter()
+                .map(|condition| self.arm_targets(condition.as_in_node().expect(IN).statements()))
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
             targets.extend(self.arm_targets(case_node.else_clause()?.statements())?);
             return Some(targets);
         }
@@ -3954,6 +3951,67 @@ end
             obligations.manifest.unmeasured
         );
         assert!(!obligations.plan.probe_obligations.is_empty());
+    }
+
+    /// A body whose last statement can jump completes through one of that
+    /// statement's arms: each arm is probed, and where an arm is missing or
+    /// empty the body's completion cannot be observed and is declared so.
+    #[test]
+    fn a_body_ending_in_a_jump_is_observed_through_every_arm_or_declared() {
+        for (last, observed) in [
+            ("if c\n return 1\nelsif d\n return 2\nelse\n 3\nend", true),
+            ("if c\n return 1\nend", false),
+            ("if c\nelse\n return 1\nend", false),
+            ("if c\n return 1\nelse\nend", false),
+            ("if c\n return 1\nelsif d\n return 2\nend", false),
+            ("unless c\n return 1\nelse\n 2\nend", true),
+            ("unless c\n return 1\nend", false),
+            ("unless c\nelse\n return 1\nend", false),
+            ("unless c\n return 1\nelse\nend", false),
+            (
+                "case c\nwhen 1 then return 1\nwhen 2 then 2\nelse 3\nend",
+                true,
+            ),
+            ("case c\nwhen 1 then return 1\nend", false),
+            ("case c\nwhen 1\nelse\n return 2\nend", false),
+            ("case c\nin 1 then return 1\nin 2 then 2\nelse 3\nend", true),
+            ("case c\nin 1 then return 1\nend", false),
+            ("case c\nin 1\nelse\n return 2\nend", false),
+            (
+                "begin\n 1\nrescue A\n return 2\nrescue B\n 3\nelse\n return 4\nend",
+                true,
+            ),
+            ("begin\n return 1\nrescue\n 2\nend", true),
+            ("begin\n 1\nrescue\n return 2\nelse\nend", false),
+            ("begin\nrescue\n return 2\nend", false),
+            ("begin\n return 1\nrescue\nend", false),
+            ("(return 1)", true),
+        ] {
+            let source = format!("def m(c, d)\n  begin\n{last}\n  rescue\n    nil\n  end\nend\n");
+            let (obligations, _) = probed(&source);
+            let declared = obligations
+                .manifest
+                .unmeasured
+                .iter()
+                .any(|id| id.ends_with(":success"));
+            assert_eq!(!declared, observed, "{last}");
+        }
+    }
+
+    /// Ruby's key for `&.` runs to the closing parenthesis, or the last
+    /// argument without one, or the message; a call by `.()` has none of
+    /// them, and its key is the whole call.
+    #[test]
+    fn a_safe_navigation_key_ends_where_ruby_ends_it() {
+        let (obligations, _) = probed("x&.foo(1)\nx&.foo 1, 2\nx&.size\nx&.()\n");
+        let ends = obligations
+            .plan
+            .branches
+            .iter()
+            .filter(|branch| branch.key.group == "&." && branch.key.branch == "then")
+            .map(|branch| branch.key.unshifted.end)
+            .collect::<Vec<_>>();
+        assert_eq!(ends, [[1, 9], [2, 11], [3, 7], [4, 5]]);
     }
 
     #[test]
