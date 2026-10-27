@@ -1592,6 +1592,43 @@ fn main() {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// The settlement and region readers, once for every file operation
+    /// they make with that one failing: each ends with an error or without,
+    /// never a panic, and the read no fault reaches is made.
+    #[test]
+    fn a_region_read_whose_file_operation_fails_ends_cleanly() {
+        let mut probes = layout(&["rs:point:a"], &[]);
+        probes.cfgs.push(crate::rust_instrumenter::RustCfgGate {
+            file: "src/lib.rs".into(),
+            predicate: "feature = \"x\"".into(),
+            line: 1,
+            end_line: 2,
+            obligations: vec!["rs:point:a".into()],
+        });
+        let fixture = || {
+            let root = temporary_directory("region-faults");
+            let mut region = empty_region(&probes);
+            region[128] = 2;
+            fs::create_dir(root.join("test-1")).unwrap();
+            fs::write(root.join(format!("test-1/{TOKEN}-1.region")), &region).unwrap();
+            fs::write(root.join(format!("{TOKEN}-2.region")), &region).unwrap();
+            root
+        };
+        let settled = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |root| read_rust_cfg_settlement(root, TOKEN, &probes).map(|_| ()),
+            |root| fs::remove_dir_all(root).unwrap(),
+        );
+        let read = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |root| read_rust_region_directory(root, TOKEN, &probes).map(|_| ()),
+            |root| fs::remove_dir_all(root).unwrap(),
+        );
+        assert!(settled > 2 && read > 1, "{settled} {read}");
+    }
+
     #[test]
     fn a_region_directory_that_cannot_be_read_is_an_error() {
         let probes = layout(&["rs:point:a"], &[]);
