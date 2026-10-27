@@ -3334,7 +3334,11 @@ fn the_html_report_says_what_it_could_not_embed() {
         .supercov(&["report", "--no-open", "--output", "whole.html"])
         .succeeds();
     let data = report_data(&whole.read("whole.html"));
-    assert_eq!(data["runs"][0]["fileDetails"], serde_json::json!({}), "{data}");
+    assert_eq!(
+        data["runs"][0]["fileDetails"],
+        serde_json::json!({}),
+        "{data}"
+    );
 
     let empty = Project::empty("html-nothing");
     empty.git(&["init", "-q"]);

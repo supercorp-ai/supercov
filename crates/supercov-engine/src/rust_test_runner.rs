@@ -2125,13 +2125,16 @@ fn note_unrun_workers(
         .into_iter()
         .filter(|file| !ran.contains(file) && project.source_files.contains(file))
         .collect::<BTreeSet<_>>();
+    // A reused build's manifest carries the notes of the run that built it;
+    // which Workers ran, and why one did not, are this run's to say.
+    project.manifest.limitations.retain(|limitation| {
+        !limitation
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id.starts_with("rust-worker-not-run#"))
+    });
     for file in &unrun {
         let id = format!("rust-worker-not-run#{file}");
-        if project.manifest.limitations.iter().any(|limitation| {
-            limitation.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())
-        }) {
-            continue;
-        }
         // The whole file: the report takes it out of the denominator and
         // says why, rather than counting its lines as gaps.
         project.manifest.limitations.push(serde_json::json!({
@@ -3485,6 +3488,36 @@ mod tests {
             .is_empty()
         );
         assert_eq!(ran, empty);
+        // A later run on the same build says its own: the first run's note
+        // on a Worker gives way to this one's, or to none where it ran.
+        let mut reused = project.clone();
+        note_unrun_workers(
+            &mut reused,
+            &BTreeSet::from(["plane".to_owned()]),
+            true,
+            &[],
+        );
+        let notes = reused
+            .manifest
+            .limitations
+            .iter()
+            .filter(|limitation| limitation["wholeFile"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("wrangler dev --remote"),
+            "{notes:?}"
+        );
+        note_unrun_workers(
+            &mut reused,
+            &BTreeSet::from(["plane".to_owned(), "runners".to_owned()]),
+            false,
+            &[],
+        );
+        assert_eq!(reused, empty);
         // Tests that did start `wrangler dev` are named, once each, with why
         // a configuration was not measured.
         let mut started = empty;
