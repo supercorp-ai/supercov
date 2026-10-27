@@ -3359,6 +3359,16 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
     project.write("src/e.js", "import { sinkNamed } from \"./db.js\";\nexport function takeE1(req, db) {\n  return sinkNamed(db, req.a);\n}\nexport function takeE2(req, db) {\n  return sinkNamed(db, req.b);\n}\nexport function inner(db) {\n  return sinkNamed(db, 1);\n}\n");
     project.write("src/f.js", "import { sinkNamed } from \"./db.js\";\nexport function takeF(req, db) {\n  return sinkNamed(db, req.f);\n}\n");
     project.write("src/g.js", "import { plain as sinkNamed } from \"./db.js\";\nexport function takeG(req, db) {\n  return sinkNamed(req.g);\n}\n");
+    // A default import of a module with no default export names the
+    // function called as it is imported; a module of no functions has no
+    // callee.
+    project.write(
+        "src/nodefault.js",
+        "export function sinkLocal(db, v) {\n  return db.query(\"w\" + v);\n}\n",
+    );
+    project.write("src/i.js", "import sinkLocal from \"./nodefault.js\";\nexport function takeI(req, db) {\n  return sinkLocal(db, req.i);\n}\n");
+    project.write("src/consts.js", "export const limit = 1;\n");
+    project.write("src/j.js", "import { limit } from \"./consts.js\";\nexport function takeJ(req) {\n  return req.j + limit;\n}\n");
     project.git(&["init", "-q"]);
     let (base, _) = gateway(MODEL, answer_by_name);
     let report = project
@@ -3374,7 +3384,7 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
     // is no sink, and a caller reading no outside data, make no path.
     assert_eq!(
         paths,
-        "6\n  0.90  injection_sink  src/a.js:3 takeA -> src/db.js:1 sinkDefault\n  0.90  injection_sink  src/b.js:3 takeB -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/c.js:3 takeC -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:3 takeE1 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:6 takeE2 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/f.js:3 takeF -> src/db.js:4 sinkNamed",
+        "7\n  0.90  injection_sink  src/a.js:3 takeA -> src/db.js:1 sinkDefault\n  0.90  injection_sink  src/b.js:3 takeB -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/c.js:3 takeC -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:3 takeE1 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/e.js:6 takeE2 -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/f.js:3 takeF -> src/db.js:4 sinkNamed\n  0.90  injection_sink  src/i.js:3 takeI -> src/nodefault.js:1 sinkLocal",
         "{report}"
     );
     // Past ten, flagged files and paths are counted rather than listed.
@@ -3387,8 +3397,8 @@ fn a_cross_file_path_is_followed_only_into_the_function_an_import_names() {
     contains_all(
         &many,
         &[
-            "  ... and 9 more\n\nCross-file paths confirmed: 17\n",
-            "src/h2.js:3 takeH2 -> src/db.js:4 sinkNamed\n  ... and 7 more\n",
+            "  ... and 13 more\n\nCross-file paths confirmed: 18\n",
+            "src/h2.js:3 takeH2 -> src/db.js:4 sinkNamed\n  ... and 8 more\n",
         ],
     );
 }

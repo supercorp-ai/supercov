@@ -2465,14 +2465,15 @@ fn confirm_paths(
             let Some(callee_answer) = by_path.get(target.as_str()) else {
                 continue;
             };
-            for (i, caller) in structure
+            // A file with labels has a function for each.
+            let callers = structure
                 .functions
                 .iter()
                 .enumerate()
-                .take(answer.labels.len())
-            {
+                .take(answer.labels.len());
+            callers.for_each(|(i, caller)| {
                 if answer.labels[i].takes_outside < cut {
-                    continue;
+                    return;
                 }
                 let caller_body = body(source, caller);
                 for (j, callee) in callee_structure
@@ -2541,7 +2542,7 @@ fn confirm_paths(
                         None => unasked.push(too_large_to_ask(ends)),
                     }
                 }
-            }
+            });
         }
     }
     let (paths, usage, reused) = confirm_pending(root, key, refresh, pending, candidates_found);
