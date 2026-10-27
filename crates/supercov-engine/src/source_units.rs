@@ -1873,6 +1873,27 @@ fn kotlin(source: &str) -> Option<Outline> {
 
 #[cfg(test)]
 mod tests {
+    /// An empty file of each language holds no unit but itself, one that does not
+    /// parse is no code at all, and nothing is said to be only added to it.
+    #[test]
+    fn an_empty_or_unparsable_file_of_each_language_holds_nothing() {
+        for (path, broken) in [
+            ("a.ts", "export const = ;"),
+            ("a.py", "def (:\n"),
+            ("a.rs", "fn {"),
+            ("a.rb", "def ("),
+            ("a.go", "package a\nfunc {"),
+            ("a.java", "class {"),
+            ("a.kt", "fun {"),
+        ] {
+            let empty = super::code(path, "").unwrap_or_else(|| panic!("{path}"));
+            assert!(empty.units.len() <= 1, "{path}: {}", empty.units.len());
+            assert!(super::code(path, broken).is_none(), "{path}");
+            assert_eq!(super::only_added(&empty, path, broken), None, "{path}");
+        }
+        assert!(super::code("notes.txt", "").is_none());
+    }
+
     /// `tests affected` compares these digests across runs. If this fails, a
     /// change made declaration digests different, so every stored run will
     /// read every declaration as changed until it is rerun: make sure that is
