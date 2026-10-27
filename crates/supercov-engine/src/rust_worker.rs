@@ -1694,12 +1694,12 @@ pub fn poll_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
     // with them.
     remove_wrapped(&windows.with_extension("started"));
     let parts = others.map(OtherWorkers::finish).unwrap_or_default();
-    for part in std::iter::once(part).chain(parts) {
+    std::iter::once(part).chain(parts).for_each(|part| {
         if fs::symlink_metadata(&part).is_ok() {
             let whole = part.with_extension("");
             let _ = fs::rename(&part, &whole);
         }
-    }
+    });
     0
 }
 
@@ -2519,11 +2519,38 @@ mod tests {
         assert!(servers.is_empty() && said.is_empty());
         fs::create_dir_all(root.join("worker")).unwrap();
         fs::write(root.join("worker/Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
-        fs::write(root.join("worker/wrangler.toml"), "[build]\ncommand = \"worker-build\"\n").unwrap();
+        fs::write(
+            root.join("worker/wrangler.toml"),
+            "[build]\ncommand = \"worker-build\"\n",
+        )
+        .unwrap();
         let servers = RustWorkerServer::prepare(&root, &root, "run", &[], &mut said).unwrap();
         assert!(servers.is_empty());
         let said = String::from_utf8(said).unwrap();
-        assert!(said.contains("names no `main`; its Worker is not measured"), "{said}");
+        assert!(
+            said.contains("names no `main`; its Worker is not measured"),
+            "{said}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// No arguments start no `wrangler dev` and name no configuration; a
+    /// note naming nothing says nothing and removes nothing; a `wrangler`
+    /// that cannot be started is said so, with the shell's code.
+    #[test]
+    fn nothing_given_is_nothing_started_noted_or_removed() {
+        assert!(!starts_dev(&[]));
+        let root = temporary("nothing-noted");
+        assert!(started_configs(&[], &root).is_empty());
+        fs::write(root.join("0.started"), "{}").unwrap();
+        assert!(started_worker_configs(&root).is_empty());
+        remove_wrapped(&root.join("0.started"));
+        assert!(root.join("0.started").exists());
+        #[cfg(unix)]
+        assert_eq!(
+            exec_wrangler(std::ffi::OsStr::new("/nonexistent/wrangler"), &[], &[]),
+            126
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
