@@ -128,6 +128,7 @@ a_python_source_that_does_not_parse_is_named	0.7	0.3
 a_python_test_whose_process_ends_during_it_is_failed_and_credited	0.5	0.3
 a_quality_diff_reads_in_either_direction_and_names_its_mistakes	0.1	0.1
 a_quality_report_names_the_sources_it_cannot_embed	0.1	0.1
+a_quality_target_that_cannot_be_read_is_refused	2.5	3.0
 a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure	0.7	0.6
 a_record_pattern_is_a_binding_too	2.4	3.2
 a_report_the_command_writes_names_the_project_and_not_the_copy	2.0	1.0

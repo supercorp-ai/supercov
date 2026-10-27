@@ -135,6 +135,16 @@ fn quality_assesses_once_and_reads_back_without_the_network() {
     );
     let left = project.supercov(&["quality", "snapshots"]).succeeds();
     assert!(left.contains(&second) && !left.contains(&first), "{left}");
+    // A snapshot that cannot be removed is named, and stays.
+    let stuck = project
+        .supercov_with(
+            &["quality", "clean"],
+            &[("SUPERCOV_TEST_FAULT", "fs.remove_dir_all@1")],
+        )
+        .exits(2);
+    assert!(stuck.contains(&second), "{stuck}");
+    let still = project.supercov(&["quality", "snapshots"]).succeeds();
+    assert!(still.contains(&second), "{still}");
     project.supercov(&["quality", "clean"]).succeeds();
     let none = project.supercov(&["quality", "snapshots"]).succeeds();
     assert!(none.contains("No quality snapshots here yet"), "{none}");
@@ -150,6 +160,26 @@ fn assessing_needs_a_key_and_reading_does_not() {
         "{}",
         refused.stderr()
     );
+    // A patch review asks for the key, and a gateway it may send it to,
+    // before it reads the change; an assessment, before its first request.
+    let patch = project.supercov(&["quality", "patch"]);
+    assert_ne!(patch.code(), 0);
+    assert!(
+        patch.stderr().contains("TYPESAFE_API_KEY"),
+        "{}",
+        patch.stderr()
+    );
+    let plain_http = [
+        ("TYPESAFE_API_KEY", "sk-unused"),
+        ("TYPESAFE_BASE_URL", "http://gateway.example/api"),
+    ];
+    for args in [&["quality", "patch"][..], &["quality", "src/cart.js"][..]] {
+        let refused = project.supercov_with(args, &plain_http).exits(2);
+        assert!(
+            refused.contains("TYPESAFE_BASE_URL must be an https:// URL"),
+            "{args:?}: {refused}"
+        );
+    }
     let run = project.measure(&[]);
     let assess = project.supercov(&["runs", &run, "assertions", "assess"]);
     assert_ne!(assess.code(), 0);
@@ -2028,6 +2058,32 @@ fn what_quality_cannot_read_or_was_asked_twice_is_named() {
         )
         .exits(2);
     assert!(unreachable.contains("[::1]"), "{unreachable}");
+}
+
+/// A target quality cannot look at is refused before anything is asked:
+/// the path itself, where it leads, each directory on the way, and the
+/// source read.
+#[test]
+fn a_quality_target_that_cannot_be_read_is_refused() {
+    let project = Project::cart("quality-unreadable");
+    let (base, seen) = gateway(MODEL, answer_no);
+    for fault in [
+        "fs.symlink_metadata@1",
+        "fs.canonicalize@1",
+        "fs.symlink_metadata@2",
+        "fs.open@1",
+    ] {
+        let mut env = through(&base).to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", fault));
+        let refused = project
+            .supercov_with(&["quality", "src/cart.js"], &env)
+            .exits(2);
+        assert!(
+            refused.contains("injected fault at fs"),
+            "{fault}: {refused}"
+        );
+    }
+    assert_eq!(seen.lock().unwrap().len(), 0, "nothing is sent");
 }
 
 #[test]
