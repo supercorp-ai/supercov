@@ -10419,6 +10419,10 @@ mod tests {
                 "const _a = 1, __b = 2, a$1 = 3;\nexport function f(_) { return _ ? _a : __b + a$1; }\n",
             ),
             (
+                "src/nonnull.ts",
+                "declare const a: { b?: { c: number } } | undefined;\nexport const v = a?.b!.c;\n",
+            ),
+            (
                 "src/style.js",
                 "import * as stylex from '@stylexjs/stylex';\nexport const s = stylex.create({ a: { color: 'red' } });\nexport const k = stylex.keyframes({ from: { opacity: 0 } });\nexport const p = (x) => stylex.props(x);\n",
             ),
