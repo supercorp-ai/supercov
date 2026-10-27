@@ -968,50 +968,52 @@ fn build_test_artifacts(
     let canonical_target = fs::canonicalize(&project.target_directory)
         .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
     let mut artifacts = Vec::new();
-    for line in output
+    // Cargo ends its messages with `build-finished`, so there is a line.
+    output
         .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-    {
-        let message: CargoMessage = serde_json::from_slice(line)
-            .map_err(|error| RustTestRunnerError::CargoJson(error.to_string()))?;
-        if message.reason != "compiler-artifact"
-            || !message.profile.as_ref().is_some_and(|profile| profile.test)
-        {
-            continue;
-        }
-        let (Some(executable), Some(target)) = (message.executable, message.target) else {
-            continue;
-        };
-        let executable = fs::canonicalize(&executable)
-            .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-        if !executable.starts_with(&canonical_target)
-            || !fs::metadata(&executable).is_ok_and(|metadata| metadata.is_file())
-        {
-            return Err(RustTestRunnerError::UnsafeArtifact(
-                executable.display().to_string(),
-            ));
-        }
-        let source = fs::canonicalize(target.src_path)
-            .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-        let package_directory = message
-            .manifest_path
-            .as_deref()
-            .and_then(Path::parent)
-            .unwrap_or(&project.workspace_root)
-            .to_path_buf();
-        artifacts.push(TestArtifact {
-            executable,
-            package_directory,
-            name: target.name,
-            kind: if target.kind.iter().any(|kind| kind == "test") {
-                "integration".into()
-            } else {
-                "unit".into()
-            },
-            source: relative_source(&project.workspace_root, &source)?,
-        });
-    }
+        .try_for_each(|line| -> Result<(), RustTestRunnerError> {
+            let message: CargoMessage = serde_json::from_slice(line)
+                .map_err(|error| RustTestRunnerError::CargoJson(error.to_string()))?;
+            if message.reason != "compiler-artifact"
+                || !message.profile.as_ref().is_some_and(|profile| profile.test)
+            {
+                return Ok(());
+            }
+            let (Some(executable), Some(target)) = (message.executable, message.target) else {
+                return Ok(());
+            };
+            let executable = fs::canonicalize(&executable)
+                .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+            if !executable.starts_with(&canonical_target)
+                || !fs::metadata(&executable).is_ok_and(|metadata| metadata.is_file())
+            {
+                return Err(RustTestRunnerError::UnsafeArtifact(
+                    executable.display().to_string(),
+                ));
+            }
+            let source = fs::canonicalize(target.src_path)
+                .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+            let package_directory = message
+                .manifest_path
+                .as_deref()
+                .and_then(Path::parent)
+                .unwrap_or(&project.workspace_root)
+                .to_path_buf();
+            artifacts.push(TestArtifact {
+                executable,
+                package_directory,
+                name: target.name,
+                kind: if target.kind.iter().any(|kind| kind == "test") {
+                    "integration".into()
+                } else {
+                    "unit".into()
+                },
+                source: relative_source(&project.workspace_root, &source)?,
+            });
+            Ok(())
+        })?;
     artifacts.sort_by(|left, right| left.executable.cmp(&right.executable));
     artifacts.dedup_by(|left, right| left.executable == right.executable);
     if artifacts.is_empty() {
