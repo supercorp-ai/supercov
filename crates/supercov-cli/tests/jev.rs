@@ -5457,3 +5457,41 @@ fn nothing_in_scope_is_assessed_and_a_line_too_long_to_ask_is_named() {
             .contains("error  src/blob.js  (file is over the request budget and line 1 alone is too; it is probably minified or embeds data)")
     );
 }
+
+/// An assessment of a run's assertions refuses, saying why, when it cannot
+/// list or read the runs, is named a run there is not, or cannot keep the
+/// answers it was given: the directory, the file and its move into place,
+/// at each of the two saves.
+#[test]
+fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
+    for (fault, said) in [
+        ("fs.read_dir@1", "injected fault at fs"),
+        ("fs.open@1", "no local coverage runs"),
+        ("fs.create_dir_all@1", "injected fault at fs"),
+        ("fs.write@1", "injected fault at fs"),
+        ("fs.rename@1", "injected fault at fs"),
+        ("fs.create_dir_all@2", "injected fault at fs"),
+        ("fs.write@2", "injected fault at fs"),
+        ("fs.rename@2", "injected fault at fs"),
+    ] {
+        let project = Project::cart("assess-keeps");
+        let (base, _) = gateway(MODEL, answer_no);
+        let run = project.measure(&[]);
+        let mut env = through(&base).to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", fault));
+        let refused = project
+            .supercov_with(&["runs", &run, "assertions", "assess"], &env)
+            .exits(2);
+        assert!(refused.contains(said), "{fault}: {refused}");
+    }
+    let project = Project::cart("assess-no-run");
+    let (base, _) = gateway(MODEL, answer_no);
+    project.measure(&[]);
+    let unknown = project
+        .supercov_with(
+            &["runs", "run_0000000000000000", "assertions", "assess"],
+            &through(&base),
+        )
+        .exits(2);
+    assert!(unknown.contains("run_0000000000000000"), "{unknown}");
+}

@@ -208,6 +208,7 @@ agent_json::tests::success_enforces_the_agent_context_budget	0.0	0.0
 agent_json::tests::success_is_byte_identical_to_the_frozen_golden	0.0	0.0
 agent_query_eval	4.5	2.9
 an_answer_cut_off_part_way_is_named	0.0	0.0
+an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so	8.0	10.0
 an_assessed_run_says_which_affected_tests_were_never_judged_against_the_change	0.5	0.8
 an_assessment_is_saved_reused_and_drives_tests_affected	1.4	1.6
 an_assessment_on_a_terminal_shows_its_progress	0.5	0.5
