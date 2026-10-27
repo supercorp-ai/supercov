@@ -12787,6 +12787,45 @@ fn a_run_whose_own_step_fails_says_so() {
             ],
         ),
     ];
+    runs.push((
+        "own-step-rs",
+        small_crate,
+        vec!["--", "cargo", "test", "-q"],
+        &[
+            "fs.canonicalize@1",
+            "fs.read_dir@2",
+            "fs.file_type@1",
+            "fs.create_dir_all@9",
+            "fs.rename@6",
+            "fs.open@10",
+            "spawn",
+        ],
+    ));
+    let go = go();
+    if let Some(go) = go {
+        runs.push((
+            "own-step-go",
+            go_project,
+            vec!["--", go, "test", "./..."],
+            &[
+                "fs.canonicalize@1",
+                "fs.create_dir_all@8",
+                "fs.create_dir_all@9",
+                "fs.create_dir_all@10",
+                "fs.create_dir_all@11",
+                "fs.create_dir_all@12",
+                "fs.write@2",
+                "fs.write@3",
+                "fs.write@4",
+                "fs.write@5",
+                "fs.write@6",
+                "fs.write@7",
+                "fs.read_to_string@7",
+                "fs.read_to_string@8",
+                "spawn",
+            ],
+        ));
+    }
     #[cfg(unix)]
     let ruby = ruby();
     #[cfg(unix)]
