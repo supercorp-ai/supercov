@@ -13664,6 +13664,36 @@ fn a_run_whose_program_cannot_start_anywhere_says_so_and_recovers() {
     }
 }
 
+/// Two standalone doctests of one item, at lines 1 and 11: every word of
+/// either name is in the other's (`1)` in `11)`), so each is run alone by a
+/// filter and a skip of the other, and both are measured.
+#[test]
+fn standalone_doctests_named_alike_are_each_run_alone() {
+    let project = Project::empty("standalone-alike");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    );
+    let doctest = "/// ```standalone_crate\n/// assert_eq!(w::a(), 1);\n/// ```\n";
+    project.write(
+        "src/lib.rs",
+        &format!(
+            "{doctest}{}{doctest}pub fn a() -> u32 {{\n    1\n}}\n",
+            "///\n".repeat(7)
+        ),
+    );
+    project.write(".gitignore", "target/\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let ran = project.supercov(&["--", "cargo", "test", "-q"]);
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    assert!(
+        ran.stderr().contains("Rust coverage: 2 test(s)"),
+        "{}",
+        ran.stderr()
+    );
+}
+
 /// [`small_crate`] in edition 2024, whose doctests are merged into one
 /// harness that lists and runs them through Supercov.
 fn small_merged_crate(project: &Project) {
