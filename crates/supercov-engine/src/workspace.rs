@@ -16,8 +16,9 @@ use sha2::{Digest, Sha256};
 use crate::fault_fs::{self as fs, OpenOptions};
 use crate::lifecycle::{LifecycleError, ProjectLock, atomic_rename, remove_stored_tree_deferred};
 
-const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
-const WORKSPACE_MARKER_CONTENTS: &[u8] = b"Supercov instrumented workspace. Safe to delete.\n";
+pub(crate) const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
+pub(crate) const WORKSPACE_MARKER_CONTENTS: &[u8] =
+    b"Supercov instrumented workspace. Safe to delete.\n";
 const ROOT_EXCLUSIONS: &[&str] = &[
     ".cache",
     ".git",

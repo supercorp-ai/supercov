@@ -2036,6 +2036,18 @@ mod tests {
             assert_eq!(copied.unwrap(), 8);
             assert_eq!(fs::read_to_string(root.join(copy)).unwrap(), "evidence");
         }
+        // A clone that cannot be opened, synced or measured afterwards: the
+        // third to fifth of its file operations, after the source's metadata
+        // and the clone itself.
+        for nth in 3..=5 {
+            let failed = crate::fault::during(&format!("clone,fs@{nth}"), || {
+                copy_regular_file(&root.join("archive"), &root.join(format!("clone-{nth}")))
+            });
+            assert!(
+                matches!(failed, Err(LifecycleError::Io { .. })),
+                "{nth}: {failed:?}"
+            );
+        }
         assert!(matches!(
             file_sha256(&directory),
             Err(LifecycleError::UnsafePath(_))
@@ -3016,6 +3028,111 @@ mod tests {
             |root, (evidence, metadata)| publish_run(root, metadata, evidence).map(drop),
         );
         assert!(operations > 5, "{operations}");
+    }
+
+    /// What the file system will not let go of is an error, not skipped: an
+    /// idle copy whose lock is a directory, an idle copy in a directory that
+    /// may not change, and kept evidence in one.
+    #[cfg(unix)]
+    #[test]
+    fn removal_the_file_system_refuses_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let two_days_ago = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        let idle_lock = |root: &Path, directory: bool| {
+            let lock = root
+                .join(".supercov/locks")
+                .join(format!("{}.lock", copy_lock_name(2)));
+            fs::create_dir_all(lock.parent().unwrap()).unwrap();
+            if directory {
+                fs::create_dir(&lock).unwrap();
+            } else {
+                fs::write(&lock, "").unwrap();
+            }
+            std::fs::File::open(&lock)
+                .unwrap()
+                .set_modified(two_days_ago)
+                .unwrap();
+        };
+        let frozen = |directory: &Path, mode: u32| {
+            fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        // A lock that cannot be opened is not taken, and recovery says so.
+        let root = project();
+        idle_lock(&root, true);
+        assert!(matches!(
+            recover_abandoned_runs(&root, "now"),
+            Err(LifecycleError::Io { .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+        // An idle copy that cannot be moved out of its container.
+        let root = project();
+        idle_lock(&root, false);
+        let container = crate::workspace::workspace_container(&root);
+        fs::create_dir_all(&crate::workspace::copy_directories(&container, 2)[0]).unwrap();
+        // Supercov's own container, as a run marks it.
+        fs::write(
+            container.join(crate::workspace::WORKSPACE_MARKER),
+            crate::workspace::WORKSPACE_MARKER_CONTENTS,
+        )
+        .unwrap();
+        frozen(&container, 0o555);
+        let refused = recover_abandoned_runs(&root, "now");
+        frozen(&container, 0o755);
+        assert!(refused.is_err(), "{refused:?}");
+        fs::remove_dir_all(root).unwrap();
+        // Kept evidence that cannot be moved out of where it is kept.
+        let root = project();
+        let kept = root.join(FAILED_EVIDENCE);
+        fs::create_dir_all(kept.join("2026-01-01T00-00-00-000Z")).unwrap();
+        frozen(&kept, 0o555);
+        let refused = clean_storage(
+            &root,
+            CleanupOptions {
+                keep: 0,
+                dry_run: false,
+            },
+            "now",
+        );
+        frozen(&kept, 0o755);
+        assert!(refused.is_err(), "{refused:?}");
+        let _ = sweep_trash(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A frontend that hands publication a manifest naming a file outside
+    /// the project is refused, and nothing is published.
+    #[test]
+    fn a_publication_handed_an_invalid_manifest_is_refused() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let root = project();
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let inputs = crate::source_manifest::InputManifest {
+            schema_version: crate::source_manifest::MANIFEST_SCHEMA,
+            language: "javascript".into(),
+            files: [(
+                "../outside.js".to_owned(),
+                crate::source_manifest::FileFingerprint::of("x"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let refused = publish_archived_run(
+            &root,
+            &metadata,
+            &evidence,
+            Archived {
+                report: None,
+                inputs: Some(inputs),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("source manifest publication"),
+            "{refused}"
+        );
+        assert!(!root.join(".supercov/runs").join(id).exists());
+        let _ = sweep_trash(&root);
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A publication's staging that cannot be cleared -- left by an earlier
