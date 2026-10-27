@@ -963,6 +963,19 @@ mod tests {
 
     use super::*;
 
+    /// A path whose name is not UTF-8 is named, not read as some other.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::path::Path::new("/root");
+        let path = root.join(std::ffi::OsStr::from_bytes(b"\xff.js"));
+        assert!(matches!(
+            local_path(root, &path),
+            Err(IntegrityError::NonUtf8Path(named)) if root.join(&named) == path
+        ));
+    }
+
     static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn directory(label: &str) -> PathBuf {

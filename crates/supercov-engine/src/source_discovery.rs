@@ -1466,6 +1466,19 @@ mod tests {
 
     use super::*;
 
+    /// A path whose name is not UTF-8 is named, not read as some other.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::path::Path::new("/root");
+        let path = root.join(std::ffi::OsStr::from_bytes(b"\xff.js"));
+        assert!(matches!(
+            local_path(root, &path),
+            Err(SourceDiscoveryError::NonUtf8Path(named)) if named == path
+        ));
+    }
+
     /// A bundler's output is a script under an asset directory with an
     /// eight-character hash that has a digit or both cases.
     #[test]
