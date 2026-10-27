@@ -1074,7 +1074,6 @@ pub enum ReportError {
     InvalidEvent(String),
     InvalidServerRecord(String),
     InvalidArchive(String),
-    MissingManifest,
     InvalidJson {
         path: String,
         reason: String,
@@ -3266,11 +3265,15 @@ pub fn archive_request(
         return Err(error);
     }
     raw_results.extend(journal_results);
-    let manifest = entries
-        .iter()
-        .find(|entry| entry.path == "manifest.json")
-        .ok_or(ReportError::MissingManifest)
-        .and_then(parse_entry::<CoverageManifest>)?;
+    // A read archive holds its manifest, declaration and model, or it is
+    // refused as it is read.
+    let held = |path: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .expect("a read archive holds its manifest, declaration and model")
+    };
+    let manifest = parse_entry::<CoverageManifest>(held("manifest.json"))?;
 
     let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
@@ -3396,16 +3399,8 @@ pub fn archive_request(
             + execution.corrupt_records,
         corrupt_files: scoped.corrupt_files + background.corrupt_files + execution.corrupt_files,
     };
-    let mut frontend = entries
-        .iter()
-        .find(|entry| entry.path == "frontend.json")
-        .ok_or_else(|| ReportError::InvalidArchive("missing frontend.json".into()))
-        .and_then(parse_entry::<FrontendRunDeclaration>)?;
-    let persisted = entries
-        .iter()
-        .find(|entry| entry.path == "coverage-model.json")
-        .ok_or_else(|| ReportError::InvalidArchive("missing coverage-model.json".into()))
-        .and_then(parse_entry::<PersistedCoverageModel>)?;
+    let mut frontend = parse_entry::<FrontendRunDeclaration>(held("frontend.json"))?;
+    let persisted = parse_entry::<PersistedCoverageModel>(held("coverage-model.json"))?;
     let coverage_model =
         persisted
             .into_declaration()
