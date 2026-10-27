@@ -198,6 +198,22 @@ mod tests {
         ] {
             assert_eq!(possible_vectors(source, &["a", "b"]), None, "{source:?}");
         }
+        // Both conditions named, so the shape itself is read and refused at
+        // each place it can break.
+        for source in [
+            "a && b &&",
+            "a || b ||",
+            "a && && b",
+            "a || || b",
+            "!a && !",
+            "(a && b",
+            "(a || ) b",
+            "a && b)",
+            "a && ) b",
+            "&& a b",
+        ] {
+            assert_eq!(possible_vectors(source, &["a", "b"]), None, "{source:?}");
+        }
     }
 
     fn text(vector: &McdcVector) -> String {
