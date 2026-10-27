@@ -2731,6 +2731,12 @@ fn cleaning_an_assessment_lane_preserves_the_other_lane() {
     clean(&temp.0, "security", 0, false).unwrap();
     assert!(store::list(&temp.0, "security").unwrap().is_empty());
     assert_eq!(store::list(&temp.0, "quality").unwrap().len(), 1);
+    // Snapshots that cannot be listed cannot be cleaned.
+    let snapshots = store::snapshots(&temp.0, "security");
+    fs::remove_dir_all(&snapshots).unwrap();
+    fs::write(&snapshots, "not a directory").unwrap();
+    let refused = clean(&temp.0, "security", 0, true).unwrap_err();
+    assert!(refused.starts_with("cannot read security snapshots:"), "{refused}");
 }
 
 #[test]
@@ -3408,6 +3414,7 @@ fn each_option_is_read_and_each_mistake_named() {
     ));
     for (text, said) in [
         ("patch --staged --unstaged", "pick one change range"),
+        ("patch --unstaged --cached", "pick one change range"),
         ("patch --annotate", "--annotate needs a format"),
         ("patch --annotate gitlab", "--annotate does not know gitlab"),
         ("patch --limit", "--limit needs a number"),
