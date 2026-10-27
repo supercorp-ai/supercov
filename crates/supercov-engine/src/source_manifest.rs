@@ -1788,6 +1788,11 @@ mod tests {
                 "src/config.js",
                 file_change(Some(&js_before), Some(&js_after), Some(&[])).unwrap(),
             ),
+            // A class that did not exist names nothing a test could have read.
+            (
+                "src/app/Fresh.java",
+                file_change(None, Some(&after), Some(&[])).unwrap(),
+            ),
         ]);
         let named = named_by_tests(&changes);
         assert_eq!(
@@ -1795,6 +1800,7 @@ mod tests {
             Some(&BTreeSet::from(["Converter".to_owned()]))
         );
         assert!(!named.contains_key("src/config.js"));
+        assert!(!named.contains_key("src/app/Fresh.java"));
         assert!(names_word("assertEquals(Converter.CLASS, x)", "Converter"));
         assert!(!names_word("ConverterTests", "Converter"));
     }
