@@ -718,16 +718,19 @@ impl Default for SupervisionOptions {
 
 impl SupervisionOptions {
     pub fn from_environment() -> Result<Self, SupervisionError> {
+        Self::from_variables(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_environment`], with the variables `variable` gives.
+    fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Result<Self, SupervisionError> {
         Ok(Self {
             diagnostic_interval: positive_milliseconds(
-                std::env::var("SUPERCOV_DIAGNOSTIC_INTERVAL_MS")
-                    .ok()
-                    .as_deref(),
+                variable("SUPERCOV_DIAGNOSTIC_INTERVAL_MS").as_deref(),
                 "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
             )?
             .unwrap_or_else(|| Duration::from_millis(DEFAULT_DIAGNOSTIC_INTERVAL_MS)),
             timeout: positive_milliseconds(
-                std::env::var("SUPERCOV_COMMAND_TIMEOUT_MS").ok().as_deref(),
+                variable("SUPERCOV_COMMAND_TIMEOUT_MS").as_deref(),
                 "SUPERCOV_COMMAND_TIMEOUT_MS",
             )?,
             termination_grace: Duration::from_millis(COMMAND_TERMINATION_GRACE_MS),
@@ -2174,6 +2177,27 @@ pub fn supervise_captured_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each setting is read, and refused by name where it is no positive
+    /// number of milliseconds.
+    #[test]
+    fn supervision_settings_are_read_or_refused_by_name() {
+        let options = SupervisionOptions::from_variables(|name| {
+            (name == "SUPERCOV_COMMAND_TIMEOUT_MS").then(|| "70".to_owned())
+        })
+        .unwrap();
+        assert_eq!(options.timeout, Some(Duration::from_millis(70)));
+        for refused in [
+            "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
+            "SUPERCOV_COMMAND_TIMEOUT_MS",
+        ] {
+            let error = SupervisionOptions::from_variables(|name| {
+                (name == refused).then(|| "soon".to_owned())
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(refused), "{error}");
+        }
+    }
 
     #[test]
     fn the_next_diagnostic_is_the_first_on_its_schedule_after_now() {
