@@ -12892,13 +12892,6 @@ fn nextest_installed() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// A run whose test fails, once for every place it makes a file operation,
-/// with that one failing: each ends, never panicking, and without a fault
-/// it says the test failed.
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
 /// A Python source that does not parse carries no obligations, and the run
 /// says which file it was.
 #[test]
@@ -13015,14 +13008,6 @@ fn go_project(project: &Project) {
     std::fs::create_dir_all(project.root.join("testdata/empty")).unwrap();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
 /// A crate with a unit test and a doctest.
 fn small_crate(project: &Project) {
     project.write(
@@ -13036,10 +13021,6 @@ fn small_crate(project: &Project) {
     project.write(".gitignore", "target/\n");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
 /// The places of a run's `role` runners -- `__doctest-runner`,
 /// `__nextest-runner`, which Cargo starts for each test -- failed one at a
 /// time (`role/fs#N`, every runner failing its Nth): each run ends, a runner
@@ -13291,18 +13272,6 @@ fn a_run_under_given_source_roots_is_read_back_under_them() {
     }
 }
 
-/// A Python or Ruby run asked to keep its work copies its evidence aside,
-/// and each file operation of that failing in turn ends the run cleanly.
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
-/// A run, once for every place it starts a program, with that start
-/// failing: each ends, never panicking, and without a fault it succeeds.
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
 /// Two standalone doctests of one item, at lines 1 and 11: every word of
 /// either name is in the other's (`1)` in `11)`), so each is run alone by a
 /// filter and a skip of the other, and both are measured.
@@ -13347,10 +13316,6 @@ fn small_maven_project(project: &Project) {
     project.write(".gitignore", "target/\n");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
 /// A Python test skipped where it is declared, or a Ruby one as it runs, is
 /// in the run, skipped.
 #[test]
@@ -13396,12 +13361,6 @@ fn a_skipped_python_or_ruby_test_is_counted_skipped() {
     }
 }
 
-/// A Maven run, once for every place it starts a program, with that start
-/// failing.
-#[cfg_attr(
-    windows,
-    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
-)]
 /// A Python test whose process ends during it reported no outcome, but what
 /// it ran was recorded: the test is in the run, failed, credited with that.
 #[test]
