@@ -1896,6 +1896,43 @@ pub fn shapes(p: &Point, n: u32, text: &str) -> Option<u32> {
         assert!(replaced >= 20, "{replaced}");
     }
 
+    /// A source cut off anywhere -- as an agent leaves a file mid-edit --
+    /// is read without a panic: every prefix of one holding each shape a
+    /// value takes, the parser filling in what the cut left out.
+    #[test]
+    fn every_prefix_of_a_source_is_read_without_a_panic() {
+        let source = r#"pub struct Point { pub x: i32, pub y: i32 }
+pub enum Mode { On, Off }
+impl Point {
+    pub fn new(x: i32) -> Self { let made = Self { x, y: 0 }; made }
+    pub fn mode(&self) -> Mode { if self.x > 0 { Mode::On } else { Mode::Off } }
+}
+fn parse(text: &str) -> Result<u32, String> { text.parse().map_err(|_| String::new()) }
+pub fn shapes(p: &Point, n: u32, text: &str, pair: (u8, u8)) -> Option<u32> {
+    let a = (n);
+    let b = parse(text).ok()?;
+    let c = Some(Box::new(n));
+    let d = match n { 0 => 1u32, _ => 2 };
+    let e = { let inner = n + 1; inner };
+    let f = Point { x: 1, ..*p };
+    let g = |v: u32| -> u32 { v + 1 };
+    let (h, i) = pair;
+    let j: Vec<u8> = vec![1, 2];
+    let k = std::ptr::addr_of_mut!(n);
+    let l = p.mode().clone();
+    let m = if n > 1 { 3u32 } else if n > 0 { 4 } else { 5 };
+    let o = [n; 2];
+    let q = std::cmp::Ordering::Less;
+    Some(a + b)
+}
+"#;
+        for (cut, _) in source.char_indices() {
+            let prefix = &source[..cut];
+            let signatures = signatures([("src/lib.rs", prefix)].into_iter());
+            let _ = replacements("src/lib.rs", prefix, &signatures);
+        }
+    }
+
     #[test]
     fn a_value_is_replaced_by_a_different_one_of_its_type() {
         assert_eq!(replacement("false", Some("bool")), "true");
