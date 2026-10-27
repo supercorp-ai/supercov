@@ -312,7 +312,7 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
                 .decode(segment.get(1)?.as_str()?)
                 .ok()?;
             bytes
-                .get_mut(offset..offset + data.len())?
+                .get_mut(offset..offset.checked_add(data.len())?)?
                 .copy_from_slice(&data);
         }
         regions.push((crate_key, bytes));
@@ -388,6 +388,7 @@ mod tests {
             json!({"regions": [["abc", 4, [[1, 2]]]]}),
             json!({"regions": [["abc", 4, [[1, "not base64!"]]]]}),
             json!({"regions": [["abc", 4, [[3, "AQI="]]]]}),
+            json!({"regions": [["abc", 4, [[u64::MAX, "AQI="]]]]}),
         ] {
             assert_eq!(regions_from(&refused), None, "{refused}");
         }

@@ -25,7 +25,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::{
@@ -851,26 +850,10 @@ fn read_windows(directory: &Path) -> Result<Vec<Window>, String> {
 }
 
 fn window_from(value: &Value) -> Option<Window> {
-    let mut regions = Vec::new();
-    for region in value.get("regions")?.as_array()? {
-        let crate_key = region.get(0)?.as_str()?.to_owned();
-        let length = usize::try_from(region.get(1)?.as_u64()?).ok()?;
-        let mut bytes = vec![0_u8; length];
-        for segment in region.get(2)?.as_array()? {
-            let offset = usize::try_from(segment.get(0)?.as_u64()?).ok()?;
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(segment.get(1)?.as_str()?)
-                .ok()?;
-            bytes
-                .get_mut(offset..offset.checked_add(data.len())?)?
-                .copy_from_slice(&data);
-        }
-        regions.push((crate_key, bytes));
-    }
     Some(Window {
         start: value.get("start")?.as_i64()?,
         end: value.get("end")?.as_i64()?,
-        regions,
+        regions: crate::rust_wasm::regions_from(value)?,
     })
 }
 
@@ -1826,6 +1809,7 @@ pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     /// The poller takes only a pid and a port; once that process is gone it
     /// stops, and what it wrote is renamed to say the run is whole.
