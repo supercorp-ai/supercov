@@ -2504,6 +2504,137 @@ mod tests {
         assert!(copied(&dependencies, unlinkable).is_ok());
     }
 
+    /// Making a project's container refuses each step that fails: the store,
+    /// the directory made, its marker, and the files written in it. Copying
+    /// a file refuses one it cannot read the size of, and one it cannot copy,
+    /// small or large.
+    #[test]
+    fn making_a_container_and_copying_a_file_refuse_each_step_that_fails() {
+        for fault in [
+            "fs.create_dir_all",
+            "fs.create_dir",
+            "fs.write@2",
+            "fs.write_all",
+        ] {
+            let root = std::env::temp_dir().join(format!("supercov-container-{}", unique()));
+            fs::create_dir_all(&root).unwrap();
+            let made = crate::fault::during(fault, || ensure_container(&root));
+            assert!(made.is_err(), "{fault}: {made:?}");
+            fs::remove_dir_all(root).unwrap();
+        }
+        let root = std::env::temp_dir().join(format!("supercov-copy-file-{}", unique()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("small"), "x").unwrap();
+        fs::write(root.join("large"), vec![0u8; 2 * 1024 * 1024]).unwrap();
+        let mut operations = SystemWorkspaceOperations;
+        for fault in ["fs.symlink_metadata", "fs.copy"] {
+            let copied = crate::fault::during(fault, || {
+                operations.copy_file(&root.join("small"), &root.join("copy"))
+            });
+            assert!(copied.is_err(), "{fault}");
+        }
+        // Into a directory that is not there, a large file is refused too.
+        assert!(
+            operations
+                .copy_file(&root.join("large"), &root.join("missing/large"))
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Preparing a copy refuses each step that fails: the container, the old
+    /// copy cleared, the root resolved, recovery, linking dependencies, a
+    /// reused path that leaves the project, and a reused artifact that cannot
+    /// replace the stale one or be read.
+    #[cfg(unix)]
+    #[test]
+    fn preparing_a_copy_refuses_each_step_that_fails() {
+        let attempt = |setup: &dyn Fn(&Path), fault: &str, reuse: &[PathBuf], isolated: bool| {
+            let root = project();
+            setup(&root);
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let prepared = crate::fault::during(fault, || {
+                if isolated {
+                    prepare_isolated_workspace(&root, "run", &lock)
+                } else {
+                    prepare_cached_workspace(&root, &lock, reuse)
+                }
+            });
+            lock.release().unwrap();
+            let _ = crate::lifecycle::sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+            prepared
+        };
+        let nothing = |_: &Path| {};
+        // A copy prepared once, so the next finds the container and a copy.
+        let prepared_once = |root: &Path| {
+            // A nested output is mirrored, so a reused one replaces a copy.
+            fs::create_dir_all(root.join("packages/app/dist")).unwrap();
+            fs::write(root.join("packages/app/dist/stale.js"), "stale").unwrap();
+            let mut lock = ProjectLock::acquire(root, "once", "now").unwrap();
+            prepare_cached_workspace(root, &lock, &[]).unwrap();
+            prepare_isolated_workspace(root, "run", &lock).unwrap();
+            lock.release().unwrap();
+        };
+        let dependencies_a_file = |root: &Path| fs::write(root.join("node_modules"), "").unwrap();
+        let build = [PathBuf::from("packages/app/dist")];
+        let built = [PathBuf::from("src/index.js")];
+        for (setup, fault, reuse, isolated) in [
+            (
+                &nothing as &dyn Fn(&Path),
+                "fs.create_dir_all",
+                &[][..],
+                false,
+            ),
+            (&prepared_once, "fs.read_dir", &[][..], false),
+            (&prepared_once, "fs.canonicalize", &[][..], false),
+            (&dependencies_a_file, "", &[][..], false),
+            (
+                &prepared_once,
+                "",
+                &[PathBuf::from("../outside")][..],
+                false,
+            ),
+            (&prepared_once, "fs.remove_dir_all", &build[..], false),
+            (&prepared_once, "fs.remove_file", &built[..], false),
+            (&prepared_once, "fs.canonicalize@2", &build[..], false),
+            (&nothing, "fs.create_dir_all", &[][..], true),
+            (&prepared_once, "fs.rename", &[][..], true),
+            (&prepared_once, "fs.canonicalize", &[][..], true),
+        ] {
+            let prepared = attempt(setup, fault, reuse, isolated);
+            assert!(
+                prepared.is_err(),
+                "{fault} {reuse:?} isolated {isolated}: {prepared:?}"
+            );
+        }
+    }
+
+    /// Recovering the cached copy refuses each step that fails: an entry's
+    /// type read, the newest previous copy put back, a leftover removed.
+    #[test]
+    fn recovering_the_cached_copy_refuses_each_step_that_fails() {
+        for (fault, keep_copy) in [
+            ("fs.file_type", true),
+            ("fs.rename", false),
+            ("fs.rename", true),
+        ] {
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            let previous = transaction_path(&root, &workspace, "previous");
+            fs::create_dir_all(&previous).unwrap();
+            if !keep_copy {
+                fs::remove_dir_all(&workspace).unwrap();
+            }
+            let recovered = crate::fault::during(fault, || recover_cached_workspace(&root, &lock));
+            assert!(recovered.is_err(), "{fault} {keep_copy}: {recovered:?}");
+            lock.release().unwrap();
+            let _ = crate::lifecycle::sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     /// The fault switch the tests here use: a fault named by the place
     /// that calls its site never fails a call that names no place, and one
     /// naming an errno fails its place's call with that errno.
