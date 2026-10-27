@@ -1405,6 +1405,19 @@ mod tests {
     }
 
     use super::*;
+
+    /// Line zero and a line past the end hold no text; the last line is
+    /// read to the end, and a carriage return before a line feed is not text.
+    #[test]
+    fn a_line_is_read_as_lines_reads_it() {
+        let source = "a\r\nb";
+        let starts = line_starts(source);
+        assert_eq!(line_text(source, &starts, 0), None);
+        assert_eq!(line_text(source, &starts, 1), Some("a"));
+        assert_eq!(line_text(source, &starts, 2), Some("b"));
+        assert_eq!(line_text(source, &starts, 3), None);
+        assert_eq!(line_text("a\n", &line_starts("a\n"), 2), None);
+    }
     use crate::evidence_archive::{read_archive, write_archive};
     use crate::run_store::discover_runs;
 
