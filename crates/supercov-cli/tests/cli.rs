@@ -9908,6 +9908,20 @@ fn query_numbers_and_shapes_are_checked_before_anything_is_read() {
             .succeeds()
             .starts_with("Coverage by directory, 1 deep\n")
     );
+    // Each metric heads its own column, and the next page keeps the metric
+    // and the tests picked.
+    for (metric, heading) in [
+        ("statements", "Statements"),
+        ("functions", "Functions"),
+        ("branches", "Branches"),
+        ("mcdc", "MC/DC"),
+    ] {
+        let areas = on_run(&[
+            "files", "--group", "dir", "--metric", metric, "--title", "total", "--limit", "1",
+        ])
+        .succeeds();
+        assert!(areas.contains(heading), "{metric}: {areas}");
+    }
     assert!(
         on_run(&["files", "--files"])
             .exits(2)
