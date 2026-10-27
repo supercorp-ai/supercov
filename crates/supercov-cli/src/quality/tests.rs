@@ -2354,6 +2354,18 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
         .unwrap()
         .is_none()
     );
+
+    // An answer the request no longer validates is refused, never served.
+    let mut stale = entry;
+    stale.response.answers.clear();
+    save(&path, &stale).unwrap();
+    let refused = cached(&path, "quality", &hash, &moved).err().unwrap();
+    assert!(refused.ends_with(" in cache; use --refresh"), "{refused}");
+    // Asked afresh, with no key, nothing is sent.
+    let refused = resolve(&temp.0, "quality", &client(), None, true, &moved, &hash)
+        .err()
+        .unwrap();
+    assert!(refused.starts_with("set TYPESAFE_API_KEY"), "{refused}");
 }
 
 #[test]
