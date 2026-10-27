@@ -492,10 +492,9 @@ fn probe_obligations_of(probes: &BTreeMap<u64, ProbeTarget>) -> Vec<String> {
                 ProbeTarget::SafeNavigation { nil, .. } => {
                     ids.insert(branch_of(nil));
                 }
+                // A hit proves at least one alternative.
                 ProbeTarget::Hits { ids: proven } => {
-                    for id in proven {
-                        ids.insert(obligation_of(id));
-                    }
+                    ids.extend(proven.iter().map(|id| obligation_of(id)));
                 }
                 ProbeTarget::Try { id, handlers, .. } => {
                     ids.insert(id.clone());
@@ -569,11 +568,14 @@ fn target_ids(target: &ProbeTarget) -> Vec<String> {
             handlers,
         } => {
             let mut ids = vec![id.clone(), success.clone(), raised.clone()];
-            for handler in handlers {
-                ids.push(handler.id.clone());
-                ids.push(handler.missed.clone());
-                ids.push(handler.selected.clone());
-            }
+            // A try has a handler at least.
+            ids.extend(handlers.iter().flat_map(|handler| {
+                [
+                    handler.id.clone(),
+                    handler.missed.clone(),
+                    handler.selected.clone(),
+                ]
+            }));
             ids
         }
         ProbeTarget::SafeNavigation { nil, called } => vec![nil.clone(), called.clone()],
@@ -620,10 +622,13 @@ fn stdlib_provable(
         }
     }
     for case in cases {
-        for clause in &case.clauses {
-            ids.insert(obligation_of(&clause.missed));
-            ids.insert(obligation_of(&clause.selected));
-        }
+        // A case has a clause at least.
+        ids.extend(case.clauses.iter().flat_map(|clause| {
+            [
+                obligation_of(&clause.missed),
+                obligation_of(&clause.selected),
+            ]
+        }));
         if let Some(no_match) = &case.no_match {
             ids.insert(obligation_of(&no_match.matched));
             ids.insert(obligation_of(&no_match.unmatched));
@@ -958,10 +963,12 @@ impl<'a> Collector<'a> {
 
     // -- statements ---------------------------------------------------------
 
+    /// Prism makes a statements node only for one statement or more.
     fn statements(&mut self, statements: &StatementsNode<'_>) {
-        for statement in statements.body().iter() {
-            self.statement(&statement);
-        }
+        statements
+            .body()
+            .iter()
+            .for_each(|statement| self.statement(&statement));
     }
 
     fn statement(&mut self, node: &Node<'_>) {
@@ -1536,11 +1543,12 @@ impl<'a> Collector<'a> {
         let then_index = self.stdlib("if", "then", then_span, then_kind, Vec::new());
         let else_index = self.stdlib("if", "else", else_span, else_kind, Vec::new());
         if kind == "ternary" {
-            // A ternary's arms are expressions, not statements.
-            for statements in arm_statements(node) {
-                self.expression_lists
-                    .insert(statements.location().start_offset());
-            }
+            // A ternary's arms are expressions, not statements; it has both.
+            self.expression_lists.extend(
+                arm_statements(node)
+                    .into_iter()
+                    .map(|statements| statements.location().start_offset()),
+            );
         } else {
             // `x if c`: the body precedes the keyword and shares its line
             // with the modifier statement, so the true outcome proves it.
@@ -1797,9 +1805,9 @@ impl<'a> Collector<'a> {
         let mut clauses = Vec::new();
         let mut clause_ids = Vec::new();
         for (index, condition) in node.conditions().iter().enumerate() {
-            let Some(when) = condition.as_when_node() else {
-                continue;
-            };
+            let when = condition
+                .as_when_node()
+                .expect("a case's conditions are its whens");
             let Some(id) = self.branch(
                 when.location().start_offset(),
                 when.location().end_offset(),
@@ -1995,9 +2003,9 @@ impl<'a> Collector<'a> {
         let mut clauses = Vec::new();
         let mut clause_ids = Vec::new();
         for (index, condition) in node.conditions().iter().enumerate() {
-            let Some(in_node) = condition.as_in_node() else {
-                continue;
-            };
+            let in_node = condition
+                .as_in_node()
+                .expect("a pattern match's conditions are its ins");
             let Some(id) = self.branch(
                 in_node.location().start_offset(),
                 in_node.location().end_offset(),
@@ -2617,9 +2625,9 @@ impl<'a> Collector<'a> {
         let Some(targets) = self.probe_targets(last) else {
             return false;
         };
-        for target in &targets {
-            self.wrap_completion(target, key);
-        }
+        targets
+            .iter()
+            .for_each(|target| self.wrap_completion(target, key));
         true
     }
 
