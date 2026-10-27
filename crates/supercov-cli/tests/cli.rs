@@ -2319,6 +2319,24 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
         places += 1;
     }
     assert!(places > 0);
+    // Nor can finding the watchdog, at each file operation it makes.
+    let mut places = 0;
+    for nth in 1.. {
+        let fault = format!("fs#{nth}");
+        let ran = project.supercov_with(
+            &["__supervise", "--", "true"],
+            &[("SUPERCOV_TEST_FAULT", &fault)],
+        );
+        let said = ran.stderr();
+        assert!(!said.contains("panicked at"), "{fault}: {said}");
+        if !said.contains("test fault at fs") {
+            break;
+        }
+        assert_ne!(ran.code(), 0, "{fault}: {said}");
+        places += 1;
+    }
+    // Windows needs no watchdog program.
+    assert!(places > 0 || cfg!(windows));
     for name in [
         "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
         "SUPERCOV_COMMAND_TIMEOUT_MS",

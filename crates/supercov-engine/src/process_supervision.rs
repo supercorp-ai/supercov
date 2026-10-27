@@ -1743,13 +1743,14 @@ impl ProcessSupervisor {
     }
 
     pub fn new_crash_safe(watchdog_program: &Path) -> Result<Self, SupervisionError> {
-        let watchdog_program = fs::canonicalize(watchdog_program).map_err(|source| {
-            SupervisionError::PlatformOperation {
-                operation: "resolve parent-death watchdog executable",
-                source,
-            }
-        })?;
-        if !fs::metadata(&watchdog_program).is_ok_and(|metadata| metadata.is_file()) {
+        let watchdog_program =
+            crate::fault_fs::canonicalize(watchdog_program).map_err(|source| {
+                SupervisionError::PlatformOperation {
+                    operation: "resolve parent-death watchdog executable",
+                    source,
+                }
+            })?;
+        if !crate::fault_fs::metadata(&watchdog_program).is_ok_and(|metadata| metadata.is_file()) {
             return Err(SupervisionError::PlatformOperation {
                 operation: "validate parent-death watchdog executable",
                 source: io::Error::new(io::ErrorKind::InvalidInput, "expected a regular file"),
