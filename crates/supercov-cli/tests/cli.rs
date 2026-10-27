@@ -2986,6 +2986,48 @@ fn a_page_too_large_for_one_reply_says_where_the_rest_starts() {
     assert!(small["data"]["pageCut"].is_null(), "{small}");
 }
 
+/// A page cut to fit carries a note of the cut, and the note is part of
+/// the reply: fitted without it, a page that had just fit went over by the
+/// note and was refused. These lines, sixty long ones then short ones, give
+/// a page that fits within the note's size of the limit.
+#[test]
+fn a_cut_page_fits_with_its_note_of_the_cut() {
+    let project = Project::empty("page-cut-note");
+    project.write(
+        "package.json",
+        r#"{ "name": "wide", "private": true, "type": "module" }"#,
+    );
+    let mut source = String::new();
+    for index in 0..400 {
+        let filler = "y".repeat(if index < 60 { 177 } else { 0 });
+        source.push_str(&format!(
+            "export function step{index}(flag) {{\n  return flag === \"v{index}{filler}\" ? 1 : {index};\n}}\n"
+        ));
+    }
+    project.write("src/wide.js", &source);
+    project.write(
+        "test/wide.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { step0 } from \"../src/wide.js\";\ntest(\"step0\", () => { assert.equal(step0(false), 0); });\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    let page = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/wide.js",
+            "--metric",
+            "branches",
+            "--limit",
+            "1000",
+            "--json",
+        ])
+        .json();
+    assert_eq!(page["ok"], true, "{}", page["error"]);
+    assert_eq!(page["data"]["pageCut"]["asked"], 1000, "{page}");
+}
+
 #[test]
 fn todo_tests_are_counted_as_node_test_counts_them() {
     // supergateway's suite: node said 1,076 tests, 1,057 passed, 6 todo;

@@ -5142,3 +5142,41 @@ fn a_run_with_no_statement_to_assess_asks_nothing() {
         .json();
     assert_eq!(json["ok"], true, "{json}");
 }
+
+/// Each place a Jev command touches a file fails in turn, its first call
+/// there (`SUPERCOV_TEST_FAULT=fs#N`): the command may stop, but says why and
+/// never panics, and the same command with no fault succeeds after it.
+#[test]
+fn a_jev_command_whose_file_operation_fails_says_so_and_recovers() {
+    let (base, _seen) = gateway(MODEL, answer_yes);
+    let jev = through(&base);
+    let commands: [&[&str]; 7] = [
+        &["quality", "--dry-run"],
+        &["quality"],
+        &["quality", "gaps"],
+        &["quality", "file", "src/cart.js"],
+        &["security"],
+        &["quality", "clean"],
+        &["quality", "patch"],
+    ];
+    let project = Project::cart("jev-faults");
+    for command in commands {
+        let mut nth = 1;
+        loop {
+            let fault = format!("fs#{nth}");
+            let mut env = jev.to_vec();
+            env.push(("SUPERCOV_TEST_FAULT", &fault));
+            let ran = project.supercov_with(command, &env);
+            let said = ran.stderr();
+            assert!(
+                !said.contains("panicked at") && ran.code() != 101,
+                "{command:?} with {fault} panicked:\n{said}"
+            );
+            if !said.contains("[supercov] test fault at fs") {
+                break;
+            }
+            nth += 1;
+        }
+        project.supercov_with(command, &jev).succeeds();
+    }
+}

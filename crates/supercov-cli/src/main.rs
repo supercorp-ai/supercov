@@ -2831,9 +2831,10 @@ impl PublicQueryOutput {
         }
     }
 
-    /// Record that this page was cut to fit one reply: on stderr, and in a
-    /// file's data, which a reader takes for the whole file.
-    fn mark_page_cut(&mut self, asked: usize) {
+    /// Record in a file's data, which a reader takes for the whole file,
+    /// that this page was cut to fit one reply. The record is part of the
+    /// reply, so the page is fitted with it.
+    fn record_page_cut(&mut self, asked: usize) {
         let Self::Coverage { output, .. } = self else {
             return;
         };
@@ -2848,6 +2849,16 @@ impl PublicQueryOutput {
                 next_offset: page.next_offset,
             });
         }
+    }
+
+    /// Say on stderr that this page was cut to fit one reply.
+    fn say_page_cut(&self, asked: usize) {
+        let Self::Coverage { output, .. } = self else {
+            return;
+        };
+        let Some(page) = &output.pagination else {
+            return;
+        };
         // A page cut to fit always has more after it: what fits is fewer
         // than were asked for, and as many were there to return.
         eprintln!(
@@ -3380,7 +3391,10 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                 // its limit; the limit falls each time, so this ends.
                 request.limit = fits.min(request.limit - 1);
                 match execute_public_query(&root, &invocation) {
-                    Ok(smaller) => output = smaller,
+                    Ok(smaller) => {
+                        output = smaller;
+                        output.record_page_cut(asked.unwrap_or_default());
+                    }
                     Err(failure) => {
                         print!(
                             "{}",
@@ -3396,7 +3410,7 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                 (asked, &invocation)
                 && request.limit < asked
             {
-                output.mark_page_cut(asked);
+                output.say_page_cut(asked);
             }
             match output.agent_json() {
                 Ok(output) => {
