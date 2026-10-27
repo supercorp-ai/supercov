@@ -3168,7 +3168,18 @@ fn numbered_file(
             .cmp(&right.get("id").and_then(|value| value.as_str()))
     });
 
-    let code = apply_insertions(source, insertions)?;
+    // Test faults stand in for insertions that overlap and for a transform
+    // that no longer parses, which a correct instrumenter never makes.
+    let code = crate::fault::or(
+        "rust-insertions",
+        || Err(RustInstrumenterError::InvalidRange),
+        || apply_insertions(source, insertions),
+    )?;
+    let code = if crate::fault::injected("rust-unparsable-transform") {
+        format!("{code} {{")
+    } else {
+        code
+    };
     let code = still_parses(file, code, edition, || {
         std::env::var_os(FAILED_TRANSFORM_DUMP_ENV)
     })?;
@@ -3239,6 +3250,12 @@ mod tests {
             |()| {},
         );
         assert!(reached > 7, "{reached}");
+        for fault in ["rust-insertions", "rust-unparsable-transform"] {
+            let refused = crate::fault::during(fault, || {
+                instrument_rust_file("src/lib.rs", source, "crate::rt", false, None)
+            });
+            assert!(refused.is_err(), "{fault}");
+        }
     }
 
     #[test]
