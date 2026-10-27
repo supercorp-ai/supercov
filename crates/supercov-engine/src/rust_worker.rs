@@ -2509,6 +2509,24 @@ mod tests {
         }
     }
 
+    /// A workspace with no Worker has no server to prepare, and one whose
+    /// configuration names no `main` is said not to be measured.
+    #[test]
+    fn a_worker_without_a_main_is_named_and_none_is_no_server() {
+        let root = temporary("no-servers");
+        let mut said = Vec::new();
+        let servers = RustWorkerServer::prepare(&root, &root, "run", &[], &mut said).unwrap();
+        assert!(servers.is_empty() && said.is_empty());
+        fs::create_dir_all(root.join("worker")).unwrap();
+        fs::write(root.join("worker/Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
+        fs::write(root.join("worker/wrangler.toml"), "[build]\ncommand = \"worker-build\"\n").unwrap();
+        let servers = RustWorkerServer::prepare(&root, &root, "run", &[], &mut said).unwrap();
+        assert!(servers.is_empty());
+        let said = String::from_utf8(said).unwrap();
+        assert!(said.contains("names no `main`; its Worker is not measured"), "{said}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_window_is_read_only_whole() {
         let region = |shape: Value| json!({ "start": 1, "end": 2, "regions": [shape] });
