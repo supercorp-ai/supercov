@@ -2122,9 +2122,9 @@ fn ask_lines(
         if answer.values.is_none() {
             continue;
         }
-        let Ok(source) = read_text(&root.join(&answer.path)) else {
-            continue;
-        };
+        // Read for its answer moments ago; a file gone since has no lines to
+        // ask about.
+        let source = read_text(&root.join(&answer.path)).unwrap_or_default();
         let path = Path::new(&answer.path);
         match candidates::nodes(path, &source) {
             Some(nodes) if !nodes.is_empty() => {
@@ -2265,9 +2265,8 @@ fn ask_lines(
         if found.is_empty() {
             continue;
         }
-        let Some(views) = views_by_index.get(index) else {
-            continue;
-        };
+        // A file has lines classified only through its views.
+        let views = &views_by_index[index];
         views.iter().enumerate().for_each(|(v, view)| {
             let last = view.offset + view.text.lines().count();
             let mine: Vec<candidates::Candidate> = found
