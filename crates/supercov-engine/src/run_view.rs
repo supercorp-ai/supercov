@@ -582,8 +582,9 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
         return Outcome::Error { reasons };
     }
 
+    // At least one floor: none is an error above.
     let mut violations = Vec::new();
-    for floor in floors {
+    floors.iter().for_each(|floor| {
         let metric = view.metric(floor.metric);
         if !metric.meets(floor.ppm) {
             violations.push(Violation {
@@ -596,7 +597,7 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
             });
         }
         if !per_file {
-            continue;
+            return;
         }
         for file in &view.files {
             let Some(counts) = file.metric(floor.metric) else {
@@ -616,7 +617,7 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
                 uncovered_lines: file.uncovered_lines.clone(),
             });
         }
-    }
+    });
     if violations.is_empty() {
         Outcome::Pass
     } else {
@@ -810,6 +811,75 @@ mod tests {
     /// under their file.
     #[test]
     fn a_declined_line_leaves_the_totals_incomplete() {
+        let coverage = small_coverage(Vec::new());
+        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
+        let file = built.file("src/a.js").unwrap();
+        assert_eq!(file.measured_lines, [1, 2]);
+        assert_eq!(file.uncovered_lines, [2]);
+        assert_eq!(file.functions.len(), 1);
+        assert_eq!(file.functions[0].name, "total");
+        assert_eq!(
+            file.branches
+                .iter()
+                .map(|branch| branch.taken)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(file.missing_branches.len(), 1);
+        assert_eq!(
+            built.metric(Metric::Lines).applicability,
+            Applicability::Incomplete { unmeasured: 1 }
+        );
+    }
+
+    /// A branch, function or decision whose file has no line of its own
+    /// still gets that file, and a view of nothing builds no file.
+    #[test]
+    fn a_record_in_a_file_with_no_line_still_has_its_file() {
+        let mut coverage = small_coverage(vec![crate::coverage_report::DecisionMeta {
+            id: "d".into(),
+            file: "src/a.js".into(),
+            line: 1,
+            column: 1,
+            source: "x".into(),
+            conditions: vec!["x".into()],
+            kind: "if".into(),
+        }]);
+        coverage.lines.clear();
+        // The decision's outcome is a branch of its own.
+        assert_eq!(coverage.branches.len(), 2);
+        coverage
+            .branches
+            .iter_mut()
+            .for_each(|branch| branch.alternatives.clear());
+        coverage.decisions[0].conditions.clear();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
+        let file = built.file("src/a.js").unwrap();
+        assert!(file.measured_lines.is_empty() && file.branches.is_empty());
+        assert!(file.conditions.is_empty() && file.missing_conditions.is_empty());
+        assert_eq!(file.functions.len(), 1);
+
+        coverage.points.clear();
+        coverage.branches.clear();
+        coverage.decisions.clear();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
+        assert!(built.files.is_empty());
+        // Totals that pass, judged per file over no file, find nothing more.
+        let floors = [Floor {
+            metric: Metric::Lines,
+            ppm: 1_000_000,
+        }];
+        assert_eq!(
+            check(&view(vec![metric(1, 1)], Vec::new()), &floors, true).exit_code(),
+            0
+        );
+    }
+
+    /// A run of one test over one file: a function, three statements (one of
+    /// them declined), a branch and these decisions.
+    fn small_coverage(
+        decisions: Vec<crate::coverage_report::DecisionMeta>,
+    ) -> crate::coverage_report::CoverageView {
         use crate::coverage_analysis::PointKind;
         use crate::coverage_report::{
             BranchAlternativeMeta, BranchMeta, CoverageManifest, PointMeta, RawTestResult,
@@ -826,7 +896,7 @@ mod tests {
         };
         let manifest = CoverageManifest {
             unmeasured: vec!["declined".into()],
-            decisions: Vec::new(),
+            decisions,
             points: vec![
                 point("f", PointKind::Function, 1, Some("total")),
                 point("ran", PointKind::Statement, 1, None),
@@ -886,25 +956,7 @@ mod tests {
             browser: Vec::new(),
             server: Vec::new(),
         };
-        let coverage = create_coverage_view(&manifest, &[raw], "now").unwrap();
-        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
-        let file = built.file("src/a.js").unwrap();
-        assert_eq!(file.measured_lines, [1, 2]);
-        assert_eq!(file.uncovered_lines, [2]);
-        assert_eq!(file.functions.len(), 1);
-        assert_eq!(file.functions[0].name, "total");
-        assert_eq!(
-            file.branches
-                .iter()
-                .map(|branch| branch.taken)
-                .collect::<Vec<_>>(),
-            [true, false]
-        );
-        assert_eq!(file.missing_branches.len(), 1);
-        assert_eq!(
-            built.metric(Metric::Lines).applicability,
-            Applicability::Incomplete { unmeasured: 1 }
-        );
+        create_coverage_view(&manifest, &[raw], "now").unwrap()
     }
 
     #[test]

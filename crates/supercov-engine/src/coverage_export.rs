@@ -542,6 +542,29 @@ mod tests {
         );
     }
 
+    /// A file Supercov knows of but measured nothing in still has its record,
+    /// its counters at zero.
+    #[test]
+    fn a_file_with_nothing_measured_exports_an_empty_record() {
+        let mut view = fixture();
+        let file = &mut view.files[0];
+        file.metrics.clear();
+        file.measured_lines.clear();
+        file.uncovered_lines.clear();
+        file.functions.clear();
+        file.branches.clear();
+        file.conditions.clear();
+        assert_eq!(
+            lcov(&view),
+            "TN:\nSF:src/a & b.ts\nFNF:0\nFNH:0\nBRF:0\nBRH:0\nLF:0\nLH:0\nend_of_record\n"
+        );
+        let xml_text = cobertura(&view, 0);
+        assert!(
+            xml_text.contains("<methods/>\n          <lines>\n          </lines>"),
+            "{xml_text}"
+        );
+    }
+
     #[test]
     fn an_empty_denominator_does_not_become_a_zero_rate() {
         // Cobertura has no "not applicable", and reporting 0% for a file with
