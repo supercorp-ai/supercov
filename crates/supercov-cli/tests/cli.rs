@@ -12990,6 +12990,61 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
     }
 }
 
+/// What a run digests to judge later whether it is current -- the tests,
+/// the dependency manifests, the configuration -- unreadable: the run ends
+/// and names the file.
+#[test]
+fn a_python_run_that_cannot_digest_its_inputs_names_the_file() {
+    for (fault, file) in [
+        ("fs.open@3", "tests/__init__.py"),
+        ("fs.open@5", "setup.cfg"),
+        ("fs.open@6", "pytest.ini"),
+    ] {
+        let project = Project::empty("digest-inputs");
+        python_project(&project);
+        project.write("setup.cfg", "[metadata]\nname = w\n");
+        project.write("pytest.ini", "[pytest]\n");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran = project.supercov_with(
+            &[
+                "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+            ],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {said}");
+        assert!(
+            said.contains(file) && said.contains("injected fault at fs"),
+            "{fault}: {said}"
+        );
+    }
+}
+
+/// A JavaScript run walks the project for its tests, dependency manifests
+/// and configuration twice: for the files that carry assertions, and for
+/// what it digests. A directory any of those walks cannot list ends the run.
+#[test]
+fn a_javascript_run_that_cannot_walk_its_inputs_says_so() {
+    for fault in [
+        "fs.read_dir@16",
+        "fs.read_dir@19",
+        "fs.read_dir@22",
+        "fs.read_dir@25",
+        "fs.read_dir@28",
+        "fs.read_dir@31",
+        "fs.read_dir@34",
+        "fs.read_dir@37",
+    ] {
+        let project = Project::cart("walk-inputs");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {said}");
+        assert!(said.contains("injected fault at fs"), "{fault}: {said}");
+    }
+}
+
 #[test]
 fn a_go_run_whose_own_step_fails_says_so() {
     let Some(go) = go() else {

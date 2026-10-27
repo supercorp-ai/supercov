@@ -67,6 +67,7 @@ a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reached
 a_guest_started_with_none_of_supercovs_settings_runs_and_is_counted	1.4	0.8
 a_handler_run_without_a_guard_is_counted_by_the_tests_that_ran_it	0.5	0.5
 a_javascript_request_shows_the_function_a_statement_is_in_and_no_helper	0.4	0.7
+a_javascript_run_that_cannot_walk_its_inputs_says_so	3.5	4.5
 a_javascript_run_whose_own_step_fails_says_so	40.0	60.0
 a_job_that_promised_a_newer_toolchain_cannot_skip_quietly	0.0	0.0
 a_key_is_never_sent_in_the_clear_to_another_machine	0.0	0.0
@@ -123,6 +124,7 @@ a_playwright_suite_reads_back_by_its_tags	6.5	4.1
 a_pnpm_workspace_finds_the_source_of_each_package_it_lists	1.0	0.6
 a_project_whose_sources_none_parse_is_refused_rather_than_reported_green	0.0	0.0
 a_project_with_links_sockets_and_pipes_is_measured_through_them	1.1	0.6
+a_python_run_that_cannot_digest_its_inputs_names_the_file	3.0	4.0
 a_python_run_whose_own_step_fails_says_so	40.0	60.0
 a_python_source_that_does_not_parse_is_named	0.7	0.3
 a_python_test_whose_process_ends_during_it_is_failed_and_credited	0.5	0.3
