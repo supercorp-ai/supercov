@@ -2904,6 +2904,25 @@ mod tests {
         }
     }
 
+    /// A component's markup names what it renders: an import only an added
+    /// component renders comes out with it, and one a kept component renders
+    /// stays.
+    #[test]
+    fn an_added_component_s_imports_are_judged_by_the_markup_that_names_them() {
+        let before = code(
+            "h.tsx",
+            "import { Button } from 'pkg';\n\nexport function Page() {\n  return <Button />;\n}\n",
+        )
+        .unwrap();
+        let added = "import { Button } from 'pkg';\nimport { Icon } from 'icons';\n\nexport function Page() {\n  return <Button />;\n}\n\nexport function More() {\n  return <Icon><Button /></Icon>;\n}\n";
+        assert_eq!(
+            only_added(&before, "h.tsx", added),
+            Some(vec!["More".to_owned()])
+        );
+        let shared = "import { Button } from 'pkg';\nimport { Icon } from 'icons';\n\nexport function Page() {\n  return <Icon><Button /></Icon>;\n}\n\nexport function More() {\n  return <Icon />;\n}\n";
+        assert_eq!(only_added(&before, "h.tsx", shared), None);
+    }
+
     /// A Python helper is only added to where nothing else moved: a
     /// removal, an edit outside the file's own lines, no addition at all, a
     /// name the old code already reads, or one exported by `__all__` is not.

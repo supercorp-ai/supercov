@@ -4101,6 +4101,17 @@ mod tests {
         );
     }
 
+    /// An accessor field and a static block are each one unit of their
+    /// class, as a method and a property are, whatever they hold.
+    #[test]
+    fn an_accessor_and_a_static_block_are_each_a_unit_of_their_class() {
+        let source = "class A {\n  accessor handler = () => {\n    return 1\n  };\n  static {\n    function setup() {\n      return 2\n    }\n  }\n}\n";
+        assert_eq!(
+            outermost_functions(Language::JavaScript, "src/a.js", source),
+            [(2, 4), (5, 9)]
+        );
+    }
+
     /// An overload signature, or a function only declared, has no body to
     /// run: only the implementation is a function a statement is in.
     #[test]

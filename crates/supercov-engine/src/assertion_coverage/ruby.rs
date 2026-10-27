@@ -658,6 +658,22 @@ mod tests {
         assert_eq!(at("1:3"), (8, 9));
     }
 
+    /// A lambda's last statement is its value, as a method's is.
+    #[test]
+    fn a_lambda_s_last_statement_is_its_value() {
+        let source = "handler = ->(x) do\n  y = x + 1\n  y * 2\nend\n";
+        let starts = statement_starts(source);
+        let rb = Language::Ruby;
+        assert_eq!(
+            change_at(&starts, 2, "y = x + 1", rb),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 3, "y * 2", rb),
+            Some(Change::ReturnUndefined)
+        );
+    }
+
     /// A ternary that is not a method's value is skipped; empty parentheses
     /// and an empty interpolation hold no statement of their own.
     #[test]

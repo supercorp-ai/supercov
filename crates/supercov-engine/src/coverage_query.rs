@@ -4576,6 +4576,12 @@ pub fn minimum_test_set(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_report_error_is_a_query_s_analysis_error() {
+        let error = ReportError::InvalidEvent("e".into());
+        assert!(matches!(QueryError::from(error), QueryError::Analysis(_)));
+    }
+
     use crate::{
         coverage_analysis::McdcVector,
         coverage_report::{

@@ -3590,6 +3590,11 @@ impl TransportStats {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_analysis_error_is_a_report_s() {
+        let error = crate::coverage_analysis::AnalysisError::EmptyDecision { decision: 0 };
+        assert!(matches!(ReportError::from(error), ReportError::Analysis(_)));
+    }
 
     #[test]
     fn a_test_filter_picks_by_any_value_of_each_criterion_and_every_criterion_given() {
