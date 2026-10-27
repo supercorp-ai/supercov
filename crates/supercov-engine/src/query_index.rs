@@ -9,7 +9,7 @@
 use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::{BTreeSet, HashSet},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -312,7 +312,7 @@ pub fn write_query_index(
 /// its checksum included, so a damaged one is refused there.
 pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError> {
     let mut header = [0_u8; QUERY_INDEX_HEADER_SIZE];
-    fs::open(path)?.read_exact(&mut header)?;
+    fs::read_exact_from(&mut fs::open(path)?, &mut header)?;
     let sha256 = header[48..80].try_into().expect("a 32-byte slice");
     Ok((sha256, get_u64(&header, 24)))
 }

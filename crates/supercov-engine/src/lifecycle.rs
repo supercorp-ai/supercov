@@ -7,7 +7,7 @@
 use crate::fault_fs::{self as fs, File, OpenOptions};
 use std::{
     collections::BTreeSet,
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -841,7 +841,8 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     let mut input = fs::open(source).map_err(|error| io_error(source, error))?;
     let mut output = fs::open_with(OpenOptions::new().write(true).create_new(true), destination)
         .map_err(|error| io_error(destination, error))?;
-    let copied = io::copy(&mut input, &mut output).map_err(|error| io_error(destination, error))?;
+    let copied =
+        fs::copy_between(&mut input, &mut output).map_err(|error| io_error(destination, error))?;
     fs::sync_all(&output).map_err(|error| io_error(destination, error))?;
     Ok(copied)
 }
@@ -855,9 +856,8 @@ fn file_sha256(path: &Path) -> Result<[u8; 32], LifecycleError> {
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
     loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| io_error(path, source))?;
+        let read =
+            fs::read_from(&mut file, &mut buffer).map_err(|source| io_error(path, source))?;
         if read == 0 {
             break;
         }

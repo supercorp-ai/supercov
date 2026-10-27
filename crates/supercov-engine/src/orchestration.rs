@@ -6,7 +6,7 @@
 
 use crate::fault_fs as fs;
 use std::{
-    io::{Read, SeekFrom, Write},
+    io::{SeekFrom, Write},
     path::Path,
     time::Instant,
 };
@@ -109,7 +109,7 @@ fn publish_captured_output(
                 )?;
             }
             let mut buffer = Vec::with_capacity(length.min(CAPTURED_OUTPUT_LIMIT) as usize);
-            file.read_to_end(&mut buffer)?;
+            fs::read_to_end_from(&mut file, &mut buffer)?;
             writer.write_all(&buffer)?;
             writer.flush()
         })();

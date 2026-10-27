@@ -565,9 +565,10 @@ fn read_metadata(path: &Path) -> Result<RunMetadata, RunStoreError> {
     }
     // Below the limit just checked, so within what a usize holds.
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    fs::open(path)?
-        .take(MAX_RUN_METADATA_BYTES + 1)
-        .read_to_end(&mut bytes)?;
+    fs::read_to_end_from(
+        &mut fs::open(path)?.take(MAX_RUN_METADATA_BYTES + 1),
+        &mut bytes,
+    )?;
     let metadata: RunMetadata = serde_json::from_slice(&bytes)
         .map_err(|_| RunStoreError::InvalidRun("run metadata JSON"))?;
     validate_integrity(&metadata.integrity)?;
@@ -780,7 +781,7 @@ pub(crate) fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError>
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = fs::read_from(&mut file, &mut buffer)?;
         if read == 0 {
             break;
         }

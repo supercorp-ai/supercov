@@ -8,7 +8,7 @@ use crate::fault_fs as fs;
 use crate::fault_process::Launch;
 use std::{
     collections::BTreeSet,
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -425,8 +425,7 @@ fn digest_paths(
         } else {
             let mut file = fs::open(&path).map_err(|source| io_error(&path, source))?;
             loop {
-                let read = file
-                    .read(&mut buffer)
+                let read = fs::read_from(&mut file, &mut buffer)
                     .map_err(|source| io_error(&path, source))?;
                 if read == 0 {
                     break;

@@ -196,3 +196,27 @@ pub fn seek(file: &mut File, position: io::SeekFrom) -> io::Result<u64> {
     use std::io::Seek;
     checked("seek", || file.seek(position))
 }
+
+/// `file.read(buffer)`, from a file already open (or a reader over one).
+#[track_caller]
+pub fn read_from(file: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize> {
+    checked("read_from", || file.read(buffer))
+}
+
+/// `file.read_exact(buffer)`.
+#[track_caller]
+pub fn read_exact_from(file: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<()> {
+    checked("read_exact_from", || file.read_exact(buffer))
+}
+
+/// `file.read_to_end(bytes)`.
+#[track_caller]
+pub fn read_to_end_from(file: &mut impl io::Read, bytes: &mut Vec<u8>) -> io::Result<usize> {
+    checked("read_to_end_from", || file.read_to_end(bytes))
+}
+
+/// `io::copy(from, to)`, between files already open.
+#[track_caller]
+pub fn copy_between(from: &mut File, to: &mut File) -> io::Result<u64> {
+    checked("copy_between", || io::copy(from, to))
+}
