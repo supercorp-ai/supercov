@@ -339,7 +339,9 @@ pub struct Writer<W> {
 
 impl<W: io::Write> io::Write for Writer<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        io(self.site, io::ErrorKind::BrokenPipe, || self.inner.write(bytes))
+        io(self.site, io::ErrorKind::BrokenPipe, || {
+            self.inner.write(bytes)
+        })
     }
 
     fn flush(&mut self) -> io::Result<()> {

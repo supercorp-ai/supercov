@@ -357,11 +357,12 @@ fn model_target_config<'a>(
     model: &'a CargoConfigValue,
     target: &str,
 ) -> Option<&'a CargoConfigValue> {
-    let target_table = model.at(&["target"])?.table()?;
-    if let Some(value) = target_table.get(target) {
+    let targets = model.at(&["target"])?;
+    if let Some(value) = targets.table()?.get(target) {
         return Some(value);
     }
-    let mut value = model.at(&["target"])?;
+    // `[target.thumbv8m.main-none-eabi]` is a table in a table to TOML.
+    let mut value = targets;
     for component in target.split('.') {
         value = value.table()?.get(component)?;
     }
@@ -1534,6 +1535,26 @@ mod tests {
             let plan =
                 resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs()).unwrap();
             assert_eq!(plan.targets[0].underlying_runner, None, "{config}");
+        }
+        // A target whose name has a dot is read through the tables TOML
+        // makes of it; one of them missing, or no table, sets no runner.
+        let dotted = invocation(&["test", "--target", "thumbv8m.main-none-eabi"]);
+        for (config, runner) in [
+            (
+                "[target.thumbv8m.main-none-eabi]\nrunner = \"probe\"\n",
+                true,
+            ),
+            ("[target.thumbv8m.other]\nrunner = \"probe\"\n", false),
+            ("[target]\nthumbv8m = 1\n", false),
+        ] {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            let plan = resolve_with_inputs(&root, &root, &dotted, model_inputs()).unwrap();
+            assert_eq!(plan.targets[0].target, "thumbv8m.main-none-eabi");
+            assert_eq!(
+                plan.targets[0].underlying_runner.is_some(),
+                runner,
+                "{config}"
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }
