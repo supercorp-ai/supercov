@@ -3014,7 +3014,19 @@ mod tests {
         )
         .unwrap();
         assert!(version_catalog(&root).is_empty());
+        // Entries naming no module, and catalogs empty or broken, resolve
+        // nothing; a bundle that is no list is no bundle.
+        for catalog in [
+            "[libraries]\nversioned = { version = \"1\" }\nhalf = { group = \"g\" }\nnumber = 1\n[bundles]\nnot-a-list = \"x\"\n",
+            "[libraries]\n[bundles]\n",
+            "[libraries",
+        ] {
+            write(&root.join("gradle/libs.versions.toml"), catalog).unwrap();
+            assert!(version_catalog(&root).is_empty(), "{catalog}");
+        }
         fs::remove_dir_all(&root).ok();
+        assert_eq!(java_literal("a\"b\\c\nd\re"), "\"a\\\"b\\\\c\\nd\\re\"");
+        assert_eq!(java_literal(""), "\"\"");
         // A self-closing section holds no `<dependencies>` of its own.
         let pom = "<project><build/><dependencies></dependencies></project>";
         assert_eq!(project_dependencies_end(pom), pom.find("</dependencies>"));
