@@ -329,13 +329,13 @@ fn judged_against_latest(
                     input.id,
                 ));
             }
-            for file in &files {
-                across.push(format!(
+            across.extend(files.iter().map(|file| {
+                format!(
                     "{file} (the {} test(s) of `{}` that reached it were measured again)",
                     judgment.reached[file].len(),
                     input.metadata.command.join(" ")
-                ));
-            }
+                )
+            }));
             superseded.insert(index, reached);
         }
         if !judgment.outdated.is_empty() {
@@ -639,7 +639,8 @@ pub fn merge_coverage_runs(
         .collect::<Result<Vec<_>, _>>()?;
     let mut merged_declaration = declarations[0].clone();
     let mut runners = BTreeMap::new();
-    for declaration in declarations {
+    // A declaration for each run, with a runner at least each.
+    declarations.into_iter().try_for_each(|declaration| {
         if declaration.protocol_version != merged_declaration.protocol_version
             || declaration.frontend_id != merged_declaration.frontend_id
             || declaration.frontend_version != merged_declaration.frontend_version
@@ -647,9 +648,9 @@ pub fn merge_coverage_runs(
             || declaration.structural_source != merged_declaration.structural_source
             || declaration.structural_limitations != merged_declaration.structural_limitations
         {
-            return Err("Cannot merge runs with different frontend declarations".into());
+            return Err("Cannot merge runs with different frontend declarations".to_owned());
         }
-        for runner in declaration.runners {
+        declaration.runners.into_iter().try_for_each(|runner| {
             if let Some(existing) = runners.get(&runner.runner) {
                 if existing != &runner {
                     return Err(format!(
@@ -660,8 +661,9 @@ pub fn merge_coverage_runs(
             } else {
                 runners.insert(runner.runner.clone(), runner);
             }
-        }
-    }
+            Ok(())
+        })
+    })?;
     merged_declaration.runners = runners.into_values().collect();
 
     let mut lock = ProjectLock::acquire(root, merged_run_id, started_at)
