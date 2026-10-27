@@ -2363,6 +2363,14 @@ mod tests {
             crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
         });
         assert!(elsewhere.is_ok());
+        let unset = crate::fault::during("env:SUPERCOV_NO_SUCH_VARIABLE/named", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(unset.is_ok());
+        let set = crate::fault::during("env:PATH/named", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(set.is_err());
     }
 
     fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {

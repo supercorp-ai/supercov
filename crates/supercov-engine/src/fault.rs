@@ -6,7 +6,9 @@
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
 //! its usual error. An entry written `__command/site...` applies only in a
 //! process started as `supercov __command` -- a doctest's or nextest's runner
-//! -- so a test can fail its Nth place there and not its parent's. A failing
+//! -- and one written `env:NAME/site...` only in a process the variable
+//! `NAME` is set for -- a merged doctest's child -- so a test can fail its
+//! Nth place there and not its parent's. A failing
 //! site does not make its call; it returns what the call returns when it
 //! fails, and says so on standard error (`test fault at <site>`), and as a
 //! line of the file `SUPERCOV_TEST_FAULT_LOG` names, where it names one: a
@@ -70,7 +72,11 @@ fn parse(text: &str) -> Vec<Fault> {
         .filter(|entry| !entry.is_empty())
         // An entry for another process's role is none of this one's.
         .filter_map(|entry| match entry.split_once('/') {
-            Some((named, rest)) => (named == role).then_some(rest),
+            Some((named, rest)) => match named.strip_prefix("env:") {
+                Some(variable) => std::env::var_os(variable).is_some(),
+                None => named == role,
+            }
+            .then_some(rest),
             None => Some(entry),
         })
         .map(|entry| {

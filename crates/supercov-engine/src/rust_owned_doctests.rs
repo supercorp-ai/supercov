@@ -1277,9 +1277,6 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
 
 // --------------------------------------------------------------- the child
 
-/// This program as the child a merged harness spawns for one case: run the
-/// harness binary in rustdoc's single-case mode under this case's own
-/// evidence directory, record how it went, and exit as it exited.
 /// A doctest's evidence directory, for the instrumentation the run that
 /// started rustdoc named (see `rust_runtime::evidence_environment`).
 /// `token` is the one this process was given, if any.
@@ -1300,7 +1297,8 @@ fn probe_token() -> Option<String> {
 /// The child of a merged harness, its records under `children` (see
 /// [`doctest_child_directory`]).
 pub fn doctest_child(children: PathBuf) -> i32 {
-    match doctest_child_inner(children) {
+    let case = ChildCase::from_variables(|name| std::env::var_os(name));
+    match case.and_then(|case| doctest_child_inner(children, case)) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -1309,16 +1307,44 @@ pub fn doctest_child(children: PathBuf) -> i32 {
     }
 }
 
-fn doctest_child_inner(children: PathBuf) -> Result<i32, RustTestRunnerError> {
-    let index = std::env::var(RUSTDOC_RUN_NB_TEST_ENV)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or_else(|| {
-            RustTestRunnerError::Context("the doctest child has no case index".into())
-        })?;
-    let binary = PathBuf::from(std::env::var_os(CHILD_BINARY_ENV).ok_or_else(|| {
-        RustTestRunnerError::Context("the doctest child has no harness binary".into())
-    })?);
+/// What a merged harness's child is told through its environment.
+struct ChildCase {
+    index: usize,
+    binary: PathBuf,
+    token: String,
+}
+
+impl ChildCase {
+    /// The case `variable` names, or what it is missing.
+    fn from_variables(
+        variable: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Self, RustTestRunnerError> {
+        let missing = |what: &str| RustTestRunnerError::Context(format!("the doctest {what}"));
+        let index = variable(RUSTDOC_RUN_NB_TEST_ENV)
+            .and_then(|value| value.to_str()?.parse::<usize>().ok())
+            .ok_or_else(|| missing("child has no case index"))?;
+        let binary =
+            variable(CHILD_BINARY_ENV).ok_or_else(|| missing("child has no harness binary"))?;
+        let token = variable(crate::rust_runtime::PROBE_TOKEN_ENV)
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| missing("runner has no instrumentation token"))?;
+        Ok(Self {
+            index,
+            binary: binary.into(),
+            token,
+        })
+    }
+}
+
+/// This program as the child a merged harness spawns for one case: run the
+/// harness binary in rustdoc's single-case mode under this case's own
+/// evidence directory, record how it went, and exit as it exited.
+fn doctest_child_inner(children: PathBuf, case: ChildCase) -> Result<i32, RustTestRunnerError> {
+    let ChildCase {
+        index,
+        binary,
+        token,
+    } = case;
     let evidence = children.join(format!("{index:08}"));
     fs::create_dir_all(&evidence).map_err(io_error)?;
     // The harness cleared RUSTDOC_DOCTEST_BIN_PATH before spawning us; make
@@ -1328,7 +1354,7 @@ fn doctest_child_inner(children: PathBuf) -> Result<i32, RustTestRunnerError> {
         .env_remove(CHILD_DIR_ENV)
         .env_remove(CHILD_BINARY_ENV)
         .envs(instrumented_stack_environment())
-        .envs(evidence_environment(probe_token(), &evidence)?)
+        .envs(crate::rust_runtime::evidence_environment(&token, &evidence))
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
@@ -1365,6 +1391,34 @@ pub fn rustdoc_wrapper_root(arguments: &[String]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_doctest_child_names_what_its_environment_lacks() {
+        let told = |unset: &str, value: &str| {
+            ChildCase::from_variables(|name| {
+                (name != unset).then(|| match name {
+                    RUSTDOC_RUN_NB_TEST_ENV => value.into(),
+                    _ => "x".into(),
+                })
+            })
+        };
+        for (unset, value, lack) in [
+            (RUSTDOC_RUN_NB_TEST_ENV, "3", "case index"),
+            ("", "three", "case index"),
+            (CHILD_BINARY_ENV, "3", "harness binary"),
+            (
+                crate::rust_runtime::PROBE_TOKEN_ENV,
+                "3",
+                "instrumentation token",
+            ),
+        ] {
+            let error = told(unset, value).err().unwrap();
+            assert!(error.to_string().contains(lack), "{error}");
+        }
+        let case = told("", "3").unwrap();
+        assert_eq!((case.index, case.token.as_str()), (3, "x"));
+        assert_eq!(case.binary, Path::new("x"));
+    }
 
     #[test]
     fn a_doctest_runner_given_no_token_names_no_evidence() {

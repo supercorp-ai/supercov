@@ -13228,8 +13228,18 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
 /// that failed saying so, and never panics; the sweep stops at the first N no
 /// runner reached, and a run with no fault then succeeds. How many it made.
 fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usize {
+    fail_each_place_of_a_runner_in(label, small_crate, role, command)
+}
+
+/// [`fail_each_place_of_a_runner`] over the project `write` makes.
+fn fail_each_place_of_a_runner_in(
+    label: &str,
+    write: fn(&Project),
+    role: &str,
+    command: &[&str],
+) -> usize {
     let project = Project::empty(label);
-    small_crate(&project);
+    write(&project);
     project.git(&["init", "-q"]);
     project.commit("fixture");
     let log = project.root.with_extension("faults.log");
@@ -13283,6 +13293,21 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
         );
         assert!(reached > 3, "{reached}");
     }
+    // Edition 2024 merges a crate's doctests into one harness, whose cases
+    // run as Supercov's children.
+    let reached = fail_each_place_of_a_runner_in(
+        "runner-faults-merged",
+        |project| {
+            small_crate(project);
+            project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
+        },
+        &format!(
+            "env:{}",
+            supercov_engine::rust_owned_doctests::CHILD_DIR_ENV
+        ),
+        &["--", "cargo", "test", "-q"],
+    );
+    assert!(reached >= 2, "{reached}");
 }
 
 /// `runs patch` reads the change from git: each git call failing in turn
