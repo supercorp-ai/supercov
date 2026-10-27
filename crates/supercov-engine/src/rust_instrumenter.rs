@@ -313,23 +313,63 @@ fn never_empty(iterable: &ast::Expr) -> bool {
     never_empty_naming(iterable, true)
 }
 
+/// A decimal integer literal's value, its `_`s and type suffix dropped.
+fn literal_integer(literal: &ast::Literal) -> Option<u128> {
+    let text = literal.syntax().text().to_string();
+    let digits = text
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(|c| *c != '_')
+        .collect::<String>();
+    let suffix = &text[text.len().min(digits.len() + text.matches('_').count())..];
+    (suffix.is_empty() || suffix.starts_with(['u', 'i']))
+        .then(|| digits.parse::<u128>().ok())
+        .flatten()
+}
+
+/// The name a path is, when it is a bare one.
+fn bare_name(path: &ast::PathExpr) -> Option<ast::NameRef> {
+    path.path()
+        .filter(|path| path.qualifier().is_none())
+        .and_then(|path| path.segment())
+        .and_then(|segment| segment.name_ref())
+}
+
+/// The values of every `const` and `static` named `name` in the file that
+/// holds `node`.
+fn constant_bodies(node: &ast::Expr, name: &ast::NameRef) -> impl Iterator<Item = ast::Expr> {
+    let file = node.syntax().ancestors().last();
+    let file = file.expect("a node is among its own ancestors");
+    let name = name.text().to_string();
+    file.descendants().filter_map(move |item| {
+        let (named, body) = match_constant(item)?;
+        (named.text() == name).then_some(body).flatten()
+    })
+}
+
+/// A `const` or `static` item's name and value.
+fn match_constant(item: ra_ap_syntax::SyntaxNode) -> Option<(ast::Name, Option<ast::Expr>)> {
+    if let Some(constant) = ast::Const::cast(item.clone()) {
+        return Some((constant.name()?, constant.body()));
+    }
+    let item = ast::Static::cast(item)?;
+    Some((item.name()?, item.body()))
+}
+
 /// [`never_empty`], following a constant's name when `constants` is set: a
 /// constant's own value is read without, so a cycle ends.
 fn never_empty_naming(iterable: &ast::Expr, constants: bool) -> bool {
     use ast::RangeItem;
-    // A decimal integer literal's value, its `_`s and type suffix dropped.
+    // A bound written as a decimal integer, or, by its bare name, a
+    // `const` of this file that is one: `1..=MOST_COPIES`.
     let integer = |bound: Option<ast::Expr>| match bound {
-        Some(ast::Expr::Literal(literal)) => {
-            let text = literal.syntax().text().to_string();
-            let digits = text
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '_')
-                .filter(|c| *c != '_')
-                .collect::<String>();
-            let suffix = &text[text.len().min(digits.len() + text.matches('_').count())..];
-            (suffix.is_empty() || suffix.starts_with(['u', 'i']))
-                .then(|| digits.parse::<u128>().ok())
-                .flatten()
+        Some(ast::Expr::Literal(literal)) => literal_integer(&literal),
+        Some(ast::Expr::PathExpr(path)) if constants => {
+            let name = bare_name(&path)?;
+            constant_bodies(iterable, &name).find_map(|body| match body {
+                ast::Expr::Literal(literal) => literal_integer(&literal),
+                _ => None,
+            })
         }
         _ => None,
     };
@@ -352,36 +392,9 @@ fn never_empty_naming(iterable: &ast::Expr, constants: bool) -> bool {
             .expr()
             .is_some_and(|inner| never_empty_naming(&inner, constants)),
         // A `const` or `static` of this file, by its bare name.
-        ast::Expr::PathExpr(path) if constants => {
-            let Some(name) = path
-                .path()
-                .filter(|path| path.qualifier().is_none())
-                .and_then(|path| path.segment())
-                .and_then(|segment| segment.name_ref())
-            else {
-                return false;
-            };
-            let Some(file) = iterable.syntax().ancestors().last() else {
-                return false;
-            };
-            let named =
-                |item: Option<ast::Name>| item.is_some_and(|item| item.text() == name.text());
-            file.descendants().any(|node| {
-                if let Some(constant) = ast::Const::cast(node.clone()) {
-                    named(constant.name())
-                        && constant
-                            .body()
-                            .is_some_and(|body| never_empty_naming(&body, false))
-                } else if let Some(item) = ast::Static::cast(node) {
-                    named(item.name())
-                        && item
-                            .body()
-                            .is_some_and(|body| never_empty_naming(&body, false))
-                } else {
-                    false
-                }
-            })
-        }
+        ast::Expr::PathExpr(path) if constants => bare_name(path).is_some_and(|name| {
+            constant_bodies(iterable, &name).any(|body| never_empty_naming(&body, false))
+        }),
         ast::Expr::MethodCallExpr(call)
             if call
                 .name_ref()
@@ -4868,13 +4881,18 @@ fn main() {
             ("KINDS.iter()", true),
             ("ORDER", true),
             ("EMPTY", false),
+            ("0..COUNT", true),
+            ("1..=COUNT", true),
+            ("COUNT..3", false),
+            ("0..NO_COUNT", false),
+            ("0..SUM", false),
             ("NONE", false),
             ("COPY", false),
             ("ALIAS", false),
             ("self::KINDS", false),
         ] {
             let source = format!(
-                "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
+                "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
             );
             let transformed =
                 instrument_rust_source("src/lib.rs", &source, "crate::__supercov_runtime_v1")
