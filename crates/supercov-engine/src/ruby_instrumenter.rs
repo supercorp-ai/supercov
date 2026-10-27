@@ -4579,6 +4579,25 @@ end
         assert_eq!(negations, [None, None, Some("()".to_owned())]);
     }
 
+    /// Each construct visited twice is declared once: a loop, an iterator,
+    /// both `case` forms, safe navigation, a logical value, an operator
+    /// assignment and a `begin` with a rescue.
+    #[test]
+    fn each_construct_visited_twice_is_declared_once() {
+        let source = b"for v in xs\n  v\nend\nxs.each do |x|\n  x\nend\ncase x\nwhen 1 then 2\nend\ncase x\nin Integer then 3\nend\nx&.call\nz = x || y\nh[k] ||= v\nbegin\n  x.call\nrescue StandardError\n  4\nend\n";
+        let parsed = ruby_prism::parse(source);
+        let program = parsed.node();
+        let mut next = 0;
+        let mut collector = Collector::new("lib/t.rb", source, &mut next);
+        collector.visit(&program);
+        let branches = collector.manifest.branches.len();
+        let decisions = collector.manifest.decisions.len();
+        collector.visit(&program);
+        assert_eq!(collector.manifest.branches.len(), branches);
+        assert_eq!(collector.manifest.decisions.len(), decisions);
+        assert!(branches >= 8, "{branches}");
+    }
+
     #[test]
     fn registering_the_same_node_twice_declares_it_once() {
         let source = b"def m(a, b)\n  a || b\nend\nif a\n  1\nend\n";
