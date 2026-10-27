@@ -14277,6 +14277,21 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
     assert!(refused);
 }
 
+/// The quality scope takes the source roots it is given, and reads roots
+/// that name nothing as none given.
+#[test]
+fn the_quality_scope_takes_the_roots_it_is_given() {
+    let project = Project::cart("quality-roots");
+    let explicit = project
+        .supercov_with(&["quality", "scope"], &[("SUPERCOV_SOURCE_ROOTS", "src")])
+        .succeeds();
+    assert!(explicit.contains("explicit mode"), "{explicit}");
+    let blank = project
+        .supercov_with(&["quality", "scope"], &[("SUPERCOV_SOURCE_ROOTS", " , ")])
+        .succeeds();
+    assert!(blank.contains("automatic mode"), "{blank}");
+}
+
 /// `runs <run> source` refuses a run that is not stored, no file, an offset
 /// that is no number and a word it does not know, and says when its reply
 /// cannot fit; `runs check` refuses a floor too large to read.
