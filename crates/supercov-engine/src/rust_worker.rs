@@ -12,6 +12,7 @@
 //! what no single test's window holds is the run's background.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
@@ -359,7 +360,7 @@ pub(crate) fn wasm_target_cfg(
     let output = std::process::Command::new("rustc")
         .args(["--print", "cfg", "--target", "wasm32-unknown-unknown"])
         .current_dir(crate_directory)
-        .output()
+        .launch_output()
         .ok()?;
     target_cfg_of(&output)
 }
@@ -1336,7 +1337,7 @@ fn watched_arguments(
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn();
+                .launch();
         }
     }
     Watched {
@@ -1616,7 +1617,7 @@ fn exec_wrangler(
     }
     #[cfg(not(unix))]
     {
-        match command.status() {
+        match command.launch_status() {
             Ok(status) => status.code().unwrap_or(1),
             Err(error) => {
                 eprintln!(
@@ -1799,7 +1800,7 @@ pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
         .current_dir(directory)
-        .output()
+        .launch_output()
         .ok()?;
     if !output.status.success() {
         return None;

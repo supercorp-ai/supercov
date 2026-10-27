@@ -15,6 +15,7 @@
 #![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -89,7 +90,7 @@ fn learn_through_cargo(
             "PATH",
             std::env::join_paths(path).map_err(|error| error.to_string())?,
         )
-        .output()
+        .launch_output()
         .map_err(|error| format!("could not run {}: {error}", command[0]))?;
     let text = fs::read_to_string(&record).map_err(|_| {
         let said = String::from_utf8_lossy(&output.stderr);

@@ -9,6 +9,7 @@
 //! runner (`rust_owned_nextest`), recording each attempt it launches.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
@@ -944,7 +945,7 @@ fn build_test_artifacts(
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
         .env("RUSTFLAGS", capped_rustflags(project, &lint_invocation))
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
         // With --message-format=json the compiler's diagnostics travel on
@@ -1261,7 +1262,7 @@ fn list_tests(
         .args(["--list", "--format", "terse"])
         .args(filters)
         .envs(environment.iter().map(|(key, value)| (key, value)))
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
         // A libtest binary that dies on a signal writes nothing to stderr, so
@@ -1543,7 +1544,7 @@ fn rustc_print_path(
         .args(selector)
         .args(["--print", request])
         .current_dir(&project.workspace_root)
-        .output()
+        .launch_output()
         .map_err(|error| {
             RustTestRunnerError::Launch(format!("rustc --print {request}: {error}"))
         })?;

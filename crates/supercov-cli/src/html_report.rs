@@ -5,6 +5,7 @@ use std::{
     process::{Command, ExitCode, Stdio},
 };
 use supercov_engine::fault_fs::{self as fs, OpenOptions};
+use supercov_engine::fault_process::Launch;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::GzEncoder};
@@ -963,7 +964,7 @@ fn open_report(path: &Path) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .launch()
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

@@ -15,6 +15,7 @@
 //! Chrome only: the remembering script is installed through Chrome's
 //! DevTools protocol. A test run in another browser is said to be unmeasured.
 
+use crate::fault_process::Launch;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -175,7 +176,7 @@ impl BrowserReader {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
+            .launch()
             .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
         let mut stop_driver = |error: String| {
             let _ = driver.kill();

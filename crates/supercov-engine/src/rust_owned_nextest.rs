@@ -15,6 +15,7 @@
 //! binaries: this program wraps it rather than replacing it.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
@@ -132,7 +133,7 @@ pub(crate) fn run_nextest(
     // The identity contract is pinned to the nextest versions it was verified
     // against; anything else fails before a test runs.
     let version = cargo(&nextest_version_arguments(invocation))
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !version.status.success() {
         return Err(RustTestRunnerError::CargoFailed(combined_output(
@@ -188,7 +189,7 @@ pub(crate) fn run_nextest(
         list_arguments.extend(listing.runner_arguments);
     }
     let listed = cargo(&list_arguments)
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !listed.status.success() {
         return Err(RustTestRunnerError::CargoFailed(combined_output(
@@ -202,7 +203,7 @@ pub(crate) fn run_nextest(
         })?;
     let metadata =
         cargo(&cargo_metadata_arguments(invocation).map_err(RustTestRunnerError::Context)?)
-            .output()
+            .launch_output()
             .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !metadata.status.success() {
         return Err(RustTestRunnerError::CargoFailed(combined_output(
@@ -582,7 +583,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
     let attempt = match identity {
         RustRunnerInvocationIdentity::NextestList(_) => {
             let status = command
-                .status()
+                .launch_status()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             return Ok(exit_code(&status));
         }
@@ -603,7 +604,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
             &plan.token,
             &evidence,
         ))
-        .status()
+        .launch_status()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let code = exit_code(&status);
     let record = AttemptRecord {

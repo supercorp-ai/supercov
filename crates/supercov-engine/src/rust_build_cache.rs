@@ -1,6 +1,7 @@
 //! Exact-input stable workspace metadata for the owned Rust frontend.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -59,7 +60,7 @@ struct RustBuildCacheIdentity<'a> {
 fn tool_version(program: &str, arguments: &[&str]) -> String {
     Command::new(program)
         .args(arguments)
-        .output()
+        .launch_output()
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())

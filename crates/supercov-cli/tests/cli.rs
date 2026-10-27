@@ -12870,6 +12870,18 @@ fn fail_each_place_of_a_run_ending(
     command: &[&str],
     code: i32,
 ) -> usize {
+    fail_each_place_at("fs", label, write, command, code)
+}
+
+/// [`fail_each_place_of_a_run_ending`], failing the fault site `site` at each
+/// place in turn.
+fn fail_each_place_at(
+    site: &str,
+    label: &str,
+    write: fn(&Project),
+    command: &[&str],
+    code: i32,
+) -> usize {
     const PROJECTS: usize = 4;
     let reached = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -12882,14 +12894,14 @@ fn fail_each_place_of_a_run_ending(
                 project.commit("fixture");
                 let mut nth = first;
                 loop {
-                    let fault = format!("fs#{nth}");
+                    let fault = format!("{site}#{nth}");
                     let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
                     let said = ran.stderr();
                     assert!(
                         !said.contains("panicked at") && ran.code() != 101,
                         "{label} with {fault} panicked:\n{said}"
                     );
-                    if !said.contains("[supercov] test fault at fs") {
+                    if !said.contains(&format!("[supercov] test fault at {site}")) {
                         break;
                     }
                     reached.fetch_max(nth, std::sync::atomic::Ordering::Relaxed);
@@ -13025,37 +13037,68 @@ fn a_ruby_source_that_does_not_parse_is_named() {
     );
 }
 
+/// A JavaScript project of one test, run by `node --test`.
+fn javascript_project(project: &Project) {
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/cart.js",
+        "export const total = (a, b) => (a && b ? a + b : 0);\n",
+    );
+    project.write(
+            "test/cart.test.js",
+            "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { total } from '../src/cart.js';\ntest('adds', () => assert.equal(total(1, 2), 3));\n",
+        );
+}
+
+/// A Python project of one test, run by unittest.
+fn python_project(project: &Project) {
+    project.write("pkg/__init__.py", "");
+    project.write("pkg/w.py", "def double(n):\n    return n * 2 if n else 0\n");
+    project.write("tests/__init__.py", "");
+    project.write(
+            "tests/test_w.py",
+            "import unittest\nfrom pkg.w import double\n\nclass W(unittest.TestCase):\n    def test_doubles(self):\n        self.assertEqual(double(2), 4)\n",
+        );
+}
+
+/// A Ruby project of one test, run by minitest.
+fn ruby_project(project: &Project) {
+    project.write(
+        "lib/w.rb",
+        "module W\n  def self.double(n) = n ? n * 2 : 0\nend\n",
+    );
+    project.write(
+            "test/w_test.rb",
+            "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_doubles\n    assert_equal 4, W.double(2)\n  end\nend\n",
+        );
+}
+
+/// A Go module of one test.
+fn go_project(project: &Project) {
+    project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+    project.write(
+            "w.go",
+            "package w\n\nfunc Double(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n",
+        );
+    project.write(
+            "w_test.go",
+            "package w\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+        );
+}
+
 #[test]
 fn a_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let javascript = fail_each_place_of_a_run(
         "run-faults-js",
-        |project| {
-            project.write(
-                "package.json",
-                r#"{ "name": "cart", "private": true, "type": "module" }"#,
-            );
-            project.write(
-                "src/cart.js",
-                "export const total = (a, b) => (a && b ? a + b : 0);\n",
-            );
-            project.write(
-                "test/cart.test.js",
-                "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { total } from '../src/cart.js';\ntest('adds', () => assert.equal(total(1, 2), 3));\n",
-            );
-        },
+        javascript_project,
         &["--", "node", "--test"],
     );
     let python = fail_each_place_of_a_run(
         "run-faults-py",
-        |project| {
-            project.write("pkg/__init__.py", "");
-            project.write("pkg/w.py", "def double(n):\n    return n * 2 if n else 0\n");
-            project.write("tests/__init__.py", "");
-            project.write(
-                "tests/test_w.py",
-                "import unittest\nfrom pkg.w import double\n\nclass W(unittest.TestCase):\n    def test_doubles(self):\n        self.assertEqual(double(2), 4)\n",
-            );
-        },
+        python_project,
         &[
             "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
         ],
@@ -13070,20 +13113,7 @@ fn a_ruby_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
         return;
     };
     let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
-    let reached = fail_each_place_of_a_run(
-        "run-faults-rb",
-        |project| {
-            project.write(
-                "lib/w.rb",
-                "module W\n  def self.double(n) = n ? n * 2 : 0\nend\n",
-            );
-            project.write(
-                "test/w_test.rb",
-                "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_doubles\n    assert_equal 4, W.double(2)\n  end\nend\n",
-            );
-        },
-        &command,
-    );
+    let reached = fail_each_place_of_a_run("run-faults-rb", ruby_project, &command);
     assert!(reached > 50, "{reached}");
 }
 
@@ -13093,21 +13123,8 @@ fn a_go_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
         eprintln!("skipping: no Go toolchain found");
         return;
     };
-    let reached = fail_each_place_of_a_run(
-        "run-faults-go",
-        |project| {
-            project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
-            project.write(
-                "w.go",
-                "package w\n\nfunc Double(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n",
-            );
-            project.write(
-                "w_test.go",
-                "package w\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
-            );
-        },
-        &["--", go, "test", "./..."],
-    );
+    let reached =
+        fail_each_place_of_a_run("run-faults-go", go_project, &["--", go, "test", "./..."]);
     assert!(reached > 50, "{reached}");
 }
 
@@ -13227,6 +13244,55 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
 /// time (`role/fs#N`, every runner failing its Nth): each run ends, a runner
 /// that failed saying so, and never panics; the sweep stops at the first N no
 /// runner reached, and a run with no fault then succeeds. How many it made.
+/// A run, once for every place it starts a program, with that start
+/// failing: each ends, never panicking, and without a fault it succeeds.
+#[test]
+fn a_run_whose_program_cannot_start_anywhere_says_so_and_recovers() {
+    let rust = fail_each_place_at(
+        "spawn",
+        "spawn-faults-rs",
+        small_crate,
+        &["--", "cargo", "test", "-q"],
+        0,
+    );
+    let javascript = fail_each_place_at(
+        "spawn",
+        "spawn-faults-js",
+        javascript_project,
+        &["--", "node", "--test"],
+        0,
+    );
+    let python = fail_each_place_at(
+        "spawn",
+        "spawn-faults-py",
+        python_project,
+        &[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ],
+        0,
+    );
+    assert!(
+        rust > 3 && javascript > 0 && python > 0,
+        "{rust} {javascript} {python}"
+    );
+    if let Some(go) = go() {
+        let reached = fail_each_place_at(
+            "spawn",
+            "spawn-faults-go",
+            go_project,
+            &["--", go, "test", "./..."],
+            0,
+        );
+        assert!(reached > 0, "{reached}");
+    }
+    #[cfg(unix)]
+    if let Some(ruby) = ruby() {
+        let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
+        let reached = fail_each_place_at("spawn", "spawn-faults-rb", ruby_project, &command, 0);
+        assert!(reached > 0, "{reached}");
+    }
+}
+
 fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usize {
     fail_each_place_of_a_runner_in(label, small_crate, role, command)
 }

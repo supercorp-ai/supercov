@@ -40,6 +40,7 @@
 //! evidence to a guess.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
@@ -784,7 +785,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             .args(arguments)
             .env_remove(WRAPPER_ROOT_ENV)
             .env_remove(REAL_RUSTDOC_ENV)
-            .status()
+            .launch_status()
             .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
         return Ok(status.code().unwrap_or(1));
     }
@@ -815,7 +816,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             command.env(key, value);
         }
         command
-            .output()
+            .launch_output()
             .map_err(|error| RustTestRunnerError::Launch(error.to_string()))
     };
 
@@ -1159,7 +1160,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             // its doctest, but the list pass never reaches one: rustdoc lists
             // standalone cases itself and does not invoke the runtool.
             let output = Command::new(&binary)
-                .output()
+                .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
             if !listed_names(&text).is_empty() {
@@ -1182,7 +1183,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                 .env(RUSTDOC_BIN_PATH_ENV, &program)
                 .env(CHILD_DIR_ENV, &children)
                 .env(CHILD_BINARY_ENV, &binary)
-                .output()
+                .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
             let lines = harness_lines(&text);
@@ -1246,7 +1247,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             let output = Command::new(&binary)
                 .envs(instrumented_stack_environment())
                 .envs(evidence_environment(probe_token(), &evidence)?)
-                .output()
+                .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
             let exit = output.status.code().unwrap_or(1);
@@ -1355,7 +1356,7 @@ fn doctest_child_inner(children: PathBuf, case: ChildCase) -> Result<i32, RustTe
         .env_remove(CHILD_BINARY_ENV)
         .envs(instrumented_stack_environment())
         .envs(crate::rust_runtime::evidence_environment(&token, &evidence))
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
     fs::write(

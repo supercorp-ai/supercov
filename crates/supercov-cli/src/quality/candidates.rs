@@ -27,6 +27,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use supercov_engine::fault_process::Launch;
 
 use serde::Deserialize;
 
@@ -489,7 +490,7 @@ fn python_parse_with(source: &str, pyenv_version: Option<&str>) -> Option<Option
     if let Some(version) = pyenv_version {
         command.env("PYENV_VERSION", version);
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = command.launch().ok()?;
     let _ = child
         .stdin
         .take()

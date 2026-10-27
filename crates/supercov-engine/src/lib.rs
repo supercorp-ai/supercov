@@ -34,6 +34,7 @@ pub mod docker_proxy;
 pub mod evidence_archive;
 pub mod fault;
 pub mod fault_fs;
+pub mod fault_process;
 pub mod frontend_detection;
 pub mod frontend_protocol;
 pub mod go_instrumenter;

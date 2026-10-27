@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use supercov_engine::fault_process::Launch;
 
 /// Where the two versions of each file come from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,7 +78,7 @@ fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .current_dir(root)
         .args(arguments)
-        .output()
+        .launch_output()
         .map_err(|e| format!("cannot run git: {e}"))?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);

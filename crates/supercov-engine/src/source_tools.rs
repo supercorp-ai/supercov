@@ -24,6 +24,7 @@
 //! ends the change is the project's, as the command meant it to be.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -526,7 +527,7 @@ fn in_view(value: &OsStr, workspace: &[&Path], view: &Path) -> OsString {
 }
 
 fn status(command: &mut Command) -> i32 {
-    match command.status() {
+    match command.launch_status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(error) => {
             eprintln!(

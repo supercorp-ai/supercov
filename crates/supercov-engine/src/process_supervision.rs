@@ -3,6 +3,7 @@
 // Descriptor and watchdog handling reads the filesystem only on Unix; on
 // Windows the module path is unused and the first Windows build said so.
 #[cfg(unix)]
+use crate::fault_process::Launch;
 use std::fs;
 use std::{
     ffi::{OsStr, OsString},
@@ -1324,7 +1325,7 @@ fn spawn_contained(
 ) -> Result<(Child, Option<ParentDeathGuard>), SupervisionError> {
     let Some(watchdog_program) = watchdog_program else {
         command.process_group(0);
-        let child = command.spawn().map_err(|source| SupervisionError::Spawn {
+        let child = command.launch().map_err(|source| SupervisionError::Spawn {
             program: program.clone(),
             source,
         })?;
@@ -1413,7 +1414,7 @@ fn spawn_contained(
             Ok(())
         });
     }
-    let child = command.spawn().map_err(|source| {
+    let child = command.launch().map_err(|source| {
         if source.raw_os_error() == Some(WATCHDOG_ENDED) {
             SupervisionError::PlatformOperation {
                 operation: "start the watchdog that stops the command if Supercov is killed",
@@ -1968,7 +1969,7 @@ impl ProcessSupervisor {
         }
         let mut command = spec.command()?;
         let targets = Relays::request(&mut command, spec.console.as_ref());
-        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
+        let mut child = command.launch().map_err(|source| SupervisionError::Spawn {
             program: spec.program.clone(),
             source,
         })?;
@@ -2021,7 +2022,7 @@ impl ProcessSupervisor {
         }
         let mut command = spec.command()?;
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
+        let mut child = command.launch().map_err(|source| SupervisionError::Spawn {
             program: spec.program.clone(),
             source,
         })?;

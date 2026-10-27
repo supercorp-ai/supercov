@@ -5,6 +5,7 @@
 //! fingerprints for every language.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::BTreeSet,
     io::{self, Read},
@@ -686,12 +687,12 @@ fn git_integrity(root: &Path) -> Option<GitIntegrity> {
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root)
-        .output()
+        .launch_output()
         .ok();
     let status = Command::new("git")
         .args(["status", "--porcelain=v1"])
         .current_dir(root)
-        .output()
+        .launch_output()
         .ok();
     if !revision
         .as_ref()
@@ -706,7 +707,7 @@ fn git_integrity(root: &Path) -> Option<GitIntegrity> {
         branch: Command::new("git")
             .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
             .current_dir(root)
-            .output()
+            .launch_output()
             .ok()
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())

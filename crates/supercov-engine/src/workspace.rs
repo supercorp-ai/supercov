@@ -1,5 +1,6 @@
 //! Isolated project snapshots and crash-recoverable stable build cache.
 
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Write},
@@ -1588,7 +1589,7 @@ fn is_build_output(root: &Path, directory: &Path) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .launch_status()
         .is_ok_and(|status| status.code() == Some(0))
 }
 
@@ -2028,7 +2029,7 @@ pub fn mirror_git_repository(root: &Path, workspace: &Path) -> Result<(), String
                 .args(arguments)
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .stdin(std::process::Stdio::null())
-                .output()
+                .launch_output()
         })
         .map_err(|error| format!("git {}: {error}", arguments.join(" ")))?;
         if output.status.success() {
@@ -2115,7 +2116,7 @@ pub fn hide_rewritten_files(workspace: &Path, files: &[String]) {
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
-                .spawn()
+                .launch()
         })
         .ok()?;
         child.stdin.take()?.write_all(input.as_bytes()).ok()?;

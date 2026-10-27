@@ -24,6 +24,7 @@
 //! writes its last evidence; it never removes them.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, BufReader, Read, Write},
@@ -91,7 +92,7 @@ fn upstream_socket_through(
     if let Some(context) = environment.get("DOCKER_CONTEXT") {
         command.env("DOCKER_CONTEXT", context);
     }
-    if let Ok(output) = command.output()
+    if let Ok(output) = command.launch_output()
         && output.status.success()
     {
         let host = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -864,7 +865,7 @@ impl Shared {
             .env("DOCKER_HOST", format!("unix://{}", self.upstream.display()))
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        let output = config.output().ok()?;
+        let output = config.launch_output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -888,7 +889,7 @@ impl Shared {
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .status()
+                    .launch_status()
                     .ok()
                     .map(|status| status.success())
             },

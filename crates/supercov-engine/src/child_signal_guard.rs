@@ -19,6 +19,7 @@
 //! registered child is placed in a Job Object that kills its members when its
 //! handle closes, so the test processes die with the runner however it ends.
 
+use crate::fault_process::Launch;
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
@@ -120,7 +121,7 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .launch()?;
     let _registered = register(&child);
     child.wait_with_output()
 }
@@ -149,7 +150,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .launch()?;
     let _registered = register(&child);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -193,7 +194,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
 
 /// `Command::status()`, with the child registered while it runs.
 pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
-    let mut child = command.spawn()?;
+    let mut child = command.launch()?;
     let _registered = register(&child);
     child.wait()
 }

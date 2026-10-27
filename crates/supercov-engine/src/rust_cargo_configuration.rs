@@ -8,6 +8,7 @@
 //! configuration surfaces fail before user code executes.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::OsString,
@@ -276,7 +277,7 @@ fn command_stdout(
 ) -> Result<String, RustCargoConfigurationError> {
     let output = Command::new(program)
         .args(arguments)
-        .output()
+        .launch_output()
         .map_err(|error| io_error(program, error))?;
     if !output.status.success() {
         return Err(RustCargoConfigurationError::Invalid(format!(
@@ -644,7 +645,7 @@ fn compiler_host(
     let output = compiler
         .command(root)
         .arg("-vV")
-        .output()
+        .launch_output()
         .map_err(|error| io_error(&compiler.rustc.resolve(root), error))?;
     if !output.status.success() {
         return Err(RustCargoConfigurationError::Invalid(format!(
@@ -707,7 +708,7 @@ fn target_cfg(
         .command(execution_root)
         .args(["--print", "cfg", "--target"])
         .arg(&target_argument)
-        .output()
+        .launch_output()
         .map_err(|error| io_error(&compiler.rustc.resolve(execution_root), error))?;
     if !output.status.success() {
         return Err(RustCargoConfigurationError::Invalid(format!(

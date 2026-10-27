@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use supercov_engine::fault_process::Launch;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -479,7 +480,7 @@ fn git_in(root: &Path, arguments: &[&str]) {
     let status = std::process::Command::new("git")
         .current_dir(root)
         .args(arguments)
-        .output()
+        .launch_output()
         .expect("git runs in tests");
     assert!(
         status.status.success(),
@@ -571,7 +572,7 @@ fn a_base_that_moved_on_is_not_this_branch_s_obligation() {
         std::process::Command::new("git")
             .current_dir(&temp.0)
             .args(["rev-parse", "HEAD~1"])
-            .output()
+            .launch_output()
             .unwrap()
             .stdout,
     )
@@ -3562,7 +3563,7 @@ fn discovery_and_reading_refuse_what_they_cannot_read() {
 fn running_as_root() -> bool {
     std::process::Command::new("id")
         .arg("-u")
-        .output()
+        .launch_output()
         .is_ok_and(|output| output.stdout.starts_with(b"0"))
 }
 
