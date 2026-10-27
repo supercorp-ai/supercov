@@ -97,9 +97,14 @@ impl Deadline {
                     signal_registered_children(libc::SIGKILL);
                 }
             }
-            // Windows has no signal to ask with: the run's Job Object takes
-            // the children down when it ends.
-            #[cfg(not(unix))]
+            // Windows has no signal to ask with: the guard's Job Object ends
+            // every child in it at once.
+            #[cfg(windows)]
+            {
+                let _ = grace;
+                windows_job::terminate();
+            }
+            #[cfg(not(any(unix, windows)))]
             let _ = grace;
         });
         Self {
@@ -199,6 +204,13 @@ mod windows_job {
         // Closing the handle kills whatever is still assigned; the runner has
         // waited for every child by the time the outermost guard drops.
         *job() = None;
+    }
+
+    /// End every child assigned to the job, the job left for any other.
+    pub fn terminate() {
+        if let Some(handle) = job().as_ref() {
+            handle.terminate();
+        }
     }
 
     pub fn assign(child: &Child) {

@@ -1173,7 +1173,7 @@ impl JobHandle {
         Ok(())
     }
 
-    fn terminate(&self) {
+    pub(crate) fn terminate(&self) {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
         // SAFETY: the handle owns this invocation's process tree. Failure can
         // only mean the tree has already exited, so termination is best effort.
