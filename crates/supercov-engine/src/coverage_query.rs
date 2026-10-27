@@ -514,11 +514,12 @@ pub fn unclassified_source(
     });
     named.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     let mut all = roots.to_vec();
-    for (root, _) in named {
+    // Named with each place, so not empty either.
+    named.into_iter().for_each(|(root, _)| {
         if !all.contains(&root) {
             all.push(root);
         }
-    }
+    });
     Some(UnclassifiedSource {
         directories,
         roots: all,
@@ -3542,10 +3543,11 @@ pub fn coverage_areas_query(
     if !kinds.is_empty() {
         let tested = index.file_gaps(options.view, Some(crate::coverage_index::ALL_TESTS), None)?;
         if !tested.is_empty() {
-            for area in areas.values_mut() {
+            // A tested file is in an area, so there are some.
+            areas.values_mut().for_each(|area| {
                 area.covered_by_tests = Some(NO_DIMENSIONS);
-            }
-            for file in tested {
+            });
+            tested.into_iter().for_each(|file| {
                 let area = areas
                     .get_mut(&area_directory(&file.file, options.depth))
                     .expect("the tested files are among every file's");
@@ -3553,7 +3555,7 @@ pub fn coverage_areas_query(
                     area.covered_by_tests.get_or_insert(NO_DIMENSIONS),
                     &file.covered,
                 );
-            }
+            });
         }
     }
     let mut areas = areas.into_values().collect::<Vec<_>>();
@@ -4300,7 +4302,8 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
         }));
     }
     for decision in &view.decisions {
-        for condition in 0..decision.meta.conditions.len() {
+        // A decision has a condition at least.
+        (0..decision.meta.conditions.len()).for_each(|condition| {
             let mut options = Vec::new();
             for left in 0..decision.vector_observations.len() {
                 for right in (left + 1)..decision.vector_observations.len() {
@@ -4324,7 +4327,7 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
                 metric: ObligationMetric::Mcdc,
                 options: deduplicate_options(options),
             });
-        }
+        });
     }
     ObligationModel {
         obligations,
@@ -4765,6 +4768,7 @@ mod tests {
                 Some("packages/ui"),
             ),
         ];
+        assert!(scope_groups(&[]).is_empty());
         let groups = scope_groups(&entries)
             .into_iter()
             .map(|group| (group.files, group.status, group.directory))
