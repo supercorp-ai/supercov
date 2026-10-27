@@ -1750,6 +1750,24 @@ mod environment_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_interrupted_run_says_by_what() {
+        let interrupted = DirectJavascriptRunError::Interrupted {
+            signal: crate::process_supervision::ForwardedSignal::Sigterm,
+            exit_code: 143,
+            timings: RunTimings {
+                initialization_ms: 0.0,
+                workspace_preparation_ms: 0.0,
+                adapter_setup_ms: 0.0,
+                instrumented_build_ms: 0.0,
+                test_command_ms: 0.0,
+                evidence_publication_ms: 0.0,
+            },
+            total_ms: 0.0,
+        };
+        assert_eq!(interrupted.to_string(), "interrupted by SIGTERM");
+    }
+
     use super::*;
     use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
 
