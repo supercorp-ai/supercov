@@ -6354,7 +6354,8 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         }
     }
 
-    fn hits(&self, points: &[usize]) -> Option<Expression<'a>> {
+    /// A hit of each of `points`, which are some.
+    fn hits(&self, points: &[usize]) -> Expression<'a> {
         let mut hits = self.ast.vec_from_iter(points.iter().map(|point| {
             self.call(
                 &self.coverage_hit_v2,
@@ -6364,10 +6365,10 @@ impl<'a> LogicalValueTransformer<'a, '_> {
                 ]),
             )
         }));
-        match hits.len() {
-            0 => None,
-            1 => hits.pop(),
-            _ => Some(self.ast.expression_sequence(Span::default(), hits)),
+        if hits.len() == 1 {
+            hits.pop().expect("one hit")
+        } else {
+            self.ast.expression_sequence(Span::default(), hits)
         }
     }
 
@@ -6386,8 +6387,9 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         if deciders.iter().all(|(_, points)| points.is_empty()) {
             return None;
         }
+        // One decider, then, with points: not all are empty.
         if let [(_, points)] = deciders {
-            return self.hits(points);
+            return Some(self.hits(points));
         }
         let tree = tree.expect("a tree with a choice of leaves has a table");
         Some(self.call(
