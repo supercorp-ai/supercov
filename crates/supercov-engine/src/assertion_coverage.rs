@@ -1601,17 +1601,18 @@ impl Population {
         // What the test uses from its own file: a table it loops over, a
         // helper it calls, a `let` it reads.
         shown.extend(used_definitions(&lines, self.language, located.start, end));
-        for i in shown {
+        // The test's own lines are among them, so they are never none.
+        shown.into_iter().for_each(|i| {
             // A doctest lives in comments: its lines are the test.
             if i < last || (commented[i] && self.language != Language::Rust) {
-                continue;
+                return;
             }
             if i > last {
                 out.push("  ...".into());
             }
             out.push(fmt(i));
             last = i + 1;
-        }
+        });
         out.join("\n")
     }
 
@@ -1676,9 +1677,10 @@ impl Population {
                 last = Some(i);
             }
         };
-        for i in class.into_iter().chain(first..=start) {
-            show(&mut out, i);
-        }
+        class
+            .into_iter()
+            .chain(first..=start)
+            .for_each(|i| show(&mut out, i));
         for (i, &l) in lines
             .iter()
             .enumerate()
@@ -1876,9 +1878,8 @@ impl Population {
             let mut show = BTreeSet::new();
             match &kept {
                 None => {
-                    for &l in r {
-                        show.extend(around(l, CONTEXT_LINES));
-                    }
+                    r.iter()
+                        .for_each(|&l| show.extend(around(l, CONTEXT_LINES)));
                 }
                 Some(kept) => {
                     // A ran line whose context can reach a kept range: within
@@ -2157,12 +2158,12 @@ impl Population {
         let t = &self.tests[test];
         let mut questions = serde_json::Map::new();
         for (n, &a) in asked.iter().enumerate() {
-            for (j, q) in self.questions(a).into_iter().enumerate() {
-                questions.insert(
+            questions.extend(self.questions(a).into_iter().enumerate().map(|(j, q)| {
+                (
                     format!("q{n}_{j}"),
                     json!({"type": "noul", "instructions": {"task": q}, "criteria": {"true": "The test fails.", "false": "The test still passes."}}),
-                );
-            }
+                )
+            }));
         }
         let mut state = json!({
             "instructions": INSTRUCTIONS, "runtime": runtime(&t.runner),
@@ -2388,14 +2389,14 @@ const DEFINITION_LINES: usize = 120;
 fn used_definitions(lines: &[&str], language: Language, start: usize, end: usize) -> Vec<usize> {
     let words = |range: std::ops::RangeInclusive<usize>| {
         let mut out = BTreeSet::new();
-        for i in range {
+        range.for_each(|i| {
             let line = lines.get(i).copied().unwrap_or("");
             out.extend(
                 line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
                     .filter(|w| !w.is_empty())
                     .map(str::to_owned),
             );
-        }
+        });
         out
     };
     let definitions = definitions(lines, language);
