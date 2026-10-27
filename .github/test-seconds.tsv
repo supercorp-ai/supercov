@@ -58,6 +58,7 @@ a_floor_on_what_a_run_has_none_of_cannot_pass	1.5	1.5
 a_function_shipped_as_text_runs_where_no_probe_exists	0.8	0.8
 a_gateway_serves_both_catalogs_with_the_model_it_names	0.1	0.1
 a_go_run_names_the_tests_it_could_not_claim_and_the_files_it_could_not_read	2.5	1.5
+a_go_run_whose_own_step_fails_says_so	60.0	90.0
 a_go_suite_behind_make_is_measured_and_other_go_commands_are_left_alone	3.9	5.0
 a_go_test_on_a_terminal_passes_partial_lines_on_and_names_the_project	1.7	0.9
 a_gradle_junit_4_project_runs_on_the_platform_in_the_copy	84.0	6.4
@@ -65,6 +66,7 @@ a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reached
 a_guest_started_with_none_of_supercovs_settings_runs_and_is_counted	1.4	0.8
 a_handler_run_without_a_guard_is_counted_by_the_tests_that_ran_it	0.5	0.5
 a_javascript_request_shows_the_function_a_statement_is_in_and_no_helper	0.4	0.7
+a_javascript_run_whose_own_step_fails_says_so	40.0	60.0
 a_job_that_promised_a_newer_toolchain_cannot_skip_quietly	0.0	0.0
 a_key_is_never_sent_in_the_clear_to_another_machine	0.0	0.0
 a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query	2.0	1.0
@@ -84,6 +86,7 @@ a_lock_an_older_release_holds_is_left_alone_and_one_left_behind_is_taken_over	2.
 a_long_decision_is_shortened_in_its_file_and_whole_on_its_own	0.9	0.9
 a_loop_condition_that_narrows_a_type_is_left_alone	25.6	20.0
 a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reached	13.4	15.1
+a_maven_run_whose_own_step_fails_says_so	120.0	180.0
 a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file	1.4	1.4
 a_measured_suite_reads_back_through_every_query	2.3	1.2
 a_merge_of_two_kinds_pages_and_narrows_by_kind	2.4	1.4
@@ -119,6 +122,7 @@ a_playwright_suite_reads_back_by_its_tags	6.5	4.1
 a_pnpm_workspace_finds_the_source_of_each_package_it_lists	1.0	0.6
 a_project_whose_sources_none_parse_is_refused_rather_than_reported_green	0.0	0.0
 a_project_with_links_sockets_and_pipes_is_measured_through_them	1.1	0.6
+a_python_run_whose_own_step_fails_says_so	40.0	60.0
 a_python_source_that_does_not_parse_is_named	0.7	0.3
 a_python_test_whose_process_ends_during_it_is_failed_and_credited	0.5	0.3
 a_quality_diff_reads_in_either_direction_and_names_its_mistakes	0.1	0.1
@@ -129,6 +133,7 @@ a_report_the_command_writes_names_the_project_and_not_the_copy	2.0	1.0
 a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for	1.9	1.4
 a_repository_the_workspace_cannot_mirror_is_named_under_debug	2.6	1.0
 a_round_sends_forty_requests_and_the_next_one_the_rest	11.5	9.3
+a_ruby_run_whose_own_step_fails_says_so	20.0	30.0
 a_ruby_source_that_does_not_parse_is_named	1.1	0.3
 a_ruby_test_whose_process_ends_during_it_is_failed_and_credited	0.8	0.4
 a_run_in_which_no_test_ran_is_marked_in_the_listing	2.7	1.1
@@ -142,7 +147,6 @@ a_run_that_cannot_release_its_copy_says_so	15.0	20.0
 a_run_that_observed_no_test_at_all_is_refused	0.6	0.7
 a_run_under_given_source_roots_is_read_back_under_them	6.0	10.0
 a_run_whose_output_stops_being_read_goes_on_without_a_panic	40.8	16.9
-a_run_whose_own_step_fails_says_so	200.0	300.0
 a_run_whose_source_is_gone_is_stale_and_never_passes_a_gate	2.1	0.7
 a_run_with_no_statement_to_assess_asks_nothing	0.4	0.5
 a_runner_alone_narrows_every_view_or_is_refused	1.5	0.8
@@ -150,6 +154,7 @@ a_rust_command_supercov_cannot_select_tests_from_is_refused_with_why	17.7	12.5
 a_rust_run_past_its_timeout_is_stopped_and_ends_124	45.0	30.0
 a_rust_run_that_cannot_publish_says_so_and_clears_its_work	3.3	1.5
 a_rust_run_told_to_stop_takes_its_test_with_it	15.0	10.0
+a_rust_run_whose_own_step_fails_says_so	150.0	250.0
 a_saved_answer_to_another_question_is_not_used	0.0	0.0
 a_saved_assessment_reads_from_its_files_down_to_one_statement_and_one_test	0.5	0.6
 a_selector_that_matches_nothing_or_several_says_so	2.0	1.2

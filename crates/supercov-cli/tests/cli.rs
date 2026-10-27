@@ -12740,82 +12740,96 @@ fn exact_attribution_runs_the_command_after_it() {
 /// Each place a language's run makes a file operation of its own -- the
 /// root resolved, the lock and recovery, the runtime and evidence written,
 /// the plan, the work cleared, publication -- failing alone, and the test
-/// command unable to start: the run says so and fails, never panicking,
-/// and runs again cleanly. Each fault names the operation and which of its
-/// calls in the run it is.
+/// command unable to start: the run says so and fails, never panicking, and
+/// runs again cleanly. Each fault names the operation and which of its calls
+/// in the run it is; each runs on a project of its own, since what a failed
+/// run leaves behind would change which call the next one's fault names.
+fn each_step_of_a_run_fails(label: &str, write: fn(&Project), command: &[&str], faults: &[&str]) {
+    for (number, fault) in faults.iter().enumerate() {
+        let project = Project::empty(&format!("{label}-{number}"));
+        write(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert!(!said.contains("panicked at"), "{label} {fault}: {said}");
+        assert_ne!(ran.code(), 0, "{label} {fault}: {said}");
+        project.supercov(command).succeeds();
+    }
+}
+
 #[test]
-fn a_run_whose_own_step_fails_says_so() {
-    let python = [
-        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
-    ];
-    // A label, the project, its command, and the faults.
-    type RunFaults<'a> = (&'a str, fn(&Project), Vec<&'a str>, &'a [&'a str]);
-    let mut runs: Vec<RunFaults> = vec![
-        (
-            "own-step-py",
-            python_project,
-            python.to_vec(),
-            &[
-                "fs.canonicalize@1",
-                "fs.create_dir_all@1",
-                "fs.create_dir_all@2",
-                "fs.create_dir_all@3",
-                "fs.create_dir_all@4",
-                "fs.create_dir_all@6",
-                "fs.create_dir_all@14",
-                "fs.write@2",
-                "fs.write@8",
-                "fs.rename@2",
-                "fs.rename@9",
-                "fs.open@7",
-                // Integrity's metadata; the archive's directory, file, rename.
-                "fs.symlink_metadata@12",
-                "fs.create_dir_all@5",
-                "fs.open_with@5",
-                "fs.rename@1",
-                "spawn",
-            ],
-        ),
-        (
-            "own-step-js",
-            javascript_project,
-            vec!["--", "node", "--test"],
-            &[
-                "fs.canonicalize@2",
-                "fs.create_dir_all@13",
-                "fs.rename@5",
-                "fs.open@8",
-                "fs.open@9",
-                "fs.open@11",
-                "fs.open@13",
-                // Integrity's hashes, walk and manifests; the archive written.
-                "fs.open@1",
-                "fs.read_from@1",
-                "fs.read@11",
-                "fs.read_dir@16",
-                "fs.file_type@15",
-                "fs.open@10",
-                "fs.open_with@11",
-                // The workspace: its container, a copy, the copy recovered,
-                // walked and synced back.
-                "fs.create_dir_all@3",
-                "fs.create_dir_all@4",
-                "fs.create_dir_all@7",
-                "fs.write@2",
-                "fs.rename@1",
-                "fs.rename@2",
-                "fs.copy@1",
-                "fs.read_dir@40",
-                "fs.read_dir@41",
-                "fs.read_dir@52",
-                "spawn",
-            ],
-        ),
-    ];
-    runs.push((
+fn a_python_run_whose_own_step_fails_says_so() {
+    each_step_of_a_run_fails(
+        "own-step-py",
+        python_project,
+        &[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ],
+        &[
+            "fs.canonicalize@1",
+            "fs.create_dir_all@1",
+            "fs.create_dir_all@2",
+            "fs.create_dir_all@3",
+            "fs.create_dir_all@4",
+            "fs.create_dir_all@6",
+            "fs.create_dir_all@14",
+            "fs.write@2",
+            "fs.write@8",
+            "fs.rename@2",
+            "fs.rename@9",
+            "fs.open@7",
+            "fs.symlink_metadata@12",
+            "fs.create_dir_all@5",
+            "fs.open_with@5",
+            "fs.rename@1",
+            "spawn",
+        ],
+    );
+}
+
+#[test]
+fn a_javascript_run_whose_own_step_fails_says_so() {
+    each_step_of_a_run_fails(
+        "own-step-js",
+        javascript_project,
+        &["--", "node", "--test"],
+        &[
+            "fs.canonicalize@2",
+            "fs.create_dir_all@13",
+            "fs.rename@5",
+            "fs.open@8",
+            "fs.open@9",
+            "fs.open@11",
+            "fs.open@13",
+            "fs.open@1",
+            "fs.read_from@1",
+            "fs.read@11",
+            "fs.read_dir@16",
+            "fs.file_type@15",
+            "fs.open@10",
+            "fs.open_with@11",
+            "fs.create_dir_all@3",
+            "fs.create_dir_all@4",
+            "fs.create_dir_all@7",
+            "fs.write@2",
+            "fs.rename@1",
+            "fs.rename@2",
+            "fs.copy@1",
+            "fs.read_dir@40",
+            "fs.read_dir@41",
+            "fs.read_dir@52",
+            "spawn",
+        ],
+    );
+}
+
+#[test]
+fn a_rust_run_whose_own_step_fails_says_so() {
+    each_step_of_a_run_fails(
         "own-step-rs",
         small_crate,
-        vec!["--", "cargo", "test", "-q"],
+        &["--", "cargo", "test", "-q"],
         &[
             "fs.canonicalize@1",
             "fs.read_dir@2",
@@ -12823,40 +12837,31 @@ fn a_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@9",
             "fs.rename@6",
             "fs.open@10",
+            "fs.canonicalize@9",
+            "fs.canonicalize@10",
+            "fs.canonicalize@11",
+            "fs.canonicalize@12",
+            "fs.read_to_string@4",
+            "fs.read_to_string@5",
+            "fs.read_to_string@6",
+            "fs.write@3",
+            "fs.write@4",
+            "fs.create_dir_all@8",
+            "fs.create_dir_all@10",
+            "fs.rename@3",
+            "fs.open@5",
+            "fs.file_type@9",
+            "fs.read@10",
+            "fs.read@11",
             "spawn",
         ],
-    ));
-    let go = go();
-    if let Some(go) = go {
-        runs.push((
-            "own-step-go",
-            go_project,
-            vec!["--", go, "test", "./..."],
-            &[
-                "fs.canonicalize@1",
-                "fs.create_dir_all@8",
-                "fs.create_dir_all@9",
-                "fs.create_dir_all@10",
-                "fs.create_dir_all@11",
-                "fs.create_dir_all@12",
-                "fs.write@2",
-                "fs.write@3",
-                "fs.write@4",
-                "fs.write@5",
-                "fs.write@6",
-                "fs.write@7",
-                "fs.read_to_string@7",
-                "fs.read_to_string@8",
-                "spawn",
-            ],
-        ));
-    }
+    );
     if nextest_installed() {
         // Nextest's runner fails the attempt, and nextest exits 100.
-        runs.push((
+        each_step_of_a_run_fails(
             "own-step-nextest",
             small_crate,
-            vec!["--", "cargo", "nextest", "run"],
+            &["--", "cargo", "nextest", "run"],
             &[
                 "fs.write@5",
                 "__nextest-runner/spawn@1",
@@ -12866,67 +12871,89 @@ fn a_run_whose_own_step_fails_says_so() {
                 "__nextest-runner/fs.open_with@1",
                 "__nextest-runner/fs.write@1",
             ],
-        ));
+        );
     }
-    if std::process::Command::new("mvn")
+}
+
+#[test]
+fn a_go_run_whose_own_step_fails_says_so() {
+    let Some(go) = go() else {
+        return;
+    };
+    each_step_of_a_run_fails(
+        "own-step-go",
+        go_project,
+        &["--", go, "test", "./..."],
+        &[
+            "fs.canonicalize@1",
+            "fs.create_dir_all@8",
+            "fs.create_dir_all@9",
+            "fs.create_dir_all@10",
+            "fs.create_dir_all@11",
+            "fs.create_dir_all@12",
+            "fs.write@2",
+            "fs.write@3",
+            "fs.write@4",
+            "fs.write@5",
+            "fs.write@6",
+            "fs.write@7",
+            "fs.read_to_string@7",
+            "fs.read_to_string@8",
+            "spawn",
+        ],
+    );
+}
+
+#[test]
+fn a_maven_run_whose_own_step_fails_says_so() {
+    if !std::process::Command::new("mvn")
         .arg("--version")
         .output()
         .is_ok_and(|out| out.status.success())
     {
-        runs.push((
-            "own-step-mvn",
-            small_maven_project,
-            vec!["--", "mvn", "-q", "test"],
-            &[
-                "fs.canonicalize@1",
-                "fs.read_dir@2",
-                "fs.write@3",
-                "fs.write@4",
-                "fs.write@5",
-                "fs.write@6",
-                "fs.write@7",
-                "fs.write@8",
-                "fs.read@10",
-                "fs.rename@10",
-                "spawn",
-            ],
-        ));
+        return;
     }
-    #[cfg(unix)]
-    let ruby = ruby();
-    #[cfg(unix)]
-    if let Some(ruby) = &ruby {
-        runs.push((
-            "own-step-rb",
-            ruby_project,
-            vec!["--", ruby.as_str(), "-Ilib", "test/w_test.rb"],
-            &[
-                "fs.canonicalize@1",
-                "fs.create_dir_all@3",
-                "fs.create_dir_all@4",
-                "fs.create_dir_all@5",
-                "fs.write@2",
-                "fs.write@7",
-                "fs.rename@1",
-                "spawn",
-            ],
-        ));
-    }
-    // A project of its own for each fault: what a failed run leaves behind
-    // would change which call the next one's fault names.
-    for (label, write, command, faults) in runs {
-        for (number, fault) in faults.iter().enumerate() {
-            let project = Project::empty(&format!("{label}-{number}"));
-            write(&project);
-            project.git(&["init", "-q"]);
-            project.commit("fixture");
-            let ran = project.supercov_with(&command, &[("SUPERCOV_TEST_FAULT", fault)]);
-            let said = ran.stderr();
-            assert!(!said.contains("panicked at"), "{label} {fault}: {said}");
-            assert_ne!(ran.code(), 0, "{label} {fault}: {said}");
-            project.supercov(&command).succeeds();
-        }
-    }
+    each_step_of_a_run_fails(
+        "own-step-mvn",
+        small_maven_project,
+        &["--", "mvn", "-q", "test"],
+        &[
+            "fs.canonicalize@1",
+            "fs.read_dir@2",
+            "fs.write@3",
+            "fs.write@4",
+            "fs.write@5",
+            "fs.write@6",
+            "fs.write@7",
+            "fs.write@8",
+            "fs.read@10",
+            "fs.rename@10",
+            "spawn",
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_ruby_run_whose_own_step_fails_says_so() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    each_step_of_a_run_fails(
+        "own-step-rb",
+        ruby_project,
+        &["--", ruby.as_str(), "-Ilib", "test/w_test.rb"],
+        &[
+            "fs.canonicalize@1",
+            "fs.create_dir_all@3",
+            "fs.create_dir_all@4",
+            "fs.create_dir_all@5",
+            "fs.write@2",
+            "fs.write@7",
+            "fs.rename@1",
+            "spawn",
+        ],
+    );
 }
 
 /// Each query refuses, with exit code 2 and the reason, when a read it makes
