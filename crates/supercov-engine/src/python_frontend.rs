@@ -900,6 +900,63 @@ mod tests {
     const PATHS_GOLDEN: &[u8] =
         include_bytes!("../test-assets/python-coverage-v1/pytest-paths.json");
 
+    /// An export whose lists are empty -- a context that saw no line of a
+    /// file, a file nothing ran, and then no context and no outcome at all --
+    /// is read as having nothing there.
+    #[test]
+    fn an_export_of_empty_lists_is_read_as_nothing_there() {
+        use serde_json::{Value, json};
+        let import = |export: &Value| {
+            import_python_coverage_json(
+                export.to_string().as_bytes(),
+                "python-tier-a-ctrace",
+                "2026-08-25T00:00:00.000Z",
+                Some(0),
+            )
+            .unwrap()
+        };
+        let mut export: Value = serde_json::from_slice(GOLDEN).unwrap();
+        let empty = json!({
+            "path": "src/empty.py",
+            "statements": [1],
+            "executedLines": [],
+            "missingLines": [1],
+            "excludedLines": [],
+            "executedBranches": [],
+            "missingBranches": [],
+            "sourceLines": [{"line": 1, "source": "x = 1"}],
+        });
+        export["files"].as_array_mut().unwrap().push(empty.clone());
+        export["contexts"].as_array_mut().unwrap().push(json!({
+            "kind": "background",
+            "workerId": "main",
+            "files": [{"path": "src/empty.py", "lines": [], "arcs": []}],
+        }));
+        let imported = import(&export);
+        let points = &imported.request.manifest.points;
+        assert_eq!(
+            points
+                .iter()
+                .filter(|point| point.file == "src/empty.py")
+                .count(),
+            1,
+            "{points:?}"
+        );
+        let branches = &imported.request.manifest.branches;
+        assert!(branches.iter().all(|branch| branch.file != "src/empty.py"));
+        export["files"] = json!([empty]);
+        export["contexts"] = json!([]);
+        export["outcomes"] = json!([]);
+        let alone = import(&export);
+        assert!(
+            alone
+                .request
+                .raw_results
+                .iter()
+                .all(|raw| raw.role != "test")
+        );
+    }
+
     /// The oracle importer refuses an export that breaks any one of its
     /// rules, each for that rule.
     #[test]
