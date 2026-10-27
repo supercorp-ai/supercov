@@ -443,6 +443,22 @@ mod tests {
                 .unwrap()
                 .starts_with("[supercov] could not read build output: ")
         );
+        // A writer that takes nothing, of a long output and a short one,
+        // loses the output and still removes the log.
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("closed"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for contents in [&output[..], b"short"] {
+            fs::write(&log, contents).unwrap();
+            publish_captured_output(&log, "build", true, false, &mut Closed);
+            assert!(!log.exists());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
