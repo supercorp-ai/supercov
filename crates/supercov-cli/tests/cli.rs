@@ -12737,6 +12737,93 @@ fn exact_attribution_runs_the_command_after_it() {
     contains_all(&measured, &["pass 3", "[coverage] evidence:"]);
 }
 
+/// Each place a language's run makes a file operation of its own -- the
+/// root resolved, the lock and recovery, the runtime and evidence written,
+/// the plan, the work cleared, publication -- failing alone, and the test
+/// command unable to start: the run says so and fails, never panicking,
+/// and runs again cleanly. Each fault names the operation and which of its
+/// calls in the run it is.
+#[test]
+fn a_run_whose_own_step_fails_says_so() {
+    let python = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    // A label, the project, its command, and the faults.
+    type RunFaults<'a> = (&'a str, fn(&Project), Vec<&'a str>, &'a [&'a str]);
+    let mut runs: Vec<RunFaults> = vec![
+        (
+            "own-step-py",
+            python_project,
+            python.to_vec(),
+            &[
+                "fs.canonicalize@1",
+                "fs.create_dir_all@1",
+                "fs.create_dir_all@2",
+                "fs.create_dir_all@3",
+                "fs.create_dir_all@4",
+                "fs.create_dir_all@6",
+                "fs.create_dir_all@14",
+                "fs.write@2",
+                "fs.write@8",
+                "fs.rename@2",
+                "fs.rename@9",
+                "fs.open@7",
+                "spawn",
+            ],
+        ),
+        (
+            "own-step-js",
+            javascript_project,
+            vec!["--", "node", "--test"],
+            &[
+                "fs.canonicalize@2",
+                "fs.create_dir_all@13",
+                "fs.rename@5",
+                "fs.open@8",
+                "fs.open@9",
+                "fs.open@11",
+                "fs.open@13",
+                "spawn",
+            ],
+        ),
+    ];
+    #[cfg(unix)]
+    let ruby = ruby();
+    #[cfg(unix)]
+    if let Some(ruby) = &ruby {
+        runs.push((
+            "own-step-rb",
+            ruby_project,
+            vec!["--", ruby.as_str(), "-Ilib", "test/w_test.rb"],
+            &[
+                "fs.canonicalize@1",
+                "fs.create_dir_all@3",
+                "fs.create_dir_all@4",
+                "fs.create_dir_all@5",
+                "fs.write@2",
+                "fs.write@7",
+                "fs.rename@1",
+                "spawn",
+            ],
+        ));
+    }
+    // A project of its own for each fault: what a failed run leaves behind
+    // would change which call the next one's fault names.
+    for (label, write, command, faults) in runs {
+        for (number, fault) in faults.iter().enumerate() {
+            let project = Project::empty(&format!("{label}-{number}"));
+            write(&project);
+            project.git(&["init", "-q"]);
+            project.commit("fixture");
+            let ran = project.supercov_with(&command, &[("SUPERCOV_TEST_FAULT", fault)]);
+            let said = ran.stderr();
+            assert!(!said.contains("panicked at"), "{label} {fault}: {said}");
+            assert_ne!(ran.code(), 0, "{label} {fault}: {said}");
+            project.supercov(&command).succeeds();
+        }
+    }
+}
+
 /// A run that succeeds and then cannot release its copy: each language
 /// says so and fails, or, where it gives the lock up when it ends
 /// (JavaScript), still answers; none panics. A sweep failing every place in
