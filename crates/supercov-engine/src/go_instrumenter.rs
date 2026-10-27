@@ -667,6 +667,7 @@ impl<'a> Collector<'a> {
         // which conditions were evaluated and what the decision came to, so a
         // probe beside it would store the same fact twice and charge for it on
         // every evaluation.
+        // A decision has a condition at least.
         leaves.iter().enumerate().for_each(|(index, leaf)| {
             // Wrapping an operand keeps short-circuiting intact: Go evaluates a
             // call argument only when the call is reached, so the right-hand
@@ -797,6 +798,7 @@ impl<'a> Collector<'a> {
                 let mut cases = Vec::new();
                 let mut has_default = false;
                 let mut cursor = node.walk();
+                // Its keyword at least.
                 node.children(&mut cursor)
                     .for_each(|child| match child.kind() {
                         "expression_case" | "type_case" | "communication_case" => {

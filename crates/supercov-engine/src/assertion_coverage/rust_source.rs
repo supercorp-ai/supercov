@@ -285,7 +285,8 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
         }
         let module = module_of(file);
         let root = parse(source).tree();
-        for node in root.syntax().descendants() {
+        // The file's root at least.
+        root.syntax().descendants().for_each(|node| {
             let owner = node
                 .ancestors()
                 .skip(1)
@@ -299,7 +300,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
             };
             if let Some(f) = ast::Fn::cast(node.clone()) {
                 let (Some(name), Some(ty)) = (f.name(), f.ret_type().and_then(|r| r.ty())) else {
-                    continue;
+                    return;
                 };
                 let ty = resolve(&ty.syntax().text().to_string());
                 out.returns
@@ -312,14 +313,14 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                     .or_insert(Some(ty.clone()));
                 // A constructor: an associated function of the type, taking
                 // no `self`, returning the type, safe to call.
-                let Some(owner) = &owner else { continue };
+                let Some(owner) = &owner else { return };
                 let takes_self = f.param_list().is_some_and(|p| p.self_param().is_some());
                 if *owner != ty
                     || takes_self
                     || f.unsafe_token().is_some()
                     || f.generic_param_list().is_some()
                 {
-                    continue;
+                    return;
                 }
                 let parameters = f
                     .param_list()
@@ -338,7 +339,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                 });
             } else if let Some(c) = ast::Const::cast(node.clone()) {
                 let (Some(owner), Some(name), Some(ty)) = (&owner, c.name(), c.ty()) else {
-                    continue;
+                    return;
                 };
                 if resolve(&ty.syntax().text().to_string()) == *owner {
                     out.makers.entry(owner.clone()).or_default().push(Maker {
@@ -349,7 +350,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                     });
                 }
             } else if let Some(e) = ast::Enum::cast(node.clone()) {
-                let Some(name) = e.name() else { continue };
+                let Some(name) = e.name() else { return };
                 let units = e
                     .variant_list()
                     .map(|list| {
@@ -362,7 +363,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                 out.enums.insert(name.text().to_string(), units);
                 out.homes.insert(name.text().to_string(), module.clone());
             } else if let Some(s) = ast::Struct::cast(node) {
-                let Some(name) = s.name() else { continue };
+                let Some(name) = s.name() else { return };
                 let open = match s.field_list() {
                     Some(ast::FieldList::RecordFieldList(list)) => {
                         list.fields().all(|f| f.visibility().is_some())
@@ -385,7 +386,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                 out.structs.insert(name.text().to_string(), fields);
                 out.homes.insert(name.text().to_string(), module.clone());
             }
-        }
+        });
     }
     out
 }
@@ -775,7 +776,8 @@ fn scoped<'a>(e: &ast::Expr, crate_view: &Crate<'a>) -> Crate<'a> {
     let at = e.syntax().text_range().start();
     // Outermost first, so an inner binding shadows an outer one.
     let ancestors = e.syntax().ancestors().collect::<Vec<_>>();
-    for ancestor in ancestors.into_iter().rev() {
+    // The expression itself at least.
+    ancestors.into_iter().rev().for_each(|ancestor| {
         let params = if let Some(f) = ast::Fn::cast(ancestor.clone()) {
             f.param_list()
         } else if let Some(c) = ast::ClosureExpr::cast(ancestor.clone()) {
@@ -804,9 +806,9 @@ fn scoped<'a>(e: &ast::Expr, crate_view: &Crate<'a>) -> Crate<'a> {
                     bind(&pat, &ty, &mut out.locals);
                 }
             }
-            continue;
+            return;
         } else {
-            continue;
+            return;
         };
         for param in params.iter().flat_map(|list| list.params()) {
             let (Some(pat), Some(ty)) = (param.pat(), param.ty()) else {
@@ -815,7 +817,7 @@ fn scoped<'a>(e: &ast::Expr, crate_view: &Crate<'a>) -> Crate<'a> {
             let ty = resolve_self(&words(&ty.syntax().text().to_string()), e.syntax());
             bind(&pat, &ty, &mut out.locals);
         }
-    }
+    });
     out
 }
 
@@ -831,9 +833,10 @@ fn bind(pat: &ast::Pat, ty: &str, locals: &mut BTreeMap<String, String>) {
             if let Some(types) = tuple(ty) {
                 let fields = t.fields().collect::<Vec<_>>();
                 if fields.len() == types.len() {
-                    for (field, ty) in fields.iter().zip(&types) {
+                    // A tuple type has two elements at least.
+                    fields.iter().zip(&types).for_each(|(field, ty)| {
                         bind(field, ty, locals);
-                    }
+                    });
                 }
             }
         }
@@ -2910,5 +2913,16 @@ fn f() -> ((), u8) {
         ] {
             assert_eq!(value_of(ty, &crate_view, 0).as_deref(), Some(value), "{ty}");
         }
+        // A tuple whose elements' types are all unknown has none to change,
+        // an expression no operand, and an impl no item to name `Self::`.
+        assert_eq!(changed("f()", Some("(_, _)"), &crate_view), None);
+        assert!(top_level_operands("").is_empty());
+        let tree = parse("impl S {}").tree();
+        let imp = tree
+            .syntax()
+            .descendants()
+            .find_map(ast::Impl::cast)
+            .unwrap();
+        assert_eq!(resolve_self("Self", imp.syntax()), "S");
     }
 }
