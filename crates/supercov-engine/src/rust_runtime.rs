@@ -1519,6 +1519,33 @@ fn main() {
             ),
             Err(RustProbeReadError::InvalidRecord(1))
         );
+        // Each field of a decision record that cannot be read is named by
+        // its line, and a record cut off mid-write is passed over.
+        let probes = layout(&[], &["rs:decision:d"]);
+        let region = empty_region(&probes);
+        for record in [
+            &b"D\t1\t1\t0\t\xff\t1\n"[..],
+            b"D\t1\t1\tx\t12\t1\n",
+            b"D\t1\t1\t9\t12\t1\n",
+            b"D\t1\t1\t0\t13\t1\n",
+            b"D\tx\t1\t0\t12\t1\n",
+            b"D\t1\tx\t0\t12\t1\n",
+        ] {
+            assert_eq!(
+                parse_rust_region(&region, Some(record), TOKEN, &probes),
+                Err(RustProbeReadError::InvalidRecord(1)),
+                "{}",
+                String::from_utf8_lossy(record)
+            );
+        }
+        let read = parse_rust_region(
+            &region,
+            Some(b"D\t1\t1\t0\t102\t1\nD\t2\t1"),
+            TOKEN,
+            &probes,
+        )
+        .unwrap();
+        assert_eq!(read.len(), 1);
     }
 
     /// A run's regions are found at any depth; anything else under the root,
@@ -1759,6 +1786,16 @@ fn main() {
                 region_header(&bytes, TOKEN, &probes),
                 Err(RustProbeReadError::InvalidHeader)
             ));
+        }
+        // A header cut short anywhere is no header.
+        for cut in 0..header.len().min(76) {
+            assert!(
+                matches!(
+                    region_header(&header[..cut], TOKEN, &probes),
+                    Err(RustProbeReadError::InvalidHeader)
+                ),
+                "cut at {cut}"
+            );
         }
     }
 }
