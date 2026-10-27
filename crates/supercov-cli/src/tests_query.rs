@@ -716,10 +716,11 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
                 all.push(test);
             }
         }
-        for test in &mut all {
+        // Every test of the run, and a run has one at least.
+        all.iter_mut().for_each(|test| {
             let reasons = test["reasons"].as_array_mut().unwrap();
             reasons.insert(0, json!(reason));
-        }
+        });
         all.sort_by(|a, b| {
             (a["file"].as_str(), a["name"].as_str()).cmp(&(b["file"].as_str(), b["name"].as_str()))
         });
