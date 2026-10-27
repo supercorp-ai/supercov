@@ -3113,32 +3113,21 @@ fn execute_coverage_query(
         let progress = ProgressLine::start("loading run evidence");
         let test_filter = request.test_filter();
         let container = open_query_index_for(run, test_filter.as_ref()).map_err(|error| {
-                if let RunIndexError::Report(ReportError::NoTestMatches(filter)) = &error {
-                    return agent_json::AgentError {
-                        code: agent_json::ErrorCode::TestFilterEmpty,
-                        message: format!("No tests match {filter}"),
-                        retryable: false,
-                        details: Some(serde_json::json!({ "filter": filter })),
-                    };
-                }
-                let message = if matches!(
-                    error,
-                    RunIndexError::Report(ReportError::NoEvidence(_))
-                ) {
-                    match run.metadata.test_exit_code {
-                        // A command that passed with nothing recorded ran
-                        // no test: a filter that matched none, most often.
-                        Some(0) => "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test.".into(),
-                        Some(code) => format!(
-                            "The wrapped command exited {code} before publishing queryable coverage evidence. Inspect that command's original output and rerun after it passes."
-                        ),
-                        None => "The wrapped command ended without an exit status or queryable coverage evidence. Inspect that command's original output and rerun.".into(),
-                    }
-                } else {
-                    format!("Failed to open coverage index: {error}")
+            if let RunIndexError::Report(ReportError::NoTestMatches(filter)) = &error {
+                return agent_json::AgentError {
+                    code: agent_json::ErrorCode::TestFilterEmpty,
+                    message: format!("No tests match {filter}"),
+                    retryable: false,
+                    details: Some(serde_json::json!({ "filter": filter })),
                 };
-                internal_agent_error(message)
-            })?;
+            }
+            let message = if matches!(error, RunIndexError::Report(ReportError::NoEvidence(_))) {
+                no_evidence_message(run.metadata.test_exit_code)
+            } else {
+                format!("Failed to open coverage index: {error}")
+            };
+            internal_agent_error(message)
+        })?;
         let index = CoverageIndex::new(&container).map_err(|error| {
             internal_agent_error(format!("Failed to read coverage index: {error}"))
         })?;
@@ -3970,8 +3959,30 @@ mod docs_command_tests {
     }
 }
 
+/// Why a run that published no evidence has none, by how its command
+/// exited.
+fn no_evidence_message(exit: Option<i32>) -> String {
+    match exit {
+        // A command that passed with nothing recorded ran no test: a filter
+        // that matched none, most often.
+        Some(0) => "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test.".into(),
+        Some(code) => format!(
+            "The wrapped command exited {code} before publishing queryable coverage evidence. Inspect that command's original output and rerun after it passes."
+        ),
+        None => "The wrapped command ended without an exit status or queryable coverage evidence. Inspect that command's original output and rerun.".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// A run with no evidence is told apart by how its command exited.
+    #[test]
+    fn a_run_without_evidence_says_how_its_command_ended() {
+        assert!(super::no_evidence_message(Some(0)).contains("ran no test"));
+        assert!(super::no_evidence_message(Some(3)).contains("exited 3"));
+        assert!(super::no_evidence_message(None).contains("without an exit status"));
+    }
+
     /// The contract version each frontend actually records, so this cannot
     /// drift from the strings runs are stored with.
     #[test]
