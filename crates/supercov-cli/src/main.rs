@@ -3145,9 +3145,7 @@ fn execute_coverage_query(
         let newer_container;
         let newer_index;
         let newer_query = if request.command == "diff" {
-            let selector = newer_run_id.ok_or_else(|| {
-                supercov_engine::indexed_query::IndexedQueryError::MissingNewerRun.agent_error()
-            })?;
+            let selector = newer_run_id.expect("a parsed diff names its newer run");
             let newer_run =
                 select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
             // A run compared with itself was warned about above.
