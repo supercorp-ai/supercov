@@ -2284,7 +2284,11 @@ mod tests {
             ],
         };
         assert_eq!(relayed(uneven), b"one\ntw");
-        for input in [b"line\n".to_vec(), vec![b'a'; RELAY_LINE_LIMIT * 2]] {
+        for input in [
+            b"line\n".to_vec(),
+            b"\xff\n".to_vec(),
+            vec![b'a'; RELAY_LINE_LIMIT * 2],
+        ] {
             relay(io::Cursor::new(input), Gone, ConsoleNames::default())
                 .recv_timeout(Duration::from_secs(10))
                 .expect("a relay with no reader ends");
