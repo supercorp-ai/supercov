@@ -13171,6 +13171,57 @@ fn each_query_refuses_when_a_read_or_write_it_makes_fails() {
     assert_eq!(ran.code(), 2, "{}", ran.stderr());
 }
 
+/// An import refuses, with exit code 2 and the reason, when a step it takes
+/// fails: reading the tracefile, the project's lock, the evidence archived,
+/// copied and hashed, and the run published and recorded. Each case on a
+/// project measured the same way, so its fault names the same call.
+#[test]
+fn an_import_whose_step_fails_says_so() {
+    for fault in [
+        "fs.read@1",
+        "fs.create_dir_all@1",
+        "fs.create_dir_all@2",
+        "fs.create_dir_all@3",
+        "fs.create_dir_all@4",
+        "fs.create_dir_all@5",
+        "fs.create_dir_all@6",
+        "fs.open_with@1",
+        "fs.open_with@2",
+        "fs.open_with@4",
+        "fs.open_with@5",
+        "fs.write@1",
+        "fs.symlink_metadata@8",
+        "fs.symlink_metadata@10",
+        "fs.open@5",
+        "fs.open@7",
+        "fs.open@8",
+        "fs.open@10",
+        "fs.rename@1",
+        "fs.rename@2",
+        "fs.rename@3",
+        "fs.rename@4",
+    ] {
+        let project = Project::cart("import-steps");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        project.supercov(&["runs", "latest", "--json"]).succeeds();
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        project.write(
+            "lcov.info",
+            "TN:\nSF:src/cart.js\nDA:2,1\nDA:3,0\nend_of_record\n",
+        );
+        let ran = project.supercov_with(
+            &["import", "lcov.info", "--test", "device"],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 2, "{fault}: {said}");
+        assert!(
+            said.contains("[supercov]") && !said.contains("panicked at"),
+            "{fault}: {said}"
+        );
+    }
+}
+
 /// A run that succeeds and then cannot release its copy: each language
 /// says so and fails, or, where it gives the lock up when it ends
 /// (JavaScript), still answers; none panics. A sweep failing every place in
