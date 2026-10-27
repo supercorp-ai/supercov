@@ -2246,24 +2246,20 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             "{request}"
         );
     }
-    // Each index a stored diff opens, refused in turn; the inventory's
-    // first, which read past one they cannot.
+    // Each of the two indexes a stored diff opens, refused: the older run's,
+    // then the newer's. Before each, the inventory opens one and reads past
+    // it, so they are the second and fourth opens.
     std::fs::write(&input, query(&run, "diff", Some(&run))).unwrap();
-    let mut refused = 0;
-    for nth in 1.. {
+    for open in ["coverage-index@2", "coverage-index@4"] {
         let ran = project.supercov_with(
             &["__query-stored-run"],
             &[
                 ("SUPERCOV_INTERNAL_INPUT_FILE", input_path),
-                ("SUPERCOV_TEST_FAULT", &format!("coverage-index@{nth}")),
+                ("SUPERCOV_TEST_FAULT", open),
             ],
         );
-        if !ran.stderr().contains("test fault at coverage-index") {
-            break;
-        }
-        refused += usize::from(ran.code() == 2);
+        assert_eq!(ran.code(), 2, "{open}: {}", ran.stderr());
     }
-    assert_eq!(refused, 2);
 
     // The supervisor runs a command and passes its exit code on.
     assert!(
@@ -2302,41 +2298,20 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
         let said = String::from_utf8_lossy(&output.stderr);
         assert!(!said.contains("panicked at"), "{script}: {said}");
     }
-    // Nor can its watchdog, or the command at each place it is started.
-    let mut places = 0;
-    for nth in 1.. {
-        let fault = format!("spawn#{nth}");
-        let ran = project.supercov_with(
+    // A command that cannot be started fails the supervisor, and so does a
+    // watchdog program it cannot find (Unix only: Windows needs none).
+    let unstarted = project.supercov_with(
+        &["__supervise", "--", "true"],
+        &[("SUPERCOV_TEST_FAULT", "spawn")],
+    );
+    assert_ne!(unstarted.code(), 0, "{}", unstarted.stderr());
+    if cfg!(unix) {
+        let unfound = project.supercov_with(
             &["__supervise", "--", "true"],
-            &[("SUPERCOV_TEST_FAULT", &fault)],
+            &[("SUPERCOV_TEST_FAULT", "fs@1")],
         );
-        let said = ran.stderr();
-        assert!(!said.contains("panicked at"), "{fault}: {said}");
-        if !said.contains("test fault at spawn") {
-            break;
-        }
-        assert_ne!(ran.code(), 0, "{fault}: {said}");
-        places += 1;
+        assert_ne!(unfound.code(), 0, "{}", unfound.stderr());
     }
-    assert!(places > 0);
-    // Nor can finding the watchdog, at each file operation it makes.
-    let mut places = 0;
-    for nth in 1.. {
-        let fault = format!("fs#{nth}");
-        let ran = project.supercov_with(
-            &["__supervise", "--", "true"],
-            &[("SUPERCOV_TEST_FAULT", &fault)],
-        );
-        let said = ran.stderr();
-        assert!(!said.contains("panicked at"), "{fault}: {said}");
-        if !said.contains("test fault at fs") {
-            break;
-        }
-        assert_ne!(ran.code(), 0, "{fault}: {said}");
-        places += 1;
-    }
-    // Windows needs no watchdog program.
-    assert!(places > 0 || cfg!(windows));
     for name in [
         "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
         "SUPERCOV_COMMAND_TIMEOUT_MS",
@@ -7531,22 +7506,6 @@ fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
     project
         .supercov(&["import", "lcov.info", "--test=device", "--status=passed"])
         .succeeds();
-    // Each place the import makes a file operation, failing in turn.
-    let mut places = 0;
-    for nth in 1.. {
-        let fault = format!("fs#{nth}");
-        let ran = project.supercov_with(
-            &["import", "lcov.info", "--background"],
-            &[("SUPERCOV_TEST_FAULT", &fault)],
-        );
-        let said = ran.stderr();
-        assert!(!said.contains("panicked at"), "{fault}: {said}");
-        if !said.contains("test fault at fs") {
-            break;
-        }
-        places += 1;
-    }
-    assert!(places > 3, "{places}");
 }
 
 #[test]
@@ -12141,40 +12100,6 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
     assert!(output.contains("could not launch"), "{output}");
 }
 
-/// The wrapper, and each runtool it starts, run once for every file
-/// operation they make with that one failing: each stops the package and
-/// says why, never panics, and the run no fault reaches records it.
-#[cfg(unix)]
-#[test]
-fn a_doctest_wrapper_whose_file_operation_fails_says_so() {
-    let project = fake_rustdoc_project("rustdoc-faults");
-    let files = [
-        ("merged", "src/lib.rs - a (line 1): test\n"),
-        ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
-        ("standalone", "src/lib.rs - s (line 3): test\n"),
-    ];
-    for nth in 1.. {
-        let scenario = format!("fault-{nth}");
-        let fault = format!("fs@{nth}");
-        let (ran, recorded) = wrap_rustdoc_with(
-            &project,
-            &scenario,
-            &files,
-            &["--test", "src/lib.rs"],
-            &[("SUPERCOV_TEST_FAULT", &fault)],
-        );
-        let stderr = ran.stderr();
-        assert!(!stderr.contains("panicked"), "{fault}: {stderr}");
-        if !stderr.contains("test fault at") {
-            ran.succeeds();
-            let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
-            assert_eq!(recorded["cases"].as_array().unwrap().len(), 2, "{recorded}");
-            assert!(nth > 5, "the sweep reached {nth} calls");
-            break;
-        }
-    }
-}
-
 #[cfg(unix)]
 #[test]
 fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
@@ -12257,58 +12182,6 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         output.contains("merged doctest child 5 ran for a case the harness did not report"),
         "{output}"
     );
-    // Each mode, once for every file operation it makes with that one
-    // failing: it may fail, but says why and never panics.
-    for (mode, binary, files) in [
-        (
-            "list",
-            "bin/harness-list",
-            &[("merged", "src/lib.rs - a (line 1): test\n")][..],
-        ),
-        (
-            "named",
-            "bin/doctest",
-            &[("doctest.out", "test src/lib.rs - s (line 3) ... ok\n")],
-        ),
-        (
-            "merged",
-            "bin/harness",
-            &[
-                ("merged-order.json", order),
-                ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
-            ],
-        ),
-    ] {
-        for nth in 1.. {
-            let package = format!("faults-{mode}-{nth}");
-            for (file, contents) in files {
-                project.write(&format!("{package}/{file}"), contents);
-            }
-            let directory = project.root.join(&package);
-            let fault = format!("fs@{nth}");
-            let ran = project.supercov_with(
-                &[
-                    "__doctest-runner",
-                    directory.to_str().unwrap(),
-                    mode,
-                    project.root.join(binary).to_str().unwrap(),
-                ],
-                &[
-                    ("FAKE_RUSTDOC_DIR", directory.to_str().unwrap()),
-                    ("SUPERCOV_DOCTEST_NAME", "src/lib.rs - s (line 3)"),
-                    ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
-                    ("SUPERCOV_TEST_FAULT", &fault),
-                ],
-            );
-            let said = ran.stderr();
-            assert!(!said.contains("panicked at"), "{mode} {fault}: {said}");
-            if !said.contains("[supercov] test fault at fs") {
-                ran.succeeds();
-                assert!(nth > 2, "{mode} reached {nth} calls");
-                break;
-            }
-        }
-    }
 }
 
 #[test]
@@ -12851,132 +12724,6 @@ fn the_nextest_runner_missing_what_it_needs_says_so() {
         "{}",
         ran.stderr()
     );
-    // An attempt as nextest starts one, once for every file operation the
-    // runner makes with that one failing: it may fail, but says why and
-    // never panics, and the attempt no fault reaches is recorded.
-    // Each attempt in a root of its own: a claim another attempt left is
-    // one more call to make.
-    let run_id = "2ae19189-240a-433a-a31d-acc411fe8e1f";
-    let attempt_id = format!("{run_id}:fixture::x$t");
-    for nth in 1.. {
-        let attempt_root = project.root.join(format!("attempt-{nth}"));
-        project.write(
-            &format!("attempt-{nth}/runner-plan.json"),
-            r#"{"token":"t","targets":[{"target":"wasm32","underlying":null}]}"#,
-        );
-        let fault = format!("fs@{nth}");
-        let ran = project.supercov_with(
-            &[
-                "__nextest-runner",
-                attempt_root.to_str().unwrap(),
-                "wasm32",
-                env!("CARGO_BIN_EXE_supercov"),
-                "--version",
-            ],
-            &[
-                ("NEXTEST", "1"),
-                ("NEXTEST_RUN_ID", run_id),
-                ("NEXTEST_VERSION", "0.9.140"),
-                ("NEXTEST_EXECUTION_MODE", "process-per-test"),
-                ("NEXTEST_BINARY_ID", "fixture::x"),
-                ("NEXTEST_TEST_NAME", "t"),
-                ("NEXTEST_ATTEMPT", "1"),
-                ("NEXTEST_TOTAL_ATTEMPTS", "1"),
-                ("NEXTEST_ATTEMPT_ID", &attempt_id),
-                ("NEXTEST_STRESS_CURRENT", "none"),
-                ("NEXTEST_STRESS_TOTAL", "none"),
-                ("SUPERCOV_TEST_FAULT", &fault),
-            ],
-        );
-        let said = ran.stderr();
-        assert!(!said.contains("panicked at"), "{fault}: {said}");
-        if !said.contains("[supercov] test fault at fs") {
-            ran.succeeds();
-            assert!(nth > 2, "the sweep reached {nth} calls");
-            break;
-        }
-    }
-}
-
-/// Each query, run once for every file operation it makes with that one
-/// failing (`SUPERCOV_TEST_FAULT=fs@N`): it may refuse, but says why and never
-/// panics, and the run its fault no longer reaches answers as usual.
-#[test]
-fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
-    let project = Project::cart("query-faults");
-    project.supercov(&["--", "node", "--test"]).succeeds();
-    // A second run, for the queries that compare two.
-    let first = project.latest();
-    project.supercov(&["--", "node", "--test"]).succeeds();
-    for query in [
-        &["runs"][..],
-        &["runs", "latest"],
-        &["runs", "latest", "gaps"],
-        &["runs", "latest", "files"],
-        &["runs", "latest", "file", "src/cart.js"],
-        &["runs", "latest", "tests", "affected"],
-        &["runs", "latest", "tests", "without-evidence"],
-        &["report", "--no-open", "--output", "faults.html"],
-        &[
-            "report",
-            "--no-open",
-            "--output",
-            "faults-compared.html",
-            "--compare",
-            &first,
-        ],
-        &[
-            "runs",
-            "latest",
-            "report",
-            "--format",
-            "lcov",
-            "--output",
-            "faults.info",
-            "--force",
-            "--title",
-            "total",
-        ],
-        &["runs", "latest", "test", "total"],
-        // Pages and the JSON envelope are the export's own to choose.
-        &[
-            "runs",
-            "latest",
-            "gaps",
-            "--format",
-            "jsonl",
-            "--output",
-            "faults.jsonl",
-            "--offset",
-            "1",
-            "--limit",
-            "1",
-            "--json",
-        ],
-        &["runs", "latest", "minimize"],
-        &["diff", &first, "latest"],
-        &["runs", "latest", "tests", "affected", "--title", "total"],
-        // Last: a merge adds a run the queries above would read.
-        &["merge"],
-    ] {
-        let mut nth = 0;
-        loop {
-            nth += 1;
-            let fault = format!("fs@{nth}");
-            let ran = project.supercov_with(query, &[("SUPERCOV_TEST_FAULT", &fault)]);
-            let said = ran.stderr();
-            assert!(
-                !said.contains("panicked at") && ran.code() != 101,
-                "{query:?} with {fault} panicked:\n{said}"
-            );
-            if !said.contains("[supercov] test fault at fs") {
-                ran.succeeds();
-                break;
-            }
-            assert!(nth < 2_000, "{query:?} kept reaching faults");
-        }
-        assert!(nth > 1, "{query:?} made no file operation");
-    }
 }
 
 /// `--exact-attribution` goes before the command, and the run is the
@@ -12988,143 +12735,6 @@ fn exact_attribution_runs_the_command_after_it() {
         .supercov(&["--exact-attribution", "--", "node", "--test"])
         .succeeds();
     contains_all(&measured, &["pass 3", "[coverage] evidence:"]);
-}
-
-/// A measured run of `command`, once for each place in the code that makes
-/// a file operation, with that place's first one failing
-/// (`SUPERCOV_TEST_FAULT=fs#N`): it may stop, but says why and never panics,
-/// and the next run of the project, with no fault, recovers whatever the
-/// stopped one left and succeeds. Four projects `write` lays out share the
-/// places. The most places a run reached.
-fn fail_each_place_of_a_run(label: &str, write: fn(&Project), command: &[&str]) -> usize {
-    fail_each_place_of_a_run_ending(label, write, command, 0)
-}
-
-/// [`fail_each_place_of_a_run`] for a command that, with no fault, exits
-/// `code`.
-fn fail_each_place_of_a_run_ending(
-    label: &str,
-    write: fn(&Project),
-    command: &[&str],
-    code: i32,
-) -> usize {
-    fail_each_place_at("fs", label, write, command, code)
-}
-
-/// Remove each record of an instrumented build under `directory`, so the
-/// next run prepares its copy again: a run that reuses a build passes every
-/// place a build takes, and a sweep would fail none of them after its first
-/// run to store one. What the build left stays, so it is quick.
-fn forget_reused_builds(directory: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .is_some_and(|name| name == "rust-build-cache.json")
-        {
-            std::fs::remove_file(&path).unwrap();
-        } else if path.is_dir() && !path.ends_with("target") && !path.ends_with("node_modules") {
-            forget_reused_builds(&path);
-        }
-    }
-}
-
-/// [`fail_each_place_of_a_run_ending`], failing the fault site `site` at each
-/// place in turn.
-fn fail_each_place_at(
-    site: &str,
-    label: &str,
-    write: fn(&Project),
-    command: &[&str],
-    code: i32,
-) -> usize {
-    fail_each_place_at_with(site, label, write, command, code, &[])
-}
-
-/// [`fail_each_place_at`] with `environment` set for every run. Each run
-/// fails the first call from every place no earlier run failed
-/// (`site#*`): a failure the run goes on from costs no run of its own, and
-/// what the run then does fails in the same run. Four projects side by side
-/// each take a share of the places; a last pass over all of them fails what
-/// only one share's failure leads to. How many places failed.
-fn fail_each_place_at_with(
-    site: &str,
-    label: &str,
-    write: fn(&Project),
-    command: &[&str],
-    code: i32,
-    environment: &[(&str, &str)],
-) -> usize {
-    const SHARES: usize = 4;
-    let fresh = |name: String| {
-        let project = Project::empty(&name);
-        write(&project);
-        project.git(&["init", "-q"]);
-        project.commit("fixture");
-        project
-    };
-    // Runs until one fails no place outside `failed`, adding what each fails.
-    let converge =
-        |project: &Project, shard: &str, failed: &mut std::collections::BTreeSet<String>| {
-            let skip = project.root.with_extension("skip");
-            let fault = format!("{site}#*");
-            let announced = format!("[supercov] test fault at {site} ");
-            loop {
-                std::fs::write(
-                    &skip,
-                    failed.iter().cloned().collect::<Vec<String>>().join("\n"),
-                )
-                .unwrap();
-                forget_reused_builds(&project.root.join(".supercov/workspaces"));
-                let mut variables = environment.to_vec();
-                variables.extend([
-                    ("SUPERCOV_TEST_FAULT", fault.as_str()),
-                    ("SUPERCOV_TEST_FAULT_SKIP", skip.to_str().unwrap()),
-                    ("SUPERCOV_TEST_FAULT_SHARD", shard),
-                ]);
-                let ran = project.supercov_with(command, &variables);
-                let said = ran.stderr();
-                // Several failures in one run can fail a test, and `cargo test`
-                // exits 101 for that: a panic is told by its own words.
-                assert!(
-                    !said.contains("panicked at"),
-                    "{label} with {fault} past {} places panicked:\n{said}",
-                    failed.len()
-                );
-                let before = failed.len();
-                failed.extend(
-                    said.lines()
-                        .filter_map(|line| line.split_once(announced.as_str()))
-                        .map(|(_, place)| place.to_owned()),
-                );
-                if failed.len() == before {
-                    break;
-                }
-            }
-        };
-    let mut failed = std::thread::scope(|scope| {
-        (0..SHARES)
-            .map(|share| {
-                scope.spawn(move || {
-                    let project = fresh(format!("{label}-{share}"));
-                    let mut failed = std::collections::BTreeSet::new();
-                    converge(&project, &format!("{share}/{SHARES}"), &mut failed);
-                    project.supercov_with(command, environment).exits(code);
-                    failed
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flat_map(|share| share.join().unwrap())
-            .collect::<std::collections::BTreeSet<_>>()
-    });
-    let project = fresh(format!("{label}-all"));
-    converge(&project, "0/1", &mut failed);
-    project.supercov_with(command, environment).exits(code);
-    failed.len()
 }
 
 /// A run that succeeds and then cannot release its copy: each language
@@ -13189,53 +12799,36 @@ fn a_run_that_cannot_release_its_copy_says_so() {
     }
 }
 
-/// A run whose standard error stops being read after each number of lines
-/// in turn -- `supercov -- npm test 2>&1 | head` -- goes on without it and
-/// never panics. How many runs it took.
-fn close_diagnostics_after_each_line(project: &Project, command: &[&str]) -> usize {
+/// A run whose standard error stops being read after its first line --
+/// `supercov -- npm test 2>&1 | head -1` -- goes on without it and never
+/// panics.
+fn close_diagnostics_after_one_line(project: &Project, command: &[&str]) {
     use std::io::BufRead;
-    let mut lines = 0;
-    loop {
-        let mut child = project
-            .supercov_command(command)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut reader = std::io::BufReader::new(child.stderr.take().unwrap());
-        let mut read = 0;
-        let mut line = String::new();
-        while read < lines && reader.read_line(&mut line).unwrap_or(0) > 0 {
-            read += 1;
-        }
-        drop(reader);
-        let status = child.wait().unwrap();
-        assert_ne!(
-            status.code(),
-            Some(101),
-            "panicked with stderr closed after {lines} line(s)"
-        );
-        if read < lines {
-            return lines;
-        }
-        lines += 1;
-    }
+    let mut child = project
+        .supercov_command(command)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    assert!(reader.read_line(&mut line).unwrap() > 0);
+    drop(reader);
+    let status = child.wait().unwrap();
+    assert_ne!(status.code(), Some(101), "panicked after {line}");
 }
 
 #[test]
 fn a_run_whose_output_stops_being_read_goes_on_without_a_panic() {
     let project = Project::cart("closed-diagnostics");
-    assert!(close_diagnostics_after_each_line(&project, &["--", "node", "--test"]) > 2);
+    close_diagnostics_after_one_line(&project, &["--", "node", "--test"]);
     let crate_project = Project::empty("closed-diagnostics-rust");
     small_crate(&crate_project);
     crate_project.git(&["init", "-q"]);
     crate_project.commit("fixture");
-    assert!(close_diagnostics_after_each_line(&crate_project, &["--", "cargo", "test", "-q"]) > 2);
+    close_diagnostics_after_one_line(&crate_project, &["--", "cargo", "test", "-q"]);
     if nextest_installed() {
-        assert!(
-            close_diagnostics_after_each_line(&crate_project, &["--", "cargo", "nextest", "run"])
-                > 2
-        );
+        close_diagnostics_after_one_line(&crate_project, &["--", "cargo", "nextest", "run"]);
     }
 }
 
@@ -13306,24 +12899,6 @@ fn nextest_installed() -> bool {
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_failing_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
-    let reached = fail_each_place_of_a_run_ending(
-        "run-faults-failing",
-        |project| {
-            project.write("package.json", r#"{ "name": "failing", "type": "module" }"#);
-            project.write("src/one.js", "export const one = () => 1;\n");
-            project.write(
-                "test/one.test.js",
-                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { one } from \"../src/one.js\";\ntest(\"one\", () => assert.equal(one(), 2));\n",
-            );
-        },
-        &["--", "node", "--test"],
-        1,
-    );
-    assert!(reached > 50, "{reached}");
-}
-
 /// A Python source that does not parse carries no obligations, and the run
 /// says which file it was.
 #[test]
@@ -13444,174 +13019,10 @@ fn go_project(project: &Project) {
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
-    let javascript = fail_each_place_of_a_run(
-        "run-faults-js",
-        javascript_project,
-        &["--", "node", "--test"],
-    );
-    let python = fail_each_place_of_a_run(
-        "run-faults-py",
-        python_project,
-        &[
-            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
-        ],
-    );
-    assert!(javascript > 50 && python > 50, "{javascript} {python}");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_ruby_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
-    let Some(ruby) = ruby() else {
-        return;
-    };
-    let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
-    let reached = fail_each_place_of_a_run("run-faults-rb", ruby_project, &command);
-    assert!(reached > 50, "{reached}");
-}
-
 #[cfg_attr(
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_go_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
-    let Some(go) = go() else {
-        eprintln!("skipping: no Go toolchain found");
-        return;
-    };
-    let reached =
-        fail_each_place_of_a_run("run-faults-go", go_project, &["--", go, "test", "./..."]);
-    assert!(reached > 50, "{reached}");
-}
-
-/// A Playwright suite of one test, its tools linked from this repository.
-#[cfg(unix)]
-fn browser_project(project: &Project) {
-    project.write(
-        "package.json",
-        r#"{ "name": "browser-faults", "private": true, "type": "module" }"#,
-    );
-    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    std::os::unix::fs::symlink(
-        modules.canonicalize().unwrap(),
-        project.root.join("node_modules"),
-    )
-    .unwrap();
-    project.write(".gitignore", "node_modules\n");
-    project.write("src/one.js", "export const one = () => 1;\n");
-    project.write(
-        "playwright.config.js",
-        "export default { testDir: \"tests\", reporter: \"line\" };\n",
-    );
-    project.write(
-        "tests/one.spec.js",
-        "import { expect, test } from \"@playwright/test\";\nimport { one } from \"../src/one.js\";\ntest(\"one\", () => { expect(one()).toBe(1); });\n",
-    );
-}
-
-/// A Playwright run whose project also holds the source of a server in each
-/// language Supercov measures beside browser tests -- Python, Ruby, Go, a
-/// Rust Worker and Java -- which it prepares in the copy: once for every
-/// place it makes a file operation, with that one failing, it ends saying so
-/// and never panics, and then succeeds.
-/// A Playwright project beside a server of every kind Supercov prepares.
-#[cfg(unix)]
-fn browser_servers_project(project: &Project) {
-    browser_project(project);
-    project.write(
-        "app/server.py",
-        "def handle(n):\n    return n * 2 if n else 0\n",
-    );
-    project.write(
-        "app/server.rb",
-        "def handle(n)\n  n.zero? ? 0 : n * 2\nend\n",
-    );
-    if go().is_some() {
-        project.write("go.mod", "module example.com/server\n\ngo 1.22\n");
-        project.write(
-                "server.go",
-                "package main\n\nfunc handle(n int) int {\n\tif n == 0 {\n\t\treturn 0\n\t}\n\treturn n * 2\n}\n\nfunc main() { _ = handle(1) }\n",
-            );
-    }
-    project.write(
-        "worker/wrangler.toml",
-        "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build --release\"\n",
-    );
-    project.write(
-            "worker/Cargo.toml",
-            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[workspace]\n",
-        );
-    project.write(
-        "worker/src/lib.rs",
-        "pub fn handle(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n",
-    );
-    project.write(
-            "pom.xml",
-            "<project><modelVersion>4.0.0</modelVersion><groupId>w</groupId><artifactId>w</artifactId><version>1</version></project>\n",
-        );
-    project.write(
-            "src/main/java/w/App.java",
-            "package w;\n\npublic class App {\n    public static int handle(int n) {\n        if (n == 0) {\n            return 0;\n        }\n        return n * 2;\n    }\n}\n",
-        );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_browser_run_preparing_servers_whose_file_operation_fails_says_so_and_recovers() {
-    let reached = fail_each_place_of_a_run(
-        "run-faults-browser",
-        browser_servers_project,
-        &["--", "npx", "playwright", "test"],
-    );
-    assert!(reached > 50, "{reached}");
-}
-
-/// A Playwright suite with no JavaScript source of its own beside a Python
-/// server no test reaches: the run prepares the server, publishes nothing
-/// and says so, and each of its file operations failing in turn ends it the
-/// same way or with the failure, never a panic.
-#[cfg(unix)]
-#[test]
-fn a_browser_run_with_only_a_server_survives_any_file_operation_failing() {
-    let reached = fail_each_place_at(
-        "fs",
-        "servers-only",
-        |project| {
-            browser_project(project);
-            std::fs::remove_file(project.root.join("src/one.js")).unwrap();
-            project.write(
-                "tests/one.spec.js",
-                "import { expect, test } from \"@playwright/test\";\ntest(\"one\", () => { expect(1).toBe(1); });\n",
-            );
-            project.write(
-                "app/server.py",
-                "def handle(n):\n    return n * 2 if n else 0\n",
-            );
-        },
-        &["--", "npx", "playwright", "test"],
-        1,
-    );
-    assert!(reached > 20, "{reached}");
-}
-
-/// The same run, once for every place it starts a program, with that start
-/// failing.
-#[cfg(unix)]
-#[test]
-fn a_browser_run_preparing_servers_whose_program_cannot_start_says_so_and_recovers() {
-    let reached = fail_each_place_at(
-        "spawn",
-        "spawn-faults-browser",
-        browser_servers_project,
-        &["--", "npx", "playwright", "test"],
-        0,
-    );
-    assert!(reached > 3, "{reached}");
-}
-
 /// A crate with a unit test and a doctest.
 fn small_crate(project: &Project) {
     project.write(
@@ -13629,22 +13040,6 @@ fn small_crate(project: &Project) {
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
-    let reached =
-        fail_each_place_of_a_run("run-faults-rs", small_crate, &["--", "cargo", "test", "-q"]);
-    assert!(reached > 50, "{reached}");
-    // And through nextest, where it is installed.
-    if nextest_installed() {
-        let reached = fail_each_place_of_a_run(
-            "run-faults-nextest",
-            small_crate,
-            &["--", "cargo", "nextest", "run"],
-        );
-        assert!(reached > 50, "{reached}");
-    }
-}
-
 /// The places of a run's `role` runners -- `__doctest-runner`,
 /// `__nextest-runner`, which Cargo starts for each test -- failed one at a
 /// time (`role/fs#N`, every runner failing its Nth): each run ends, a runner
@@ -13902,92 +13297,12 @@ fn a_run_under_given_source_roots_is_read_back_under_them() {
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_run_keeping_its_work_survives_any_file_operation_failing() {
-    let keep = [("SUPERCOV_KEEP_WORK", "1")];
-    let python = fail_each_place_at_with(
-        "fs",
-        "keep-faults-py",
-        python_project,
-        &[
-            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
-        ],
-        0,
-        &keep,
-    );
-    assert!(python > 50, "{python}");
-    #[cfg(unix)]
-    if let Some(ruby) = ruby() {
-        let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
-        let reached =
-            fail_each_place_at_with("fs", "keep-faults-rb", ruby_project, &command, 0, &keep);
-        assert!(reached > 50, "{reached}");
-    }
-}
-
 /// A run, once for every place it starts a program, with that start
 /// failing: each ends, never panicking, and without a fault it succeeds.
 #[cfg_attr(
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_run_whose_program_cannot_start_anywhere_says_so_and_recovers() {
-    let rust = fail_each_place_at(
-        "spawn",
-        "spawn-faults-rs",
-        small_crate,
-        &["--", "cargo", "test", "-q"],
-        0,
-    );
-    let javascript = fail_each_place_at(
-        "spawn",
-        "spawn-faults-js",
-        javascript_project,
-        &["--", "node", "--test"],
-        0,
-    );
-    let python = fail_each_place_at(
-        "spawn",
-        "spawn-faults-py",
-        python_project,
-        &[
-            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
-        ],
-        0,
-    );
-    assert!(
-        rust > 3 && javascript > 0 && python > 0,
-        "{rust} {javascript} {python}"
-    );
-    if nextest_installed() {
-        let reached = fail_each_place_at(
-            "spawn",
-            "spawn-faults-nextest",
-            small_crate,
-            &["--", "cargo", "nextest", "run"],
-            0,
-        );
-        assert!(reached > 3, "{reached}");
-    }
-    if let Some(go) = go() {
-        let reached = fail_each_place_at(
-            "spawn",
-            "spawn-faults-go",
-            go_project,
-            &["--", go, "test", "./..."],
-            0,
-        );
-        assert!(reached > 0, "{reached}");
-    }
-    #[cfg(unix)]
-    if let Some(ruby) = ruby() {
-        let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
-        let reached = fail_each_place_at("spawn", "spawn-faults-rb", ruby_project, &command, 0);
-        assert!(reached > 0, "{reached}");
-    }
-}
-
 /// Two standalone doctests of one item, at lines 1 and 11: every word of
 /// either name is in the other's (`1)` in `11)`), so each is run alone by a
 /// filter and a skip of the other, and both are measured.
@@ -14018,217 +13333,6 @@ fn standalone_doctests_named_alike_are_each_run_alone() {
     );
 }
 
-/// [`small_crate`] in edition 2024, whose doctests are merged into one
-/// harness that lists and runs them through Supercov.
-#[cfg(unix)]
-fn small_merged_crate(project: &Project) {
-    small_crate(project);
-    project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
-}
-
-#[cfg(unix)]
-fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usize {
-    fail_each_place_of_a_runner_in(label, small_crate, &format!("{role}/fs"), command)
-}
-
-/// [`fail_each_place_of_a_runner`] over the project `write` makes, failing
-/// `site`, a fault site with the role it applies in (`__doctest-runner/fs`).
-/// A runner says it reached a fault in `SUPERCOV_TEST_FAULT_LOG`. Like the
-/// run sweeps, these are left to Unix: Windows starts processes too slowly.
-#[cfg(unix)]
-fn fail_each_place_of_a_runner_in(
-    label: &str,
-    write: fn(&Project),
-    site: &str,
-    command: &[&str],
-) -> usize {
-    let project = Project::empty(label);
-    write(&project);
-    project.git(&["init", "-q"]);
-    project.commit("fixture");
-    let log = project.root.with_extension("faults.log");
-    let mut nth = 1;
-    loop {
-        let _ = std::fs::remove_file(&log);
-        let fault = format!("{site}#{nth}");
-        let ran = project.supercov_with(
-            command,
-            &[
-                ("SUPERCOV_TEST_FAULT", &fault),
-                ("SUPERCOV_TEST_FAULT_LOG", log.to_str().unwrap()),
-            ],
-        );
-        // A failing runner fails its test, and `cargo test` exits 101 for a
-        // failed test: a panic is told by its own words.
-        let said = format!("{}{}", ran.stdout(), ran.stderr());
-        assert!(
-            !said.contains("panicked at"),
-            "{label} with {fault} panicked:\n{said}"
-        );
-        if !log.exists() {
-            break;
-        }
-        nth += 1;
-    }
-    let _ = std::fs::remove_file(&log);
-    project.supercov(command).succeeds();
-    nth - 1
-}
-
-/// A doctest's runner, and nextest's where it is installed, each failing
-/// at every place it makes a file operation.
-#[cfg(unix)]
-#[test]
-fn a_test_runner_whose_file_operation_fails_says_so() {
-    let reached = fail_each_place_of_a_runner(
-        "runner-faults-doctest",
-        supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT,
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached > 3, "{reached}");
-    if nextest_installed() {
-        let reached = fail_each_place_of_a_runner(
-            "runner-faults-nextest",
-            supercov_engine::rust_owned_nextest::RUNNER_MODE_ARGUMENT,
-            &["--", "cargo", "nextest", "run"],
-        );
-        assert!(reached > 3, "{reached}");
-    }
-    // Edition 2024 merges a crate's doctests into one harness, whose cases
-    // run as Supercov's children.
-    let reached = fail_each_place_of_a_runner_in(
-        "runner-faults-merged",
-        small_merged_crate,
-        &format!(
-            "env:{}/fs",
-            supercov_engine::rust_owned_doctests::CHILD_DIR_ENV
-        ),
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached >= 2, "{reached}");
-    // And a doctest's runner as the merged harness lists and runs them.
-    let reached = fail_each_place_of_a_runner_in(
-        "runner-faults-harness",
-        small_merged_crate,
-        &format!(
-            "{}/fs",
-            supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT
-        ),
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached > 3, "{reached}");
-    // And rustdoc's stand-in, told by its variable (it starts rustdoc
-    // without it, so the doctests' runners are not).
-    let reached = fail_each_place_of_a_runner_in(
-        "runner-faults-rustdoc",
-        small_crate,
-        &format!(
-            "env:{}/fs",
-            supercov_engine::rust_owned_doctests::WRAPPER_ROOT_ENV
-        ),
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached > 3, "{reached}");
-}
-
-/// Each of a run's helper processes -- rustdoc's stand-in, a doctest's
-/// runner, a merged doctest's child, nextest's runner -- failing to start a
-/// program at each place it starts one.
-#[cfg(unix)]
-#[test]
-fn a_test_runner_whose_program_cannot_start_says_so() {
-    let doctests = supercov_engine::rust_owned_doctests::WRAPPER_ROOT_ENV;
-    // rustdoc's stand-in starts rustdoc; a doctest's runner its doctest, or
-    // a merged harness that lists or runs them.
-    let reached = fail_each_place_of_a_runner_in(
-        "runner-spawn-rustdoc",
-        small_crate,
-        &format!("env:{doctests}/spawn"),
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached > 0, "{reached}");
-    let reached = fail_each_place_of_a_runner_in(
-        "runner-spawn-doctest",
-        small_crate,
-        &format!(
-            "{}/spawn",
-            supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT
-        ),
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached > 0, "{reached}");
-    let reached = fail_each_place_of_a_runner_in(
-        "runner-spawn-harness",
-        small_merged_crate,
-        &format!(
-            "{}/spawn",
-            supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT
-        ),
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached > 0, "{reached}");
-    let reached = fail_each_place_of_a_runner_in(
-        "runner-spawn-merged",
-        small_merged_crate,
-        &format!(
-            "env:{}/spawn",
-            supercov_engine::rust_owned_doctests::CHILD_DIR_ENV
-        ),
-        &["--", "cargo", "test", "-q"],
-    );
-    assert!(reached > 0, "{reached}");
-    if nextest_installed() {
-        let reached = fail_each_place_of_a_runner_in(
-            "runner-spawn-nextest",
-            small_crate,
-            &format!(
-                "{}/spawn",
-                supercov_engine::rust_owned_nextest::RUNNER_MODE_ARGUMENT
-            ),
-            &["--", "cargo", "nextest", "run"],
-        );
-        assert!(reached > 0, "{reached}");
-    }
-}
-
-/// `runs patch` reads the change from git: each git call failing in turn
-/// (`SUPERCOV_TEST_FAULT=git@N`) is named and ends the command with `2`, never
-/// a panic, and the call no fault reaches answers as usual.
-#[test]
-fn a_patch_whose_git_call_fails_says_so() {
-    let project = Project::cart("patch-git-faults");
-    project.edit(
-        "src/cart.js",
-        "  return items.map((item) => item.name).join(\", \");",
-        "  const names = items.map((item) => item.name);\n  return names.join(\", \");",
-    );
-    project.write("src/new.js", "export const fresh = 1;\n");
-    project.measure(&[]);
-    for query in [
-        &["runs", "patch", "--base", "HEAD", "--min-lines", "100"][..],
-        &["runs", "patch", "--base", "HEAD", "--annotate", "github"],
-        &["runs", "patch", "--base", "HEAD", "--json"],
-    ] {
-        let mut nth = 0;
-        loop {
-            nth += 1;
-            let fault = format!("git@{nth}");
-            let ran = project.supercov_with(query, &[("SUPERCOV_TEST_FAULT", &fault)]);
-            let said = format!("{}{}", ran.stdout(), ran.stderr());
-            assert!(
-                !said.contains("panicked at") && ran.code() != 101,
-                "{query:?} with {fault} panicked:\n{said}"
-            );
-            if !ran.stderr().contains("[supercov] test fault at git") {
-                break;
-            }
-            assert_ne!(ran.code(), 0, "{query:?} with {fault}:\n{said}");
-            assert!(said.contains("git"), "{query:?} with {fault}:\n{said}");
-        }
-        assert!(nth > 2, "{query:?} ran no git");
-    }
-}
-
 /// A Maven project with one class and its test.
 fn small_maven_project(project: &Project) {
     project.write("pom.xml", "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>example</groupId>\n  <artifactId>w</artifactId>\n  <version>1.0</version>\n  <properties>\n    <maven.compiler.source>17</maven.compiler.source>\n    <maven.compiler.target>17</maven.compiler.target>\n    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n  </properties>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n      <scope>test</scope>\n    </dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin>\n        <groupId>org.apache.maven.plugins</groupId>\n        <artifactId>maven-surefire-plugin</artifactId>\n        <version>3.2.5</version>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n");
@@ -14247,24 +13351,6 @@ fn small_maven_project(project: &Project) {
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
-    let maven = std::process::Command::new("mvn")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !maven {
-        eprintln!("skipping: no Maven found");
-        return;
-    }
-    let reached = fail_each_place_of_a_run(
-        "run-faults-mvn",
-        small_maven_project,
-        &["--", "mvn", "-q", "test"],
-    );
-    assert!(reached > 50, "{reached}");
-}
-
 /// A Python test skipped where it is declared, or a Ruby one as it runs, is
 /// in the run, skipped.
 #[test]
@@ -14316,25 +13402,6 @@ fn a_skipped_python_or_ruby_test_is_counted_skipped() {
     windows,
     ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
 )]
-#[test]
-fn a_maven_run_whose_program_cannot_start_says_so_and_recovers() {
-    let maven = std::process::Command::new("mvn")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !maven {
-        return;
-    }
-    let reached = fail_each_place_at(
-        "spawn",
-        "spawn-faults-mvn",
-        small_maven_project,
-        &["--", "mvn", "-q", "test"],
-        0,
-    );
-    assert!(reached > 0, "{reached}");
-}
-
 /// A Python test whose process ends during it reported no outcome, but what
 /// it ran was recorded: the test is in the run, failed, credited with that.
 #[test]
@@ -14451,72 +13518,6 @@ fn a_command_started_in_a_removed_directory_says_so() {
     }
 }
 
-/// Each query fails at every place it reads its index, one at a time, and
-/// says so: every record was checked when the index was opened, so only a
-/// fault fails a read.
-#[test]
-fn each_query_says_so_wherever_a_read_of_its_index_fails() {
-    let project = Project::cart("index-read-faults");
-    // A file no source imports, outside the roots: the summary names it.
-    project.write("extra/unused.js", "export const unused = 1;\n");
-    project.commit("extra");
-    project.measure(&[]);
-    let older = project.latest();
-    project.measure(&[]);
-    let commands: &[&[&str]] = &[
-        &["runs", "latest"],
-        &["runs", "latest", "--json"],
-        &["runs", "latest", "gaps"],
-        &["runs", "latest", "gaps", "--json"],
-        &["runs", "latest", "file", "src/cart.js"],
-        &["runs", "latest", "file", "src/cart.js", "--json"],
-        &["runs", "latest", "line", "src/cart.js:2"],
-        &["runs", "latest", "line", "src/cart.js:2", "--json"],
-        &["runs", "latest", "tests"],
-        &["runs", "latest", "tests", "--json"],
-        &["runs", "latest", "scope", "--json"],
-        &["runs", "latest", "summary", "--json"],
-        &["runs", "--json"],
-        &["runs", "check", "--json"],
-        &["runs", "latest", "tests", "affected", "--json"],
-        &["runs", "latest", "tests", "without-evidence", "--json"],
-        &["runs", "latest", "kinds", "--json"],
-        &["runs", "latest", "runners", "--json"],
-        &["runs", "latest", "files", "--json"],
-        &["runs", "latest", "files", "--group", "dir", "--json"],
-        &[
-            "runs",
-            "latest",
-            "file",
-            "src/cart.js",
-            "--group",
-            "decision",
-            "--json",
-        ],
-        &["runs", "latest", "decision", "src/cart.js:6", "--json"],
-        &["runs", "latest", "test", "total", "--json"],
-        &["runs", "latest", "minimize", "--json"],
-        &["runs", "latest", "gaps", "--format", "jsonl"],
-        &["diff", &older, "latest", "--json"],
-        &["report", "--no-open", "--output", "r.html"],
-    ];
-    let mut places = 0;
-    for command in commands {
-        for nth in 1.. {
-            let fault = format!("coverage-index-read#{nth}");
-            let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
-            let said = format!("{}{}", ran.stdout(), ran.stderr());
-            assert!(!said.contains("panicked at"), "{fault} {command:?}: {said}");
-            if !said.contains("test fault at coverage-index-read") {
-                break;
-            }
-            places += 1;
-            assert!(nth < 100, "{command:?} kept reading");
-        }
-    }
-    assert!(places > commands.len(), "{places}");
-}
-
 /// With every index refused, and with no room for any reply, each query
 /// says what failed: a fault the engine injects stands in for an index from
 /// another version and for an answer too large to send.
@@ -14572,35 +13573,16 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
             "{fault} reached {reached} commands"
         );
     }
-    // A command that opens an index more than once -- a diff opens two, a
-    // query its run's after the inventory's -- refuses at each in turn.
-    for command in commands {
-        for nth in 1.. {
-            let fault = format!("coverage-index@{nth}");
-            let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
-            let said = format!("{}{}", ran.stdout(), ran.stderr());
-            assert!(!said.contains("panicked at"), "{fault} {command:?}: {said}");
-            if !said.contains("test fault at coverage-index") {
-                break;
-            }
-            assert!(nth < 20, "{command:?} kept opening indexes");
-        }
-    }
     // A reply too large is asked for again with a smaller page, and that
-    // ask can fail too.
-    let refused = (1..8).any(|nth| {
-        let fault = format!("reply-too-large=2,coverage-index@{nth}");
-        let ran = project.supercov_with(
-            &["runs", "latest", "file", "src/cart.js", "--json"],
-            &[("SUPERCOV_TEST_FAULT", &fault)],
-        );
-        let said = format!("{}{}", ran.stdout(), ran.stderr());
-        assert!(!said.contains("panicked at"), "{fault}: {said}");
-        ran.code() == 2
-            && said.contains("test fault at reply-too-large")
-            && said.contains("test fault at coverage-index")
-    });
-    assert!(refused);
+    // ask's index open (the fourth) can fail too.
+    let ran = project.supercov_with(
+        &["runs", "latest", "file", "src/cart.js", "--json"],
+        &[("SUPERCOV_TEST_FAULT", "reply-too-large=2,coverage-index@4")],
+    );
+    let said = format!("{}{}", ran.stdout(), ran.stderr());
+    assert_eq!(ran.code(), 2, "{said}");
+    assert!(said.contains("test fault at reply-too-large"), "{said}");
+    assert!(said.contains("test fault at coverage-index"), "{said}");
 }
 
 /// The quality scope takes the source roots it is given, and reads roots

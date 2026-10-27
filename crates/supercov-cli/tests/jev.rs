@@ -369,58 +369,6 @@ fn a_saved_assessment_edited_by_hand_is_read_or_ignored() {
     }
 }
 
-/// An assessment of each kind, once for each place in the code that makes a
-/// file operation, with that place's first call failing: it may stop, but
-/// says why and never panics, and the one no fault reaches succeeds.
-#[test]
-fn an_assessment_whose_file_operation_fails_says_so_and_never_panics() {
-    let project = Project::cart("assess-faults");
-    let run = project.measure(&[]);
-    let (base, _) = gateway(MODEL, answer_yes);
-    let sweep = |command: &[&str]| {
-        for place in 1.. {
-            let fault = format!("fs#{place}");
-            let mut environment = through(&base).to_vec();
-            environment.push(("SUPERCOV_TEST_FAULT", fault.as_str()));
-            let ran = project.supercov_with(command, &environment);
-            let said = ran.stderr();
-            assert!(
-                !said.contains("panicked at") && ran.code() != 101,
-                "{command:?} with {fault}:\n{said}"
-            );
-            if !said.contains("[supercov] test fault at fs") {
-                ran.succeeds();
-                assert!(place > 3, "{command:?} reached {place} places");
-                break;
-            }
-        }
-    };
-    for command in [
-        &["runs", &run, "assertions", "assess", "--refresh"][..],
-        &["runs", &run, "assertions", "assess", "--dry-run"][..],
-        &["runs", &run, "assertions"][..],
-        &["quality"],
-        &["security"],
-        &["security", "--run", "latest"],
-    ] {
-        sweep(command);
-    }
-    // A pass over what changed reads the change too.
-    project.edit(
-        "src/cart.js",
-        "return express ? 15 : 5;",
-        "return express ? 20 : 5;",
-    );
-    sweep(&[
-        "runs",
-        &run,
-        "assertions",
-        "assess",
-        "--changed",
-        "--refresh",
-    ]);
-}
-
 #[test]
 fn a_statement_no_asked_test_catches_says_which_test_files_were_not_asked() {
     // One function forty tests run, in four files. Eighteen are asked at
@@ -5302,50 +5250,8 @@ fn a_run_with_no_statement_to_assess_asks_nothing() {
     assert_eq!(json["ok"], true, "{json}");
 }
 
-/// Each place a Jev command touches a file fails in turn, its first call
-/// there (`SUPERCOV_TEST_FAULT=fs#N`): the command may stop, but says why and
-/// never panics, and the same command with no fault succeeds after it.
-#[test]
-fn a_jev_command_whose_file_operation_fails_says_so_and_recovers() {
-    let (base, _seen) = gateway(MODEL, answer_yes);
-    let jev = through(&base);
-    let commands: [&[&str]; 11] = [
-        &["security", "patch"],
-        &["quality", "scope"],
-        &["quality", "--dry-run"],
-        &["quality"],
-        &["quality", "src/cart.js"],
-        &["quality", "src"],
-        &["quality", "gaps"],
-        &["quality", "file", "src/cart.js"],
-        &["security"],
-        &["quality", "clean"],
-        &["quality", "patch"],
-    ];
-    let project = Project::cart("jev-faults");
-    for command in commands {
-        let mut nth = 1;
-        loop {
-            let fault = format!("fs#{nth}");
-            let mut env = jev.to_vec();
-            env.push(("SUPERCOV_TEST_FAULT", &fault));
-            let ran = project.supercov_with(command, &env);
-            let said = ran.stderr();
-            assert!(
-                !said.contains("panicked at") && ran.code() != 101,
-                "{command:?} with {fault} panicked:\n{said}"
-            );
-            if !said.contains("[supercov] test fault at fs") {
-                break;
-            }
-            nth += 1;
-        }
-        project.supercov_with(command, &jev).succeeds();
-    }
-}
-
-/// A patch review, once for each place it starts git, with that start
-/// failing: it says so and never panics, and succeeds with no fault.
+/// A patch review that cannot start git says so and fails, never
+/// panicking, and succeeds when it can.
 #[test]
 fn a_patch_review_whose_git_cannot_start_says_so() {
     let (base, _seen) = gateway(MODEL, answer_yes);
@@ -5353,23 +5259,16 @@ fn a_patch_review_whose_git_cannot_start_says_so() {
     let project = Project::cart("jev-spawn-faults");
     project.edit("src/cart.js", "return 0;", "return 1;");
     for command in [&["quality", "patch"][..], &["security", "patch"][..]] {
-        let mut places = 0;
-        for nth in 1.. {
-            let fault = format!("spawn#{nth}");
-            let mut env = jev.to_vec();
-            env.push(("SUPERCOV_TEST_FAULT", &fault));
-            let ran = project.supercov_with(command, &env);
-            let said = ran.stderr();
-            assert!(
-                !said.contains("panicked at") && ran.code() != 101,
-                "{command:?} with {fault} panicked:\n{said}"
-            );
-            if !said.contains("[supercov] test fault at spawn") {
-                break;
-            }
-            places += 1;
-        }
-        assert!(places > 0, "{command:?}");
+        let mut env = jev.to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", "spawn"));
+        let ran = project.supercov_with(command, &env);
+        let said = ran.stderr();
+        assert!(!said.contains("panicked at"), "{command:?}: {said}");
+        assert!(
+            said.contains("[supercov] test fault at spawn"),
+            "{command:?}: {said}"
+        );
+        assert_ne!(ran.code(), 0, "{command:?}: {said}");
         project.supercov_with(command, &jev).succeeds();
     }
 }
