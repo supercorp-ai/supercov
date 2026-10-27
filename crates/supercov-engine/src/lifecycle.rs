@@ -2785,6 +2785,11 @@ mod tests {
             update_run_state(&root, "run_dir", RunStateStatus::Failed, "now", None),
             Err(LifecycleError::Io { .. })
         ));
+        // A run with no state at all cannot be marked interrupted.
+        assert!(matches!(
+            interrupt_run_state(&root, "run_absent", "now", "SIGINT"),
+            Err(LifecycleError::InvalidState(reason)) if reason == "state is missing for run_absent"
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

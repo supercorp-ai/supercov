@@ -626,7 +626,7 @@ pub fn merge_coverage_runs(
             let contents = entries
                 .iter()
                 .find(|entry| entry.path == "frontend.json")
-                .ok_or_else(|| "Cannot merge runs without a frontend declaration".to_owned())?;
+                .expect("a stored run's archive was read with its frontend declaration");
             let mut declaration = serde_json::from_slice::<FrontendRunDeclaration>(
                 &contents.contents,
             )
