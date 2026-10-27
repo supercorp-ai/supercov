@@ -1348,6 +1348,40 @@ exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
         }
     }
 
+    /// A version that does not read or is too old, a listing or metadata
+    /// that is no JSON, and an attempt record that is none each stop the
+    /// run with what was wrong.
+    #[cfg(unix)]
+    #[test]
+    fn each_answer_nextest_or_cargo_gives_that_cannot_be_read_stops_the_run() {
+        for (step, output, said) in [
+            ("version", "nonsense\n", "cargo-nextest product identity"),
+            (
+                "version",
+                "cargo-nextest 0.9.100\nrelease: 0.9.100\nhost: x86_64-unknown-linux-gnu\n",
+                "older than 0.9.138",
+            ),
+            ("list", "not json", "invalid nextest test listing"),
+            ("metadata", "not json", "invalid Cargo metadata"),
+        ] {
+            let fake = FakeNextest::new();
+            fake.answer(step, output);
+            let error = fake.run(&["nextest", "run"]).0.err().unwrap().to_string();
+            assert!(error.contains(said), "{step}: {error}");
+            assert!(!fake.calls().contains("nextest run"), "{step}");
+        }
+        let fake = FakeNextest::new();
+        fs::write(
+            fake.root.join("fake/run.sh"),
+            format!(
+                "mkdir -p '{0}/attempts' && printf 'not json' > '{0}/attempts/00000000.json'\n",
+                fake.evidence.display()
+            ),
+        )
+        .unwrap();
+        assert!(fake.run(&["nextest", "run"]).0.is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_nextest_newer_than_the_checked_releases_is_named() {
