@@ -394,36 +394,44 @@ pub fn read_rust_cfg_settlement(
     if layout.cfgs.is_empty() {
         return Ok(settled);
     }
-    let mut directories = vec![root.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(RustProbeReadError::Io(error.to_string())),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| RustProbeReadError::Io(error.to_string()))?;
-            let kind =
-                fs::file_type(&entry).map_err(|error| RustProbeReadError::Io(error.to_string()))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if kind.is_dir() {
-                directories.push(entry.path());
-            } else if kind.is_file()
-                && name.starts_with(&format!("{token}-"))
-                && name.ends_with(".region")
-            {
-                let bytes = fs::read(entry.path())
-                    .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
-                for (slot, bits) in settled
-                    .iter_mut()
-                    .zip(parse_rust_region_cfgs(&bytes, token, layout)?)
-                {
-                    *slot |= bits;
-                }
-            }
+    settle_under(root, token, layout, &mut settled)?;
+    Ok(settled)
+}
+
+/// What the regions of `token` at any depth under `directory` said of the
+/// `cfg` gates, folded into `settled`.
+fn settle_under(
+    directory: &Path,
+    token: &str,
+    layout: &crate::rust_instrumenter::RustProbeLayout,
+    settled: &mut [u8],
+) -> Result<(), RustProbeReadError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(RustProbeReadError::Io(error.to_string())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+        let kind =
+            fs::file_type(&entry).map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_dir() {
+            settle_under(&entry.path(), token, layout, settled)?;
+        } else if kind.is_file()
+            && name.starts_with(&format!("{token}-"))
+            && name.ends_with(".region")
+        {
+            let bytes = fs::read(entry.path())
+                .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+            // Both as long as the layout's cfgs, which are some.
+            settled
+                .iter_mut()
+                .zip(parse_rust_region_cfgs(&bytes, token, layout)?)
+                .for_each(|(slot, bits)| *slot |= bits);
         }
     }
-    Ok(settled)
+    Ok(())
 }
 
 /// Every region of `token`'s instrumentation in a test's evidence
