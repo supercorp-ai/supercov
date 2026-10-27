@@ -1213,68 +1213,72 @@ fn instrument_workspace(
         })
         .collect::<Vec<_>>();
 
-    for module in &modules {
-        let frameworks = frameworks_of(&module.directory);
-        let at = |source_set: &str| {
-            workspace
-                .join(&module.directory)
-                .join(source_root(source_set))
-                .join(PACKAGE_DIRECTORY)
-        };
-        // The runtime goes in every module's main source set: instrumented
-        // product code stores into its array, and a module compiles only its
-        // own sources. The class is identical everywhere, and each module's
-        // tests fork a JVM that loads exactly one of them.
-        write(
-            &at("main").join("Supercov.java"),
-            &runtime_source(probe_count),
-        )?;
-        if !module.has_tests {
-            continue;
-        }
-        if frameworks.junit4 && build == JvmBuild::Plain {
-            // Maven's and Gradle's copies get Vintage added below; a plain
-            // tree has no build to add it to, so the module keeps its probes
-            // and gets no listener, because attributing it is impossible and
-            // trying would break it.
-            unmeasurable.push(module.directory.clone());
-            continue;
-        }
-        // A test source set with a module-info.java is a named JPMS module,
-        // and a named module is closed: every package it holds is its own and
-        // every dependency has to be declared in that file. A listener written
-        // into it imports org.junit.platform, which the module does not
-        // require, and reads the runtime from a package its main module does
-        // not export -- so the module stops compiling and takes the build with
-        // it. gson's test-jpms is exactly this, and it tests module boundaries
-        // rather than product logic, so leaving it alone costs the report
-        // nothing it could have had.
-        if workspace
-            .join(&module.directory)
-            .join(source_root("test"))
-            .join("module-info.java")
-            .exists()
-        {
-            modular.push(module.directory.clone());
-            continue;
-        }
-        // The listeners and their configuration go in the test source set,
-        // because only the test classpath has the frameworks to listen to.
-        let test = at("test");
-        write(
-            &test.join("SupercovConfig.java"),
-            &configuration(probe_count, &project.decision_widths, &module.evidence),
-        )?;
-        if frameworks.platform || frameworks.junit4 {
-            write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
-        }
-        if frameworks.testng {
+    // There is at least one module.
+    modules
+        .iter()
+        .try_for_each(|module| -> Result<(), String> {
+            let frameworks = frameworks_of(&module.directory);
+            let at = |source_set: &str| {
+                workspace
+                    .join(&module.directory)
+                    .join(source_root(source_set))
+                    .join(PACKAGE_DIRECTORY)
+            };
+            // The runtime goes in every module's main source set: instrumented
+            // product code stores into its array, and a module compiles only its
+            // own sources. The class is identical everywhere, and each module's
+            // tests fork a JVM that loads exactly one of them.
             write(
-                &test.join("SupercovTestNGListener.java"),
-                TESTNG_LISTENER_SOURCE,
+                &at("main").join("Supercov.java"),
+                &runtime_source(probe_count),
             )?;
-        }
-    }
+            if !module.has_tests {
+                return Ok(());
+            }
+            if frameworks.junit4 && build == JvmBuild::Plain {
+                // Maven's and Gradle's copies get Vintage added below; a plain
+                // tree has no build to add it to, so the module keeps its probes
+                // and gets no listener, because attributing it is impossible and
+                // trying would break it.
+                unmeasurable.push(module.directory.clone());
+                return Ok(());
+            }
+            // A test source set with a module-info.java is a named JPMS module,
+            // and a named module is closed: every package it holds is its own and
+            // every dependency has to be declared in that file. A listener written
+            // into it imports org.junit.platform, which the module does not
+            // require, and reads the runtime from a package its main module does
+            // not export -- so the module stops compiling and takes the build with
+            // it. gson's test-jpms is exactly this, and it tests module boundaries
+            // rather than product logic, so leaving it alone costs the report
+            // nothing it could have had.
+            if workspace
+                .join(&module.directory)
+                .join(source_root("test"))
+                .join("module-info.java")
+                .exists()
+            {
+                modular.push(module.directory.clone());
+                return Ok(());
+            }
+            // The listeners and their configuration go in the test source set,
+            // because only the test classpath has the frameworks to listen to.
+            let test = at("test");
+            write(
+                &test.join("SupercovConfig.java"),
+                &configuration(probe_count, &project.decision_widths, &module.evidence),
+            )?;
+            if frameworks.platform || frameworks.junit4 {
+                write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
+            }
+            if frameworks.testng {
+                write(
+                    &test.join("SupercovTestNGListener.java"),
+                    TESTNG_LISTENER_SOURCE,
+                )?;
+            }
+            Ok(())
+        })?;
 
     // A project's warning policy applies to code it wrote. The copy holds code
     // it did not.
@@ -2314,7 +2318,10 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(bom.contains("'org.junit.platform:junit-platform-launcher'"), "{bom}");
+        assert!(
+            bom.contains("'org.junit.platform:junit-platform-launcher'"),
+            "{bom}"
+        );
 
         // A parent on disk that imports the BOM, and one that sets a property.
         let root = std::env::temp_dir().join(format!(
