@@ -2328,6 +2328,26 @@ mod tests {
 
     use super::*;
 
+    /// The fault switch the sweeps here rely on: a fault named by the place
+    /// that calls its site never fails a call that names no place, and one
+    /// naming an errno fails its place's call with that errno.
+    #[test]
+    fn a_fault_by_place_or_errno_fails_as_it_names() {
+        let unplaced = crate::fault::during("named#1", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(unplaced.is_ok());
+        let errno = crate::fault::during("errno:2", || {
+            crate::fault::io_at(
+                "errno",
+                io::ErrorKind::Other,
+                std::panic::Location::caller(),
+                || Ok(()),
+            )
+        });
+        assert_eq!(errno.unwrap_err().raw_os_error(), Some(2));
+    }
+
     fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {
         let base =
             std::env::temp_dir().join(format!("supercov-writeback-{}-{name}", std::process::id()));
