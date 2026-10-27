@@ -2787,6 +2787,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.exit_code(), 0);
+        // Nor does a timeout line nobody reads.
+        let slow = CommandSpec {
+            arguments: vec!["-c".into(), "sleep 5".into()],
+            ..spec
+        };
+        let result = supervise_command(
+            &slow,
+            SupervisionOptions {
+                diagnostic_interval: Duration::from_secs(60),
+                timeout: Some(Duration::from_millis(50)),
+                termination_grace: Duration::from_millis(50),
+            },
+            &mut BrokenWriter,
+        )
+        .unwrap();
+        assert!(result.timed_out);
     }
 
     /// A terminal of the user's: what is written to the second shows at the
