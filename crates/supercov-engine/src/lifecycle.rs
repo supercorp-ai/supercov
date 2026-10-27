@@ -1305,11 +1305,11 @@ fn remove_idle_copies(root: &Path, locks: &Path) -> Result<(), LifecycleError> {
         else {
             continue;
         };
-        for directory in crate::workspace::copy_directories(&container, copy) {
-            if fs::symlink_metadata(&directory).is_ok() {
-                remove_stored_tree_deferred(root, &directory)?;
-            }
-        }
+        // The copy and its source view.
+        crate::workspace::copy_directories(&container, copy)
+            .iter()
+            .filter(|directory| fs::symlink_metadata(directory).is_ok())
+            .try_for_each(|directory| remove_stored_tree_deferred(root, directory).map(drop))?;
     }
     Ok(())
 }
