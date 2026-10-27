@@ -2958,6 +2958,14 @@ mod tests {
             Err(SupervisionError::Signal(_))
         ));
         assert_eq!(disposition(), before);
+        // Refused first, nothing is put back; asked for none, none is kept.
+        assert!(SignalFlags::install_for(&[libc::SIGKILL]).is_err());
+        let none = SignalFlags::install_for(&[]).unwrap();
+        // A hangup the guard saw is read as one.
+        RECEIVED_SIGNAL.store(libc::SIGHUP, Ordering::SeqCst);
+        assert_eq!(none.received(), Some(ForwardedSignal::Sighup));
+        drop(none);
+        assert_eq!(RECEIVED_SIGNAL.load(Ordering::SeqCst), 0);
     }
 
     #[test]
