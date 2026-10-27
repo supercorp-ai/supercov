@@ -1467,6 +1467,38 @@ mod tests {
 
     use super::*;
 
+    /// Text with nothing to strip, a comment that runs to the end, and
+    /// targets of every JSON kind, each read as written.
+    #[test]
+    fn jsonc_and_targets_at_their_edges() {
+        assert_eq!(strip_jsonc_comments(""), "");
+        assert_eq!(strip_trailing_commas(""), "");
+        assert!(!strip_jsonc_comments("{} //").contains("//"));
+        assert!(!strip_jsonc_comments("{} /* open").contains("/*"));
+        let mut targets = Vec::new();
+        string_targets(
+            &serde_json::json!({"a": [], "b": {}, "c": 5, "d": ["./x.js", {"e": "./y.js"}]}),
+            0,
+            &mut targets,
+        );
+        assert_eq!(targets, ["./x.js", "./y.js"]);
+    }
+
+    /// An empty pnpm workspace declares no package.
+    #[test]
+    fn an_empty_pnpm_workspace_declares_nothing() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-empty-pnpm-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("pnpm-workspace.yaml"), "").unwrap();
+        fs::write(root.join("package.json"), r#"{"workspaces": 5}"#).unwrap();
+        assert!(declared_workspace_packages(&root).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A path whose name is not UTF-8 is named, not read as some other.
     #[cfg(unix)]
     #[test]
