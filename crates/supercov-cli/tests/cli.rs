@@ -12431,6 +12431,7 @@ fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
         &["runs", "latest", "files"],
         &["runs", "latest", "file", "src/cart.js"],
         &["runs", "latest", "tests", "affected"],
+        &["runs", "latest", "tests", "without-evidence"],
         &["report", "--no-open", "--output", "faults.html"],
     ] {
         let mut nth = 0;
