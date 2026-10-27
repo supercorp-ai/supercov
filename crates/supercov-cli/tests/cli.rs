@@ -13747,6 +13747,52 @@ fn tests_affected_names_the_record_it_cannot_read() {
     );
 }
 
+/// The workspace gets a git repository of its own, cloned from the
+/// project's: its HEAD, branch or detached commit, remotes and their
+/// branches, and an index. Each step of that failing leaves the workspace
+/// without one and the run goes on; asked to, it says which step failed.
+#[test]
+fn a_workspace_whose_git_repository_cannot_be_made_runs_without_one() {
+    let on_branch = [
+        ("git@1", "git clone --quiet --shared --bare"),
+        ("git@2", "git config core.bare false"),
+        ("git@4", "git symbolic-ref HEAD refs/heads/"),
+        ("git@5", "git remote remove origin"),
+        ("git@6", "git remote: injected fault at git"),
+        ("git@7", "git config --get remote.origin.url"),
+        ("git@8", "git remote add origin https://example.com/w.git"),
+        ("git@9", "git fetch --quiet --no-tags"),
+        ("git@10", "git read-tree HEAD"),
+        ("fs.create_dir_all@8", "injected fault at fs"),
+        ("fs.write@3", "injected fault at fs"),
+    ];
+    let detached = [
+        ("git@4", "git rev-parse HEAD"),
+        ("git@5", "git update-ref --no-deref HEAD"),
+    ];
+    for (detach, cases) in [(false, &on_branch[..]), (true, &detached[..])] {
+        for (fault, said) in cases {
+            let project = Project::cart("workspace-git");
+            project.git(&["remote", "add", "origin", "https://example.com/w.git"]);
+            if detach {
+                project.git(&["checkout", "-q", "--detach"]);
+            }
+            let ran = project.supercov_with(
+                &["--", "node", "--test"],
+                &[("SUPERCOV_TEST_FAULT", fault), ("SUPERCOV_DEBUG", "1")],
+            );
+            let stderr = ran.stderr();
+            assert_eq!(ran.code(), 0, "{fault}: {stderr}");
+            assert!(
+                stderr.contains(&format!(
+                    "the workspace has no git repository of its own: {said}"
+                )),
+                "{fault}: {stderr}"
+            );
+        }
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
