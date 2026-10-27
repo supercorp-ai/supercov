@@ -13096,6 +13096,28 @@ fn a_browser_run_preparing_a_rust_worker_whose_file_operation_fails_says_so_and_
     assert!(reached > 50, "{reached}");
 }
 
+/// The same for a Java server beside the browser tests.
+#[cfg(unix)]
+#[test]
+fn a_browser_run_preparing_a_java_server_whose_file_operation_fails_says_so_and_recovers() {
+    let reached = fail_each_place_of_a_run(
+        "run-faults-browser-java",
+        |project| {
+            browser_project(project);
+            project.write(
+                "pom.xml",
+                "<project><modelVersion>4.0.0</modelVersion><groupId>w</groupId><artifactId>w</artifactId><version>1</version></project>\n",
+            );
+            project.write(
+                "src/main/java/w/App.java",
+                "package w;\n\npublic class App {\n    public static int handle(int n) {\n        if (n == 0) {\n            return 0;\n        }\n        return n * 2;\n    }\n}\n",
+            );
+        },
+        &["--", "npx", "playwright", "test"],
+    );
+    assert!(reached > 50, "{reached}");
+}
+
 /// A crate with a unit test and a doctest.
 fn small_crate(project: &Project) {
     project.write(
