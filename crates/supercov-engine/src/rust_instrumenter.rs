@@ -347,13 +347,15 @@ fn constant_bodies(node: &ast::Expr, name: &ast::NameRef) -> impl Iterator<Item 
     })
 }
 
-/// A `const` or `static` item's name and value.
+/// A `const` or `static` item's name and value. A file is instrumented only
+/// where it parses, and there each has a name.
 fn match_constant(item: ra_ap_syntax::SyntaxNode) -> Option<(ast::Name, Option<ast::Expr>)> {
+    const NAMED: &str = "a constant of a file that parses is named";
     if let Some(constant) = ast::Const::cast(item.clone()) {
-        return Some((constant.name()?, constant.body()));
+        return Some((constant.name().expect(NAMED), constant.body()));
     }
     let item = ast::Static::cast(item)?;
-    Some((item.name()?, item.body()))
+    Some((item.name().expect(NAMED), item.body()))
 }
 
 /// [`never_empty`], following a constant's name when `constants` is set: a
