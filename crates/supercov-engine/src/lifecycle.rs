@@ -823,7 +823,14 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     // A clone where the filesystem can make one (APFS, Btrfs, XFS): the
     // archive's blocks are shared, not copied -- 150 MB on a large run --
     // and the clone is the source as it was at that instant.
-    if reflink_copy::reflink(source, destination).is_ok() {
+    let cloned = crate::fault::or(
+        "clone",
+        // A test stands a copy in for the clone where the file system makes
+        // none, so what follows one is checked there too.
+        || fs::copy(source, destination).is_ok(),
+        || reflink_copy::reflink(source, destination).is_ok(),
+    );
+    if cloned {
         fs::open(destination)
             .and_then(|file| file.sync_all())
             .map_err(|error| io_error(destination, error))?;
@@ -1961,6 +1968,14 @@ mod tests {
             copy_regular_file(&directory, &root.join("copy")),
             Err(LifecycleError::UnsafePath(_))
         ));
+        fs::write(root.join("archive"), "evidence").unwrap();
+        for (fault, copy) in [("clone", "cloned"), ("", "copied")] {
+            let copied = crate::fault::during(fault, || {
+                copy_regular_file(&root.join("archive"), &root.join(copy))
+            });
+            assert_eq!(copied.unwrap(), 8);
+            assert_eq!(fs::read_to_string(root.join(copy)).unwrap(), "evidence");
+        }
         assert!(matches!(
             file_sha256(&directory),
             Err(LifecycleError::UnsafePath(_))
