@@ -2413,7 +2413,7 @@ mod tests {
                 "rustflags",
             ),
             (
-                "[target.x86_64-unknown-linux-gnu]\nrunner=''\n[target.aarch64-apple-darwin]\nrunner=''\n",
+                "[target.x86_64-unknown-linux-gnu]\nrunner=''\n[target.aarch64-apple-darwin]\nrunner=''\n[target.x86_64-pc-windows-msvc]\nrunner=''\n",
                 &["test"][..],
                 "cannot be empty",
             ),
