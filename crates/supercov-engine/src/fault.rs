@@ -175,12 +175,14 @@ pub fn fail_each_call<Fixture, E: std::fmt::Debug>(
     }
 }
 
-/// [`fail_each_call`] for each pair of calls at `site`, both failing
-/// (`site@N,site@M`): what a failure's own clean-up does when it fails too.
-/// The number of pairs.
+/// [`fail_each_call`] for each pair of calls at `site` no more than
+/// `within` apart, both failing (`site@N,site@M`): what a failure's own
+/// clean-up, which follows it closely, does when it fails too. The number
+/// of pairs.
 #[cfg(any(test, debug_assertions))]
 pub fn fail_each_pair_of_calls<Fixture, E: std::fmt::Debug>(
     site: &str,
+    within: usize,
     setup: impl Fn() -> Fixture,
     scenario: impl Fn(&Fixture) -> Result<(), E>,
     cleanup: impl Fn(Fixture),
@@ -188,7 +190,7 @@ pub fn fail_each_pair_of_calls<Fixture, E: std::fmt::Debug>(
     let calls = fail_each_call(site, &setup, &scenario, &cleanup);
     let mut pairs = 0;
     for first in 1..calls {
-        for second in first + 1..=calls {
+        for second in first + 1..=calls.min(first + within) {
             let fixture = setup();
             let _ = during(&format!("{site}@{first},{site}@{second}"), || {
                 scenario(&fixture)

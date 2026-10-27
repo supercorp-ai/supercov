@@ -2980,6 +2980,7 @@ mod tests {
         let id = "2026-01-01T00-00-00-100Z";
         let pairs = crate::fault::fail_each_pair_of_calls(
             "fs",
+            8,
             || {
                 let root = project();
                 let evidence = analysable_evidence(&root, id);
@@ -2994,28 +2995,31 @@ mod tests {
         assert!(pairs > 10, "{pairs}");
     }
 
+    /// A project with a run whose process died and one that published but
+    /// was not finished: two runs to recover.
+    fn abandoned_runs() -> PathBuf {
+        let root = project();
+        let dead = "2026-01-01T00-00-00-000Z";
+        let published = "2026-01-02T00-00-00-000Z";
+        for id in [dead, published] {
+            fs::create_dir_all(
+                root.join(".supercov/work")
+                    .join(id)
+                    .join(root.file_name().unwrap()),
+            )
+            .unwrap();
+            fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+            write_run_state(&root, &state(&root, id, RunStateStatus::Testing, u32::MAX)).unwrap();
+        }
+        let (evidence, bytes) = evidence(&root);
+        publish_run(&root, &metadata(published, bytes), &evidence).unwrap();
+        root
+    }
+
     #[test]
     fn recovering_runs_survives_any_file_operation_failing() {
         let operations = fail_each_file_operation(
-            || {
-                let root = project();
-                let dead = "2026-01-01T00-00-00-000Z";
-                let published = "2026-01-02T00-00-00-000Z";
-                for id in [dead, published] {
-                    fs::create_dir_all(
-                        root.join(".supercov/work")
-                            .join(id)
-                            .join(root.file_name().unwrap()),
-                    )
-                    .unwrap();
-                    fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
-                    write_run_state(&root, &state(&root, id, RunStateStatus::Testing, u32::MAX))
-                        .unwrap();
-                }
-                let (evidence, bytes) = evidence(&root);
-                publish_run(&root, &metadata(published, bytes), &evidence).unwrap();
-                (root, ())
-            },
+            || (abandoned_runs(), ()),
             |root, ()| recover_abandoned_runs(root, "recovered").map(drop),
         );
         assert!(operations > 5, "{operations}");
