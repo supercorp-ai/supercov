@@ -14015,6 +14015,9 @@ fn a_command_started_in_a_removed_directory_says_so() {
 #[test]
 fn each_query_says_so_wherever_a_read_of_its_index_fails() {
     let project = Project::cart("index-read-faults");
+    // A file no source imports, outside the roots: the summary names it.
+    project.write("extra/unused.js", "export const unused = 1;\n");
+    project.commit("extra");
     project.measure(&[]);
     let older = project.latest();
     project.measure(&[]);
@@ -14038,6 +14041,7 @@ fn each_query_says_so_wherever_a_read_of_its_index_fails() {
         &["runs", "latest", "kinds", "--json"],
         &["runs", "latest", "runners", "--json"],
         &["runs", "latest", "files", "--json"],
+        &["runs", "latest", "files", "--group", "dir", "--json"],
         &[
             "runs",
             "latest",
