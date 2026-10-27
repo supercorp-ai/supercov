@@ -2750,6 +2750,21 @@ fn made() -> Thing {
         assert_eq!(r[&13][1].1, "(x + 1) ^ 1");
     }
 
+    /// A value whose type is written but whose expression says nothing of
+    /// it takes the type's own plain value.
+    #[test]
+    fn a_value_of_a_written_type_takes_that_type_s_plain_value() {
+        let source = "fn f() {\n    let a: f64 = compute();\n    let c: Vec<u8> = make();\n    let d: std::ptr::NonNull<u8> = make();\n}\n";
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        for (line, value) in [
+            (2, "0.0"),
+            (3, "Vec::new()"),
+            (4, "std::ptr::NonNull::dangling()"),
+        ] {
+            assert_eq!(r[&line][0].1, value, "line {line}");
+        }
+    }
+
     /// The rarest readings: an associated type with a value, a tuple element
     /// whose change is itself, a closure whose changed body is a block
     /// already, a `let` that names nothing, and a slice-shaped text with no
