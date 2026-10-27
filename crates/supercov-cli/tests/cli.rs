@@ -13430,6 +13430,66 @@ fn an_import_whose_step_fails_says_so() {
     }
 }
 
+/// An import refuses a run whose stored record it cannot read: its manifest,
+/// frontend declaration or source record garbled on disk. And a file the
+/// evidence names that the project does not have is skipped and named.
+#[test]
+fn an_import_reads_what_the_run_stored() {
+    use supercov_engine::evidence_archive::{read_archive, write_archive};
+    for (entry, said) in [
+        ("manifest.json", "its manifest is invalid"),
+        ("frontend.json", "its frontend declaration is invalid"),
+        ("source-inputs.json", "its source record is invalid"),
+    ] {
+        let project = Project::cart("import-stored");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        let listed = project.supercov(&["runs", "--limit", "1", "--json"]).json();
+        let run = listed["data"]["runs"][0]["id"].as_str().unwrap();
+        let archive = project
+            .root
+            .join(".supercov/runs")
+            .join(run)
+            .join("evidence.raw.gz");
+        let entries = read_archive(&archive)
+            .unwrap()
+            .into_iter()
+            .map(|mut stored| {
+                if stored.path == entry {
+                    stored.contents = b"{".to_vec();
+                }
+                stored
+            })
+            .collect::<Vec<_>>();
+        assert!(entries.iter().any(|stored| stored.path == entry), "{entry}");
+        let written = write_archive(entries, &archive).unwrap();
+        // The record names the archive's length; a rewritten one would
+        // not be listed at all.
+        let record = format!(".supercov/runs/{run}/run.json");
+        let mut metadata: serde_json::Value = serde_json::from_str(&project.read(&record)).unwrap();
+        metadata["rawEvidence"]["compressedBytes"] = written.compressed_bytes.into();
+        project.write(&record, &metadata.to_string());
+        project.write("lcov.info", "TN:\nSF:src/cart.js\nDA:2,1\nend_of_record\n");
+        let ran = project.supercov(&["import", "lcov.info", "--test", "device"]);
+        assert_eq!(ran.code(), 2, "{entry}: {}", ran.stderr());
+        assert!(ran.stderr().contains(said), "{entry}: {}", ran.stderr());
+    }
+
+    let project = Project::cart("import-absent-file");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.write(
+        "lcov.info",
+        "TN:\nSF:src/cart.js\nDA:2,1\nend_of_record\nSF:src/gone.js\nDA:1,1\nend_of_record\n",
+    );
+    let ran = project.supercov(&["import", "lcov.info", "--test", "device"]);
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    assert!(
+        ran.stderr().contains("src/gone.js")
+            && ran.stderr().contains("no such file in the project"),
+        "{}",
+        ran.stderr()
+    );
+}
+
 /// A merge refuses, with exit code 2 and the reason, when a step it takes
 /// fails: the run store listed and read, the project's lock, the merged
 /// evidence archived and published, and the merged run recorded. Each case
