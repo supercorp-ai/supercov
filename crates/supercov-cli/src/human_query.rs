@@ -2353,6 +2353,64 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Each branch outcome a frontend labels is said as the outcome not
+    /// observed, and each assertion confidence by what it means.
+    #[test]
+    fn every_outcome_label_and_confidence_is_said_plainly() {
+        for (label, said) in [
+            ("default evaluated", "default-value branch not observed"),
+            ("value provided", "explicit-value branch not observed"),
+            ("no matching case", "switch no-match outcome not observed"),
+            (
+                "try completed without catch",
+                "try-success outcome not observed",
+            ),
+            ("catch entered", "catch outcome not observed"),
+            ("zero iterations", "zero-iteration outcome not observed"),
+            (
+                "one or more iterations",
+                "entered-loop outcome not observed",
+            ),
+            (
+                "nullish / short-circuited",
+                "nullish short-circuit outcome not observed",
+            ),
+            (
+                "non-nullish / continued",
+                "non-nullish continuation outcome not observed",
+            ),
+            (
+                "assignment skipped",
+                "assignment-skipped outcome not observed",
+            ),
+            (
+                "right evaluated / assigned",
+                "right-evaluated assignment outcome not observed",
+            ),
+            (
+                "short-circuit / left selected",
+                "left-selected short-circuit outcome not observed",
+            ),
+            (
+                "right evaluated / selected",
+                "right-selected outcome not observed",
+            ),
+            ("true", "decision never true"),
+            ("false", "decision never false"),
+            ("something new", "branch outcome not observed: something new"),
+        ] {
+            assert_eq!(branch_need(label), said, "{label}");
+        }
+        for (level, said) in [
+            ("action", "linked to a test action"),
+            ("executed", "execution only"),
+            ("unexecuted", "not executed"),
+            ("other", "other"),
+        ] {
+            assert_eq!(confidence_label(level), said);
+        }
+    }
+
     /// A line with nothing on it is not measured; one nothing ran is not
     /// covered; one whose every anchored obligation is complete, with no
     /// limitation and nothing left, is covered; anything between is partial.
