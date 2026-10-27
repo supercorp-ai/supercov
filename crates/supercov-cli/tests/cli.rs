@@ -1693,6 +1693,7 @@ fn the_report_compares_two_runs_and_names_a_mistake() {
     let newer = project.measure(&[]);
     let help = project.supercov(&["report", "--help"]).succeeds();
     contains_all(&help, &["--compare <run-id>", "--no-open"]);
+    assert_eq!(project.supercov(&["report", "-h"]).succeeds(), help);
     for (args, message) in [
         (vec!["report", "--compare"], "--compare requires a run ID"),
         (vec!["report", "--output"], "--output requires a path"),

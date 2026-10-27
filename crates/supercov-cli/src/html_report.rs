@@ -1243,6 +1243,12 @@ mod tests {
         write_atomic(&root.join("r.html"), b"report").unwrap();
         assert_eq!(fs::read_to_string(root.join("r.html")).unwrap(), "report");
         assert_eq!(fs::read_to_string(&held).unwrap(), "held");
+        // A path that ends in no file name names nothing to write.
+        let nameless = root.join("..");
+        assert_eq!(
+            write_atomic(&nameless, b"report"),
+            Err(format!("{} is not a file path", nameless.display()))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
