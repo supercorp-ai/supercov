@@ -636,9 +636,9 @@ fn render_scope(view: &Value) -> String {
         .filter(|reasons| !reasons.is_empty())
     {
         out.push_str("\nFiles left out, by reason:\n");
-        for (reason, count) in reasons {
+        reasons.iter().for_each(|(reason, count)| {
             out.push_str(&format!("  {:>5}  {reason}\n", count.as_u64().unwrap_or(0)));
-        }
+        });
     }
     let shown = view["not_included"].as_array().unwrap_or(&empty);
     if !shown.is_empty() {
@@ -771,7 +771,7 @@ fn render_quality_diff(view: &Value) -> String {
     let added = view["added"].as_array().unwrap_or(&empty);
     if !added.is_empty() {
         out.push_str("\nAdded:\n");
-        for row in added {
+        added.iter().for_each(|row| {
             let fired: Vec<String> = row["present"]
                 .as_array()
                 .unwrap_or(&none)
@@ -794,15 +794,15 @@ fn render_quality_diff(view: &Value) -> String {
                     format!("  ({})", fired.join(", "))
                 }
             ));
-        }
+        });
         more(&mut out, "added", added.len());
     }
     let removed = view["removed"].as_array().unwrap_or(&empty);
     if !removed.is_empty() {
         out.push_str("\nRemoved:\n");
-        for row in removed {
+        removed.iter().for_each(|row| {
             out.push_str(&format!("  {}\n", row["path"].as_str().unwrap_or("?")));
-        }
+        });
         more(&mut out, "removed", removed.len());
     }
     out
