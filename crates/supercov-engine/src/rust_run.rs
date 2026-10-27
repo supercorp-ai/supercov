@@ -463,7 +463,9 @@ fn run_direct_rust_timed(
         // Past the deadline the tests that ran are the run, and it ends as
         // a supervised command that timed out does.
         let run = match (run, deadline.passed()) {
-            (Ok(mut run), Some(milliseconds)) => {
+            (Ok(mut run), Some(milliseconds))
+                if run.request.raw_results.iter().any(|raw| raw.role == "test") =>
+            {
                 let _ = writeln!(
                     diagnostics,
                     "[supercov] command timed out after {milliseconds} ms: the tests still running were stopped, and no other was started"
@@ -472,7 +474,9 @@ fn run_direct_rust_timed(
                 run
             }
             (Ok(run), None) => run,
-            (Err(_), Some(milliseconds)) => {
+            // No test reported before the deadline: there is nothing to
+            // publish, as for a supervised command.
+            (_, Some(milliseconds)) => {
                 return Err(format!(
                     "the test command exited {} before any test reported an outcome: it ran past SUPERCOV_COMMAND_TIMEOUT_MS ({milliseconds} ms), and no run was published",
                     supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE

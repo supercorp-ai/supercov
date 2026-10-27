@@ -13646,6 +13646,17 @@ fn a_rust_run_past_its_timeout_is_stopped_and_ends_124() {
         let run = project.supercov(&["runs", "latest", "--json"]).json();
         assert_eq!(run["data"]["testExitCode"], 124, "{run}");
     }
+    // A deadline that passes before any test reports publishes nothing.
+    let early = project.supercov_with(
+        &["--", "cargo", "test", "-q"],
+        &[("SUPERCOV_COMMAND_TIMEOUT_MS", "1")],
+    );
+    assert_eq!(early.code(), 124, "{}", early.stderr());
+    assert!(
+        early.stderr().contains("no run was published"),
+        "{}",
+        early.stderr()
+    );
 }
 
 /// A Rust run told to stop (SIGTERM, as a supervisor or `kill` sends it)
