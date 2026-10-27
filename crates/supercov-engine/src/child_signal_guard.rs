@@ -33,7 +33,7 @@ static GUARDS: AtomicUsize = AtomicUsize::new(0);
 /// Send `signal` to every registered child. Safe to call from a signal
 /// handler: it only loads atomics and calls `kill(2)`.
 pub fn signal_registered_children(signal: i32) {
-    for slot in &CHILDREN {
+    CHILDREN.iter().for_each(|slot| {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
             #[cfg(unix)]
@@ -44,7 +44,7 @@ pub fn signal_registered_children(signal: i32) {
             #[cfg(not(unix))]
             let _ = signal;
         }
-    }
+    });
 }
 
 /// A child's registration; dropping it removes the child from the table.
@@ -67,15 +67,12 @@ pub fn register(child: &Child) -> RegisteredChild {
     };
     #[cfg(windows)]
     windows_job::assign(child);
-    for (index, slot) in CHILDREN.iter().enumerate() {
-        if slot
-            .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return RegisteredChild { slot: Some(index) };
-        }
+    RegisteredChild {
+        slot: CHILDREN.iter().position(|slot| {
+            slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        }),
     }
-    RegisteredChild { slot: None }
 }
 
 #[cfg(windows)]
@@ -160,7 +157,8 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
         let out = scope.spawn(move || {
             let mut line = Vec::new();
             let recorded = read_all(stdout.expect("piped above"), |chunk| {
-                for byte in chunk {
+                // A chunk is never empty: a read of nothing ends the pipe.
+                chunk.iter().for_each(|byte| {
                     line.push(*byte);
                     if *byte == b'\n' {
                         if keep(&line) {
@@ -168,7 +166,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
                         }
                         line.clear();
                     }
-                }
+                });
             });
             if keep(&line) {
                 let _ = io::stdout().lock().write_all(&line);
@@ -355,6 +353,9 @@ mod tests {
         let before = disposition(libc::SIGUSR2);
         assert!(install_handlers(&[libc::SIGUSR2, libc::SIGKILL]).is_err());
         assert_eq!(disposition(libc::SIGUSR2), before);
+        // The first failing has nothing to put back; no signal installs none.
+        assert!(install_handlers(&[libc::SIGKILL]).is_err());
+        assert!(install_handlers(&[]).unwrap().is_empty());
     }
 
     #[test]
@@ -426,5 +427,6 @@ mod tests {
         assert_eq!(read_all(Failing(3), |chunk| seen += chunk.len()), b"xxx");
         assert_eq!(seen, 3);
         assert_eq!(read_all(&b"ab"[..], |_| {}), b"ab");
+        assert!(read_all(Failing(0), |_| panic!("nothing was read")).is_empty());
     }
 }
