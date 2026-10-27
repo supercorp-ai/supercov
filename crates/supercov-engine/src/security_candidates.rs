@@ -486,6 +486,48 @@ router.get('/x/:id', async (req, res) => {{
         assert!(nodes(Path::new("b.js"), "function (").is_err());
     }
 
+    /// Each way a module is required binds what it names: the module, its
+    /// properties under their own names or new ones, and nothing for a
+    /// shape it does not name; a handler is a function written in place.
+    #[test]
+    fn requires_bind_what_they_name_and_handlers_are_functions_in_place() {
+        let source = concat!(
+            "const db = require('./db')\n",
+            "const { find, save: store, limit = 10 } = require('./orm')\n",
+            "const [first] = require('./list')\n",
+            "const table = { 'quoted': 1, [key]: 2, plain: 3 }\n",
+            "app.post('/save', function (req, res) { store(req.body) })\n",
+            "app.get('/named', named)\n",
+        );
+        let structure = structure(Path::new("a.js"), source).unwrap();
+        let imports = structure
+            .imports
+            .iter()
+            .map(|import| {
+                (
+                    import.local.as_str(),
+                    import.exported.as_str(),
+                    import.specifier.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            imports,
+            [
+                ("db", "*", "./db"),
+                ("find", "find", "./orm"),
+                ("store", "save", "./orm"),
+                ("limit", "limit", "./orm"),
+            ]
+        );
+        let found = nodes(Path::new("a.js"), source).unwrap();
+        let at =
+            |line: usize, kind: NodeKind| found.iter().any(|n| n.line == line && n.kind == kind);
+        assert!(at(4, NodeKind::Assign), "{found:?}");
+        assert!(at(5, NodeKind::Handler), "{found:?}");
+        assert!(!at(6, NodeKind::Handler), "{found:?}");
+    }
+
     /// A route given no handler, and an import or require naming nothing,
     /// add nothing.
     #[test]
