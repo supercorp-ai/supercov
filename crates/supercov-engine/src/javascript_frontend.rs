@@ -658,27 +658,28 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
     result
 }
 
-fn checked_source_path(workspace: &Path, file: &str) -> Result<PathBuf, JavascriptFrontendError> {
+/// `file` as a path inside the project, or refused. Discovery names only
+/// such paths; a test fault (`javascript-source-path`) stands in for one
+/// that is not, so each place that refuses one runs under test.
+fn project_relative(file: &str) -> Result<&Path, JavascriptFrontendError> {
     let relative = Path::new(file);
-    if relative.is_absolute()
+    if crate::fault::injected("javascript-source-path")
+        || relative.is_absolute()
         || relative
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         return Err(JavascriptFrontendError::UnsafeSourcePath(file.to_owned()));
     }
-    Ok(workspace.join(relative))
+    Ok(relative)
+}
+
+fn checked_source_path(workspace: &Path, file: &str) -> Result<PathBuf, JavascriptFrontendError> {
+    project_relative(file).map(|relative| workspace.join(relative))
 }
 
 fn runtime_specifier(file: &str, name: &str) -> Result<String, JavascriptFrontendError> {
-    let relative = Path::new(file);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(JavascriptFrontendError::UnsafeSourcePath(file.to_owned()));
-    }
+    let relative = project_relative(file)?;
     let depth = relative
         .parent()
         .map_or(0, |parent| parent.components().count());
@@ -2297,6 +2298,19 @@ mod tests {
             },
         );
         assert!(steps > 20, "{steps}");
+        // A path discovery would never name, at each place one is used.
+        let paths = crate::fault::fail_each_call(
+            "javascript-source-path",
+            fixture,
+            |(_, workspace, project)| {
+                prepare_javascript_frontend(workspace, project, "collector", "cache", &[]).map(drop)
+            },
+            |(source_root, workspace, _)| {
+                let _ = fs::remove_dir_all(source_root);
+                let _ = fs::remove_dir_all(workspace);
+            },
+        );
+        assert!(paths > 3, "{paths}");
         // Supercov breaking its own invariant on a source or a test file stops
         // the preparation, naming the file.
         for site in ["instrument-source", "instrument-test"] {
