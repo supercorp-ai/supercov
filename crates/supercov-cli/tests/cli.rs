@@ -12783,6 +12783,15 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@5",
             "fs.open_with@5",
             "fs.rename@1",
+            // The project walked and read; the evidence listed and read back.
+            "fs.read_dir@2",
+            "fs.file_type@1",
+            "fs.read@4",
+            "fs.read_dir@5",
+            "fs.symlink_metadata@15",
+            "fs.open@5",
+            "fs.read@10",
+            "fs.read@12",
             "spawn",
         ],
     );
@@ -12969,6 +12978,13 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.write@2",
             "fs.write@7",
             "fs.rename@1",
+            // The project walked and read; the evidence listed and read back.
+            "fs.read_dir@2",
+            "fs.file_type@1",
+            "fs.read@4",
+            "fs.read_dir@5",
+            "fs.symlink_metadata@11",
+            "fs.open@3",
             "spawn",
         ],
     );
