@@ -516,17 +516,20 @@ fn snapshot(
             .iter()
             .map(|key| unpack_vector(*key, width))
             .collect::<Vec<_>>();
-        for vector in &observed {
-            events.push(RuntimeEvent {
-                event_type: "decision".into(),
-                id: meta.id.clone(),
-                vector: Some(vector.clone()),
-                timestamp_ms: clock,
-                phase_id: Some(phase.to_owned()),
-                environment: environment.into(),
-            });
-            clock += 1;
-        }
+        events.extend(
+            observed
+                .iter()
+                .zip(clock..)
+                .map(|(vector, timestamp_ms)| RuntimeEvent {
+                    event_type: "decision".into(),
+                    id: meta.id.clone(),
+                    vector: Some(vector.clone()),
+                    timestamp_ms,
+                    phase_id: Some(phase.to_owned()),
+                    environment: environment.into(),
+                }),
+        );
+        clock += observed.len() as i64;
         decisions.push(DecisionSnapshot {
             meta: meta.clone(),
             vectors: observed,
@@ -573,12 +576,16 @@ impl OwnedFrontendRun {
                     .expect("plain data serializes"),
             },
         ];
-        for (index, result) in self.request.raw_results.iter().enumerate() {
-            entries.push(EvidenceArchiveEntry {
-                path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result).expect("plain data serializes"),
-            });
-        }
+        entries.extend(
+            self.request
+                .raw_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| EvidenceArchiveEntry {
+                    path: format!("results/{index:08}/mcdc.json"),
+                    contents: serde_json::to_vec(result).expect("plain data serializes"),
+                }),
+        );
         Ok(entries)
     }
 }
