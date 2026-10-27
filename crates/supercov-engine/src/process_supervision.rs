@@ -3176,6 +3176,13 @@ mod tests {
                     .is_err()
             );
         }
+        // A watchdog that is not there, or is no file, is refused.
+        for watchdog in [root.join("absent"), root.clone()] {
+            assert!(matches!(
+                ProcessSupervisor::new_crash_safe(&watchdog),
+                Err(SupervisionError::PlatformOperation { .. })
+            ));
+        }
         RECEIVED_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
         let output = supervisor
             .supervise_captured(&spec, SupervisionOptions::default(), &mut Vec::new())
