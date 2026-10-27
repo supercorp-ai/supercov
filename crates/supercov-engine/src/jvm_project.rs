@@ -111,33 +111,27 @@ fn language_of(name: &str) -> Option<JvmLanguage> {
 /// Maven and Gradle both mean the same thing by these paths, and have for
 /// long enough that the convention is more reliable than any name-based guess.
 fn role(relative: &str) -> Option<&'static str> {
-    let mut parts = relative.split('/');
-    while let Some(part) = parts.next() {
-        if part != "src" {
-            continue;
-        }
-        // `src/<sourceSet>/<language>/...`, where the source set is `main`,
-        // `test`, or a custom one a project defined.
-        return match parts.next() {
-            Some("test") | Some("integrationTest") | Some("testFixtures") => Some("test"),
-            Some("main") => Some("main"),
-            // A Kotlin Multiplatform project names its source sets by target:
-            // `jvmMain` builds for the JVM and nothing else, so it is measured
-            // like any other main. `commonMain` builds for every target the
-            // project declares, and a probe there is a call to a runtime that
-            // exists only on the JVM -- so it is measured only where the JVM
-            // is the only target, which `discover_jvm_files` decides.
-            Some("jvmMain") => Some("main"),
-            Some("commonMain") => Some("common"),
-            // Tests are never instrumented on the JVM -- attribution comes
-            // from the framework's own lifecycle -- so recognising a test
-            // source set only decides whether a module has tests at all.
-            Some(set) if set.ends_with("Test") => Some("test"),
-            Some(_) => Some("other"),
-            None => None,
-        };
-    }
-    None
+    // `src/<sourceSet>/<language>/...`, where the source set is `main`,
+    // `test`, or a custom one a project defined.
+    let mut parts = relative.split('/').skip_while(|part| *part != "src");
+    parts.next()?;
+    Some(match parts.next()? {
+        "test" | "integrationTest" | "testFixtures" => "test",
+        "main" => "main",
+        // A Kotlin Multiplatform project names its source sets by target:
+        // `jvmMain` builds for the JVM and nothing else, so it is measured
+        // like any other main. `commonMain` builds for every target the
+        // project declares, and a probe there is a call to a runtime that
+        // exists only on the JVM -- so it is measured only where the JVM
+        // is the only target, which `discover_jvm_files` decides.
+        "jvmMain" => "main",
+        "commonMain" => "common",
+        // Tests are never instrumented on the JVM -- attribution comes
+        // from the framework's own lifecycle -- so recognising a test
+        // source set only decides whether a module has tests at all.
+        set if set.ends_with("Test") => "test",
+        _ => "other",
+    })
 }
 
 /// Whether the JVM is the only target this build produces.
@@ -428,6 +422,18 @@ pub fn jvm_integrity_inputs(files: &JvmFiles, command: &[String]) -> ExplicitInt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_s_source_set_names_its_role() {
+        assert_eq!(role("src/main/java/A.java"), Some("main"));
+        assert_eq!(role("module/src/integrationTest/java/A.java"), Some("test"));
+        assert_eq!(role("src/jvmMain/kotlin/A.kt"), Some("main"));
+        assert_eq!(role("src/commonMain/kotlin/A.kt"), Some("common"));
+        assert_eq!(role("src/benchTest/kotlin/A.kt"), Some("test"));
+        assert_eq!(role("src/custom/java/A.java"), Some("other"));
+        assert_eq!(role("src"), None);
+        assert_eq!(role("lib/A.java"), None);
+    }
     use std::fs;
 
     fn fixture(label: &str) -> PathBuf {
