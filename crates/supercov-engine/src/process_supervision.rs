@@ -3122,6 +3122,33 @@ mod tests {
             supervisor.supervise_captured(&merged, SupervisionOptions::default(), &mut Vec::new()),
             Err(SupervisionError::PlatformOperation { .. })
         ));
+        // Options that cannot be kept, a command that names nothing and one
+        // that cannot start are refused before anything runs.
+        let never = SupervisionOptions {
+            diagnostic_interval: Duration::ZERO,
+            ..SupervisionOptions::default()
+        };
+        assert!(supervisor.supervise(&spec, never, &mut Vec::new()).is_err());
+        assert!(
+            supervisor
+                .supervise_captured(&spec, never, &mut Vec::new())
+                .is_err()
+        );
+        let empty = CommandSpec {
+            program: "".into(),
+            ..spec.clone()
+        };
+        let absent = CommandSpec {
+            program: "/nonexistent/supercov-command".into(),
+            ..spec.clone()
+        };
+        for refused in [&empty, &absent] {
+            assert!(
+                supervisor
+                    .supervise_captured(refused, SupervisionOptions::default(), &mut Vec::new())
+                    .is_err()
+            );
+        }
         RECEIVED_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
         let output = supervisor
             .supervise_captured(&spec, SupervisionOptions::default(), &mut Vec::new())
