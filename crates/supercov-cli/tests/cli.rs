@@ -12851,6 +12851,30 @@ fn a_run_whose_own_step_fails_says_so() {
             ],
         ));
     }
+    if std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        runs.push((
+            "own-step-mvn",
+            small_maven_project,
+            vec!["--", "mvn", "-q", "test"],
+            &[
+                "fs.canonicalize@1",
+                "fs.read_dir@2",
+                "fs.write@3",
+                "fs.write@4",
+                "fs.write@5",
+                "fs.write@6",
+                "fs.write@7",
+                "fs.write@8",
+                "fs.read@10",
+                "fs.rename@10",
+                "spawn",
+            ],
+        ));
+    }
     #[cfg(unix)]
     let ruby = ruby();
     #[cfg(unix)]
