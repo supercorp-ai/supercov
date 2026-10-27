@@ -3624,6 +3624,70 @@ pub(crate) mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Every record of a run's evidence with each of its fields gone, null
+    /// or of another kind, and each record gone: the run is built or
+    /// refused, never with a panic.
+    #[test]
+    fn evidence_with_any_field_damaged_is_read_or_refused() {
+        let source = "def f(a, b):\n    if a and b:\n        return 1\n    return 2\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let statements = &obligations.plan.statements;
+        let decision = &obligations.manifest.decisions[0].id;
+        let test = "tests/test_m.py::test_a";
+        let records = vec![
+            json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]}),
+            json!({"t":"hit","ctx":0,"id":statements[0].id}),
+            json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":test,"retry":0,"phase":"setup"}),
+            json!({"t":"hits","ctx":1,"ids":[statements[0].id, statements[1].id]}),
+            json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"setup","outcome":"passed","xfail":false}),
+            json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":test,"retry":0,"phase":"call"}),
+            json!({"t":"dec","ctx":2,"id":decision,"v":"22","o":1}),
+            json!({"t":"decs","ctx":2,"v":[[decision, "21", 0]]}),
+            json!({"t":"assert","ctx":2}),
+            json!({"t":"limitation","id":"python-code-object-unmapped","file":"m.py","reason":"no ranges"}),
+            json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            json!({"t":"exit","at":9}),
+        ];
+        let build = |records: &[serde_json::Value]| {
+            let directory = temporary("damaged-fields");
+            write_transport(&directory.join("main.1.mmap"), records, 0);
+            let built = build_python_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            )
+            .is_ok();
+            fs::remove_dir_all(directory).unwrap();
+            built
+        };
+        assert!(build(&records));
+        let mut refused = 0;
+        for (index, record) in records.iter().enumerate() {
+            let mut without = records.clone();
+            without.remove(index);
+            refused += usize::from(!build(&without));
+            for key in record.as_object().unwrap().keys() {
+                let other = match &record[key] {
+                    serde_json::Value::String(_) => json!(7),
+                    _ => json!("x"),
+                };
+                for damaged in [None, Some(json!(null)), Some(other)] {
+                    let mut changed = records.clone();
+                    let fields = changed[index].as_object_mut().unwrap();
+                    match damaged {
+                        None => drop(fields.remove(key)),
+                        Some(value) => drop(fields.insert(key.clone(), value)),
+                    }
+                    refused += usize::from(!build(&changed));
+                }
+            }
+        }
+        assert!(refused > 20, "{refused}");
+    }
+
     #[test]
     fn a_damaged_record_is_refused_with_what_is_wrong() {
         // The runtime writes none of these. Another version of it, another

@@ -2605,6 +2605,78 @@ pub(crate) mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
+    /// Every record of a run's evidence with each of its fields gone, null
+    /// or of another kind, and each record gone: the run is built or
+    /// refused, never with a panic.
+    #[test]
+    fn evidence_with_any_field_damaged_is_read_or_refused() {
+        let source = "def f(a, b)\n  return 1 if a && b\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap()
+            .id
+            .clone();
+        let decision = obligations.manifest.decisions[0].id.clone();
+        let test = "spec/m_spec.rb[1:1]";
+        let records = vec![
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"],"lines":"exact"}),
+            serde_json::json!({"t":"lines","mode":"exact"}),
+            serde_json::json!({"t":"ids","first":0,"names":[statement]}),
+            serde_json::json!({"t":"hits","ctx":0,"n":[0]}),
+            serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":test,"retry":0,"phase":"call"}),
+            serde_json::json!({"t":"assert","ctx":1}),
+            serde_json::json!({"t":"hit","ctx":1,"id":statement}),
+            serde_json::json!({"t":"dec","ctx":1,"id":decision,"v":"22","o":1}),
+            serde_json::json!({"t":"limitation","id":"ruby-iseq-unmapped","reason":"no ranges","file":"lib/m.rb"}),
+            serde_json::json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"rspec"}),
+            serde_json::json!({"t":"exit","at":9}),
+        ];
+        let build = |records: &[serde_json::Value]| {
+            let directory = temporary("damaged-fields");
+            fs::write(directory.join("main.7.a.mmap"), transport(records)).unwrap();
+            let built = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            )
+            .is_ok();
+            fs::remove_dir_all(directory).unwrap();
+            built
+        };
+        assert!(build(&records));
+        let mut refused = 0;
+        for (index, record) in records.iter().enumerate() {
+            let mut without = records.clone();
+            without.remove(index);
+            refused += usize::from(!build(&without));
+            for key in record.as_object().unwrap().keys() {
+                let other = match &record[key] {
+                    serde_json::Value::String(_) => serde_json::json!(7),
+                    _ => serde_json::json!("x"),
+                };
+                for damaged in [None, Some(serde_json::json!(null)), Some(other)] {
+                    let mut changed = records.clone();
+                    let fields = changed[index].as_object_mut().unwrap();
+                    match damaged {
+                        None => drop(fields.remove(key)),
+                        Some(value) => drop(fields.insert(key.clone(), value)),
+                    }
+                    refused += usize::from(!build(&changed));
+                }
+            }
+        }
+        assert!(refused > 20, "{refused}");
+    }
+
     #[test]
     fn a_transport_without_a_process_record_declares_no_lost_process() {
         let mut evidence = Evidence::default();
