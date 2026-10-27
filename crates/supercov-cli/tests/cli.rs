@@ -13957,8 +13957,8 @@ fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usi
 
 /// [`fail_each_place_of_a_runner`] over the project `write` makes, failing
 /// `site`, a fault site with the role it applies in (`__doctest-runner/fs`).
-/// A runner says it reached a fault in `SUPERCOV_TEST_FAULT_LOG`, which only
-/// Unix builds write.
+/// A runner says it reached a fault in `SUPERCOV_TEST_FAULT_LOG`. Like the
+/// run sweeps, these are left to Unix: Windows starts processes too slowly.
 #[cfg(unix)]
 fn fail_each_place_of_a_runner_in(
     label: &str,
@@ -13971,21 +13971,14 @@ fn fail_each_place_of_a_runner_in(
     project.git(&["init", "-q"]);
     project.commit("fixture");
     let log = project.root.with_extension("faults.log");
-    let skip = project.root.with_extension("skip");
-    let fault = format!("{site}#*");
-    let mut failed = std::collections::BTreeSet::new();
+    let mut nth = 1;
     loop {
         let _ = std::fs::remove_file(&log);
-        std::fs::write(
-            &skip,
-            failed.iter().cloned().collect::<Vec<String>>().join("\n"),
-        )
-        .unwrap();
+        let fault = format!("{site}#{nth}");
         let ran = project.supercov_with(
             command,
             &[
-                ("SUPERCOV_TEST_FAULT", fault.as_str()),
-                ("SUPERCOV_TEST_FAULT_SKIP", skip.to_str().unwrap()),
+                ("SUPERCOV_TEST_FAULT", &fault),
                 ("SUPERCOV_TEST_FAULT_LOG", log.to_str().unwrap()),
             ],
         );
@@ -13994,25 +13987,16 @@ fn fail_each_place_of_a_runner_in(
         let said = format!("{}{}", ran.stdout(), ran.stderr());
         assert!(
             !said.contains("panicked at"),
-            "{label} with {fault} past {} places panicked:\n{said}",
-            failed.len()
+            "{label} with {fault} panicked:\n{said}"
         );
-        // Each line names the site and the place that failed.
-        let before = failed.len();
-        failed.extend(
-            std::fs::read_to_string(&log)
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| line.split_once(' '))
-                .map(|(_, place)| place.to_owned()),
-        );
-        if failed.len() == before {
+        if !log.exists() {
             break;
         }
+        nth += 1;
     }
     let _ = std::fs::remove_file(&log);
     project.supercov(command).succeeds();
-    failed.len()
+    nth - 1
 }
 
 /// A doctest's runner, and nextest's where it is installed, each failing
