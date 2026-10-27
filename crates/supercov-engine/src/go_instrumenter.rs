@@ -316,21 +316,24 @@ pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
 /// actually choked on is deep inside: the innermost one is the one worth
 /// naming.
 pub(crate) fn parse_failure(tree: &tree_sitter::Tree, source: &str) -> String {
-    let mut deepest: Option<(usize, Node)> = None;
     let mut stack = vec![(0_usize, tree.root_node())];
-    while let Some((depth, node)) = stack.pop() {
-        if (node.is_error() || node.is_missing()) && deepest.is_none_or(|(found, _)| depth > found)
-        {
-            deepest = Some((depth, node));
-        }
+    let nodes = std::iter::from_fn(|| {
+        let (depth, node) = stack.pop()?;
         // Every child, not only those that report an error of their own: an
         // ERROR node holds the tokens it did manage to read, and the one that
         // actually failed is among them.
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push((depth + 1, child));
+        stack.extend(node.children(&mut cursor).map(|child| (depth + 1, child)));
+        Some((depth, node))
+    });
+    let deepest = nodes.fold(None, |deepest: Option<(usize, Node)>, (depth, node)| {
+        if (node.is_error() || node.is_missing()) && deepest.is_none_or(|(found, _)| depth > found)
+        {
+            Some((depth, node))
+        } else {
+            deepest
         }
-    }
+    });
     let Some((_, node)) = deepest else {
         return "source does not parse".to_owned();
     };
@@ -472,24 +475,21 @@ fn is_range_loop(node: Node) -> bool {
 
 /// Whether the function holding `node` has a `goto` anywhere in it.
 fn in_function_with_goto(node: Node) -> bool {
-    let mut function = node;
-    while !matches!(
-        function.kind(),
-        "function_declaration" | "method_declaration" | "func_literal" | "source_file"
-    ) {
-        match function.parent() {
-            Some(parent) => function = parent,
-            None => break,
-        }
-    }
+    let function = std::iter::successors(Some(node), Node::parent)
+        .find(|ancestor| {
+            matches!(
+                ancestor.kind(),
+                "function_declaration" | "method_declaration" | "func_literal" | "source_file"
+            )
+        })
+        .expect("the source file holds every node");
     let mut stack = vec![function];
-    while let Some(next) = stack.pop() {
-        if next.kind() == "goto_statement" {
-            return true;
-        }
+    std::iter::from_fn(|| {
+        let next = stack.pop()?;
         stack.extend(next.children(&mut next.walk()));
-    }
-    false
+        Some(next)
+    })
+    .any(|next| next.kind() == "goto_statement")
 }
 
 /// The condition a `for` loop tests: written alone (`for x < n {`), which
@@ -849,9 +849,9 @@ impl<'a> Collector<'a> {
                         .filter(|parent| parent.kind() == "labeled_statement")
                         .unwrap_or(node);
                     self.edit(statement.start_byte(), 90, format!("var {flag} bool; "));
-                    for fallthrough in fallthroughs.iter().flatten() {
+                    fallthroughs.iter().flatten().for_each(|fallthrough| {
                         self.call_before(fallthrough.start_byte(), format!("{flag} = true"));
-                    }
+                    });
                 }
                 for (index, (probe, (_, clause))) in probes.iter().zip(cases.iter()).enumerate() {
                     match clause {
