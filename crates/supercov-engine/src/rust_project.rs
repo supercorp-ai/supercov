@@ -1970,7 +1970,7 @@ fn integration_choice() {
         for (file, text) in [
             (
                 "src/lib.rs",
-                "mod a;\nmod b;\n#[path = \"other/c_impl.rs\"]\nmod c;\nmod inline {\n    #[path = \"deep.rs\"]\n    mod d;\n    mod e;\n}\n#[cfg(test)]\nmod tests;\ninclude!(\"gen.rs\");\ninclude!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\nconst DATA: &str = include_str!(\"data.txt\");\n#[path = \"../../outside.rs\"]\nmod out;\ncfg_if::cfg_if! {\n    if #[cfg(unix)] {\n        mod unix_impl;\n    } else {\n        mod other_impl;\n    }\n}\nmod missing;\n",
+                "mod a;\nmod b;\n#[path = \"other/c_impl.rs\"]\nmod c;\nmod inline {\n    #[path = \"deep.rs\"]\n    mod d;\n    mod e;\n}\n#[cfg(test)]\nmod tests;\ninclude!(\"gen.rs\");\ninclude!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\nconst DATA: &str = include_str!(\"data.txt\");\n#[path = \"../../outside.rs\"]\nmod out;\ncfg_if::cfg_if! {\n    if #[cfg(unix)] {\n        mod unix_impl;\n    } else {\n        mod other_impl;\n    }\n}\nmod missing;\nmod ;\nquirk! { mod 3; }\ninclude!(GENERATED);\n",
             ),
             ("src/a.rs", "mod a_child;\n"),
             ("src/a/a_child.rs", ""),
