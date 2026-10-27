@@ -3585,6 +3585,13 @@ impl TransportStats {
 
 #[cfg(test)]
 mod tests {
+    /// No result passes or fails.
+    #[test]
+    fn no_result_passes_or_fails() {
+        assert!(super::passing_coverage_results(&[]).is_empty());
+        assert!(super::failed_coverage_results(&[]).is_empty());
+    }
+
     #[test]
     fn an_analysis_error_is_a_report_s() {
         let error = crate::coverage_analysis::AnalysisError::EmptyDecision { decision: 0 };

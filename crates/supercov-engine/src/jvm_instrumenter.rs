@@ -309,7 +309,8 @@ impl Collector<'_> {
         let id = self.id(node, "decision");
         let index = self.decision_base as usize + self.widths.len();
         self.widths.push(leaves.len().min(64) as u8);
-        for (position, leaf) in leaves.iter().enumerate() {
+        // A decision has a leaf at least.
+        leaves.iter().enumerate().for_each(|(position, leaf)| {
             // Java and Kotlin both evaluate an argument only when the call is
             // reached, so a wrapped right-hand operand runs exactly when the
             // unwrapped one would have.
@@ -319,7 +320,7 @@ impl Collector<'_> {
                 format!("{RUNTIME_CLASS}.c({index}, {position}, "),
             );
             self.edit(leaf.end_byte(), 20, ")".to_owned());
-        }
+        });
         self.decisions.push(DecisionMeta {
             id,
             file: self.file.to_owned(),
@@ -830,9 +831,11 @@ fn if_node(collector: &mut Collector, node: Node) -> Option<()> {
     let probes = collector.add_branch(node, "if", &["true", "false"]);
     // An arm written without braces has nowhere to record itself.
     let (consequence, alternative) = arms(node, language);
-    for arm in [consequence, alternative].into_iter().flatten() {
-        collector.ensure_block(arm);
-    }
+    // An `if` has its consequence at least.
+    [consequence, alternative]
+        .into_iter()
+        .flatten()
+        .for_each(|arm| collector.ensure_block(arm));
     if narrows_a_type(condition, collector.source, language) {
         // The condition stays exactly as written, and the branch is
         // recorded from inside the arms instead. Which way it went
