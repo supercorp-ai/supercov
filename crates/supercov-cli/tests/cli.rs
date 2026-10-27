@@ -13703,6 +13703,27 @@ fn a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     assert!(reached > 50, "{reached}");
 }
 
+/// A Python test skipped where it is declared is in the run, skipped.
+#[test]
+fn a_skipped_python_test_is_counted_skipped() {
+    let project = Project::empty("python-skips");
+    python_project(&project);
+    project.write(
+        "tests/test_later.py",
+        "import unittest\nfrom pkg.w import double\n\nclass Later(unittest.TestCase):\n    @unittest.skip(\"later\")\n    def test_later(self):\n        double(0)\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ])
+        .succeeds();
+    let run = project.supercov(&["runs", "latest", "--json"]).json();
+    assert_eq!(run["data"]["testOutcomes"]["skipped"], 1, "{run}");
+    assert_eq!(run["data"]["testOutcomes"]["passed"], 1, "{run}");
+}
+
 /// A Python test whose process ends during it reported no outcome, but what
 /// it ran was recorded: the test is in the run, failed, credited with that.
 #[test]
