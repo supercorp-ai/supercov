@@ -90,12 +90,12 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
     let mut files = BTreeMap::<String, RecordedFile>::new();
     let mut current: Option<String> = None;
     let mut function_lines = BTreeMap::<String, usize>::new();
-    let number = |value: &str, what: &str, at: usize| {
+    fn number<T: std::str::FromStr>(value: &str, what: &str, at: usize) -> Result<T, String> {
         value
             .trim()
-            .parse::<u64>()
+            .parse::<T>()
             .map_err(|_| format!("line {at}: {what} is not a number: {value}"))
-    };
+    }
     for (index, raw) in text.lines().enumerate() {
         let at = index + 1;
         let line = raw.trim();
@@ -127,8 +127,7 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
                         let [line, count, ..] = fields[..] else {
                             return Err(format!("line {at}: DA needs a line and a count"));
                         };
-                        let line = usize::try_from(number(line, "DA line", at)?)
-                            .map_err(|_| format!("line {at}: DA line out of range"))?;
+                        let line: usize = number(line, "DA line", at)?;
                         // Some tools write a negative or fractional count for a
                         // line that ran; only zero says it did not.
                         let count = count.trim().parse::<u64>().unwrap_or_else(|_| {
@@ -139,14 +138,13 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
                     }
                     // FN:<line>,<name> or, in LCOV 2, FN:<line>,<end>,<name>
                     "FN" if fields.len() >= 2 => {
-                        let line = usize::try_from(number(fields[0], "FN line", at)?)
-                            .map_err(|_| format!("line {at}: FN line out of range"))?;
+                        let line: usize = number(fields[0], "FN line", at)?;
                         let name = fields[1..].last().expect("two fields").to_string();
                         function_lines.insert(name, line);
                     }
                     // FNDA:<count>,<name>
                     "FNDA" if fields.len() >= 2 => {
-                        let count = number(fields[0], "FNDA count", at)?;
+                        let count: u64 = number(fields[0], "FNDA count", at)?;
                         let name = fields[1..].join(",");
                         if let Some(&line) = function_lines
                             .get(&name)
@@ -1100,5 +1098,76 @@ mod tests {
                 "the run leaves it out: vendored".to_owned()
             )]
         );
+    }
+
+    /// Each malformed number of a tracefile is named with its line; a count
+    /// written negative or fractional ran; nothing at all is no tracefile.
+    #[test]
+    fn a_tracefile_s_numbers_are_read_or_named() {
+        assert_eq!(
+            parse_lcov("").unwrap_err(),
+            "no SF record: this is not an LCOV tracefile"
+        );
+        for (text, error) in [
+            ("SF:a.js\nDA:x,1\n", "line 2: DA line is not a number: x"),
+            ("SF:a.js\nFN:x,f\n", "line 2: FN line is not a number: x"),
+            (
+                "SF:a.js\nFNDA:x,f\n",
+                "line 2: FNDA count is not a number: x",
+            ),
+            (
+                "SF:a.js\nDA:99999999999999999999999,1\n",
+                "line 2: DA line is not a number: 99999999999999999999999",
+            ),
+        ] {
+            assert_eq!(parse_lcov(text).unwrap_err(), error, "{text}");
+        }
+        let files = parse_lcov("SF:a.js\nDA:1,-1\nDA:2,0.5\nDA:3,0.0\n").unwrap();
+        assert_eq!(
+            files["a.js"].lines,
+            BTreeMap::from([(1, 1), (2, 1), (3, 0)])
+        );
+    }
+
+    /// An import, once for every file operation it makes with that one
+    /// failing: each ends with an error or without, never a panic, and the
+    /// import no fault reaches is made.
+    #[test]
+    fn an_import_whose_file_operation_fails_ends_cleanly() {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let calls = crate::fault::fail_each_call(
+            "fs",
+            || {
+                let base = std::env::temp_dir().join(format!(
+                    "supercov-import-faults-{}-{}",
+                    std::process::id(),
+                    UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                std::fs::create_dir_all(base.join("src")).unwrap();
+                let root = crate::test_directory::TestDirectory::adopt(base);
+                crate::run_store::create_analyzable_test_run(&root, "run-a");
+                std::fs::write(root.join("src/new.js"), "one();\n").unwrap();
+                std::fs::write(
+                    root.join("lines.info"),
+                    "SF:src/app.js\nDA:1,1\nend_of_record\nSF:src/new.js\nDA:1,1\nend_of_record\n",
+                )
+                .unwrap();
+                root
+            },
+            |root| {
+                import_line_evidence(&ImportRequest {
+                    root,
+                    run: Some("run-a"),
+                    evidence: &root.join("lines.info"),
+                    credit: Credit::Test("smoke".into()),
+                    status: None,
+                    run_id: "run-b",
+                    started_at: "2026-01-01T00:00:00.000Z",
+                })
+                .map(|_| ())
+            },
+            drop,
+        );
+        assert!(calls > 10, "{calls}");
     }
 }
