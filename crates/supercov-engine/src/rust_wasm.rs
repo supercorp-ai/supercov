@@ -303,10 +303,11 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
     let mut regions = Vec::new();
     for region in value.get("regions")?.as_array()? {
         let crate_key = region.get(0)?.as_str()?.to_owned();
-        let length = usize::try_from(region.get(1)?.as_u64()?).ok()?;
+        // A length or offset is far below what a usize holds on any host.
+        let length = region.get(1)?.as_u64()? as usize;
         let mut bytes = vec![0_u8; length];
         for segment in region.get(2)?.as_array()? {
-            let offset = usize::try_from(segment.get(0)?.as_u64()?).ok()?;
+            let offset = segment.get(0)?.as_u64()? as usize;
             let data = base64::engine::general_purpose::STANDARD
                 .decode(segment.get(1)?.as_str()?)
                 .ok()?;
@@ -322,6 +323,38 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A take's regions are rebuilt from a well-formed record, and any part
+    /// of one missing or of the wrong kind is no regions at all.
+    #[test]
+    fn a_take_s_regions_are_read_or_refused_whole() {
+        use serde_json::json;
+        assert_eq!(
+            regions_from(&json!({"regions": [["abc", 4, [[1, "AQI="]]], ["def", 2, []]]})),
+            Some(vec![
+                ("abc".into(), vec![0, 1, 2, 0]),
+                ("def".into(), vec![0, 0])
+            ])
+        );
+        for refused in [
+            json!({}),
+            json!({"regions": {}}),
+            json!({"regions": [[]]}),
+            json!({"regions": [[1]]}),
+            json!({"regions": [["abc"]]}),
+            json!({"regions": [["abc", "4"]]}),
+            json!({"regions": [["abc", 4]]}),
+            json!({"regions": [["abc", 4, {}]]}),
+            json!({"regions": [["abc", 4, [[]]]]}),
+            json!({"regions": [["abc", 4, [["1", "AQI="]]]]}),
+            json!({"regions": [["abc", 4, [[1]]]]}),
+            json!({"regions": [["abc", 4, [[1, 2]]]]}),
+            json!({"regions": [["abc", 4, [[1, "not base64!"]]]]}),
+            json!({"regions": [["abc", 4, [[3, "AQI="]]]]}),
+        ] {
+            assert_eq!(regions_from(&refused), None, "{refused}");
+        }
+    }
 
     #[test]
     fn a_wasm_library_is_a_cdylib_that_depends_on_wasm_bindgen() {
