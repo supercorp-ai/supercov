@@ -1618,6 +1618,8 @@ mod tests {
         }
         for (path, normal) in [
             ("a/./b/../c", "a/c"),
+            // Only a leading `.` is a component of its own.
+            ("./a", "a"),
             ("../a", "../a"),
             ("a/../../b", "../b"),
         ] {
