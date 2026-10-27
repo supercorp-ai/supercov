@@ -12890,6 +12890,27 @@ fn fail_each_place_of_a_run_ending(
     fail_each_place_at("fs", label, write, command, code)
 }
 
+/// Remove each record of an instrumented build under `directory`, so the
+/// next run prepares its copy again: a run that reuses a build passes every
+/// place a build takes, and a sweep would fail none of them after its first
+/// run to store one. What the build left stays, so it is quick.
+fn forget_reused_builds(directory: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name == "rust-build-cache.json")
+        {
+            std::fs::remove_file(&path).unwrap();
+        } else if path.is_dir() && !path.ends_with("target") && !path.ends_with("node_modules") {
+            forget_reused_builds(&path);
+        }
+    }
+}
+
 /// [`fail_each_place_of_a_run_ending`], failing the fault site `site` at each
 /// place in turn.
 fn fail_each_place_at(
@@ -12912,6 +12933,7 @@ fn fail_each_place_at(
                 let mut nth = first;
                 loop {
                     let fault = format!("{site}#{nth}");
+                    forget_reused_builds(&project.root.join(".supercov/workspaces"));
                     let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
                     let said = ran.stderr();
                     assert!(
