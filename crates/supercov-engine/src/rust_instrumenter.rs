@@ -2334,16 +2334,20 @@ fn instrument_decision(
     // Each condition's scope is the condition itself, so a wrapper that
     // started earlier and ends where this condition ends -- the left operand
     // of a logical operator -- closes after it, not before.
-    for (index, atomic_range) in condition_ranges.into_iter().enumerate() {
-        push_wrapper(
-            insertions,
-            atomic_range,
-            atomic_range,
-            1,
-            format!("{runtime_path}::condition(("),
-            format!("), &mut {frame_name}, {index})"),
-        );
-    }
+    // A decision has a condition.
+    condition_ranges
+        .into_iter()
+        .enumerate()
+        .for_each(|(index, atomic_range)| {
+            push_wrapper(
+                insertions,
+                atomic_range,
+                atomic_range,
+                1,
+                format!("{runtime_path}::condition(("),
+                format!("), &mut {frame_name}, {index})"),
+            );
+        });
     true
 }
 
@@ -3494,7 +3498,10 @@ fn main() {
         assert_eq!(decide("true"), Some(true));
         assert_eq!(decide("false"), Some(false));
         // A target that names nothing settles only what is no name.
-        assert_eq!(TargetCfg::new(&[]).evaluate(&"unix".parse().unwrap()), Some(false));
+        assert_eq!(
+            TargetCfg::new(&[]).evaluate(&"unix".parse().unwrap()),
+            Some(false)
+        );
 
         let source = "pub fn a() -> u8 { b() }\n#[cfg(windows)]\nfn b() -> u8 { 1 }\n#[cfg(unix)]\nfn b() -> u8 { 2 }\n#[cfg(feature = \"x\")]\nfn c() -> u8 { 3 }\n#[cfg(unix)]\n#[cfg(windows)]\nfn d() -> u8 {\n    4\n}\npub fn e(a: bool, b: bool) -> bool {\n    a && (b || a)\n}\n";
         let instrumented = instrument_rust_file(
@@ -3522,7 +3529,12 @@ fn main() {
         // compiled out.
         assert!(lines.contains(&14), "{lines:?}");
         assert_eq!(
-            instrumented.manifest.decisions.iter().filter(|d| d.line == 14).count(),
+            instrumented
+                .manifest
+                .decisions
+                .iter()
+                .filter(|d| d.line == 14)
+                .count(),
             1
         );
         let windows = &instrumented.code[instrumented.code.find("#[cfg(windows)]").unwrap()
