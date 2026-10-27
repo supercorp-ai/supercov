@@ -4890,9 +4890,11 @@ fn main() {
             ("COPY", false),
             ("ALIAS", false),
             ("self::KINDS", false),
+            // A constant's own value is read without following another.
+            ("RANGE", false),
         ] {
             let source = format!(
-                "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
+                "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nconst RANGE: std::ops::Range<usize> = 0..COUNT;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
             );
             let transformed =
                 instrument_rust_source("src/lib.rs", &source, "crate::__supercov_runtime_v1")

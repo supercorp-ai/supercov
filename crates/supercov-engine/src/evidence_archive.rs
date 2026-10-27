@@ -1314,4 +1314,81 @@ mod tests {
             ]
         );
     }
+
+    /// Collecting, writing and reading an archive, each once for every file
+    /// operation it makes with that one failing: each ends with an error or
+    /// without, never a panic, and the run no fault reaches succeeds.
+    #[test]
+    fn an_archive_whose_file_operation_fails_ends_cleanly() {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fixture = || {
+            let directory = temporary_directory(&format!(
+                "archive-faults-{}",
+                UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(directory.join("sources/nested")).unwrap();
+            fs::write(directory.join("sources/manifest.json"), b"{}").unwrap();
+            fs::write(directory.join("sources/nested/b.json"), b"[]").unwrap();
+            write_archive(
+                vec![
+                    entry("coverage-model.json", b"{}"),
+                    entry("frontend.json", b"{}"),
+                    entry("manifest.json", b"{}"),
+                ],
+                &directory.join("kept.raw.gz"),
+            )
+            .unwrap();
+            directory
+        };
+        let entries = || {
+            vec![
+                entry("coverage-model.json", b"{}"),
+                entry("frontend.json", b"{}"),
+                entry("manifest.json", b"{}"),
+                entry("results/00000000/mcdc.json", b"[]"),
+            ]
+        };
+        let cleanup = |directory: PathBuf| fs::remove_dir_all(directory).unwrap();
+        let collected = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |directory| {
+                collect_sources(&[EvidenceArchiveSource::Directory {
+                    directory: directory.join("sources"),
+                    prefix: None,
+                }])
+                .map(|_| ())
+            },
+            cleanup,
+        );
+        let written = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |directory| write_archive(entries(), &directory.join("a.raw.gz")).map(|_| ()),
+            cleanup,
+        );
+        let read = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |directory| read_archive(&directory.join("kept.raw.gz")).map(|_| ()),
+            cleanup,
+        );
+        assert!(
+            collected > 2 && written > 2 && read > 0,
+            "{collected} {written} {read}"
+        );
+        // No source is no manifest; an empty entry left out is skipped.
+        assert!(matches!(
+            collect_sources(&[]),
+            Err(EvidenceArchiveError::MissingManifest)
+        ));
+        let directory = fixture();
+        let path = directory.join("empty-entry.raw.gz");
+        let mut with_empty = entries();
+        with_empty.push(entry("empty.txt", b""));
+        write_archive(with_empty, &path).unwrap();
+        let kept = read_archive_selected(&path, |name| name != "empty.txt").unwrap();
+        assert_eq!(kept.len(), 4);
+        cleanup(directory);
+    }
 }
