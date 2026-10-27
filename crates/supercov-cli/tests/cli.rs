@@ -2223,6 +2223,10 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             "stored diff requires a newer run ID",
         ),
         (query("no-such-run", "summary", None), "stored query failed"),
+        (
+            query(&run, "diff", Some("no-such-run")),
+            "stored query failed",
+        ),
     ] {
         assert!(
             feed("__query-stored-run", request.as_bytes())
@@ -2231,6 +2235,24 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             "{request}"
         );
     }
+    // Each index a stored diff opens, refused in turn; the inventory's
+    // first, which read past one they cannot.
+    std::fs::write(&input, query(&run, "diff", Some(&run))).unwrap();
+    let mut refused = 0;
+    for nth in 1.. {
+        let ran = project.supercov_with(
+            &["__query-stored-run"],
+            &[
+                ("SUPERCOV_INTERNAL_INPUT_FILE", input_path),
+                ("SUPERCOV_TEST_FAULT", &format!("coverage-index@{nth}")),
+            ],
+        );
+        if !ran.stderr().contains("test fault at coverage-index") {
+            break;
+        }
+        refused += usize::from(ran.code() == 2);
+    }
+    assert_eq!(refused, 2);
 
     // The supervisor runs a command and passes its exit code on.
     assert!(
