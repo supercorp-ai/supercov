@@ -12870,8 +12870,8 @@ fn the_nextest_runner_missing_what_it_needs_says_so() {
                 "__nextest-runner",
                 attempt_root.to_str().unwrap(),
                 "wasm32",
-                "/bin/echo",
-                "ran",
+                env!("CARGO_BIN_EXE_supercov"),
+                "--version",
             ],
             &[
                 ("NEXTEST", "1"),
@@ -13895,17 +13895,22 @@ fn standalone_doctests_named_alike_are_each_run_alone() {
 
 /// [`small_crate`] in edition 2024, whose doctests are merged into one
 /// harness that lists and runs them through Supercov.
+#[cfg(unix)]
 fn small_merged_crate(project: &Project) {
     small_crate(project);
     project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
 }
 
+#[cfg(unix)]
 fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usize {
     fail_each_place_of_a_runner_in(label, small_crate, &format!("{role}/fs"), command)
 }
 
 /// [`fail_each_place_of_a_runner`] over the project `write` makes, failing
 /// `site`, a fault site with the role it applies in (`__doctest-runner/fs`).
+/// A runner says it reached a fault in `SUPERCOV_TEST_FAULT_LOG`, which only
+/// Unix builds write.
+#[cfg(unix)]
 fn fail_each_place_of_a_runner_in(
     label: &str,
     write: fn(&Project),
@@ -13947,6 +13952,7 @@ fn fail_each_place_of_a_runner_in(
 
 /// A doctest's runner, and nextest's where it is installed, each failing
 /// at every place it makes a file operation.
+#[cfg(unix)]
 #[test]
 fn a_test_runner_whose_file_operation_fails_says_so() {
     let reached = fail_each_place_of_a_runner(
@@ -14003,6 +14009,7 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
 /// Each of a run's helper processes -- rustdoc's stand-in, a doctest's
 /// runner, a merged doctest's child, nextest's runner -- failing to start a
 /// program at each place it starts one.
+#[cfg(unix)]
 #[test]
 fn a_test_runner_whose_program_cannot_start_says_so() {
     let doctests = supercov_engine::rust_owned_doctests::WRAPPER_ROOT_ENV;
