@@ -221,15 +221,16 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
                 "package.json exists and the test command is opaque",
             ),
         ];
-        for (language, present, reason) in candidates {
-            if present {
+        candidates
+            .into_iter()
+            .filter(|(_, present, _)| *present)
+            .for_each(|(language, _, reason)| {
                 selected.insert(language);
                 evidence.push(FrontendEvidence {
                     language,
                     reason: reason.into(),
                 });
-            }
-        }
+            });
     }
 
     FrontendDetection {
@@ -278,24 +279,25 @@ pub fn detect_unsupported_ecosystem(
         ("Swift", &["swift"]),
         ("Dart/Flutter", &["flutter", "dart"]),
     ];
-    for (language, runners) in by_command {
-        for runner in *runners {
-            // `go test`, `swift test`, `mix test`, `dotnet test`, `gradle
-            // test`: the runner word alone is too common in shell text, so
-            // require the test-launch shape for single-word runners.
-            let launches = if matches!(*runner, "go" | "swift" | "mix" | "dotnet") {
+    let launched = by_command
+        .iter()
+        .flat_map(|(language, runners)| runners.iter().map(move |runner| (*language, *runner)))
+        // `go test`, `swift test`, `mix test`, `dotnet test`, `gradle
+        // test`: the runner word alone is too common in shell text, so
+        // require the test-launch shape for single-word runners.
+        .find(|(_, runner)| {
+            if matches!(*runner, "go" | "swift" | "mix" | "dotnet") {
                 has_sequence(&command_tokens, &[runner, "test"])
             } else {
                 command_tokens.iter().any(|token| token == runner)
-            };
-            if launches {
-                return Some(UnsupportedEcosystem {
-                    language,
-                    evidence: format!("the test command runs `{runner}`"),
-                    from_command: true,
-                });
             }
-        }
+        });
+    if let Some((language, runner)) = launched {
+        return Some(UnsupportedEcosystem {
+            language,
+            evidence: format!("the test command runs `{runner}`"),
+            from_command: true,
+        });
     }
     let by_manifest: &[(&str, &[&str])] = &[
         ("PHP", &["composer.json"]),
@@ -303,18 +305,17 @@ pub fn detect_unsupported_ecosystem(
         ("Swift", &["Package.swift"]),
         ("Dart/Flutter", &["pubspec.yaml"]),
     ];
-    for (language, manifests) in by_manifest {
-        for manifest in *manifests {
-            if regular_file(&root.join(manifest)) {
-                return Some(UnsupportedEcosystem {
-                    language,
-                    evidence: format!("{manifest} is present"),
-                    from_command: false,
-                });
-            }
-        }
-    }
-    None
+    by_manifest
+        .iter()
+        .flat_map(|(language, manifests)| {
+            manifests.iter().map(move |manifest| (*language, *manifest))
+        })
+        .find(|(_, manifest)| regular_file(&root.join(manifest)))
+        .map(|(language, manifest)| UnsupportedEcosystem {
+            language,
+            evidence: format!("{manifest} is present"),
+            from_command: false,
+        })
 }
 
 #[cfg(test)]
