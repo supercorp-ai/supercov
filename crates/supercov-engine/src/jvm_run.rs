@@ -2305,6 +2305,15 @@ mod tests {
             updated.contains("junit-platform-launcher:1.11.3"),
             "{updated}"
         );
+        // Under the BOM, the launcher takes the version the BOM gives it.
+        let bom = gradle_with_launcher(
+            "dependencies { testImplementation(platform('org.junit:junit-bom:5.11.3')) }\n",
+            false,
+            "",
+            &[],
+        )
+        .unwrap();
+        assert!(bom.contains("'org.junit.platform:junit-platform-launcher'"), "{bom}");
 
         // A parent on disk that imports the BOM, and one that sets a property.
         let root = std::env::temp_dir().join(format!(
@@ -3038,6 +3047,12 @@ mod tests {
         // A self-closing section holds no `<dependencies>` of its own.
         let pom = "<project><build/><dependencies></dependencies></project>";
         assert_eq!(project_dependencies_end(pom), pom.find("</dependencies>"));
+        // Nothing, or a tag never closed, holds no dependencies.
+        assert_eq!(project_dependencies_end(""), None);
+        assert_eq!(project_dependencies_end("<project"), None);
+        // An analyser argument never closed is left as written.
+        let open = "<arg>-Xplugin:ErrorProne";
+        assert_eq!(without_error_prone(open), open);
         // A file whose name merely ends in the class's does not declare it.
         let only = BTreeMap::from([("Baz".to_owned(), "src/MyBar.java".to_owned())]);
         assert_eq!(declaring_file(&only, "Bar"), None);
