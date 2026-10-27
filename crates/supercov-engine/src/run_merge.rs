@@ -689,35 +689,48 @@ pub fn merge_coverage_runs(
                 contents: manifest.to_vec(),
             },
         ];
-        for (shard, archive) in archives.iter().enumerate() {
-            for entry in archive.iter().filter(|entry| {
-                !matches!(
-                    entry.path.as_str(),
-                    "coverage-model.json" | "frontend.json" | "manifest.json"
-                )
-            }) {
-                // One record of the files for the whole merge: the latest
-                // run's, which holds every file the others were recorded with.
-                let superseded = grown
-                    .as_ref()
-                    .and_then(|grown| grown.superseded.get(&shard));
-                let contents = match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
-                    Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
-                        files.clone()
-                    }
-                    _ => match rewritten_contents(&entry.contents, merged_run_id, superseded)? {
-                        Some(contents) => contents,
-                        // Every record of the entry was of a test measured
-                        // again elsewhere.
-                        None => continue,
-                    },
-                };
-                entries.push(EvidenceArchiveEntry {
-                    path: merged_path(&entry.path, shard),
-                    contents,
-                });
-            }
-        }
+        // Two runs at least, each with evidence besides its three files of
+        // the whole run.
+        archives
+            .iter()
+            .enumerate()
+            .try_for_each(|(shard, archive)| {
+                archive
+                    .iter()
+                    .filter(|entry| {
+                        !matches!(
+                            entry.path.as_str(),
+                            "coverage-model.json" | "frontend.json" | "manifest.json"
+                        )
+                    })
+                    .try_for_each(|entry| -> Result<(), String> {
+                        // One record of the files for the whole merge: the latest
+                        // run's, which holds every file the others were recorded with.
+                        let superseded = grown
+                            .as_ref()
+                            .and_then(|grown| grown.superseded.get(&shard));
+                        let contents = match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
+                            Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
+                                files.clone()
+                            }
+                            _ => match rewritten_contents(
+                                &entry.contents,
+                                merged_run_id,
+                                superseded,
+                            )? {
+                                Some(contents) => contents,
+                                // Every record of the entry was of a test measured
+                                // again elsewhere.
+                                None => return Ok(()),
+                            },
+                        };
+                        entries.push(EvidenceArchiveEntry {
+                            path: merged_path(&entry.path, shard),
+                            contents,
+                        });
+                        Ok(())
+                    })
+            })?;
         let archive_path = work.join("evidence.raw.gz");
         let raw = write_archive(entries, &archive_path)
             .map_err(|error| format!("Could not write merged evidence: {error}"))?;
