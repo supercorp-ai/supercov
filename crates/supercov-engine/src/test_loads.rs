@@ -1713,6 +1713,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(normal(Path::new("/etc/x")), None);
         assert_eq!(normal(Path::new("../x")), None);
+        assert_eq!(normal(Path::new("")).as_deref(), Some(""));
         assert_eq!(normal(Path::new("a/./b/../c")).as_deref(), Some("a/c"));
     }
 

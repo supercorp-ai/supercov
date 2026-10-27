@@ -267,6 +267,11 @@ mod tests {
             learned.runner_environment,
             [("NO_HEADLESS".to_owned(), "1".to_owned())]
         );
+        // A record of the directory alone is plain `cargo`; none is refused.
+        let bare = parse_record(&root, "/elsewhere/web").unwrap();
+        assert_eq!(bare.command, ["cargo"]);
+        assert!(bare.runner_environment.is_empty());
+        assert!(parse_record(&root, "").is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 }
