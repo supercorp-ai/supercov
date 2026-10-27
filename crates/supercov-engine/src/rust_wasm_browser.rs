@@ -324,10 +324,20 @@ fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 
 /// One request to chromedriver; its status and body, chunked or not.
 fn call(upstream: SocketAddr, method: &str, path: &str, body: &[u8]) -> Option<(u16, Vec<u8>)> {
-    let mut stream = TcpStream::connect(upstream).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
-        .ok()?;
+    let stream = TcpStream::connect(upstream).ok()?;
+    // A connected socket takes a timeout: only an unconnected one refuses.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    exchange(stream, upstream, method, path, body)
+}
+
+/// [`call`] over a stream already open to chromedriver.
+fn exchange(
+    mut stream: impl Read + Write,
+    upstream: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Option<(u16, Vec<u8>)> {
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: {upstream}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -482,6 +492,114 @@ fn take_regions(upstream: SocketAddr, session: &str, evidence: &Path, token: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the other side sends, and what is sent to it, failing at the
+    /// `left`th read or write and every one after, a byte read at a time.
+    struct Failing<'a> {
+        input: &'a [u8],
+        output: Vec<u8>,
+        left: usize,
+        failed: bool,
+    }
+
+    impl Failing<'_> {
+        fn spend(&mut self) -> std::io::Result<()> {
+            if self.left == 0 {
+                self.failed = true;
+                return Err(std::io::Error::other("closed"));
+            }
+            self.left -= 1;
+            Ok(())
+        }
+    }
+
+    impl Read for Failing<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.spend()?;
+            let end = buffer.len().min(1);
+            self.input.read(&mut buffer[..end])
+        }
+    }
+
+    impl Write for Failing<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.spend()?;
+            self.output.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `read` over `input` failing at each call in turn: every failure
+    /// reads nothing, and the run no failure reaches reads `expected`.
+    fn fails_each_read<T: PartialEq + std::fmt::Debug>(
+        input: &[u8],
+        read: impl Fn(&mut Failing<'_>) -> Option<T>,
+        expected: T,
+    ) {
+        for left in 0.. {
+            let mut stream = Failing {
+                input,
+                output: Vec::new(),
+                left,
+                failed: false,
+            };
+            let got = read(&mut stream);
+            if !stream.failed {
+                assert_eq!(got, Some(expected));
+                assert!(left > 3, "{left}");
+                return;
+            }
+            assert_eq!(got, None, "failing at {left}");
+        }
+    }
+
+    #[test]
+    fn a_message_whose_stream_fails_anywhere_reads_as_nothing() {
+        fails_each_read(
+            b"POST /e/2f/session HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3;x=1\r\nabc\r\n0\r\nT: t\r\n\r\n",
+            |stream| read_request(&mut BufReader::with_capacity(1, stream)).map(|r| r.body),
+            b"abc".to_vec(),
+        );
+        fails_each_read(
+            b"GET /e/2f/status HTTP/1.1\r\nContent-Length: 2\r\n\r\nok",
+            |stream| read_request(&mut BufReader::with_capacity(1, stream)).map(|r| r.body),
+            b"ok".to_vec(),
+        );
+        for (response, body) in [
+            (
+                &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n"[..],
+                &b"ok"[..],
+            ),
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", b"ok"),
+            (b"HTTP/1.1 200 OK\r\n\r\nall of it", b"all of it"),
+        ] {
+            fails_each_read(
+                response,
+                |stream| read_response(&mut BufReader::with_capacity(1, stream)),
+                (200, body.to_vec()),
+            );
+            let upstream: SocketAddr = "127.0.0.1:9515".parse().unwrap();
+            fails_each_read(
+                response,
+                |stream| exchange(stream, upstream, "POST", "/session", b"{}"),
+                (200, body.to_vec()),
+            );
+        }
+        // A line that is no request, a length that is no number and a
+        // status that is none read as nothing too.
+        for broken in [
+            &b"\r\n"[..],
+            b"GET\r\n",
+            b"GET / HTTP/1.1\r\nContent-Length: x\r\n\r\n",
+        ] {
+            assert!(read_request(&mut &broken[..]).is_none());
+        }
+        assert!(read_response(&mut &b"HTTP/1.1 OK\r\n\r\n"[..]).is_none());
+        assert!(read_chunked(&mut &b"z\r\n"[..]).is_none());
+    }
 
     #[test]
     fn the_runner_s_browser_is_picked_as_it_picks_it() {
