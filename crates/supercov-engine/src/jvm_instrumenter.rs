@@ -59,128 +59,11 @@ pub fn parse(
         .parse(source, None)
         .ok_or_else(|| JvmInstrumenterError::Parse("parser returned no tree".into()))?;
     if tree.root_node().has_error() {
-        if language == JvmLanguage::Kotlin
-            && let Some(joined) = constructors_joined(source)
-            && let Some(retried) = parser
-                .parse(&joined, None)
-                .filter(|retried| !retried.root_node().has_error())
-        {
-            return Ok(retried);
-        }
         return Err(JvmInstrumenterError::Parse(
             crate::go_instrumenter::parse_failure(&tree, source),
         ));
     }
     Ok(tree)
-}
-
-/// The source with each primary constructor that starts a line moved onto its
-/// class's line, every byte and every line kept where it was.
-///
-/// Kotlin lets a nested class put `private constructor(` on the line after its
-/// name, and moshi's `JsonReader.Options` does. tree-sitter's Kotlin grammar
-/// ends the class header at that line break and reads the rest as a secondary
-/// constructor of the enclosing class -- which cannot declare properties -- so
-/// the whole file fails to parse. Moving the line break from before the
-/// modifiers to after `constructor` is something the grammar reads as
-/// intended. The rewrite swaps whitespace with the header's own words, so
-/// offsets and line numbers inside every body are unchanged and the tree reads
-/// against the original source.
-fn constructors_joined(source: &str) -> Option<String> {
-    let mut out = String::with_capacity(source.len());
-    let mut changed = false;
-    let mut rest = source;
-    while let Some(newline) = rest.find('\n') {
-        let line = &rest[..newline];
-        let after = &rest[newline + 1..];
-        let indent_len = after.len() - after.trim_start_matches([' ', '\t']).len();
-        let next = &after[indent_len..];
-        let header = line.trim_end_matches([' ', '\t', '\r']);
-        if let Some(keyword) = constructor_prefix(next)
-            && ends_class_header(header)
-        {
-            // trailing whitespace + line break + indent, then the modifiers
-            // and the keyword: the words go first, behind one separating
-            // space, and the whitespace after them -- one byte shorter, which
-            // the separating space makes up.
-            let whitespace = format!("{}\n{}", &line[header.len()..], &after[..indent_len]);
-            let words = &next[..keyword];
-            let original = format!("{whitespace}{words}");
-            let (header, rotated) = match whitespace.find([' ', '\t']) {
-                Some(at) => (
-                    header.to_owned(),
-                    format!(" {words}{}{}", &whitespace[..at], &whitespace[at + 1..]),
-                ),
-                // No byte to spare after the header: the last space among the
-                // words becomes the line break, or failing that the header
-                // gives up one byte of its own indent.
-                None => match (words.rfind(' '), header.strip_prefix([' ', '\t'])) {
-                    (Some(at), _) => (
-                        header.to_owned(),
-                        format!(" {}\n{}", &words[..at], &words[at + 1..]),
-                    ),
-                    (None, Some(outdented)) => (outdented.to_owned(), format!(" {words}\n")),
-                    (None, None) => (header.to_owned(), original.clone()),
-                },
-            };
-            changed |= rotated != original;
-            out.push_str(&header);
-            out.push_str(&rotated);
-            rest = &next[keyword..];
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-        rest = after;
-    }
-    out.push_str(rest);
-    debug_assert_eq!(out.len(), source.len());
-    changed.then_some(out)
-}
-
-/// The length of `[modifiers or annotations] constructor` when a line starts
-/// with a primary constructor.
-fn constructor_prefix(line: &str) -> Option<usize> {
-    let mut at = 0usize;
-    loop {
-        let word = &line[at..];
-        let length = word
-            .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '@' | '.')))
-            .unwrap_or(word.len());
-        if length == 0 {
-            return None;
-        }
-        let name = &word[..length];
-        let tail = &word[length..];
-        if name == "constructor" {
-            return tail.trim_start().starts_with('(').then_some(at + length);
-        }
-        let modifier = name.starts_with('@')
-            || matches!(name, "private" | "protected" | "internal" | "public");
-        if !modifier || !tail.starts_with(' ') {
-            return None;
-        }
-        at += length + 1;
-    }
-}
-
-/// Whether a line ends with `class Name` or `class Name<T>`, as a header whose
-/// constructor comes next would.
-fn ends_class_header(line: &str) -> bool {
-    let line = line.trim_end();
-    let name = match line.strip_suffix('>') {
-        Some(_) => line.rfind('<').map(|at| &line[..at]).unwrap_or(line),
-        None => line,
-    };
-    let name = name.trim_end();
-    let start = name
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map_or(0, |at| at + 1);
-    let before = name[..start].trim_end();
-    start < name.len()
-        && before.ends_with("class")
-        && !before[..before.len() - "class".len()]
-            .ends_with(|c: char| c.is_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1284,8 +1167,9 @@ class Outer {
 
     /// square/moshi's JsonReader.kt: a nested class whose primary
     /// constructor is written on the line after its name, which
-    /// tree-sitter-kotlin-ng 1.1.0 reads as a secondary constructor of the
-    /// enclosing class. The file is measured, every statement on the line it
+    /// tree-sitter-kotlin-ng 1.1.0 read as a secondary constructor of the
+    /// enclosing class and the grammar built with upstream's scanner fixes
+    /// reads as written. The file is measured, every statement on the line it
     /// is written on.
     #[test]
     fn a_primary_constructor_on_its_own_line_is_read_as_one() {
@@ -1309,26 +1193,6 @@ class Outer {
         assert!(lines.contains(&(11, "return strings.size")), "{lines:?}");
         assert!(lines.contains(&(18, "return n * 2")), "{lines:?}");
         assert!(lines.contains(&(25, "return t")), "{lines:?}");
-
-        let joined = constructors_joined(source).expect("rewritten");
-        assert_eq!(joined.len(), source.len());
-        assert_eq!(joined.lines().count(), source.lines().count());
-        assert!(
-            joined.contains("  public class Options private constructor\n (\n"),
-            "{joined}"
-        );
-        // No indent after the line break to borrow a byte from: the class
-        // line gives up one of its own.
-        assert!(joined.contains("\n class Bare constructor\n("), "{joined}");
-        // Valid Kotlin the grammar already reads is never touched.
-        assert_eq!(
-            constructors_joined("class A private constructor(val n: Int)\n"),
-            None
-        );
-        assert_eq!(
-            constructors_joined("val subclass = 1\nconstructor(x)\n"),
-            None
-        );
     }
 
     #[test]
@@ -1837,27 +1701,6 @@ class Outer {
         );
         // A labelled loop and one without braces have nowhere for the flag.
         assert_eq!(obligations.manifest.limitations.len(), 2);
-    }
-
-    #[test]
-    fn a_constructor_line_is_joined_only_to_a_class_header_through_plain_modifiers() {
-        // An annotation counts among the modifiers before `constructor`.
-        assert_eq!(
-            constructor_prefix("@Inject constructor(val n: Int)"),
-            Some("@Inject constructor".len())
-        );
-        // A modifier has to be followed by a space.
-        assert_eq!(constructor_prefix("private\tconstructor(x)"), None);
-        assert_eq!(constructor_prefix("private(x)"), None);
-        assert!(ends_class_header("class My_Box"));
-        assert!(ends_class_header("  data class Box<T>"));
-        for line in ["fun f(", "subclass Box", "my_class Box", "class"] {
-            assert!(!ends_class_header(line), "{line}");
-        }
-        // A file that still fails once its constructor is joined is refused.
-        let source = "class Outer {\n  class Inner\n  private constructor(val n: Int) {\n    fun f(): Int {\n      return n )\n    }\n  }\n}\n";
-        assert!(constructors_joined(source).is_some());
-        assert!(parse(source, JvmLanguage::Kotlin).is_err());
     }
 
     #[test]
