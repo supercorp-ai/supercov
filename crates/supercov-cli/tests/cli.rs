@@ -12642,6 +12642,51 @@ fn the_nextest_runner_missing_what_it_needs_says_so() {
         "{}",
         ran.stderr()
     );
+    // An attempt as nextest starts one, once for every file operation the
+    // runner makes with that one failing: it may fail, but says why and
+    // never panics, and the attempt no fault reaches is recorded.
+    // Each attempt in a root of its own: a claim another attempt left is
+    // one more call to make.
+    let run_id = "2ae19189-240a-433a-a31d-acc411fe8e1f";
+    let attempt_id = format!("{run_id}:fixture::x$t");
+    for nth in 1.. {
+        let attempt_root = project.root.join(format!("attempt-{nth}"));
+        project.write(
+            &format!("attempt-{nth}/runner-plan.json"),
+            r#"{"token":"t","targets":[{"target":"wasm32","underlying":null}]}"#,
+        );
+        let fault = format!("fs@{nth}");
+        let ran = project.supercov_with(
+            &[
+                "__nextest-runner",
+                attempt_root.to_str().unwrap(),
+                "wasm32",
+                "/bin/echo",
+                "ran",
+            ],
+            &[
+                ("NEXTEST", "1"),
+                ("NEXTEST_RUN_ID", run_id),
+                ("NEXTEST_VERSION", "0.9.140"),
+                ("NEXTEST_EXECUTION_MODE", "process-per-test"),
+                ("NEXTEST_BINARY_ID", "fixture::x"),
+                ("NEXTEST_TEST_NAME", "t"),
+                ("NEXTEST_ATTEMPT", "1"),
+                ("NEXTEST_TOTAL_ATTEMPTS", "1"),
+                ("NEXTEST_ATTEMPT_ID", &attempt_id),
+                ("NEXTEST_STRESS_CURRENT", "none"),
+                ("NEXTEST_STRESS_TOTAL", "none"),
+                ("SUPERCOV_TEST_FAULT", &fault),
+            ],
+        );
+        let said = ran.stderr();
+        assert!(!said.contains("panicked at"), "{fault}: {said}");
+        if !said.contains("[supercov] test fault at fs") {
+            ran.succeeds();
+            assert!(nth > 2, "the sweep reached {nth} calls");
+            break;
+        }
+    }
 }
 
 /// Each query, run once for every file operation it makes with that one
