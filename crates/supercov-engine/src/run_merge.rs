@@ -244,7 +244,8 @@ fn judged_against_latest(
     // reached -- is not gone: it is judged by what the checkout holds now,
     // and the merge's record keeps it.
     let mut into = into.clone();
-    for (_, recorded) in files.iter().flatten() {
+    // The latest run's record is one of them.
+    files.iter().flatten().for_each(|(_, recorded)| {
         for file in recorded.files.keys() {
             if into.files.contains_key(file) {
                 continue;
@@ -256,7 +257,7 @@ fn judged_against_latest(
                 );
             }
         }
-    }
+    });
     let into = &into;
     // Every file known to hold tests, from every run there is: a file of some
     // other test changing takes nothing from this run.
@@ -276,9 +277,10 @@ fn judged_against_latest(
     };
     let mut across = Vec::new();
     let mut superseded = BTreeMap::new();
-    for (index, input) in inputs.iter().enumerate() {
+    // A merge is of two runs at least: one is not the latest.
+    inputs.iter().enumerate().try_for_each(|(index, input)| -> Result<(), String> {
         if index == latest {
-            continue;
+            return Ok(());
         }
         let Some((_, recorded)) = &files[index] else {
             return Err(unrecorded(input));
@@ -354,7 +356,8 @@ fn judged_against_latest(
             ));
         }
         across.extend(judgment.across);
-    }
+        Ok(())
+    })?;
     Ok(Some(Grown {
         latest,
         files: Some(serde_json::to_vec(into).expect("plain data serializes")),
@@ -504,7 +507,8 @@ pub fn merge_coverage_runs(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let first = inputs[0];
-    for input in inputs.iter().skip(1) {
+    // A merge is of two runs at least.
+    inputs.iter().skip(1).try_for_each(|input| -> Result<(), String> {
         let dimensions = incompatible_dimensions(first, input);
         // Another release instruments differently, and nothing else is worth
         // saying about the difference: the run has to be measured again.
@@ -557,7 +561,8 @@ pub fn merge_coverage_runs(
                 dimensions.join(", ")
             ));
         }
-    }
+        Ok(())
+    })?;
 
     let archives = inputs
         .iter()
@@ -1599,7 +1604,9 @@ mod tests {
         let tests = measured_tests(&[
             entry(b"{\"testId\":\"t1\",\"test\":\"adds\"}\n{\"testId\":\"t3\"}\nnot \"testId\" json\nplain\n"),
             entry(&[0xff, 0xfe]),
+            entry(b""),
         ]);
+        assert!(measured_tests(&[]).is_empty());
         assert_eq!(
             tests,
             [("t1".to_owned(), "adds".to_owned())].into_iter().collect()
