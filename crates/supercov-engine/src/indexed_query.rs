@@ -166,14 +166,16 @@ impl std::error::Error for IndexedQueryError {}
 
 fn grouped_decimal(value: usize) -> String {
     let digits = value.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.bytes().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(char::from(digit));
-    }
-    grouped
+    let grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    digits
+        .char_indices()
+        .fold(grouped, |mut grouped, (index, digit)| {
+            if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+            grouped
+        })
 }
 
 fn metric_name(metric: MinimizeMetric) -> &'static str {
@@ -1187,6 +1189,79 @@ mod tests {
                 "response is 20 bytes and exceeds the 10-byte limit",
                 "response is 20 bytes and exceeds the 10-byte limit",
             ]
+        );
+        assert!(
+            E::Query(QueryError::ScopeUnavailable)
+                .to_string()
+                .contains("ScopeUnavailable")
+        );
+    }
+
+    /// Each refusal reaches an agent under the code it is acted on by.
+    #[test]
+    fn each_refusal_reaches_an_agent_under_its_code() {
+        use super::IndexedQueryError as E;
+        use crate::agent_json::ErrorCode as C;
+        let query = |error| E::Query(error);
+        for (error, code) in [
+            (E::InvalidFilter("[".into()), C::InvalidArgument),
+            (E::UnsupportedCommand("fly".into()), C::UnknownCommand),
+            (E::MissingArgument("--file"), C::InvalidArgument),
+            (E::MissingNewerRun, C::InvalidArgument),
+            (E::MissingReport, C::InternalError),
+            (query(QueryError::InvalidTarget(2.0)), C::InvalidArgument),
+            (query(QueryError::InvalidPagination), C::InvalidArgument),
+            (
+                query(QueryError::OutOfScope {
+                    file: "a.js".into(),
+                    status: "excluded".into(),
+                    reason: "test source".into(),
+                }),
+                C::SourceNotFound,
+            ),
+            (
+                query(QueryError::AmbiguousSelector {
+                    selector: "a".into(),
+                    matches: vec!["a.js".into(), "b/a.js".into()],
+                }),
+                C::AmbiguousSelector,
+            ),
+            (query(QueryError::ScopeUnavailable), C::ScopeUnavailable),
+            (
+                query(QueryError::Analysis(
+                    crate::coverage_report::ReportError::InvalidEvent("e".into()),
+                )),
+                C::InternalError,
+            ),
+            (
+                query(QueryError::Index(
+                    crate::coverage_index::CoverageIndexError::InvalidRecord("r"),
+                )),
+                C::InternalError,
+            ),
+            (query(QueryError::InvalidRecordSelection), C::InternalError),
+        ] {
+            assert_eq!(error.agent_error().code, code, "{error}");
+        }
+        for (metric, name) in [
+            (MinimizeMetric::All, "all"),
+            (MinimizeMetric::Lines, "lines"),
+            (MinimizeMetric::Statements, "statements"),
+            (MinimizeMetric::Functions, "functions"),
+            (MinimizeMetric::Branches, "branches"),
+            (MinimizeMetric::Mcdc, "mcdc"),
+        ] {
+            assert_eq!(metric_name(metric), name);
+        }
+        assert_eq!(grouped_decimal(0), "0");
+        assert_eq!(grouped_decimal(1_234_567), "1,234,567");
+        let request = |filter: &str| -> IndexedQueryRequest {
+            serde_json::from_value(json!({ "runId": "r", "filter": filter, "command": "summary" }))
+                .unwrap()
+        };
+        assert_eq!(request("failed").view().unwrap(), CoverageViewId::Failed);
+        assert!(
+            matches!(request("some").view(), Err(E::InvalidFilter(filter)) if filter == "some")
         );
     }
 }

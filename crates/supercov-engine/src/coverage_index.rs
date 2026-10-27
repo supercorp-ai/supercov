@@ -5533,6 +5533,63 @@ mod tests {
         Ok(read)
     }
 
+    /// A query missing what its command needs is refused naming it, as is
+    /// a command no query answers, a diff with no newer run and a filter no
+    /// view is.
+    #[test]
+    fn a_query_missing_what_its_command_needs_says_what() {
+        use crate::indexed_query::{IndexedQueryError as E, IndexedQueryRequest, query_indexed};
+        let report = report();
+        let (_root, container) = index_of(&report, &|_| {});
+        let index = CoverageIndex::new(&container).unwrap();
+        let request = |command: &str, filter: &str, line: Option<usize>| -> IndexedQueryRequest {
+            serde_json::from_value(serde_json::json!({
+                "runId": "run", "filter": filter, "command": command, "line": line,
+            }))
+            .unwrap()
+        };
+        for (command, line, needs) in [
+            ("line", None, "a file"),
+            ("line", Some(2), "a file"),
+            ("file-decisions", None, "a file"),
+            ("test", None, "a test selector"),
+            ("decision", None, "a decision selector"),
+            ("file-detail", None, "a file"),
+        ] {
+            let refused = query_indexed(&index, None, &request(command, "all", line), None);
+            assert!(
+                matches!(&refused, Err(E::MissingArgument(argument)) if *argument == needs),
+                "{command}: {:?}",
+                refused.err()
+            );
+        }
+        let file_without_line: IndexedQueryRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run", "filter": "all", "command": "line", "file": "src/a.js",
+        }))
+        .unwrap();
+        assert!(matches!(
+            query_indexed(&index, None, &file_without_line, None),
+            Err(E::MissingArgument("a line"))
+        ));
+        assert!(matches!(
+            query_indexed(&index, None, &request("fly", "all", None), None),
+            Err(E::UnsupportedCommand(_))
+        ));
+        assert!(matches!(
+            query_indexed(&index, None, &request("diff", "all", None), None),
+            Err(E::MissingNewerRun)
+        ));
+        assert!(matches!(
+            crate::indexed_query::execute_indexed_query(
+                &index,
+                None,
+                &request("summary", "some", None),
+                None
+            ),
+            Err(E::InvalidFilter(_))
+        ));
+    }
+
     /// Every query a command asks of an index, by kind and runner and as
     /// a diff with itself, each on its own: how many refused.
     fn query_each(index: &CoverageIndex<'_>) -> usize {
