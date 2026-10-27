@@ -552,7 +552,7 @@ docker_proxy::tests::times_the_daemon_prints_are_read_to_the_millisecond	0.0	0.0
 docker_servers	243.8	23.2
 docs_command_tests::guides_print_commands_the_way_the_reader_started_supercov	0.0	0.0
 each_affected_test_says_how_it_meets_the_change_as_the_change_grows	0.8	0.8
-each_language_refuses_a_missing_source_root_and_an_unreadable_timeout	20.0	40.0
+each_language_refuses_a_missing_source_root_and_an_unreadable_timeout_or_interval	20.0	40.0
 each_page_names_a_next_page_command_that_shows_it	0.8	0.8
 each_query_says_so_when_its_index_or_its_reply_fails	9.2	4.6
 each_query_says_so_wherever_a_read_of_its_index_fails	4.9	4.2

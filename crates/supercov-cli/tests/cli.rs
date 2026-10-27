@@ -13605,7 +13605,7 @@ type LanguageRun = (&'static str, fn(&Project), Vec<String>);
 /// A run of each language refuses a source root that is not there and a
 /// timeout that is no number of milliseconds, before it measures anything.
 #[test]
-fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout() {
+fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout_or_interval() {
     let python = [
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
@@ -13661,6 +13661,7 @@ fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout() {
         for (name, value) in [
             ("SUPERCOV_SOURCE_ROOTS", "missing"),
             ("SUPERCOV_COMMAND_TIMEOUT_MS", "soon"),
+            ("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "often"),
         ] {
             let ran = project.supercov_with(&command, &[(name, value)]);
             let said = ran.stderr();
