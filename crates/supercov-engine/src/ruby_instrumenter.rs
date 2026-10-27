@@ -4443,6 +4443,44 @@ end
         );
     }
 
+    /// Every kind of probe a block can hold leaves with it, and what each
+    /// would have proven is declared; an empty block holds none to drop.
+    #[test]
+    fn a_ractor_block_declares_what_each_kind_of_probe_would_have_proven() {
+        let source = "def b(x)\n  Ractor.new(x) do |y|\n    for i in y do\n      i\n    end\n    z = y && y.size\n    w = y&.size\n    begin\n      y.go\n    rescue StandardError\n      nil\n    end\n    case y\n    when 1 then 2\n    end\n    if y then 3 end\n  end\n  Ractor.new { }\nend\n";
+        let (obligations, _) = probed(source);
+        let [[first, first_end], [second, second_end]] = obligations.plan.ractor_blocks[..] else {
+            panic!("{:?}", obligations.plan.ractor_blocks);
+        };
+        assert!(obligations.plan.edits.iter().all(|edit| {
+            !(first..first_end).contains(&edit.offset)
+                && !(second..second_end).contains(&edit.offset)
+        }));
+        let manifest = &obligations.manifest;
+        let kinds = manifest
+            .branches
+            .iter()
+            .filter(|branch| (3..=16).contains(&branch.line))
+            .inspect(|branch| {
+                assert!(
+                    manifest.unmeasured.contains(&branch.id),
+                    "{} {}",
+                    branch.kind,
+                    branch.source
+                );
+            })
+            .map(|branch| branch.kind.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(kinds.len() >= 5, "{kinds:?}");
+        for decision in &manifest.decisions {
+            assert!(
+                manifest.unmeasured.contains(&decision.id),
+                "{}",
+                decision.kind
+            );
+        }
+    }
+
     #[test]
     fn only_a_literal_block_on_a_receiverless_refine_or_ractor_new_is_set_apart() {
         let source = "Ractor.new(1)\nRactor.new(&blk)\nx.refine(String) do\nend\nrefine(String)\nrefine(String, &blk)\n";
