@@ -13272,6 +13272,73 @@ fn a_run_under_given_source_roots_is_read_back_under_them() {
     }
 }
 
+/// Each place a doctest's helper processes write, read or list, failing
+/// on its own: rustdoc's stand-in, the doctest runner, and a merged
+/// harness's child. The run ends, never panicking, and runs again cleanly.
+#[cfg(unix)]
+#[test]
+fn a_doctest_helper_whose_file_operation_fails_ends_cleanly() {
+    let stand_in = "env:SUPERCOV_DOCTEST_WRAPPER_ROOT/";
+    let runner = "__doctest-runner/";
+    let child = "env:SUPERCOV_DOCTEST_CHILD_DIR/";
+    for (edition, faults) in [
+        (
+            "2021",
+            vec![
+                format!("{stand_in}fs.create_dir_all@1"),
+                format!("{stand_in}fs.open_with@1"),
+                format!("{stand_in}fs.create_dir_all@2"),
+                format!("{stand_in}fs.write@1"),
+                format!("{stand_in}fs.read_dir@1"),
+                format!("{stand_in}fs.read_dir@2"),
+                format!("{stand_in}fs.read@1"),
+                format!("{runner}fs.create_dir_all@2"),
+                format!("{runner}fs.write@1"),
+                format!("{runner}fs.create_dir_all@3"),
+            ],
+        ),
+        (
+            "2024",
+            vec![
+                format!("{stand_in}fs.write@1"),
+                format!("{stand_in}fs.write@2"),
+                format!("{stand_in}fs.write@3"),
+                format!("{stand_in}fs.write@4"),
+                format!("{stand_in}fs.read_to_string@1"),
+                format!("{runner}fs.write@1"),
+                format!("{runner}fs.write@2"),
+                format!("{runner}fs.create_dir_all@3"),
+                format!("{runner}fs.read@1"),
+                format!("{runner}fs.read@2"),
+                format!("{runner}fs.read@3"),
+                format!("{runner}fs.read_dir@1"),
+                format!("{runner}fs.read_to_string@1"),
+                format!("{child}fs.create_dir_all@1"),
+                format!("{child}fs.write@1"),
+            ],
+        ),
+    ] {
+        let project = Project::empty(&format!("doctest-helper-faults-{edition}"));
+        small_crate(&project);
+        project.edit(
+            "Cargo.toml",
+            "edition = \"2021\"",
+            &format!("edition = \"{edition}\""),
+        );
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        for fault in faults {
+            let ran = project.supercov_with(
+                &["--", "cargo", "test", "-q"],
+                &[("SUPERCOV_TEST_FAULT", fault.as_str())],
+            );
+            let said = format!("{}{}", ran.stdout(), ran.stderr());
+            assert!(!said.contains("panicked at"), "{edition} {fault}:\n{said}");
+        }
+        project.supercov(&["--", "cargo", "test", "-q"]).succeeds();
+    }
+}
+
 /// Two standalone doctests of one item, at lines 1 and 11: every word of
 /// either name is in the other's (`1)` in `11)`), so each is run alone by a
 /// filter and a skip of the other, and both are measured.

@@ -40,6 +40,7 @@ a_diff_counts_a_dependency_change_as_a_change_in_the_code	1.9	1.6
 a_diff_keeps_only_what_the_tests_a_filter_picks_covered	3.3	1.9
 a_direct_javascript_run_with_no_command_is_refused	0.0	0.0
 a_directory_says_what_ran_while_no_test_was_running	0.9	0.8
+a_doctest_helper_whose_file_operation_fails_ends_cleanly	60.0	90.0
 a_doctest_stand_in_missing_what_it_needs_says_so	0.0	0.0
 a_failed_projection_of_a_passing_run_reads_as_empty_and_names_what_it_leaves_out	0.9	0.7
 a_failing_suite_keeps_its_exit_status_and_cannot_pass_a_gate	0.8	0.6
