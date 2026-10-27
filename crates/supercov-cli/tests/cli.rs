@@ -7463,6 +7463,8 @@ fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
     let project = Project::cart("import-arguments");
     project.measure(&[]);
     project.write("lcov.info", "SF:src/cart.js\nDA:1,1\nend_of_record\n");
+    std::fs::write(project.root.join("binary.info"), [0xff, 0xfe]).unwrap();
+    project.write("broken.info", "SF:src/cart.js\nDA:one,1\nend_of_record\n");
 
     contains_all(
         &project.supercov(&["import", "--help"]).succeeds(),
@@ -7495,6 +7497,14 @@ fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
             &["import", "lcov.info", "--test=device", "--status=flaky"][..],
             "--status is passed or failed, not flaky",
         ),
+        (
+            &["import", "binary.info", "--background"][..],
+            "binary.info is not an LCOV tracefile",
+        ),
+        (
+            &["import", "broken.info", "--background"][..],
+            "Cannot read broken.info as LCOV",
+        ),
     ] {
         let stderr = project.supercov(arguments).exits(2);
         assert!(stderr.contains(said), "{arguments:?}: {stderr}");
@@ -7503,6 +7513,22 @@ fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
     project
         .supercov(&["import", "lcov.info", "--test=device", "--status=passed"])
         .succeeds();
+    // Each place the import makes a file operation, failing in turn.
+    let mut places = 0;
+    for nth in 1.. {
+        let fault = format!("fs#{nth}");
+        let ran = project.supercov_with(
+            &["import", "lcov.info", "--background"],
+            &[("SUPERCOV_TEST_FAULT", &fault)],
+        );
+        let said = ran.stderr();
+        assert!(!said.contains("panicked at"), "{fault}: {said}");
+        if !said.contains("test fault at fs") {
+            break;
+        }
+        places += 1;
+    }
+    assert!(places > 3, "{places}");
 }
 
 #[test]
