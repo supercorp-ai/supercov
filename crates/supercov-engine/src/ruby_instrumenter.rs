@@ -1799,50 +1799,57 @@ impl<'a> Collector<'a> {
         });
         let mut clauses = Vec::new();
         let mut clause_ids = Vec::new();
-        for (index, condition) in node.conditions().iter().enumerate() {
-            let when = condition.as_when_node().expect(WHEN);
-            let Some(id) = self.branch(
-                when.location().start_offset(),
-                when.location().end_offset(),
-                &format!("case-when-{index}"),
-                [("missed", "not selected"), ("selected", "selected")],
-            ) else {
-                return;
-            };
-            let statements = self.statements_span(&when.statements());
-            let span = statements.unwrap_or_else(|| self.location_span(&when.location()));
-            let key_index = self.stdlib(
-                "case",
-                "when",
-                span,
-                if statements.is_some() {
-                    KeyKind::List
-                } else {
-                    KeyKind::Node
-                },
-                vec![format!("{id}:selected")],
-            );
-            self.key_body(when.statements(), key_index, KeyProof::Probe);
-            let proven =
-                self.clause_proof(&id, &clause_ids, no_match_id.as_deref(), else_id.as_deref());
-            // An empty body gets its probe after `then`, or as a `then` of
-            // its own after the last condition.
-            let (offset, before) = match when.then_keyword_loc() {
-                Some(then) => (then.end_offset(), " "),
-                None => {
-                    let last = when.conditions().iter().last();
-                    let last = last.expect("a when has a condition");
-                    (last.location().end_offset(), " then ")
-                }
-            };
-            self.claim_line_at(offset);
-            self.body_proves(&when.statements(), proven, offset, before, "");
-            clauses.push(CaseClausePlan {
-                key: self.branches[key_index].key.clone(),
-                missed: format!("{id}:missed"),
-                selected: format!("{id}:selected"),
+        // A case has a `when` at least.
+        let all = node
+            .conditions()
+            .iter()
+            .enumerate()
+            .try_for_each(|(index, condition)| {
+                let when = condition.as_when_node().expect(WHEN);
+                let id = self.branch(
+                    when.location().start_offset(),
+                    when.location().end_offset(),
+                    &format!("case-when-{index}"),
+                    [("missed", "not selected"), ("selected", "selected")],
+                )?;
+                let statements = self.statements_span(&when.statements());
+                let span = statements.unwrap_or_else(|| self.location_span(&when.location()));
+                let key_index = self.stdlib(
+                    "case",
+                    "when",
+                    span,
+                    if statements.is_some() {
+                        KeyKind::List
+                    } else {
+                        KeyKind::Node
+                    },
+                    vec![format!("{id}:selected")],
+                );
+                self.key_body(when.statements(), key_index, KeyProof::Probe);
+                let proven =
+                    self.clause_proof(&id, &clause_ids, no_match_id.as_deref(), else_id.as_deref());
+                // An empty body gets its probe after `then`, or as a `then` of
+                // its own after the last condition.
+                let (offset, before) = match when.then_keyword_loc() {
+                    Some(then) => (then.end_offset(), " "),
+                    None => {
+                        let last = when.conditions().iter().last();
+                        let last = last.expect("a when has a condition");
+                        (last.location().end_offset(), " then ")
+                    }
+                };
+                self.claim_line_at(offset);
+                self.body_proves(&when.statements(), proven, offset, before, "");
+                clauses.push(CaseClausePlan {
+                    key: self.branches[key_index].key.clone(),
+                    missed: format!("{id}:missed"),
+                    selected: format!("{id}:selected"),
+                });
+                clause_ids.push(id);
+                Some(())
             });
-            clause_ids.push(id);
+        if all.is_none() {
+            return;
         }
         let no_match = match node.else_clause() {
             Some(else_node) => {
@@ -1992,54 +1999,61 @@ impl<'a> Collector<'a> {
         });
         let mut clauses = Vec::new();
         let mut clause_ids = Vec::new();
-        for (index, condition) in node.conditions().iter().enumerate() {
-            let in_node = condition.as_in_node().expect(IN);
-            let Some(id) = self.branch(
-                in_node.location().start_offset(),
-                in_node.location().end_offset(),
-                &format!("case-in-{index}"),
-                [("missed", "not selected"), ("selected", "selected")],
-            ) else {
-                return;
-            };
-            let statements = self.statements_span(&in_node.statements());
-            let span = statements.unwrap_or_else(|| self.location_span(&in_node.location()));
-            let key_index = self.stdlib(
-                "case",
-                "in",
-                span,
-                if statements.is_some() {
-                    KeyKind::List
-                } else {
-                    KeyKind::Node
-                },
-                vec![format!("{id}:selected")],
-            );
-            self.key_body(in_node.statements(), key_index, KeyProof::Probe);
-            let proven =
-                self.clause_proof(&id, &clause_ids, no_match_id.as_deref(), else_id.as_deref());
-            let (offset, before) = match in_node.then_loc() {
-                Some(then) => (then.end_offset(), " "),
-                None => (in_node.pattern().location().end_offset(), " then "),
-            };
-            self.claim_line_at(offset);
-            self.body_proves(&in_node.statements(), proven, offset, before, "");
-            clauses.push(CaseClausePlan {
-                key: self.branches[key_index].key.clone(),
-                missed: format!("{id}:missed"),
-                selected: format!("{id}:selected"),
+        // A case has a `in` at least.
+        let all = node
+            .conditions()
+            .iter()
+            .enumerate()
+            .try_for_each(|(index, condition)| {
+                let in_node = condition.as_in_node().expect(IN);
+                let id = self.branch(
+                    in_node.location().start_offset(),
+                    in_node.location().end_offset(),
+                    &format!("case-in-{index}"),
+                    [("missed", "not selected"), ("selected", "selected")],
+                )?;
+                let statements = self.statements_span(&in_node.statements());
+                let span = statements.unwrap_or_else(|| self.location_span(&in_node.location()));
+                let key_index = self.stdlib(
+                    "case",
+                    "in",
+                    span,
+                    if statements.is_some() {
+                        KeyKind::List
+                    } else {
+                        KeyKind::Node
+                    },
+                    vec![format!("{id}:selected")],
+                );
+                self.key_body(in_node.statements(), key_index, KeyProof::Probe);
+                let proven =
+                    self.clause_proof(&id, &clause_ids, no_match_id.as_deref(), else_id.as_deref());
+                let (offset, before) = match in_node.then_loc() {
+                    Some(then) => (then.end_offset(), " "),
+                    None => (in_node.pattern().location().end_offset(), " then "),
+                };
+                self.claim_line_at(offset);
+                self.body_proves(&in_node.statements(), proven, offset, before, "");
+                clauses.push(CaseClausePlan {
+                    key: self.branches[key_index].key.clone(),
+                    missed: format!("{id}:missed"),
+                    selected: format!("{id}:selected"),
+                });
+                clause_ids.push(id);
+                // A guard is a decision of its own; Ruby reports no branch key
+                // for it, so it is always probe-driven.
+                let pattern = in_node.pattern();
+                if let Some(guard) = pattern.as_if_node() {
+                    self.guard_nodes.insert(pattern.location().start_offset());
+                    self.probe_decision(guard.predicate(), "in-guard", None, "d");
+                } else if let Some(guard) = pattern.as_unless_node() {
+                    self.guard_nodes.insert(pattern.location().start_offset());
+                    self.probe_decision(guard.predicate(), "in-guard-unless", None, "d");
+                }
+                Some(())
             });
-            clause_ids.push(id);
-            // A guard is a decision of its own; Ruby reports no branch key
-            // for it, so it is always probe-driven.
-            let pattern = in_node.pattern();
-            if let Some(guard) = pattern.as_if_node() {
-                self.guard_nodes.insert(pattern.location().start_offset());
-                self.probe_decision(guard.predicate(), "in-guard", None, "d");
-            } else if let Some(guard) = pattern.as_unless_node() {
-                self.guard_nodes.insert(pattern.location().start_offset());
-                self.probe_decision(guard.predicate(), "in-guard-unless", None, "d");
-            }
+        if all.is_none() {
+            return;
         }
         let no_match = match node.else_clause() {
             Some(else_node) => {
@@ -2862,28 +2876,29 @@ impl<'a> Collector<'a> {
         };
         let (dropped, kept): (Vec<_>, Vec<_>) =
             pending.into_iter().partition(|edit| inside(edit.offset));
-        let mut keys = BTreeSet::new();
-        for edit in &dropped {
-            keys.extend(probe_keys_in(&edit.text));
-        }
+        let keys = dropped
+            .iter()
+            .flat_map(|edit| probe_keys_in(&edit.text))
+            .collect::<BTreeSet<_>>();
         // Every key an insertion names is a probe still in the table.
         let targets = self
             .probes
             .extract_if(.., |key, _| keys.contains(key))
             .collect::<BTreeMap<_, _>>();
         let mut unmeasured = probe_obligations_of(&targets);
-        for target in targets.values() {
-            for named in target_ids(target) {
-                if let Some(implied) = self.implied.get(&named) {
-                    unmeasured.extend(implied.hits.iter().map(|id| obligation_of(id)));
-                    unmeasured.extend(implied.decisions.iter().map(|d| d.id.clone()));
-                }
-            }
-        }
+        targets
+            .values()
+            .flat_map(target_ids)
+            .filter_map(|named| self.implied.get(&named))
+            .for_each(|implied| {
+                unmeasured.extend(implied.hits.iter().map(|id| obligation_of(id)));
+                unmeasured.extend(implied.decisions.iter().map(|d| d.id.clone()));
+            });
         unmeasured.sort();
         unmeasured.dedup();
         self.manifest.unmeasured.extend(unmeasured);
-        for (start, end) in blocks {
+        // Called with a block at least.
+        blocks.iter().for_each(|(start, end)| {
             let (line, _) = self.line_column(*start);
             let source = self
                 .text(*start, *end)
@@ -2898,7 +2913,7 @@ impl<'a> Collector<'a> {
                 &source,
                 "a Ractor block cannot call Supercov's probes (a non-main Ractor cannot read the probe receiver), so what only a probe could prove inside it is unmeasured; its lines are still counted",
             ));
-        }
+        });
         kept
     }
 
@@ -2925,9 +2940,10 @@ impl<'a> Collector<'a> {
         let cases: Vec<CasePlan> = std::mem::take(&mut self.cases)
             .into_iter()
             .map(|mut case| {
-                for clause in &mut case.clauses {
+                // A case has a clause at least.
+                case.clauses.iter_mut().for_each(|clause| {
                     clause.key.span = self.shifted(clause.key.span, clause.key.kind, &pending);
-                }
+                });
                 if let Some(no_match) = &mut case.no_match {
                     no_match.key.span =
                         self.shifted(no_match.key.span, no_match.key.kind, &pending);
