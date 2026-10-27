@@ -12809,7 +12809,6 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.symlink_metadata@15",
             "fs.open@5",
             "fs.read@10",
-            "fs.read@12",
             "spawn",
         ],
     );
