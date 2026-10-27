@@ -12846,6 +12846,20 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
             "{fault} reached {reached} commands"
         );
     }
+    // A command that opens an index more than once -- a diff opens two, a
+    // query its run's after the inventory's -- refuses at each in turn.
+    for command in commands {
+        for nth in 1.. {
+            let fault = format!("coverage-index@{nth}");
+            let ran = project.supercov_with(command, &[("SUPERCOV_TEST_FAULT", &fault)]);
+            let said = format!("{}{}", ran.stdout(), ran.stderr());
+            assert!(!said.contains("panicked at"), "{fault} {command:?}: {said}");
+            if !said.contains("test fault at coverage-index") {
+                break;
+            }
+            assert!(nth < 20, "{command:?} kept opening indexes");
+        }
+    }
 }
 
 /// A line asked about after its file was cut short is past its end; after
