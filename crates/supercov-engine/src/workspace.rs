@@ -3939,6 +3939,30 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn linking_nested_dependency_trees_survives_any_file_operation_failing() {
+        let nested = || {
+            let (root, lock) = varied_project();
+            let linked = root.join("packages/a/node_modules");
+            fs::create_dir_all(linked.join("left-pad")).unwrap();
+            fs::create_dir_all(linked.join(".bin")).unwrap();
+            fs::write(linked.join(".bin/tool"), "#!/bin/sh\n").unwrap();
+            let by_package = root.join("packages/b/node_modules");
+            fs::create_dir_all(by_package.join("right-pad")).unwrap();
+            fs::create_dir_all(by_package.join(".bin")).unwrap();
+            fs::write(by_package.join(".bin/tool"), "#!/bin/sh\n").unwrap();
+            fifo(&by_package.join("pipe"));
+            (root, lock)
+        };
+        let operations = fail_each_file_operation(
+            nested,
+            |(root, lock)| prepare_isolated_workspace(root, "run", lock).map(drop),
+            release,
+        );
+        assert!(operations > 20, "{operations}");
+    }
+
     /// A link that stays in the project by its path but leaves it through
     /// another link on the way is left out.
     #[cfg(unix)]
