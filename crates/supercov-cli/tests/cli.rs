@@ -2249,6 +2249,23 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             .exits(1)
             .is_empty()
     );
+    // Nor can its watchdog, or the command at each place it is started.
+    let mut places = 0;
+    for nth in 1.. {
+        let fault = format!("spawn#{nth}");
+        let ran = project.supercov_with(
+            &["__supervise", "--", "true"],
+            &[("SUPERCOV_TEST_FAULT", &fault)],
+        );
+        let said = ran.stderr();
+        assert!(!said.contains("panicked at"), "{fault}: {said}");
+        if !said.contains("test fault at spawn") {
+            break;
+        }
+        assert_ne!(ran.code(), 0, "{fault}: {said}");
+        places += 1;
+    }
+    assert!(places > 0);
     for name in [
         "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
         "SUPERCOV_COMMAND_TIMEOUT_MS",
@@ -13690,6 +13707,21 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
             assert!(nth < 20, "{command:?} kept opening indexes");
         }
     }
+    // A reply too large is asked for again with a smaller page, and that
+    // ask can fail too.
+    let refused = (1..8).any(|nth| {
+        let fault = format!("reply-too-large=2,coverage-index@{nth}");
+        let ran = project.supercov_with(
+            &["runs", "latest", "file", "src/cart.js", "--json"],
+            &[("SUPERCOV_TEST_FAULT", &fault)],
+        );
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert!(!said.contains("panicked at"), "{fault}: {said}");
+        ran.code() == 2
+            && said.contains("test fault at reply-too-large")
+            && said.contains("test fault at coverage-index")
+    });
+    assert!(refused);
 }
 
 /// A line asked about after its file was cut short is past its end; after
