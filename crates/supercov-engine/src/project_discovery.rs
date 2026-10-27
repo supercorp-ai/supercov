@@ -783,10 +783,9 @@ pub fn no_source_error(
     environment: &BTreeMap<String, String>,
 ) -> ProjectDiscoveryError {
     match crate::source_discovery::ExplicitSourceRoots::from_environment(root, environment) {
-        Ok(Some(explicit)) => match explicit.refuse_if_empty(0, "JavaScript or TypeScript") {
-            Err(message) => ProjectDiscoveryError::RootsLeftNothing(message),
-            Ok(()) => ProjectDiscoveryError::NoSourceFiles,
-        },
+        Ok(Some(explicit)) => ProjectDiscoveryError::RootsLeftNothing(
+            explicit.nothing_left("JavaScript or TypeScript"),
+        ),
         Ok(None) => ProjectDiscoveryError::NoSourceFiles,
         Err(error) => ProjectDiscoveryError::Source(error),
     }

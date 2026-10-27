@@ -360,6 +360,11 @@ impl ExplicitSourceRoots {
         if remaining > 0 {
             return Ok(());
         }
+        Err(self.nothing_left(language))
+    }
+
+    /// What to say of roots that left no `language` source to measure.
+    pub fn nothing_left(&self, language: &str) -> String {
         let missing = self
             .configured
             .iter()
@@ -374,7 +379,7 @@ impl ExplicitSourceRoots {
             message.push_str(&format!("; {} does not exist", missing.join(", ")));
         }
         message.push_str("; name the directories or files that hold your own code");
-        Err(message)
+        message
     }
 
     /// The scope a frontend that has no scope of its own records when explicit
