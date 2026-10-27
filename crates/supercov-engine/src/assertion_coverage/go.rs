@@ -427,6 +427,16 @@ mod tests {
             rewrite(source, 11, Change::ValueUndefined).as_deref(),
             Some("p := my_pkg.Point_3{}")
         );
+        // An empty result list returns no value.
+        assert_eq!(
+            rewrite(
+                "package a\n\nfunc f() () {\n\treturn\n}\n",
+                4,
+                Change::ReturnUndefined
+            )
+            .as_deref(),
+            Some("return ")
+        );
     }
 
     #[test]

@@ -365,6 +365,9 @@ mod tests {
             window(380, 390, &[1, 2], &[]),
             window(1000, 1001, &[1, 4], &[0, 9]),
         ];
+        // No window and no test credit nothing.
+        let (_, nothing, none, neither) = credit(&[], &[], 2, &[1]);
+        assert!(nothing.is_empty() && none.is_empty() && neither.is_empty());
         let (evidence, outcomes, credited, overlapped) = credit(&windows, &tests, 2, &[1]);
         assert_eq!(evidence.global, [1, 6]);
         // A vector no test's span holds still reaches the run's totals.
