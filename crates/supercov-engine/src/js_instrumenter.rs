@@ -10329,6 +10329,13 @@ mod tests {
                 "app/entry.server.jsx",
                 "export default function handleRequest() { return 1; }\n",
             ),
+            // A route module of nothing, and one whose export lists name no
+            // handler.
+            ("app/routes/empty.jsx", ""),
+            (
+                "app/routes/listed.jsx",
+                "export {} from './x.js';\nconst helper = 1;\nexport { helper };\n",
+            ),
             (
                 "src/f.js",
                 "export function f(a, b) {\n  switch (a) { case 1: break; default: }\n  label: for (;;) { break label; }\n  for (const x of []) ;\n  while (a) b();\n  do {} while (0);\n}\n",
