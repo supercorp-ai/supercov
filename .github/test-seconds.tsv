@@ -87,6 +87,7 @@ a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reached	
 a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file	1.4	1.4
 a_measured_suite_reads_back_through_every_query	2.3	1.2
 a_merge_of_two_kinds_pages_and_narrows_by_kind	2.4	1.4
+a_merge_whose_step_fails_says_so	90.0	120.0
 a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select	0.5	0.2
 a_merged_run_is_assessed_like_the_runs_it_was_made_from	1.0	1.1
 a_mocking_test_resolves_paths_a_later_preload_maps	0.4	0.4

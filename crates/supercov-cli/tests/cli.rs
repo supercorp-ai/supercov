@@ -13222,6 +13222,58 @@ fn an_import_whose_step_fails_says_so() {
     }
 }
 
+/// A merge refuses, with exit code 2 and the reason, when a step it takes
+/// fails: the run store listed and read, the project's lock, the merged
+/// evidence archived and published, and the merged run recorded. Each case
+/// on a project measured the same way: the whole suite, then each of two
+/// test files on its own.
+#[test]
+fn a_merge_whose_step_fails_says_so() {
+    for fault in [
+        "fs.symlink_metadata@1",
+        "fs.read_dir@1",
+        "fs.read_to_end_from@6",
+        "fs.create_dir_all@1",
+        "fs.create_dir_all@2",
+        "fs.create_dir_all@3",
+        "fs.create_dir_all@4",
+        "fs.create_dir_all@5",
+        "fs.create_dir_all@6",
+        "fs.open_with@1",
+        "fs.open_with@2",
+        "fs.open_with@4",
+        "fs.open_with@5",
+        "fs.write@1",
+        "fs.rename@1",
+        "fs.rename@2",
+        "fs.rename@3",
+        "fs.rename@4",
+    ] {
+        let project = Project::cart("merge-steps");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        project.supercov(&["runs", "latest", "--json"]).succeeds();
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        project.write(
+            "test/more.test.js",
+            "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { describe } from \"../src/cart.js\";\ntest(\"describe names\", () => assert.equal(describe([{ name: \"a\" }]), \"a\"));\n",
+        );
+        project.commit("more");
+        project
+            .supercov(&["--", "node", "--test", "test/cart.test.js"])
+            .succeeds();
+        project
+            .supercov(&["--", "node", "--test", "test/more.test.js"])
+            .succeeds();
+        let ran = project.supercov_with(&["merge"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 2, "{fault}: {said}");
+        assert!(
+            said.contains("[supercov]") && !said.contains("panicked at"),
+            "{fault}: {said}"
+        );
+    }
+}
+
 /// A run that succeeds and then cannot release its copy: each language
 /// says so and fails, or, where it gives the lock up when it ends
 /// (JavaScript), still answers; none panics. A sweep failing every place in
