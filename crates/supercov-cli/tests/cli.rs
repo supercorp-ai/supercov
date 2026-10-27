@@ -13388,6 +13388,34 @@ fn a_browser_run_preparing_servers_whose_file_operation_fails_says_so_and_recove
     assert!(reached > 50, "{reached}");
 }
 
+/// A Playwright suite with no JavaScript source of its own beside a Python
+/// server no test reaches: the run prepares the server, publishes nothing
+/// and says so, and each of its file operations failing in turn ends it the
+/// same way or with the failure, never a panic.
+#[cfg(unix)]
+#[test]
+fn a_browser_run_with_only_a_server_survives_any_file_operation_failing() {
+    let reached = fail_each_place_at(
+        "fs",
+        "servers-only",
+        |project| {
+            browser_project(project);
+            std::fs::remove_file(project.root.join("src/one.js")).unwrap();
+            project.write(
+                "tests/one.spec.js",
+                "import { expect, test } from \"@playwright/test\";\ntest(\"one\", () => { expect(1).toBe(1); });\n",
+            );
+            project.write(
+                "app/server.py",
+                "def handle(n):\n    return n * 2 if n else 0\n",
+            );
+        },
+        &["--", "npx", "playwright", "test"],
+        1,
+    );
+    assert!(reached > 20, "{reached}");
+}
+
 /// The same run, once for every place it starts a program, with that start
 /// failing.
 #[cfg(unix)]
