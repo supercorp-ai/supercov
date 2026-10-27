@@ -1,9 +1,9 @@
 //! Privacy-preserving child-process supervision for arbitrary test commands.
 
+use crate::fault_process::Launch;
 // Descriptor and watchdog handling reads the filesystem only on Unix; on
 // Windows the module path is unused and the first Windows build said so.
 #[cfg(unix)]
-use crate::fault_process::Launch;
 use std::fs;
 use std::{
     ffi::{OsStr, OsString},
