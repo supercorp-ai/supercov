@@ -2350,7 +2350,161 @@ mod tests {
 
     use super::*;
 
-    /// The fault switch the sweeps here rely on: a fault named by the place
+    /// A tree that cannot be linked -- its directory, its listing, an
+    /// entry's type, a link or a hard link failing -- is not linked, and
+    /// what was made of it is gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_cannot_be_linked_is_left_unmade() {
+        let source = std::env::temp_dir().join(format!("supercov-link-source-{}", unique()));
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/file"), "x").unwrap();
+        std::os::unix::fs::symlink("nested/file", source.join("link")).unwrap();
+        for operation in [
+            "create_dir",
+            "read_dir",
+            "file_type",
+            "read_link",
+            "symlink",
+            "hard_link",
+        ] {
+            let destination = source.with_extension(operation);
+            let linked = crate::fault::during(&format!("fs.{operation}"), || {
+                hard_link_tree(&source, &destination)
+            });
+            assert!(!linked, "{operation}");
+            assert!(!destination.exists(), "{operation}");
+        }
+        let whole = source.with_extension("whole");
+        assert!(hard_link_tree(&source, &whole));
+        assert_eq!(fs::read_to_string(whole.join("link")).unwrap(), "x");
+        fs::remove_dir_all(whole).unwrap();
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    /// Linking a project's dependencies refuses what it cannot make, at each
+    /// step: its own listing and directory, the tools of `.bin` (listed
+    /// first), and a scope's packages. A store linked in place of
+    /// `node_modules` that cannot be resolved or read is refused too.
+    #[cfg(unix)]
+    #[test]
+    fn linking_dependencies_refuses_each_step_that_fails() {
+        let root = project();
+        fs::create_dir_all(root.join("node_modules/@acme/pkg")).unwrap();
+        fs::create_dir_all(root.join("node_modules/plain")).unwrap();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        fs::write(root.join("node_modules/.bin/tool"), "").unwrap();
+        // In sorted order: `.bin` (link_tools), `@acme` (a scope), `plain`.
+        for fault in [
+            "fs.symlink_metadata",
+            "fs.create_dir_all",
+            "fs.read_dir",
+            "fs.create_dir_all@2",
+            "fs.read_dir@2",
+            "fs.symlink",
+            "fs.symlink_metadata@2",
+            "fs.create_dir_all@3",
+            "fs.read_dir@3",
+            "fs.symlink@2",
+        ] {
+            let workspace = root.with_extension(format!("copy-{}", unique()));
+            let linked = crate::fault::during(fault, || {
+                link_node_modules(&root, &workspace, &mut SystemWorkspaceOperations)
+            });
+            assert!(linked.is_err(), "{fault}");
+            let _ = fs::remove_dir_all(workspace);
+        }
+        let store = root.with_extension("store");
+        fs::create_dir_all(store.join("left-pad")).unwrap();
+        let linked_root = project();
+        std::os::unix::fs::symlink(&store, linked_root.join("node_modules")).unwrap();
+        for fault in ["fs.canonicalize", "fs.symlink_metadata@2"] {
+            let workspace = linked_root.with_extension(format!("copy-{}", unique()));
+            let linked = crate::fault::during(fault, || {
+                link_node_modules(&linked_root, &workspace, &mut SystemWorkspaceOperations)
+            });
+            assert!(linked.is_err(), "{fault}");
+            let _ = fs::remove_dir_all(workspace);
+        }
+        for directory in [root, store, linked_root] {
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// Copying a tree refuses each step that fails: its directory and its
+    /// listing, an entry's type, a link's target read, resolved or its type,
+    /// a link remade (resolved, dangling, or a virtual environment's), and a
+    /// nested `node_modules` that could not be linked whole, linked entry by
+    /// entry.
+    #[cfg(unix)]
+    #[test]
+    fn copying_a_tree_refuses_each_step_that_fails() {
+        let copied = |entries: &dyn Fn(&Path), fault: &str| {
+            let source = std::env::temp_dir().join(format!("supercov-copy-source-{}", unique()));
+            fs::create_dir_all(&source).unwrap();
+            entries(&source);
+            let destination = source.with_extension("copy");
+            let canonical = canonicalize_simplified(&source).unwrap();
+            let result = crate::fault::during(fault, || {
+                copy_tree(
+                    &source,
+                    &destination,
+                    CopyRoots {
+                        source: &source,
+                        destination: &destination,
+                        final_destination: &destination,
+                        canonical_source: &canonical,
+                    },
+                    true,
+                    &mut SystemWorkspaceOperations,
+                )
+            });
+            let _ = fs::remove_dir_all(&destination);
+            fs::remove_dir_all(&source).unwrap();
+            result
+        };
+        let plain = |root: &Path| fs::write(root.join("file"), "x").unwrap();
+        let linked = |root: &Path| {
+            fs::write(root.join("file"), "x").unwrap();
+            std::os::unix::fs::symlink("file", root.join("link")).unwrap();
+        };
+        let dangling =
+            |root: &Path| std::os::unix::fs::symlink("missing", root.join("link")).unwrap();
+        let environment = |root: &Path| {
+            fs::create_dir_all(root.join("venv")).unwrap();
+            fs::write(root.join("venv/pyvenv.cfg"), "").unwrap();
+        };
+        let dependencies = |root: &Path| {
+            fs::create_dir_all(root.join("pkg/node_modules/dep")).unwrap();
+            fs::create_dir_all(root.join("pkg/node_modules/.bin")).unwrap();
+            fs::write(root.join("pkg/node_modules/.bin/tool"), "").unwrap();
+        };
+        // A nested `node_modules` that can be neither cloned nor hard-linked.
+        let unlinkable = "directory-clone,fs.hard_link";
+        for (entries, fault) in [
+            (&plain as &dyn Fn(&Path), "fs.create_dir_all".to_owned()),
+            (&plain, "fs.read_dir".to_owned()),
+            (&plain, "fs.symlink_metadata".to_owned()),
+            (&linked, "fs.read_link".to_owned()),
+            (&linked, "fs.canonicalize".to_owned()),
+            (&linked, "fs.metadata".to_owned()),
+            (&linked, "fs.symlink".to_owned()),
+            (&dangling, "fs.symlink".to_owned()),
+            (&environment, "fs.symlink".to_owned()),
+            // The root and `pkg` make two directories and listings first, and
+            // the hard links tried list `node_modules` and its `.bin`.
+            (&dependencies, format!("{unlinkable},fs.create_dir_all@3")),
+            (&dependencies, format!("{unlinkable},fs.read_dir@5")),
+            (&dependencies, format!("{unlinkable},fs.create_dir_all@4")),
+            (&dependencies, format!("{unlinkable},fs.read_dir@6")),
+            (&dependencies, format!("{unlinkable},fs.symlink")),
+        ] {
+            assert!(copied(entries, &fault).is_err(), "{fault}");
+        }
+        assert!(copied(&dependencies, unlinkable).is_ok());
+    }
+
+    /// The fault switch the tests here use: a fault named by the place
     /// that calls its site never fails a call that names no place, and one
     /// naming an errno fails its place's call with that errno.
     #[test]
