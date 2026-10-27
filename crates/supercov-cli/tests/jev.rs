@@ -5310,6 +5310,36 @@ fn a_jev_command_whose_file_operation_fails_says_so_and_recovers() {
     }
 }
 
+/// A patch review, once for each place it starts git, with that start
+/// failing: it says so and never panics, and succeeds with no fault.
+#[test]
+fn a_patch_review_whose_git_cannot_start_says_so() {
+    let (base, _seen) = gateway(MODEL, answer_yes);
+    let jev = through(&base);
+    let project = Project::cart("jev-spawn-faults");
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    for command in [&["quality", "patch"][..], &["security", "patch"][..]] {
+        let mut places = 0;
+        for nth in 1.. {
+            let fault = format!("spawn#{nth}");
+            let mut env = jev.to_vec();
+            env.push(("SUPERCOV_TEST_FAULT", &fault));
+            let ran = project.supercov_with(command, &env);
+            let said = ran.stderr();
+            assert!(
+                !said.contains("panicked at") && ran.code() != 101,
+                "{command:?} with {fault} panicked:\n{said}"
+            );
+            if !said.contains("[supercov] test fault at spawn") {
+                break;
+            }
+            places += 1;
+        }
+        assert!(places > 0, "{command:?}");
+        project.supercov_with(command, &jev).succeeds();
+    }
+}
+
 /// A large file read in windows, with some of its requests refused: what
 /// was answered is reported, what was refused is named, and nothing stops
 /// half way. Every third request after the first is refused, file windows
