@@ -13623,6 +13623,58 @@ fn a_rust_run_past_its_timeout_is_stopped_and_ends_124() {
     }
 }
 
+/// A Rust run told to stop (SIGTERM, as a supervisor or `kill` sends it)
+/// takes the test it is running down with it rather than leaving it to
+/// run on, and ends by that signal.
+#[cfg(unix)]
+#[test]
+fn a_rust_run_told_to_stop_takes_its_test_with_it() {
+    use std::os::unix::process::ExitStatusExt;
+    let project = Project::empty("rust-terminated");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn waits() {\n        let marker = std::env::var(\"SUPERCOV_TEST_MARKER\").unwrap();\n        std::fs::write(marker, std::process::id().to_string()).unwrap();\n        std::thread::sleep(std::time::Duration::from_secs(120));\n    }\n}\n",
+    );
+    project.write(".gitignore", "target/\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["--", "cargo", "test", "-q"])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(240),
+            "the test never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let test = std::fs::read_to_string(&marker).unwrap();
+    // SAFETY: a signal to the process this test started.
+    unsafe { libc::kill(supercov.id() as i32, libc::SIGTERM) };
+    let status = supercov.wait().unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+    let gone = (0..50).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // SAFETY: probing a pid with signal 0 sends nothing.
+        let probed = unsafe { libc::kill(test.trim().parse().unwrap(), 0) };
+        probed != 0
+    });
+    let _ = std::fs::remove_file(&marker);
+    assert!(gone, "test process {test} outlived the run");
+}
+
 /// A Python or Ruby run measured under the source roots it was given is
 /// read back under the same roots, and is current while the project is.
 #[test]
