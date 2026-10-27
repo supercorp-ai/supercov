@@ -4821,6 +4821,14 @@ fn a_patch_review_reads_a_large_change_as_its_diff_and_names_what_it_cannot_read
         review.contains("(unified diff only: both versions exceed the request budget)"),
         "{review}"
     );
+    // A security review of it too.
+    let review = project
+        .supercov_with(&["security", "patch", "src/big.js"], &jev)
+        .succeeds();
+    assert!(
+        review.contains("(unified diff only: both versions exceed the request budget)"),
+        "{review}"
+    );
     // A large new file has no previous version, and its diff is the file.
     project.write("src/huge.js", &source);
     let refused = project
