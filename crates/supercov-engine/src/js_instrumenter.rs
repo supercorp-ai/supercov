@@ -7628,36 +7628,39 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
     /// that for a true one. `_f` holds the weights of the conditions that
     /// were evaluated; `+!!_v` adds the second for each true one.
     fn encoded(&self, applied: &AppliedDecision) -> Expression<'a> {
-        let mut sum = self.identifier(&applied.frame);
-        for (index, name) in applied.values.iter().enumerate() {
-            let truth = self.ast.expression_unary(
-                Span::default(),
-                UnaryOperator::UnaryPlus,
-                self.ast.expression_unary(
+        // A decision has a condition at least.
+        let frame = self.identifier(&applied.frame);
+        applied
+            .values
+            .iter()
+            .enumerate()
+            .fold(frame, |sum, (index, name)| {
+                let truth = self.ast.expression_unary(
                     Span::default(),
-                    UnaryOperator::LogicalNot,
+                    UnaryOperator::UnaryPlus,
                     self.ast.expression_unary(
                         Span::default(),
                         UnaryOperator::LogicalNot,
-                        self.identifier(name),
+                        self.ast.expression_unary(
+                            Span::default(),
+                            UnaryOperator::LogicalNot,
+                            self.identifier(name),
+                        ),
                     ),
-                ),
-            );
-            let term = if index == 0 {
-                truth
-            } else {
-                self.ast.expression_binary(
-                    Span::default(),
-                    self.number(3_u64.pow(index as u32)),
-                    BinaryOperator::Multiplication,
-                    truth,
-                )
-            };
-            sum = self
-                .ast
-                .expression_binary(Span::default(), sum, BinaryOperator::Addition, term);
-        }
-        sum
+                );
+                let term = if index == 0 {
+                    truth
+                } else {
+                    self.ast.expression_binary(
+                        Span::default(),
+                        self.number(3_u64.pow(index as u32)),
+                        BinaryOperator::Multiplication,
+                        truth,
+                    )
+                };
+                self.ast
+                    .expression_binary(Span::default(), sum, BinaryOperator::Addition, term)
+            })
     }
 
     /// `mcdcEndV2(file, decision, vector, outcome)`, where the outcome is
@@ -7677,17 +7680,22 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
     ) {
         let inline = pending.iter().any(|(applied, _)| applied.inline);
         let result = self.scratch_for("_supercovMcdcResult", inline);
-        let mut steps = self.ast.vec();
-        for (applied, _) in &pending {
-            steps.push(self.assign(&applied.frame, self.number(0)));
-            for name in &applied.values {
-                steps.push(self.assign(name, self.number(0)));
-            }
-        }
+        // The decision that left the tree pending, at least, each with a
+        // condition at least.
+        let mut steps = self
+            .ast
+            .vec_from_iter(pending.iter().flat_map(|(applied, _)| {
+                std::iter::once(self.assign(&applied.frame, self.number(0))).chain(
+                    applied
+                        .values
+                        .iter()
+                        .map(|name| self.assign(name, self.number(0))),
+                )
+            }));
         let value = expression.take_in(self.ast.allocator);
         steps.push(self.assign(&result, value));
         let mut names = Vec::new();
-        for (applied, shape) in &pending {
+        pending.iter().for_each(|(applied, shape)| {
             let truth = self.ast.expression_unary(
                 Span::default(),
                 UnaryOperator::LogicalNot,
@@ -7713,7 +7721,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
                 names.push(applied.frame.clone());
                 names.extend(applied.values.iter().cloned());
             }
-        }
+        });
         steps.push(self.identifier(&result));
         let observed = self.ast.expression_parenthesized(
             Span::default(),
