@@ -216,10 +216,12 @@ pub fn publish(
         // frontend declares for its own suites.
         let mut declaration = server.declaration;
         declaration.runners.truncate(1);
-        for runner in &mut declaration.runners {
-            runner.runner = "playwright".into();
-            runner.execution_model = supercov_contracts::ExecutionModel::ParallelContextPropagated;
-        }
+        let runner = declaration
+            .runners
+            .first_mut()
+            .expect("a frontend declares a runner");
+        runner.runner = "playwright".into();
+        runner.execution_model = supercov_contracts::ExecutionModel::ParallelContextPropagated;
         let mut run = build_frontend_run(OwnedRunInputs {
             declaration,
             environment: server.environment,
@@ -463,5 +465,68 @@ mod tests {
             assert!(!directory.exists());
             assert!(!root.join(".supercov/runs/run_server").exists());
         }
+    }
+
+    /// A server run published, once for every file operation it makes with
+    /// that one failing: each ends with an error or without, never a panic,
+    /// and the one no fault reaches is published.
+    #[test]
+    fn a_server_run_whose_file_operation_fails_ends_cleanly() {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let metadata = crate::lifecycle::test_run_metadata("run_server", 0);
+        let manifest: CoverageManifest =
+            serde_json::from_str(r#"{"decisions":[],"points":[],"branches":[]}"#).unwrap();
+        let probes = BTreeMap::new();
+        let inputs = crate::source_manifest::Inputs {
+            language: "go".into(),
+            files: BTreeMap::new(),
+        };
+        let mut test = served("one", "passed", (100, 200));
+        test.provenance.runner = "playwright".into();
+        let tests = [test];
+        let calls = crate::fault::fail_each_call(
+            "fs",
+            || {
+                let root = std::env::temp_dir().join(format!(
+                    "supercov-owned-server-faults-{}-{}",
+                    std::process::id(),
+                    UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                let directory = root.join(".supercov/work/run_server/go");
+                fs::create_dir_all(directory.join("evidence")).unwrap();
+                fs::write(
+                    directory.join("evidence/1.windows"),
+                    "{\"start\":100,\"end\":150,\"probes\":[],\"vectors\":[]}\n",
+                )
+                .unwrap();
+                crate::test_directory::TestDirectory::adopt(root)
+            },
+            |root| {
+                let directory = root.join(".supercov/work/run_server/go");
+                publish(
+                    root,
+                    OwnedServer {
+                        language: "Go",
+                        declaration: crate::owned_evidence::go_declaration(),
+                        environment: "go",
+                        coverage_model: crate::owned_evidence::go_coverage_model(),
+                        manifest: &manifest,
+                        probes: &probes,
+                        widths: &[],
+                        integrity: &metadata.integrity,
+                        source_inputs: &inputs,
+                        source_roots: None,
+                        directory: &directory,
+                        source_files: 0,
+                    },
+                    metadata.clone(),
+                    &tests,
+                    &mut Vec::new(),
+                )
+                .map(|_| ())
+            },
+            drop,
+        );
+        assert!(calls > 3, "{calls}");
     }
 }
