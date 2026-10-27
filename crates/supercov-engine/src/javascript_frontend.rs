@@ -1889,6 +1889,106 @@ pub fn prepare_javascript_frontend(
 
 #[cfg(test)]
 mod tests {
+    fn frontend_fixture() -> (PathBuf, PathBuf, CoverageProject) {
+        let source_root = temporary("faults-source");
+        let workspace = temporary("faults-workspace");
+        for root in [&source_root, &workspace] {
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join("test")).unwrap();
+            fs::write(
+                root.join("src/example.mjs"),
+                "export function value(a, b) { if (a || b) return 1; return 0; }\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("test/example.test.mjs"),
+                "import test from 'node:test';\nimport assert from 'node:assert';\nimport { value } from '../src/example.mjs';\ntest('v', () => assert.equal(value(1, 0), 1));\n",
+            )
+            .unwrap();
+            fs::write(root.join("package.json"), "{\"type\":\"module\"}\n").unwrap();
+        }
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        let project = discover_coverage_project(
+            &source_root,
+            &BTreeMap::new(),
+            &["node".into(), "--test".into()],
+        )
+        .unwrap();
+        (source_root, workspace, project)
+    }
+
+    fn prepare_and_reload(
+        workspace: &Path,
+        project: &CoverageProject,
+    ) -> Result<(), JavascriptFrontendError> {
+        prepare_javascript_frontend(workspace, project, "collector", "cache", &[])?;
+        let cache = read_javascript_frontend_cache(workspace, "cache")
+            .ok_or(JavascriptFrontendError::UnsafeSourcePath("no cache".into()))?;
+        load_cached_javascript_frontend(workspace, &cache).map(drop)
+    }
+
+    /// Preparing the frontend, and loading it back from its cache, refuse
+    /// each step that fails: each directory made, each file read, written,
+    /// renamed into place or removed, the runtime's own files read back, and
+    /// a source or test path that is not the project's.
+    #[test]
+    fn preparing_and_reloading_the_frontend_refuse_each_step_that_fails() {
+        for fault in [
+            // The generated directory, the authored copies, the cache.
+            "fs.create_dir_all@1",
+            "fs.create_dir_all@2",
+            "fs.create_dir_all@4",
+            "fs.create_dir_all@5",
+            // A file restored from the cache: written, the old one removed.
+            "fs.write@1",
+            "fs.write@3",
+            "fs.remove_file@1",
+            // Read for the cache: its marker, the manifest, an authored copy,
+            // the runtime, a source.
+            "fs.read@1",
+            "fs.read@2",
+            "fs.read@3",
+            "fs.read@5",
+            "fs.read@38",
+            // Read back to adapt: Playwright's runtime, the loader, a source.
+            "fs.read_to_string@1",
+            "fs.read_to_string@2",
+            "fs.read_to_string@4",
+            // Written atomically: made, written, renamed into place.
+            "fs.open_with@1",
+            "fs.write_all@1",
+            "fs.rename@1",
+            "fs.rename@33",
+            "fs.rename@34",
+            "javascript-source-path@1",
+            "javascript-source-path@7",
+        ] {
+            let (source_root, workspace, project) = frontend_fixture();
+            let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
+            assert!(prepared.is_err(), "{fault}");
+            let _ = fs::remove_dir_all(source_root);
+            let _ = fs::remove_dir_all(workspace);
+        }
+        // Supercov breaking its own invariant on a source or a test file stops
+        // the preparation, naming the file.
+        for site in ["instrument-source", "instrument-test"] {
+            let (source_root, workspace, project) = frontend_fixture();
+            let prepared = crate::fault::during(site, || {
+                prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[])
+            });
+            assert!(
+                matches!(prepared, Err(JavascriptFrontendError::Instrument { .. })),
+                "{site}: {prepared:?}"
+            );
+            let _ = fs::remove_dir_all(source_root);
+            let _ = fs::remove_dir_all(workspace);
+        }
+        let (source_root, workspace, project) = frontend_fixture();
+        prepare_and_reload(&workspace, &project).unwrap();
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
     /// A source path the test fault says is not the project's is refused;
     /// without it, a plain relative path is taken.
     #[test]
