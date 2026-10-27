@@ -2510,6 +2510,33 @@ mod tests {
     }
 
     #[test]
+    fn a_window_is_read_only_whole() {
+        let region = |shape: Value| json!({ "start": 1, "end": 2, "regions": [shape] });
+        for value in [
+            json!({}),
+            json!({ "regions": 1 }),
+            region(json!([1])),
+            region(json!(["k"])),
+            region(json!(["k", -1])),
+            region(json!(["k", 4])),
+            region(json!(["k", 4, 1])),
+            region(json!(["k", 4, [["x"]]])),
+            region(json!(["k", 4, [[0]]])),
+            region(json!(["k", 4, [[0, 1]]])),
+            region(json!(["k", 4, [[0, "!!"]]])),
+            region(json!(["k", 1, [[0, "AAAA"]]])),
+            region(json!(["k", 4, [[u64::MAX, "AA=="]]])),
+            json!({ "regions": [], "start": "1" }),
+            json!({ "regions": [], "start": 1 }),
+        ] {
+            assert!(window_from(&value).is_none(), "{value}");
+        }
+        // A region no page of which was touched is all zeros.
+        let untouched = window_from(&region(json!(["k", 2, []]))).unwrap();
+        assert_eq!(untouched.regions, [("k".to_owned(), vec![0, 0])]);
+    }
+
+    #[test]
     fn a_line_that_is_no_window_is_skipped() {
         let root = std::env::temp_dir().join(format!(
             "supercov-worker-windows-{}-{}",
