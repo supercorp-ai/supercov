@@ -694,6 +694,135 @@ fn apply_directory(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A view laid out, laid out again, its launchers placed, and the changes
+    /// a tool made applied back: each refuses the step that fails, at each
+    /// place it makes one. The fault names the call: the operation, and
+    /// which of its calls in the scenario it is.
+    #[test]
+    fn a_view_and_its_launchers_refuse_each_step_that_fails() {
+        let applied_changes = |root: &Path, workspace: &Path| {
+            for (file, project, written) in [
+                ("src/a.js", "const a = 1;\n", "const a = 1\n"),
+                ("lib/nested/b.js", "const b = 2;\n", "const b = 2\n"),
+            ] {
+                std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+                std::fs::write(root.join(file), project).unwrap();
+                let changed = changed_path(workspace, Path::new(file));
+                std::fs::create_dir_all(changed.parent().unwrap()).unwrap();
+                std::fs::write(changed, written).unwrap();
+            }
+        };
+        let cases = [
+            // Laid out, then what a tool did in it brought back.
+            ("view", "fs.symlink_metadata@1"),
+            ("view", "fs.metadata@1"),
+            ("view", "fs.symlink_metadata@5"),
+            ("view", "fs.read@2"),
+            ("view", "fs.symlink_metadata@11"),
+            ("view", "fs.write@1"),
+            ("view", "fs.create_dir_all@1"),
+            ("view", "fs.read_dir@1"),
+            ("view", "fs.file_type@1"),
+            ("view", "fs.read_link@1"),
+            ("view", "fs.symlink_metadata@7"),
+            ("view", "fs.create_dir@1"),
+            ("view", "fs.create_dir@4"),
+            ("view", "fs.read_dir@4"),
+            ("view", "fs.create_dir_all@2"),
+            ("view", "fs.write@3"),
+            ("view", "fs.read_dir@9"),
+            ("view", "fs.file_type@10"),
+            ("view", "fs.remove_file@1"),
+            ("view", "fs.create_dir@5"),
+            ("view", "fs.symlink@1"),
+            // Laid out over one an earlier run left.
+            ("again", "fs.remove_file@1"),
+            ("again", "fs.symlink_metadata@7"),
+            // Launchers for the tools that judge source.
+            ("launchers", "fs.symlink_metadata@2"),
+            ("launchers", "fs.write@1"),
+            ("launchers", "fs.set_permissions@1"),
+            // Changes a tool made, applied to the project.
+            ("applied", "fs.symlink_metadata@1"),
+            ("applied", "fs.remove_dir_all@1"),
+            ("applied", "fs.read_dir@1"),
+            ("applied", "fs.file_type@1"),
+            ("applied", "fs.read@1"),
+            ("applied", "fs.write@1"),
+        ];
+        for (scenario, fault) in cases {
+            let (workspace, view, dependencies) = deeper_workspace();
+            let root = dependencies.parent().unwrap().to_path_buf();
+            match scenario {
+                "again" => {
+                    refresh(&workspace, &view, &dependencies).unwrap();
+                    std::fs::write(view.join("left-behind.txt"), "x").unwrap();
+                }
+                "launchers" => {
+                    std::fs::create_dir_all(workspace.join("tools/.bin")).unwrap();
+                    for tool in ["biome", "cspell", "knip"] {
+                        let path = workspace.join("node_modules/.bin").join(tool);
+                        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+                        std::fs::set_permissions(
+                            &path,
+                            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                        )
+                        .unwrap();
+                    }
+                }
+                "applied" => applied_changes(&root, &workspace),
+                _ => {}
+            }
+            let result = crate::fault::during(fault, || -> std::io::Result<()> {
+                match scenario {
+                    "view" => {
+                        let state = refresh(&workspace, &view, &dependencies)?;
+                        // What a tool does in the view, written past the fault.
+                        let _ = std::fs::write(view.join("src/a.js"), "const a = 9\n");
+                        let _ = std::fs::create_dir_all(view.join("reports/deep"));
+                        let _ = std::fs::write(view.join("reports/deep/out.json"), "[]");
+                        let _ = std::fs::remove_file(view.join("README.md"));
+                        let _ = std::fs::create_dir(view.join("README.md"));
+                        reconcile(&workspace, &view, &state).map(drop)
+                    }
+                    "again" => refresh(&workspace, &view, &dependencies).map(drop),
+                    "launchers" => place_launchers(
+                        &workspace.join("node_modules/.bin"),
+                        &workspace.join("tools/.bin"),
+                    ),
+                    _ => apply_source_changes(&root, &workspace)
+                        .map(drop)
+                        .map_err(std::io::Error::other),
+                }
+            });
+            assert!(result.is_err(), "{scenario} {fault}");
+            std::fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+        }
+    }
+
+    /// The workspace laid out deeper: a nested authored source, and links to
+    /// a directory and to a file.
+    fn deeper_workspace() -> (PathBuf, PathBuf, PathBuf) {
+        let (workspace, view, dependencies) = workspace();
+        std::fs::create_dir_all(workspace.join("lib/nested")).unwrap();
+        std::fs::write(workspace.join("lib/nested/b.js"), "probe(); const b = 2;\n").unwrap();
+        std::fs::create_dir_all(workspace.join(".supercov/node_modules/.authored/lib/nested"))
+            .unwrap();
+        std::fs::write(
+            workspace.join(".supercov/node_modules/.authored/lib/nested/b.js"),
+            "const b = 2;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".supercov/node_modules/authored-sources.json"),
+            "[\"src/a.js\",\"lib/nested/b.js\"]",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("src", workspace.join("source")).unwrap();
+        std::os::unix::fs::symlink("README.md", workspace.join("READ.md")).unwrap();
+        (workspace, view, dependencies)
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A workspace's source view is beside it under `source`, numbered as
