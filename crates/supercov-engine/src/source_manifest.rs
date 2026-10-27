@@ -1366,6 +1366,14 @@ fn byte_column_in(
 
 #[cfg(test)]
 mod tests {
+    /// On an empty line of JavaScript the first column is the line's end,
+    /// and no other column is on it.
+    #[test]
+    fn an_empty_line_has_its_first_column_only() {
+        assert_eq!(super::byte_column("a\n\nb\n", 2, 1, "javascript"), Some(1));
+        assert_eq!(super::byte_column("a\n\nb\n", 2, 2, "javascript"), None);
+    }
+
     /// An execution recorded before attribution was a question is exact.
     #[test]
     fn an_execution_that_says_nothing_of_attribution_is_exact() {

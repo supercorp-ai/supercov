@@ -2103,6 +2103,7 @@ mod tests {
             Some(9231)
         );
         assert_eq!(named_inspector_port(&os(&["dev", "--port", "8787"])), None);
+        assert_eq!(named_inspector_port(&os(&[])), None);
         assert_eq!(
             named_inspector_port(&os(&["dev", "--inspector-port"])),
             None
