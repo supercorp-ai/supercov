@@ -2079,6 +2079,7 @@ mod tests {
         assert!(described.contains("present=dir"), "{described}");
         assert!(described.contains("file.txt=file"), "{described}");
         assert!(described.ends_with("child=missing"), "{described}");
+        assert_eq!(super::describe_ancestors(Path::new("")), "");
         fs::remove_dir_all(&root).unwrap();
     }
 
