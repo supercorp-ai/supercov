@@ -2746,6 +2746,34 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Kept evidence under a name that is not UTF-8 is refused by name
+    /// rather than removed as some other. (macOS names none.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kept_evidence_under_a_name_that_is_not_utf8_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = project();
+        kept_evidence(&root, "run_cleaned");
+        fs::create_dir_all(
+            root.join(FAILED_EVIDENCE)
+                .join(std::ffi::OsStr::from_bytes(b"\xff")),
+        )
+        .unwrap();
+        let refused = clean_storage(
+            &root,
+            CleanupOptions {
+                keep: 0,
+                dry_run: true,
+            },
+            "now",
+        );
+        assert!(
+            matches!(refused, Err(LifecycleError::UnsafePath(_))),
+            "{refused:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cleaning_everything_reclaims_kept_evidence_and_says_which() {
         let root = project();
