@@ -3689,3 +3689,27 @@ fn an_answer_is_read_as_far_as_it_goes() {
             .contains("10 input tokens this run")
     );
 }
+
+/// Every view renders when it holds nothing, and a view of no known kind
+/// says so; a health is banded as it prints.
+#[test]
+fn every_quality_view_renders_with_nothing_in_it() {
+    for view in [
+        "quality-diff",
+        "scope",
+        "quality",
+        "security",
+        "gaps",
+        "file",
+        "snapshots",
+        "quality.clean",
+        "security.clean",
+    ] {
+        let text = query::render(&serde_json::json!({ "view": view }));
+        assert!(!text.is_empty(), "{view}");
+    }
+    assert_eq!(
+        query::render(&serde_json::json!({ "view": "odd" })),
+        "unknown quality view: odd\n"
+    );
+}
