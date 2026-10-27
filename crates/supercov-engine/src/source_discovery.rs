@@ -1574,12 +1574,15 @@ mod tests {
         fs::write(root.join("package.json"), "{}").unwrap();
         fs::write(root.join("src/a.js"), "").unwrap();
         let odd = std::ffi::OsStr::from_bytes(b"\xff");
-        fs::write(root.join("src").join(odd).with_extension("js"), "").unwrap();
+        // Deeper than packages are looked for, so the source walk meets it.
+        let deep = root.join("src/a/b/c/d/e/f");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join(odd).with_extension("js"), "").unwrap();
         assert!(matches!(
             discover_source_scope(&root, None),
             Err(SourceDiscoveryError::NonUtf8Path(_))
         ));
-        fs::remove_file(root.join("src").join(odd).with_extension("js")).unwrap();
+        fs::remove_dir_all(root.join("src/a")).unwrap();
         fs::create_dir(root.join(odd)).unwrap();
         assert!(matches!(
             discover_source_scope(&root, None),
