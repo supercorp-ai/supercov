@@ -1957,10 +1957,11 @@ fn combine_windows(answered: Vec<Answers>) -> Vec<Answers> {
                 into.windows += 1;
                 match (&mut into.values, answer.values) {
                     (Some(kept), Some(next)) => {
-                        for (check, value) in next {
+                        // A validated answer holds every check it was asked.
+                        next.into_iter().for_each(|(check, value)| {
                             let slot = kept.entry(check).or_insert(value);
                             *slot = slot.max(value);
-                        }
+                        });
                     }
                     (slot @ None, next) => *slot = next,
                     (Some(_), None) => {}
@@ -2019,10 +2020,7 @@ fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View>
             structure,
         }];
     }
-    let Ok(windows) = line_windows(path, source) else {
-        return Vec::new();
-    };
-    windows
+    line_windows(path, source)
         .into_iter()
         .map(|(window, text)| {
             let offset = window.start_line - 1;
@@ -2065,7 +2063,7 @@ fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View>
 /// 2,342-line Express file that left room for four Choices per request, and
 /// seventy-five requests for one file. A single declaration over the half
 /// budget is cut every two hundred lines.
-fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, String> {
+fn line_windows(path: &str, source: &str) -> Vec<(Window, String)> {
     let starts = line_starts(source);
     let declared = window_candidates(path, source, &starts);
     let half = MAX_REQUEST_TOKENS * BYTES_PER_TOKEN / 2;
@@ -2094,9 +2092,7 @@ fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, Strin
             start = end + 1;
         }
     });
-    Ok(merged_windows(cut, source, &starts, |window| {
-        bytes(window) <= half
-    }))
+    merged_windows(cut, source, &starts, |window| bytes(window) <= half)
 }
 
 fn ask_lines(
@@ -2147,7 +2143,9 @@ fn ask_lines(
                     continue;
                 }
                 let views = line_views(&answer.path, &source, &nodes);
-                for (v, view) in views.iter().enumerate() {
+                // One view of the whole file, or one per window; a window
+                // may hold none of the file's lines.
+                views.iter().enumerate().for_each(|(v, view)| {
                     let mut offset = 0;
                     while offset < view.nodes.len() {
                         let left = view.nodes.len() - offset;
@@ -2185,7 +2183,7 @@ fn ask_lines(
                         }
                         offset += took;
                     }
-                }
+                });
                 views_by_index.insert(index, views);
             }
             Some(_) => continue,
@@ -2219,7 +2217,7 @@ fn ask_lines(
             &pending,
             pending.len() > 4,
         );
-        for ((index, slot), result) in answered {
+        answered.into_iter().for_each(|((index, slot), result)| {
             let (_, v, lines) = jobs[slot.expect("each classification names its job")];
             let entry = match result {
                 Ok((_, entry, hit, _)) => {
@@ -2231,7 +2229,7 @@ fn ask_lines(
                 // says so rather than reading as nothing found.
                 Err(_) => {
                     answers[index].unchecked_lines += lines;
-                    continue;
+                    return;
                 }
             };
             let view = &views_by_index[&index][v];
@@ -2246,7 +2244,7 @@ fn ask_lines(
                     text: node.text.clone(),
                 });
             }
-        }
+        });
     }
     // Round two: the check's own question and the triage question on every
     // classified line. Authorisation stays file-level: at a line it confirmed
@@ -2270,7 +2268,7 @@ fn ask_lines(
         let Some(views) = views_by_index.get(index) else {
             continue;
         };
-        for (v, view) in views.iter().enumerate() {
+        views.iter().enumerate().for_each(|(v, view)| {
             let last = view.offset + view.text.lines().count();
             let mine: Vec<candidates::Candidate> = found
                 .iter()
@@ -2278,7 +2276,7 @@ fn ask_lines(
                 .cloned()
                 .collect();
             if mine.is_empty() {
-                continue;
+                return;
             }
             let local: Vec<candidates::Candidate> = mine
                 .iter()
@@ -2288,8 +2286,9 @@ fn ask_lines(
                     text: c.text.clone(),
                 })
                 .collect();
+            // Chunk by chunk, each a request that fits: there is at least one.
             let mut offset = 0;
-            while offset < local.len() {
+            loop {
                 let left = local.len() - offset;
                 let mut took = 0;
                 for take in [left, 16, 8, 4, 2, 1] {
@@ -2314,8 +2313,11 @@ fn ask_lines(
                     took = 1;
                 }
                 offset += took;
+                if offset == local.len() {
+                    break;
+                }
             }
-        }
+        });
     }
     for (index, lines) in unchecked {
         answers[index].unchecked_lines += lines;
@@ -2334,7 +2336,7 @@ fn ask_lines(
     );
     let mut confirmed = 0usize;
     let mut lines_by_index: BTreeMap<usize, Vec<ConfirmedLine>> = BTreeMap::new();
-    for ((index, slot), result) in answered {
+    answered.into_iter().for_each(|((index, slot), result)| {
         let (_, v, chunk) = &jobs[slot.expect("each confirmation names its job")];
         let entry = match result {
             Ok((_, entry, hit, _)) => {
@@ -2345,15 +2347,16 @@ fn ask_lines(
             // As with a classification that failed: its lines are unchecked.
             Err(_) => {
                 answers[index].unchecked_lines += chunk.len();
-                continue;
+                return;
             }
         };
         let offset = views_by_index[&index][*v].offset;
         let lines = lines_by_index.entry(index).or_default();
-        for (i, candidate) in chunk.iter().enumerate() {
-            let Some(value) = noul(&entry.response, &format!("c{i}")) else {
-                break;
-            };
+        // The answer's values in order, up to the first it lacks.
+        let valued = chunk.iter().enumerate().map_while(|(i, candidate)| {
+            noul(&entry.response, &format!("c{i}")).map(|value| (i, candidate, value))
+        });
+        valued.for_each(|(i, candidate, value)| {
             let dismissed = noul(&entry.response, &format!("t{i}")).unwrap_or(0.0);
             if value >= catalog::security::cut_for(&candidate.check)
                 && dismissed < catalog::security::DISMISS_AT
@@ -2369,8 +2372,8 @@ fn ask_lines(
                     enters_at,
                 });
             }
-        }
-    }
+        });
+    });
     // One finding per check per ten lines: three `eval` calls in a row are
     // one thing to fix, and are counted as one. The strongest line of the
     // window is the one shown, so a handler's `def` line at 0.62 does not

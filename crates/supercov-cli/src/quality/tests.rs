@@ -3153,7 +3153,6 @@ fn a_dense_run_counts_a_token_a_byte_and_an_oversized_declaration_splits_at_its_
 fn line_windows_cut_a_long_declaration_and_merge_what_fits() {
     let ranges = |source: &str| {
         line_windows("src/a.js", source)
-            .unwrap()
             .into_iter()
             .map(|(window, _)| (window.start_line, window.end_line))
             .collect::<Vec<_>>()
