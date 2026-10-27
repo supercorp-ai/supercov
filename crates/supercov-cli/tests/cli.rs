@@ -13332,6 +13332,70 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
 /// time (`role/fs#N`, every runner failing its Nth): each run ends, a runner
 /// that failed saying so, and never panics; the sweep stops at the first N no
 /// runner reached, and a run with no fault then succeeds. How many it made.
+/// A project's label, the fixture that writes it, and the command it runs.
+type LanguageRun = (&'static str, fn(&Project), Vec<String>);
+
+/// A run of each language refuses a source root that is not there and a
+/// timeout that is no number of milliseconds, before it measures anything.
+/// A Rust run reads no timeout of its own.
+#[test]
+fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout() {
+    let python = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    let mut runs: Vec<LanguageRun> = vec![
+        (
+            "refuse-js",
+            javascript_project,
+            vec!["--".into(), "node".into(), "--test".into()],
+        ),
+        (
+            "refuse-py",
+            python_project,
+            python.iter().map(|part| part.to_string()).collect(),
+        ),
+        (
+            "refuse-rs",
+            small_crate,
+            ["--", "cargo", "test", "-q"].map(String::from).to_vec(),
+        ),
+    ];
+    if let Some(go) = go() {
+        runs.push((
+            "refuse-go",
+            go_project,
+            vec!["--".into(), go.into(), "test".into(), "./...".into()],
+        ));
+    }
+    #[cfg(unix)]
+    if let Some(ruby) = ruby() {
+        runs.push((
+            "refuse-rb",
+            ruby_project,
+            vec!["--".into(), ruby, "-Ilib".into(), "test/w_test.rb".into()],
+        ));
+    }
+    for (label, write, command) in runs {
+        let project = Project::empty(label);
+        write(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let command = command.iter().map(String::as_str).collect::<Vec<_>>();
+        for (name, value) in [
+            ("SUPERCOV_SOURCE_ROOTS", "missing"),
+            ("SUPERCOV_COMMAND_TIMEOUT_MS", "soon"),
+        ] {
+            if label == "refuse-rs" && name == "SUPERCOV_COMMAND_TIMEOUT_MS" {
+                continue;
+            }
+            let ran = project.supercov_with(&command, &[(name, value)]);
+            let said = ran.stderr();
+            assert!(!said.contains("panicked at"), "{label} {name}: {said}");
+            assert_ne!(ran.code(), 0, "{label} {name}: {said}");
+        }
+    }
+}
+
 /// A Python or Ruby run measured under the source roots it was given is
 /// read back under the same roots, and is current while the project is.
 #[test]
