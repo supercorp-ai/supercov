@@ -760,13 +760,13 @@ fn line_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
         return Vec::new();
     }
     let mut lines = vec![String::new(), "Assertions".into()];
-    for statement in &statements {
+    lines.extend(statements.iter().map(|statement| {
         let test = statement["test"]["name"].as_str().unwrap_or("no test");
         let likely = statement["answer"]
             .as_f64()
             .map(|p| format!(", {:.0}% likely to fail", p * 100.0))
             .unwrap_or_default();
-        lines.push(if statement["asserted"] == true {
+        if statement["asserted"] == true {
             format!(
                 "  Asserted: `{}`; {test} is judged to fail if it changes ({}{likely})",
                 statement["text"].as_str().unwrap_or(""),
@@ -778,8 +778,8 @@ fn line_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
                 statement["text"].as_str().unwrap_or(""),
                 statement["change"].as_str().unwrap_or("")
             )
-        });
-    }
+        }
+    }));
     lines.push(format!(
         "  Inspect: {}",
         a["inspect"].as_str().unwrap_or("")
@@ -1101,28 +1101,31 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             }
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);
-                for kind in data.coverage_by_kind.iter().filter(|kind| kind.tests > 0) {
-                    if kind.attributed == 0 {
-                        lines.push(format!(
+                data.coverage_by_kind
+                    .iter()
+                    .filter(|kind| kind.tests > 0)
+                    .for_each(|kind| {
+                        if kind.attributed == 0 {
+                            lines.push(format!(
                             "  {:<12} {:>4} test(s)  coverage not attributable; counted run-wide",
                             kind.kind.as_deref().unwrap_or("unknown"),
                             kind.tests,
                         ));
-                        continue;
-                    }
-                    lines.push(format!(
-                        "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}{}",
-                        kind.kind.as_deref().unwrap_or("unknown"),
-                        kind.tests,
-                        share(kind.summary.lines.percentage, kind.summary.lines.total),
-                        share(
-                            kind.summary.branches.percentage,
-                            kind.summary.branches.total
-                        ),
-                        share(kind.summary.condition_coverage_pct, kind.summary.conditions),
-                        unattributed_note(kind),
-                    ));
-                }
+                            return;
+                        }
+                        lines.push(format!(
+                            "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}{}",
+                            kind.kind.as_deref().unwrap_or("unknown"),
+                            kind.tests,
+                            share(kind.summary.lines.percentage, kind.summary.lines.total),
+                            share(
+                                kind.summary.branches.percentage,
+                                kind.summary.branches.total
+                            ),
+                            share(kind.summary.condition_coverage_pct, kind.summary.conditions),
+                            unattributed_note(kind),
+                        ));
+                    });
                 // One kind of test at 35.83% under a run total of 41.58%
                 // read as two answers to one question. The rest ran while no
                 // test was running, and the rows now say so.
@@ -1281,7 +1284,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             ]);
             if !data.diagnostics.is_empty() {
                 lines.extend([String::new(), "Warnings".into()]);
-                for diagnostic in &data.diagnostics {
+                data.diagnostics.iter().for_each(|diagnostic| {
                     lines.extend(diagnostic_lines(
                         diagnostic,
                         Some(&coverage_command(
@@ -1290,7 +1293,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             "tests without-evidence",
                         )),
                     ));
-                }
+                });
             }
             if !data.hints.is_empty() {
                 lines.extend([String::new(), "Hints".into()]);
@@ -1727,9 +1730,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     }
                     if !data.anchored.is_empty() {
                         lines.extend([String::new(), "Coverage details".into()]);
-                        for anchor in &data.anchored {
-                            lines.extend(render_anchor(anchor));
-                        }
+                        lines.extend(data.anchored.iter().flat_map(render_anchor));
                     }
                     if !data.limitations.is_empty() {
                         lines.extend([String::new(), "Measurement limits".into()]);
@@ -1810,9 +1811,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     }
                     if !data.anchored.is_empty() {
                         lines.extend([String::new(), "Coverage details".into()]);
-                        for anchor in &data.anchored {
-                            lines.extend(render_anchor(anchor));
-                        }
+                        lines.extend(data.anchored.iter().flat_map(render_anchor));
                     }
                     if !data.limitations.is_empty() {
                         lines.extend([String::new(), "Measurement limits".into()]);
@@ -2052,7 +2051,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 return lines.join("\n");
             }
             lines.push(String::new());
-            for test in &data.tests {
+            // Some: no test returned above.
+            data.tests.iter().for_each(|test| {
                 // A runner that names a test by its titles alone leaves out
                 // where it is.
                 let place = test
@@ -2078,7 +2078,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ""
                     },
                 ));
-            }
+            });
             lines.push(page_label(page));
             let base = coverage_command(&data.run, request, "tests without-evidence");
             if page.offset + page.returned < page.total {
