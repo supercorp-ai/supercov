@@ -572,6 +572,13 @@ mod tests {
     /// merge, each shard's: a support record of another shape, a declaration
     /// that names no runners and an entry that is not JSON say nothing.
     #[test]
+    fn an_archive_of_nothing_says_nothing_of_what_ran() {
+        let ran = Ran::from_entries(&[], false);
+        assert!(ran.runners.is_none() && ran.playwright.is_none());
+        assert!(ran.measured.is_none() && ran.support.is_none());
+    }
+
+    #[test]
     fn what_a_run_ran_is_read_from_its_entries_or_its_shards() {
         let entry = |path: &str, contents: Value| EvidenceArchiveEntry {
             path: path.into(),

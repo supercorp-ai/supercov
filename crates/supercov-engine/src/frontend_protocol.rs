@@ -327,14 +327,15 @@ pub fn validate_frontend_report_request(
     }
     // A run in which no test ran -- a filter that matched none -- names the
     // runner it asked, and nothing was observed of it or of any other.
-    for runner in runners.keys() {
-        if !observed.contains(runner) && !request.raw_results.is_empty() {
-            return Err(FrontendProtocolError::UnobservedRunner(
-                (*runner).to_owned(),
-            ));
-        }
+    match runners
+        .keys()
+        .find(|runner| !observed.contains(*runner) && !request.raw_results.is_empty())
+    {
+        Some(runner) => Err(FrontendProtocolError::UnobservedRunner(
+            (*runner).to_owned(),
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 pub fn analyze_frontend_results(
