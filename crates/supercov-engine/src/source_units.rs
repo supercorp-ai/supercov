@@ -2612,6 +2612,8 @@ mod tests {
         assert_eq!(x.units[x.unit_at(1, 1)].path, "");
         assert_eq!(x.units[x.unit_at(2, 1)].path, "C");
         assert_eq!(x.units[x.unit_at(4, 5)].path, "C.a");
+        // Past the file's end, nothing holds it but the file's own unit.
+        assert_eq!(x.unit_at(99, 1), 0);
         assert_eq!(
             x.units[x.unit_at(6, 1)].path,
             "C",
