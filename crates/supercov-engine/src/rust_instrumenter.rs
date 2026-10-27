@@ -5542,6 +5542,39 @@ pub fn documented(value: i32) -> i32 {
         );
     }
 
+    /// A tree collected against its source cut short anywhere is refused
+    /// whole, wherever its first range falls past the end.
+    #[test]
+    fn a_tree_collected_against_any_shorter_source_is_refused_whole() {
+        let source = concat!(
+            "pub fn f(a: bool, b: bool, v: &[u8]) -> Option<u8> {\n",
+            "    if a && (b || !a) { return None; }\n",
+            "    for x in v { if *x > 1 { break; } }\n",
+            "    while a { break; }\n",
+            "    let n = match v.len() { 0 => 1, n if n > 2 => 2, _ => 3 };\n",
+            "    let g = |y: u8| y.checked_add(1)?.checked_sub(1);\n",
+            "    let w = if let Some(z) = v.first() && *z > 0 { *z } else { 0 };\n",
+            "    assert!(a || b, \"a or b\");\n",
+            "    Some(g(n)? + w)\n",
+            "}\n",
+        );
+        let tree = SourceFile::parse(source, Edition::Edition2024);
+        assert!(tree.errors().is_empty(), "{:?}", tree.errors());
+        let tree = tree.tree();
+        assert!(
+            RustObligationCollector::new("src/lib.rs", source)
+                .collect(&tree, &[], &[])
+                .is_ok()
+        );
+        for cut in 0..source.trim_end().len() {
+            assert_eq!(
+                RustObligationCollector::new("src/lib.rs", &source[..cut]).collect(&tree, &[], &[]),
+                Err(RustInstrumenterError::InvalidRange),
+                "cut at {cut}"
+            );
+        }
+    }
+
     #[test]
     fn a_collector_given_a_tree_of_other_text_reports_an_invalid_range() {
         let tree = SourceFile::parse("fn f() { work(); }", Edition::Edition2024).tree();
