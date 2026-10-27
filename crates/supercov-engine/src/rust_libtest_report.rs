@@ -80,12 +80,12 @@ fn failure_detail(stdout: &str) -> Option<&str> {
 /// Text without what a terminal reads as colour: on one, libtest writes
 /// `ok` as `ESC[32mokESC(BESC[m`.
 fn plain(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains('\u{1b}') {
+    let Some(mut at) = text.find('\u{1b}') else {
         return text.into();
-    }
+    };
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(at) = rest.find('\u{1b}') {
+    loop {
         out.push_str(&rest[..at]);
         let sequence = &rest[at + 1..];
         let length = match sequence.as_bytes().first() {
@@ -98,6 +98,10 @@ fn plain(text: &str) -> std::borrow::Cow<'_, str> {
             _ => 0,
         };
         rest = &sequence[length..];
+        match rest.find('\u{1b}') {
+            Some(next) => at = next,
+            None => break,
+        }
     }
     out.push_str(rest);
     out.into()
@@ -226,9 +230,9 @@ pub(crate) fn merged_report(reports: &[&str], quiet: bool, known: &[(&str, &str)
         }
         report.push_str("\nfailures:\n");
         failed.sort_unstable();
-        for name in &failed {
+        failed.iter().for_each(|name| {
             let _ = writeln!(report, "    {name}");
-        }
+        });
     }
     let _ = writeln!(
         report,
@@ -370,18 +374,19 @@ pub(crate) fn libtest_report(cases: &[CaseOutput<'_>], quiet: bool) -> String {
     // A terse line is ended by what follows it.
     if !failed.is_empty() {
         report.push_str("\nfailures:\n\n");
-        for detail in &details {
+        // A failed case left its detail.
+        details.iter().for_each(|detail| {
             report.push_str(detail);
             if !detail.ends_with('\n') {
                 report.push('\n');
             }
             report.push('\n');
-        }
+        });
         report.push_str("\nfailures:\n");
         failed.sort_unstable();
-        for name in &failed {
+        failed.iter().for_each(|name| {
             let _ = writeln!(report, "    {name}");
-        }
+        });
     }
     // Each process filtered out every test but its own.
     let filtered = (filtered.unwrap_or(0) + 1).saturating_sub(cases.len());
@@ -428,6 +433,17 @@ mod tests {
         format!(
             "\nrunning 1 test\ntest {name} ... FAILED\n\nfailures:\n\n---- {name} stdout ----\n\nthread '{name}' (7) panicked at src/lib.rs:8:9:\n{message}\n{BACKTRACE_NOTE}\n\nfailures:\n    {name}\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.02s\n\n"
         )
+    }
+
+    /// No report at all is a run of no doctest.
+    #[test]
+    fn no_report_merges_into_a_run_of_nothing() {
+        let report = merged_report(&[], false, &[]);
+        assert!(report.starts_with("\nrunning 0 tests\n"), "{report}");
+        assert!(
+            report.contains("test result: ok. 0 passed; 0 failed"),
+            "{report}"
+        );
     }
 
     #[test]
