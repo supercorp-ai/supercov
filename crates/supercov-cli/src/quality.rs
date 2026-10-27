@@ -3742,35 +3742,40 @@ fn human_security(report: &Value) -> String {
                 "    {lines} line(s) not checked one by one: a request asking about them did not fit beside the code, or was refused\n"
             ));
         }
-        for finding in file["present"].as_array().unwrap_or(&empty) {
-            out.push_str(&format!(
-                "    {:.2}  {}{}\n",
-                finding["value"].as_f64().unwrap_or(0.0),
-                finding["check"].as_str().unwrap_or("?"),
-                if finding["tier"] == "line" {
-                    ""
-                } else {
-                    "  (file-level only)"
-                }
-            ));
-            for line in finding["lines"].as_array().unwrap_or(&empty).iter().take(3) {
+        // A file is shown only with findings.
+        file["present"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .for_each(|finding| {
                 out.push_str(&format!(
-                    "          line {}  {:.2}  {}{}\n",
-                    line["line"].as_u64().unwrap_or(0),
-                    line["value"].as_f64().unwrap_or(0.0),
-                    line["text"]
-                        .as_str()
-                        .unwrap_or("")
-                        .chars()
-                        .take(70)
-                        .collect::<String>(),
-                    match line["enters_at"].as_u64() {
-                        Some(n) => format!("  (enters at line {n})"),
-                        None => String::new(),
+                    "    {:.2}  {}{}\n",
+                    finding["value"].as_f64().unwrap_or(0.0),
+                    finding["check"].as_str().unwrap_or("?"),
+                    if finding["tier"] == "line" {
+                        ""
+                    } else {
+                        "  (file-level only)"
                     }
                 ));
-            }
-        }
+                for line in finding["lines"].as_array().unwrap_or(&empty).iter().take(3) {
+                    out.push_str(&format!(
+                        "          line {}  {:.2}  {}{}\n",
+                        line["line"].as_u64().unwrap_or(0),
+                        line["value"].as_f64().unwrap_or(0.0),
+                        line["text"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(70)
+                            .collect::<String>(),
+                        match line["enters_at"].as_u64() {
+                            Some(n) => format!("  (enters at line {n})"),
+                            None => String::new(),
+                        }
+                    ));
+                }
+            });
         if file["flagged_and_untested"] == true {
             out.push_str(&format!(
                 "    and {} of its measured lines are not covered by the run\n",
@@ -3825,7 +3830,8 @@ fn human_security(report: &Value) -> String {
     let paths = report["paths"].as_array().unwrap_or(&empty);
     if !paths.is_empty() {
         out.push_str(&format!("\nCross-file paths confirmed: {}\n", paths.len()));
-        for path in paths.iter().take(10) {
+        // Only where there are paths.
+        paths.iter().take(10).for_each(|path| {
             out.push_str(&format!(
                 "  {:.2}  {}{}  {}:{} {} -> {}:{} {}\n",
                 path["value"].as_f64().unwrap_or(0.0),
@@ -3842,7 +3848,7 @@ fn human_security(report: &Value) -> String {
                 path["callee"]["line"].as_u64().unwrap_or(0),
                 path["callee"]["function"].as_str().unwrap_or("?"),
             ));
-        }
+        });
         if paths.len() > 10 {
             out.push_str(&format!("  ... and {} more\n", paths.len() - 10));
         }
@@ -3867,7 +3873,8 @@ fn human_security(report: &Value) -> String {
             continue;
         }
         out.push_str(&format!("{} {heading}:\n", not_asked.len()));
-        for path in not_asked.iter().take(5) {
+        // Only where some were not asked.
+        not_asked.iter().take(5).for_each(|path| {
             out.push_str(&format!(
                 "  {}:{} {} -> {}:{} {}\n",
                 path["caller"]["file"].as_str().unwrap_or("?"),
@@ -3877,7 +3884,7 @@ fn human_security(report: &Value) -> String {
                 path["callee"]["line"].as_u64().unwrap_or(0),
                 path["callee"]["function"].as_str().unwrap_or("?"),
             ));
-        }
+        });
         if not_asked.len() > 5 {
             out.push_str(&format!("  ... and {} more\n", not_asked.len() - 5));
         }
@@ -3955,13 +3962,14 @@ fn human_patch(report: &Value, limit: usize) -> String {
         if basis != "both versions" {
             out.push_str(&format!("  ({basis})\n"));
         }
-        for finding in fired {
+        // Only a file where something fired is shown.
+        fired.iter().for_each(|finding| {
             out.push_str(&format!(
                 "  {:.2}  {}\n",
                 finding["value"].as_f64().unwrap_or(0.0),
                 finding["check"].as_str().unwrap_or("?")
             ));
-        }
+        });
         out.push('\n');
     }
     if files.len() > shown {

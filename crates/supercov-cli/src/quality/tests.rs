@@ -3582,6 +3582,24 @@ fn reports_render_whatever_they_hold() {
             human_patch(report, limit);
         }
     }
+    // A review of changed files, some reviewed, one failed, one refused.
+    for patch in [
+        serde_json::json!({"reviewed_files": 2, "introduced": 1, "files": []}),
+        serde_json::json!({
+            "reviewed_files": 1, "introduced": 0, "skipped": [{}],
+            "files": [
+                {"status": "failed", "path": "a.js", "error": "HTTP 400"},
+                {"path": "b.js", "present": []},
+                {"path": "c.js", "present": [finding("x")], "basis": "the new version only",
+                 "untested_and_changed": true, "coverage": {"uncovered_lines": 3}},
+                {"path": "d.js", "present": [finding("y")]}
+            ]
+        }),
+    ] {
+        for limit in [0, 2] {
+            human_patch(&patch, limit);
+        }
+    }
     let security = human_security(&full);
     assert!(
         security.contains("2 line(s) not checked one by one"),
