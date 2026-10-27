@@ -5256,7 +5256,10 @@ mod tests {
                     "events": events.iter().map(|(id, phase)| serde_json::json!({
                         "type": "hit", "id": id, "timestampMs": 0, "phaseId": phase, "environment": "server"
                     })).collect::<Vec<_>>()
-                }]
+                }],
+                "server": events.iter().map(|(id, phase)| serde_json::json!({
+                    "type": "hit", "id": format!("server-{id}"), "phaseId": phase
+                })).collect::<Vec<_>>()
             }))
             .unwrap()
         };
@@ -5266,6 +5269,13 @@ mod tests {
             record("passed", &[("third", "t-0:assertion:1")]),
         ];
         separate_repeated_executions(&mut results);
+        // A server record of each execution follows its phase's new name.
+        for raw in &results {
+            assert_eq!(
+                raw.server[0].phase_id, raw.runtime[0].events[0].phase_id,
+                "{raw:?}"
+            );
+        }
         let ids = |raw: &RawTestResult| {
             raw.phases
                 .iter()
