@@ -4083,6 +4083,18 @@ mod tests {
             create_coverage_view(&unscoped, &[raw("test", 0, "passed", &[])], "time").unwrap();
         assert_eq!(view.summary.statements.total, 1);
         assert!(view.scope.is_none());
+        // An empty scope lists the file all the same.
+        let listed = whole_files_unmeasured(&manifest(serde_json::json!({"entries": []}))).unwrap();
+        assert_eq!(listed.scope.unwrap()["entries"][0]["file"], "w.rs");
+        // A note that does not say which file, or why, leaves every file in.
+        let mut unnamed = manifest(serde_json::json!({"entries": []}));
+        unnamed.limitations = vec![
+            serde_json::json!({"wholeFile": true, "reason": "x"}),
+            serde_json::json!({"wholeFile": true, "file": 1, "reason": "x"}),
+            serde_json::json!({"wholeFile": true, "file": "w.rs"}),
+            serde_json::json!({"wholeFile": true, "file": "w.rs", "reason": 1}),
+        ];
+        assert!(whole_files_unmeasured(&unnamed).is_none());
     }
 
     #[test]
@@ -4267,6 +4279,13 @@ mod tests {
             }
         };
         assert_eq!(read(record(None, Some(vector.clone()))), "missing meta");
+        assert_eq!(
+            read(ServerRecord {
+                record_type: "hit".into(),
+                ..record(None, None)
+            }),
+            "missing hit id"
+        );
         assert_eq!(
             read(record(
                 Some(meta("decision", "src/app.js", "left && right")),
