@@ -3035,6 +3035,190 @@ mod tests {
         }
     }
 
+    /// Recovering abandoned runs refuses each step that fails: its lock's
+    /// directory and lock, a state it cannot read, and each removal and
+    /// update a run it recovers needs.
+    #[test]
+    fn recovering_runs_refuses_each_step_that_fails() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let work = |root: &Path| root.join(".supercov/work").join(id);
+        let abandoned = |root: &Path| {
+            write_run_state(root, &state(root, id, RunStateStatus::Testing, u32::MAX)).unwrap();
+        };
+        let published = |root: &Path, status: RunStateStatus| {
+            let (evidence, metadata) = analysable_evidence(root, id);
+            publish_run(root, &metadata, &evidence).unwrap();
+            write_run_state(root, &state(root, id, status, u32::MAX)).unwrap();
+            fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+        };
+        // A project's state made before the step under test, and its fault.
+        type Case<'a> = (&'a dyn Fn(&Path), &'a str);
+        let cases: [Case; 10] = [
+            (&|_| {}, "fs.create_dir_all"),
+            (&|_| {}, "fs.open_with"),
+            (
+                &|root| {
+                    fs::create_dir_all(work(root)).unwrap();
+                    fs::write(work(root).join("state.json"), "not json").unwrap();
+                },
+                "",
+            ),
+            // A finished run whose leftovers cannot go.
+            (
+                &|root| published(root, RunStateStatus::Complete),
+                "fs.rename",
+            ),
+            // A run whose process is gone: its copy, its staging, a published
+            // run's leftovers, its evidence, its state, its work directory.
+            (
+                &|root| {
+                    abandoned(root);
+                    fs::create_dir_all(work(root).join(root.file_name().unwrap())).unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| {
+                    abandoned(root);
+                    fs::create_dir_all(work(root).join("run-publication")).unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| published(root, RunStateStatus::Testing),
+                "fs.rename",
+            ),
+            (
+                &|root| {
+                    abandoned(root);
+                    fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+                },
+                "fs.rename",
+            ),
+            // The recover lock is the first file made, the state the second.
+            (&abandoned, "fs.open_with@2"),
+            (&abandoned, "fs.rename@2"),
+        ];
+        for (number, (setup, fault)) in cases.into_iter().enumerate() {
+            let root = project();
+            setup(&root);
+            let recovered = crate::fault::during(fault, || recover_abandoned_runs(&root, "now"));
+            assert!(recovered.is_err(), "case {number} {fault}: {recovered:?}");
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Cleaning storage refuses each step that fails: a store directory it
+    /// cannot list, a state it cannot read, and each removal -- a work
+    /// directory, evidence, a run, kept evidence, the caches -- and the
+    /// recovery and release around it.
+    #[test]
+    fn cleaning_storage_refuses_each_step_that_fails() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let full = CleanupOptions {
+            keep: 0,
+            dry_run: false,
+        };
+        let a_file_at = |path: &'static str| {
+            move |root: &Path| {
+                fs::create_dir_all(root.join(".supercov")).unwrap();
+                fs::write(root.join(path), "").unwrap();
+            }
+        };
+        let runs_file = a_file_at(".supercov/runs");
+        let work_file = a_file_at(".supercov/work");
+        let evidence_file = a_file_at(".supercov/evidence");
+        // A project's state made before the step under test, and its fault.
+        type Case<'a> = (&'a dyn Fn(&Path), &'a str);
+        let cases: [Case; 9] = [
+            (&runs_file, ""),
+            (&work_file, ""),
+            (&evidence_file, ""),
+            (
+                &|root| {
+                    fs::create_dir_all(root.join(".supercov/work").join(id)).unwrap();
+                    fs::write(root.join(".supercov/work").join(id).join("state.json"), "{")
+                        .unwrap();
+                },
+                "",
+            ),
+            (
+                &|root| {
+                    write_run_state(root, &state(root, id, RunStateStatus::Complete, u32::MAX))
+                        .unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap(),
+                "fs.rename",
+            ),
+            (
+                &|root| {
+                    let (evidence, metadata) = analysable_evidence(root, id);
+                    publish_run(root, &metadata, &evidence).unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| fs::create_dir_all(root.join(FAILED_EVIDENCE).join(id)).unwrap(),
+                "fs.rename",
+            ),
+            (
+                &|root| fs::create_dir_all(root.join(".supercov/cache")).unwrap(),
+                "fs.rename",
+            ),
+        ];
+        for (number, (setup, fault)) in cases.into_iter().enumerate() {
+            let root = project();
+            setup(&root);
+            let cleaned = crate::fault::during(fault, || cleanup_storage_locked(&root, full, true));
+            assert!(cleaned.is_err(), "case {number} {fault}: {cleaned:?}");
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+        // Around the cleaning: recovery's directory (after the lock's own),
+        // and the release.
+        for fault in ["fs.create_dir_all@2", "fs.remove_file"] {
+            let root = project();
+            let cleaned = crate::fault::during(fault, || clean_storage(&root, full, "now"));
+            assert!(cleaned.is_err(), "{fault}: {cleaned:?}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Keeping a failed run's evidence keeps nothing, and leaves nothing,
+    /// when a step of the copy fails; listing run directories refuses a
+    /// store that is a link and an entry whose type cannot be read.
+    #[cfg(unix)]
+    #[test]
+    fn keeping_evidence_and_listing_runs_refuse_what_fails() {
+        let root = project();
+        let evidence = root.join("evidence");
+        fs::create_dir_all(evidence.join("nested")).unwrap();
+        fs::write(evidence.join("nested/record"), "x").unwrap();
+        let id = "2026-01-01T00-00-00-100Z";
+        for fault in [
+            "fs.create_dir_all",
+            "fs.read_dir",
+            "fs.file_type",
+            "fs.create_dir_all@2",
+            "fs.read_dir@2",
+        ] {
+            let kept = crate::fault::during(fault, || keep_failed_evidence(&root, &evidence, id));
+            assert!(kept.is_none(), "{fault}");
+            assert!(!root.join(FAILED_EVIDENCE).join(id).exists(), "{fault}");
+        }
+        let runs = root.join(".supercov/runs");
+        fs::create_dir_all(runs.join(id)).unwrap();
+        assert!(crate::fault::during("fs.file_type", || child_directories(&runs)).is_err());
+        let linked = root.join(".supercov/linked");
+        std::os::unix::fs::symlink(&runs, &linked).unwrap();
+        assert!(child_directories(&linked).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Taking a project's lock refuses each step that fails: its directory,
     /// the store's lock, the copy's lock, and its owner's name written; and
     /// a release that cannot remove that name.
