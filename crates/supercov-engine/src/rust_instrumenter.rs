@@ -2175,9 +2175,14 @@ fn instrument_let_chain(
         if !matches!(binary.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And))) {
             continue;
         }
-        let (Some(left), Some(right)) = (binary.lhs(), binary.rhs()) else {
-            continue;
-        };
+        let (left, right) = (
+            binary
+                .lhs()
+                .expect("a tree parsed without errors has every part its syntax requires"),
+            binary
+                .rhs()
+                .expect("a tree parsed without errors has every part its syntax requires"),
+        );
         if !has_let(&left) {
             continue;
         }
@@ -2705,9 +2710,9 @@ fn numbered_file(
     }
 
     for closure in root.descendants().filter_map(ast::ClosureExpr::cast) {
-        let Some(body) = closure.body() else {
-            continue;
-        };
+        let body = closure
+            .body()
+            .expect("a tree parsed without errors has every part its syntax requires");
         if cannot_carry_probe(body.syntax()) {
             continue;
         }
@@ -2741,9 +2746,9 @@ fn numbered_file(
         if cannot_carry_probe(expression.syntax()) {
             continue;
         }
-        let Some(list) = expression.match_arm_list() else {
-            continue;
-        };
+        let list = expression
+            .match_arm_list()
+            .expect("a tree parsed without errors has every part its syntax requires");
         let arms = list.arms().collect::<Vec<_>>();
         if arms.is_empty() {
             continue;
@@ -2773,9 +2778,9 @@ fn numbered_file(
             format!(" const {table}: &[u32] = &[{entries}];"),
         );
         for (index, arm) in arms.iter().enumerate() {
-            let Some(body) = arm.expr() else {
-                continue;
-            };
+            let body = arm
+                .expr()
+                .expect("a tree parsed without errors has every part its syntax requires");
             let call = format!("{runtime_path}::arms({table}, {index});");
             match &body {
                 ast::Expr::BlockExpr(block) if plain_block(block) => {
@@ -2805,9 +2810,14 @@ fn numbered_file(
         if cannot_carry_probe(binary.syntax()) {
             continue;
         }
-        let (Some(left), Some(right)) = (binary.lhs(), binary.rhs()) else {
-            continue;
-        };
+        let (left, right) = (
+            binary
+                .lhs()
+                .expect("a tree parsed without errors has every part its syntax requires"),
+            binary
+                .rhs()
+                .expect("a tree parsed without errors has every part its syntax requires"),
+        );
         // In a let chain the left operand is (or holds) a `let`, whose
         // bindings must stay in scope for the right operand; it cannot pass
         // through a call. The chain's own probes record that operator.
@@ -2841,9 +2851,9 @@ fn numbered_file(
         if cannot_carry_probe(expression.syntax()) {
             continue;
         }
-        let Some(iterable) = expression.iterable() else {
-            continue;
-        };
+        let iterable = expression
+            .iterable()
+            .expect("a tree parsed without errors has every part its syntax requires");
         let id = stable_id(file, "branch", expression.syntax().text_range(), "for-loop");
         // A loop that cannot be empty has no zero-iterations outcome: the
         // adapter is given its entry ordinal for both, and the first is
@@ -2913,9 +2923,9 @@ fn numbered_file(
         if cannot_carry_probe(expression.syntax()) {
             continue;
         }
-        let Some(operand) = expression.expr() else {
-            continue;
-        };
+        let operand = expression
+            .expr()
+            .expect("a tree parsed without errors has every part its syntax requires");
         let id = stable_id(
             file,
             "branch",
@@ -2939,9 +2949,9 @@ fn numbered_file(
     }
 
     for expression in root.descendants().filter_map(ast::IfExpr::cast) {
-        let Some(condition) = expression.condition() else {
-            continue;
-        };
+        let condition = expression
+            .condition()
+            .expect("a tree parsed without errors has every part its syntax requires");
         if has_let(&condition) {
             if !cannot_carry_probe(condition.syntax()) {
                 instrument_let_chain(
@@ -2966,9 +2976,9 @@ fn numbered_file(
         );
     }
     for expression in root.descendants().filter_map(ast::WhileExpr::cast) {
-        let Some(condition) = expression.condition() else {
-            continue;
-        };
+        let condition = expression
+            .condition()
+            .expect("a tree parsed without errors has every part its syntax requires");
         if has_let(&condition) {
             if !cannot_carry_probe(condition.syntax()) {
                 instrument_let_chain(
