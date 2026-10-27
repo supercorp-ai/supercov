@@ -13367,6 +13367,17 @@ fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout() {
             vec!["--".into(), go.into(), "test".into(), "./...".into()],
         ));
     }
+    if std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        runs.push((
+            "refuse-mvn",
+            small_maven_project,
+            ["--", "mvn", "-q", "test"].map(String::from).to_vec(),
+        ));
+    }
     #[cfg(unix)]
     if let Some(ruby) = ruby() {
         runs.push((
