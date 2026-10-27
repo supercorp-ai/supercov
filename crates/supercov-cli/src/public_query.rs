@@ -755,6 +755,45 @@ pub fn parse_public_query(
 
 #[cfg(test)]
 mod tests {
+    /// Each query's help names its own usage; an unknown one, the list.
+    #[test]
+    fn each_query_s_help_is_its_own_usage() {
+        let help = |child: &str| {
+            help_for(
+                "runs",
+                &["latest".to_owned(), child.to_owned(), "--help".to_owned()],
+            )
+            .unwrap()
+        };
+        for child in [
+            "summary",
+            "files",
+            "gaps",
+            "tests-without-evidence",
+            "kinds",
+            "runners",
+            "scope",
+            "file",
+            "decision",
+            "line",
+            "test",
+            "minimize",
+        ] {
+            let usage = help(child);
+            let named = if child == "summary" {
+                "[--filter"
+            } else {
+                child.split('-').next().unwrap()
+            };
+            assert!(
+                usage.starts_with("Usage: supercov runs <run-id> "),
+                "{child}: {usage}"
+            );
+            assert!(usage.contains(named), "{child}: {usage}");
+        }
+        assert_eq!(help("unknown"), "Usage: supercov runs <run-id> --help\n");
+    }
+
     use super::*;
 
     fn args(values: &[&str]) -> Vec<String> {
