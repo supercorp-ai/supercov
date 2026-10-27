@@ -1836,6 +1836,41 @@ mod replacement_tests {
     /// constructor or a crate function, a method of a crate type, `Self`,
     /// a block, a `match` or an `if`, a literal, a record and a closure.
     /// Every one is given a replacement, and none is the value itself.
+    /// Values whose type cannot be read off their shape -- an empty block,
+    /// branches with no value, a call of a closure, a record of no known
+    /// type, a method of an unknown receiver -- are changed, where they are
+    /// at all, to something else.
+    #[test]
+    fn values_of_no_readable_type_are_changed_to_something_else_or_not_at_all() {
+        let source = r#"impl Unit {
+    fn odd(&self, n: u32, f: fn() -> u32) -> u32 {
+        let a = {};
+        let b = if n > 1 {} else {};
+        let c = (|| 1u32)();
+        let d = Unknown { x: 1 };
+        let e = unknown.call(n);
+        let g = f()?;
+        let h = Self::Value;
+        let i = match n {};
+        let j = (unknown)(n);
+        let k = Self { n };
+        n
+    }
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let changes = replacements("src/lib.rs", source, &signatures);
+        for (line, line_changes) in &changes {
+            let text = source.lines().nth(*line - 1).unwrap_or("");
+            for (_, changed) in line_changes {
+                assert!(
+                    !text.contains(&format!("= {changed};")),
+                    "{text} -> {changed}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn values_of_every_inferred_shape_are_replaced_by_others() {
         let source = r#"pub struct Point {
