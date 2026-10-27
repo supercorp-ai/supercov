@@ -1004,9 +1004,16 @@ fn assess_changed(
 
 /// `assess --changed`'s saved answers for a run, if any.
 pub(crate) fn impact(run: &StoredRun) -> Option<Value> {
-    supercov_engine::fault_fs::read(run.directory.join(IMPACT_FILE))
+    stored(&run.directory.join(IMPACT_FILE))
+}
+
+/// A result saved beside a run. One that does not read as a JSON object,
+/// edited or cut short, is none at all: it is asked again.
+fn stored(path: &Path) -> Option<Value> {
+    supercov_engine::fault_fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(Value::is_object)
 }
 
 fn send_all(
@@ -1336,9 +1343,7 @@ fn narrow_result(
 }
 
 pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
-    supercov_engine::fault_fs::read(run.directory.join(RESULT_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    stored(&run.directory.join(RESULT_FILE))
 }
 
 /// The lines of the statements judged asserted in a run, by file; `None`
@@ -1429,11 +1434,7 @@ fn read(run: &StoredRun, runs: &[StoredRun], options: &Options) -> Result<Value,
         // An assessment of exactly these tests, else the whole one read for
         // them; the filter is checked against the run either way.
         let picked = crate::picked_tests(run, &options.filter)?;
-        let own = supercov_engine::fault_fs::read(
-            run.directory.join(filtered_result_file(&options.filter)),
-        )
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let own = stored(&run.directory.join(filtered_result_file(&options.filter)));
         let result = match own {
             Some(result) => Some(result),
             None => saved(run)
@@ -1514,16 +1515,14 @@ fn view(
     offset: usize,
     limit: Option<usize>,
 ) -> Result<Value, String> {
-    let all = result["statements"]
-        .take()
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
     let run = result["run"].as_str().unwrap_or("").to_owned();
     let data = result
         .as_object_mut()
-        .ok_or("the saved assessment is not a JSON object")?;
-    data.remove("statements");
+        .expect("a saved assessment is read only as an object");
+    let all = data
+        .remove("statements")
+        .and_then(|statements| statements.as_array().cloned())
+        .unwrap_or_default();
     match target {
         Target::Overview | Target::Weak => {
             let by_weak = *target == Target::Weak;

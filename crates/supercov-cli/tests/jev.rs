@@ -335,6 +335,40 @@ fn an_assessment_sends_no_more_than_its_estimate_says_it_can() {
     );
 }
 
+/// A saved assessment edited by hand: statements missing their place are
+/// left out of a narrowed view, and one that is no object is none at all.
+#[test]
+fn a_saved_assessment_edited_by_hand_is_read_or_ignored() {
+    let project = Project::cart("assess-edited");
+    let run = project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let saved = project
+        .root
+        .join(".supercov/runs")
+        .join(&run)
+        .join("assertion-coverage.json");
+    let mut result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+    let statements = result["statements"].as_array_mut().unwrap();
+    statements[0].as_object_mut().unwrap().remove("file");
+    statements[1].as_object_mut().unwrap().remove("line");
+    std::fs::write(&saved, result.to_string()).unwrap();
+    let narrowed = project
+        .supercov(&["runs", &run, "assertions", "--title", "total", "--all"])
+        .succeeds();
+    assert!(!narrowed.is_empty());
+    std::fs::write(&saved, "[]").unwrap();
+    for narrowing in [&[][..], &["--title", "total"][..]] {
+        let unread = project
+            .supercov(&[&["runs", &run, "assertions", "--json"][..], narrowing].concat())
+            .json();
+        assert_eq!(unread["data"]["assessed"], false, "{narrowing:?}: {unread}");
+    }
+}
+
 /// An assessment of each kind, once for each place in the code that makes a
 /// file operation, with that place's first call failing: it may stop, but
 /// says why and never panics, and the one no fault reaches succeeds.

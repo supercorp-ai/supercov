@@ -14483,6 +14483,17 @@ fn source_and_check_refuse_what_they_cannot_read() {
         "{}",
         large.stdout()
     );
+    // An assertions listing halved down to one entry that still cannot fit.
+    let assertions = project.supercov_with(
+        &["runs", "latest", "assertions", "--json"],
+        &[("SUPERCOV_TEST_FAULT", "reply-too-large")],
+    );
+    assert_eq!(assertions.code(), 2, "{}", assertions.stdout());
+    assert!(
+        assertions.stdout().contains("RESPONSE_TOO_LARGE"),
+        "{}",
+        assertions.stdout()
+    );
     // A diff narrowed by a title keeps the narrowing in its paging.
     let older = project.latest();
     project.measure(&[]);
