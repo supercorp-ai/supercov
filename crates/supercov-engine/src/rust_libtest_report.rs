@@ -24,13 +24,20 @@ pub(crate) fn write_reports(
     diagnostics: &mut dyn std::io::Write,
     reports: &[Announced],
 ) -> std::io::Result<()> {
-    use std::io::Write as _;
+    write_reports_to(diagnostics, &mut std::io::stdout().lock(), reports)
+}
+
+/// [`write_reports`], each report to `output`.
+fn write_reports_to(
+    diagnostics: &mut dyn std::io::Write,
+    output: &mut dyn std::io::Write,
+    reports: &[Announced],
+) -> std::io::Result<()> {
     for announced in reports {
         if let Some(heading) = &announced.heading {
             writeln!(diagnostics, "{heading}")?;
             diagnostics.flush()?;
         }
-        let mut output = std::io::stdout().lock();
         output.write_all(announced.report.as_bytes())?;
         output.flush()?;
     }
@@ -436,6 +443,77 @@ mod tests {
     }
 
     /// No report at all is a run of no doctest.
+    /// A stream that takes `writes` writes and then refuses them, and
+    /// refuses to flush when `flushes` is false.
+    struct Refusing {
+        writes: usize,
+        flushes: bool,
+    }
+
+    impl std::io::Write for Refusing {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self.writes == 0 {
+                return Err(std::io::Error::other("closed"));
+            }
+            self.writes -= 1;
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.flushes {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("closed"))
+            }
+        }
+    }
+
+    /// A report whose heading or text cannot be written, or not flushed,
+    /// says so rather than going on.
+    #[test]
+    fn a_report_that_cannot_be_written_says_so() {
+        let reports = [Announced {
+            heading: Some("     Running tests".into()),
+            report: "ok\n".into(),
+        }];
+        let write = |diagnostics: Refusing, output: Refusing| {
+            let (mut diagnostics, mut output) = (diagnostics, output);
+            write_reports_to(&mut diagnostics, &mut output, &reports).is_ok()
+        };
+        let fine = || Refusing {
+            writes: usize::MAX,
+            flushes: true,
+        };
+        assert!(write(fine(), fine()));
+        assert!(!write(
+            Refusing {
+                writes: 0,
+                flushes: true
+            },
+            fine()
+        ));
+        assert!(!write(
+            Refusing {
+                writes: usize::MAX,
+                flushes: false
+            },
+            fine()
+        ));
+        assert!(!write(
+            fine(),
+            Refusing {
+                writes: 0,
+                flushes: true
+            }
+        ));
+        assert!(!write(
+            fine(),
+            Refusing {
+                writes: usize::MAX,
+                flushes: false
+            }
+        ));
+    }
+
     #[test]
     fn no_report_merges_into_a_run_of_nothing() {
         let report = merged_report(&[], false, &[]);
