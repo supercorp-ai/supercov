@@ -186,7 +186,7 @@ a_test_file_whose_tests_were_never_asked_is_not_read_as_asserting_nothing	0.5	0.
 a_test_is_affected_by_a_helper_its_file_loads	0.7	0.9
 a_test_main_inside_an_unparseable_file_is_not_declared_twice	0.1	0.1
 a_test_over_jev_s_limit_is_left_unasked_and_counted	16.3	5.9
-a_test_runner_whose_file_operation_fails_says_so	24.0	15.1
+a_test_runner_whose_file_operation_fails_says_so	45.0	30.0
 a_test_runner_whose_program_cannot_start_says_so	30.0	60.0
 a_test_that_ran_alongside_others_is_undetermined_and_a_new_file_asks_for_the_whole_suite	1.5	0.9
 a_testng_suite_is_attributed_through_its_own_lifecycle	61.8	25.4
