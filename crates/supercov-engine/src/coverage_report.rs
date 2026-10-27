@@ -4457,6 +4457,21 @@ mod tests {
             Err(ReportError::InvalidServerRecord(reason))
                 if reason.contains("differs from the frozen manifest")
         ));
+
+        // A vector of fewer conditions than its decision has is no reading
+        // of it.
+        let mut narrow = raw("test", 0, "passed", &[]);
+        narrow.runtime[0].decisions.push(DecisionSnapshot {
+            meta: manifest.decisions[0].clone(),
+            vectors: vec![McdcVector {
+                values: vec![Some(true)],
+                outcome: true,
+            }],
+        });
+        assert!(matches!(
+            create_coverage_view(&manifest, &[narrow], "time"),
+            Err(ReportError::DecisionAnalysis { .. })
+        ));
     }
 
     #[test]
