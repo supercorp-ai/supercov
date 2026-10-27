@@ -221,6 +221,10 @@ fn unique() -> String {
     )
 }
 
+/// A project a lock is taken on is a directory with a name: the lock refuses
+/// any other root.
+const NAMED: &str = "a locked project has a name";
+
 fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
     root.file_name()
         .ok_or_else(|| WorkspaceError::UnsafePath(root.into()))
@@ -229,35 +233,32 @@ fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
 /// The git repository a project is a directory of, when it is not the
 /// repository itself: a package in a monorepo. None for a project inside one
 /// of Supercov's own copies, which is never laid out again.
-fn enclosing_repository(root: &Path) -> Option<&Path> {
+fn enclosing_repository(root: &Path) -> Option<(&Path, &Path)> {
     let repository = root
         .ancestors()
         .skip(1)
-        .find(|directory| directory.join(".git").exists())?;
-    let relative = root.strip_prefix(repository).ok()?;
+        .find(|directory| directory.file_name().is_some() && directory.join(".git").exists())?;
+    let relative = root.strip_prefix(repository);
+    let relative = relative.expect("a root is under its ancestors");
     if relative
         .components()
         .any(|component| component.as_os_str() == ".supercov")
     {
         return None;
     }
-    Some(repository)
+    Some((repository, relative))
 }
 
 /// Where in a copy directory the project's copy sits: under its own name, or,
 /// for a package of a repository, at its path in the repository, so that
 /// what its suite reaches as `../` is where it is in the checkout.
 fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
-    let Some(repository) = enclosing_repository(root) else {
-        return Ok(PathBuf::from(project_name(root)?));
-    };
-    let name = repository
-        .file_name()
-        .ok_or_else(|| WorkspaceError::UnsafePath(repository.into()))?;
-    let relative = root
-        .strip_prefix(repository)
-        .map_err(|_| WorkspaceError::UnsafePath(root.into()))?;
-    Ok(Path::new(name).join(relative))
+    match enclosing_repository(root) {
+        Some((repository, relative)) => {
+            Ok(Path::new(repository.file_name().expect(NAMED)).join(relative))
+        }
+        None => Ok(PathBuf::from(project_name(root)?)),
+    }
 }
 
 /// Around a package's copy, the rest of its repository: each directory on
@@ -267,53 +268,56 @@ fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
 /// alone. Only the package is copied: what lies outside it is the checkout's,
 /// as when the suite runs there, and `.git` is never shared. Best effort.
 fn link_repository_around(root: &Path, workspace: &Path) {
-    let Some(repository) = enclosing_repository(root) else {
+    let Some((_, relative)) = enclosing_repository(root) else {
         return;
     };
-    let (mut real, mut copy) = (root, workspace);
-    while real != repository {
-        let (Some(real_parent), Some(copy_parent)) = (real.parent(), copy.parent()) else {
-            return;
-        };
-        let Ok(entries) = fs::read_dir(real_parent) else {
-            return;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            // A lockfile is never reached as `../`, and a tool that takes the
-            // topmost one as the root (Next.js) found the repository's twice,
-            // beside the copy and in the checkout above `.supercov`, and
-            // warned of a second lockfile the run alone had.
-            if Some(name.as_os_str()) == real.file_name()
-                || matches!(
-                    name.to_str(),
-                    Some(
-                        ".git"
-                            | ".supercov"
-                            | "package-lock.json"
-                            | "npm-shrinkwrap.json"
-                            | "yarn.lock"
-                            | "pnpm-lock.yaml"
-                            | "bun.lock"
-                            | "bun.lockb"
-                    )
-                )
-            {
-                continue;
-            }
-            let destination = copy_parent.join(&name);
-            if fs::symlink_metadata(&destination).is_ok() {
-                continue;
-            }
-            let target = entry.path();
-            let directory = fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir());
-            // Windows: a file link needs a privilege a junction does not.
-            if create_link(&target, &destination, directory).is_err() && !directory {
-                let _ = fs::copy(&target, &destination);
-            }
-        }
-        (real, copy) = (real_parent, copy_parent);
-    }
+    // Each level from the package up to the repository, beside its copy.
+    let levels = root.ancestors().zip(workspace.ancestors());
+    levels
+        .take(relative.components().count())
+        .for_each(|(real, copy)| {
+            const UNDER: &str = "a level below the repository has a parent";
+            let (real_parent, copy_parent) =
+                (real.parent().expect(UNDER), copy.parent().expect(UNDER));
+            let Ok(entries) = fs::read_dir(real_parent) else {
+                return;
+            };
+            entries
+                .filter_map(Result::ok)
+                // A lockfile is never reached as `../`, and a tool that takes
+                // the topmost one as the root (Next.js) found the repository's
+                // twice, beside the copy and in the checkout above `.supercov`,
+                // and warned of a second lockfile the run alone had.
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    Some(name.as_os_str()) != real.file_name()
+                        && !matches!(
+                            name.to_str(),
+                            Some(
+                                ".git"
+                                    | ".supercov"
+                                    | "package-lock.json"
+                                    | "npm-shrinkwrap.json"
+                                    | "yarn.lock"
+                                    | "pnpm-lock.yaml"
+                                    | "bun.lock"
+                                    | "bun.lockb"
+                            )
+                        )
+                })
+                .for_each(|entry| {
+                    let destination = copy_parent.join(entry.file_name());
+                    if fs::symlink_metadata(&destination).is_ok() {
+                        return;
+                    }
+                    let target = entry.path();
+                    let directory = fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir());
+                    // Windows: a file link needs a privilege a junction does not.
+                    if create_link(&target, &destination, directory).is_err() && !directory {
+                        let _ = fs::copy(&target, &destination);
+                    }
+                });
+        });
 }
 
 pub fn workspace_container(root: &Path) -> PathBuf {
@@ -352,7 +356,8 @@ pub fn planted_cargo_configuration(root: &Path, workspace: &Path) -> Option<Path
     }
     // A repository's own, linked around a package's copy, applies to the
     // checkout too.
-    let repository = enclosing_repository(root).and_then(|path| canonicalize_simplified(path).ok());
+    let repository =
+        enclosing_repository(root).and_then(|(path, _)| canonicalize_simplified(path).ok());
     workspace
         .ancestors()
         .skip(1)
@@ -1088,9 +1093,10 @@ fn link_node_modules<Operations: WorkspaceOperations>(
     Ok(())
 }
 
-fn require_lock(root: &Path, lock: &ProjectLock) -> Result<(), WorkspaceError> {
+/// The copy the lock holds, when it is the project's.
+fn require_lock(root: &Path, lock: &ProjectLock) -> Result<PathBuf, WorkspaceError> {
     if lock.protects(root) {
-        Ok(())
+        Ok(cached_workspace_path(root, lock).expect(NAMED))
     } else {
         Err(WorkspaceError::MissingLock)
     }
@@ -1124,25 +1130,17 @@ pub fn prepare_isolated_workspace(
     Ok(workspace)
 }
 
-fn transaction_prefix(root: &Path, kind: &str) -> Result<String, WorkspaceError> {
-    Ok(format!(
-        ".{}.{}-",
-        project_name(root)?.to_string_lossy(),
-        kind
-    ))
+fn transaction_prefix(root: &Path, kind: &str) -> String {
+    let name = root.file_name().expect(NAMED);
+    format!(".{}.{}-", name.to_string_lossy(), kind)
 }
 
-fn transaction_path(
-    root: &Path,
-    lock: &ProjectLock,
-    kind: &str,
-) -> Result<PathBuf, WorkspaceError> {
-    let workspace = cached_workspace_path(root, lock)?;
-    Ok(workspace.parent().expect("workspace parent").join(format!(
+fn transaction_path(root: &Path, workspace: &Path, kind: &str) -> PathBuf {
+    workspace.parent().expect("workspace parent").join(format!(
         "{}{}",
-        transaction_prefix(root, kind)?,
+        transaction_prefix(root, kind),
         unique()
-    )))
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1157,8 +1155,7 @@ pub fn recover_cached_workspace(
     root: &Path,
     lock: &ProjectLock,
 ) -> Result<CacheRecoveryResult, WorkspaceError> {
-    require_lock(root, lock)?;
-    let workspace = cached_workspace_path(root, lock)?;
+    let workspace = require_lock(root, lock)?;
     let parent = workspace.parent().expect("workspace parent");
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
@@ -1171,8 +1168,8 @@ pub fn recover_cached_workspace(
         }
         Err(error) => return Err(io_error(parent, error)),
     };
-    let staging_prefix = transaction_prefix(root, "staging")?;
-    let previous_prefix = transaction_prefix(root, "previous")?;
+    let staging_prefix = transaction_prefix(root, "staging");
+    let previous_prefix = transaction_prefix(root, "previous");
     let mut staging = Vec::new();
     let mut previous = Vec::new();
     let mut invalid_previous = Vec::new();
@@ -1251,12 +1248,11 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
     reuse_paths: &[PathBuf],
     operations: &mut Operations,
 ) -> Result<PathBuf, WorkspaceError> {
-    require_lock(root, lock)?;
+    let workspace = require_lock(root, lock)?;
     ensure_container(root)?;
     recover_cached_workspace(root, lock)?;
-    let workspace = cached_workspace_path(root, lock)?;
-    let staging = transaction_path(root, lock, "staging")?;
-    let previous = transaction_path(root, lock, "previous")?;
+    let staging = transaction_path(root, &workspace, "staging");
+    let previous = transaction_path(root, &workspace, "previous");
     let result = (|| {
         let canonical_root =
             canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
@@ -2218,8 +2214,7 @@ pub fn prune_cached_workspace_sources(
     root: &Path,
     lock: &ProjectLock,
 ) -> Result<Vec<String>, WorkspaceError> {
-    require_lock(root, lock)?;
-    let workspace = cached_workspace_path(root, lock)?;
+    let workspace = require_lock(root, lock)?;
     if fs::symlink_metadata(&workspace).is_err() {
         return Ok(Vec::new());
     }
@@ -3338,6 +3333,41 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_on_another_project_or_a_root_without_a_name_holds_no_copy() {
+        let (root, other) = (project(), project());
+        let mut lock = ProjectLock::acquire(&other, "run", "now").unwrap();
+        for result in [
+            prepare_isolated_workspace(&root, "run", &lock),
+            prepare_cached_workspace(&root, &lock, &[]),
+            recover_cached_workspace(&root, &lock).map(|_| PathBuf::new()),
+            prune_cached_workspace_sources(&root, &lock).map(|_| PathBuf::new()),
+        ] {
+            assert!(
+                matches!(result, Err(WorkspaceError::MissingLock)),
+                "{result:?}"
+            );
+        }
+        lock.release().unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        assert!(matches!(
+            prepare_isolated_workspace(&root, "..", &lock),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        lock.release().unwrap();
+        let nameless = Path::new("/");
+        assert!(matches!(
+            copy_path(nameless, 1),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            isolated_workspace_path(nameless, "run"),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
     fn everything_supercov_writes_lives_under_the_store() {
         let root = project();
         assert_eq!(
@@ -3643,14 +3673,8 @@ mod tests {
         let workspace = cached_workspace_path(&root, &lock).unwrap();
         let parent = workspace.parent().unwrap();
         fs::create_dir_all(parent).unwrap();
-        let previous = parent.join(format!(
-            "{}old",
-            transaction_prefix(&root, "previous").unwrap()
-        ));
-        let staging = parent.join(format!(
-            "{}new",
-            transaction_prefix(&root, "staging").unwrap()
-        ));
+        let previous = parent.join(format!("{}old", transaction_prefix(&root, "previous")));
+        let staging = parent.join(format!("{}new", transaction_prefix(&root, "staging")));
         fs::create_dir_all(&previous).unwrap();
         fs::write(previous.join("complete"), "yes").unwrap();
         fs::create_dir_all(&staging).unwrap();
@@ -4009,10 +4033,7 @@ mod tests {
         ));
         fs::remove_file(&parent).unwrap();
         fs::create_dir_all(&parent).unwrap();
-        let previous = parent.join(format!(
-            "{}old",
-            transaction_prefix(&root, "previous").unwrap()
-        ));
+        let previous = parent.join(format!("{}old", transaction_prefix(&root, "previous")));
         fs::write(&previous, "not a generation").unwrap();
         let result = recover_cached_workspace(&root, &lock).unwrap();
         assert!(!result.restored_previous);
@@ -4564,20 +4585,15 @@ mod tests {
         let interrupted = || {
             let (root, lock) = varied_project();
             let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
-            let previous = transaction_path(&root, &lock, "previous").unwrap();
+            let previous = transaction_path(&root, &workspace, "previous");
             fs::rename(&workspace, &previous).unwrap();
-            fs::create_dir_all(transaction_path(&root, &lock, "previous").unwrap()).unwrap();
+            fs::create_dir_all(transaction_path(&root, &workspace, "previous")).unwrap();
             fs::write(
-                transaction_path(&root, &lock, "previous").unwrap(),
+                transaction_path(&root, &workspace, "previous"),
                 "not a copy",
             )
             .unwrap();
-            fs::create_dir_all(
-                transaction_path(&root, &lock, "staging")
-                    .unwrap()
-                    .join("src"),
-            )
-            .unwrap();
+            fs::create_dir_all(transaction_path(&root, &workspace, "staging").join("src")).unwrap();
             (root, lock)
         };
         {

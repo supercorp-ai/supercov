@@ -693,6 +693,10 @@ impl ProjectLock {
         alone: bool,
     ) -> Result<Self, LifecycleError> {
         checked_id(run_id)?;
+        // A project is a directory with a name: its copies are named after it.
+        if root.file_name().is_none() {
+            return Err(LifecycleError::UnsafePath(root.into()));
+        }
         let locks = root.join(".supercov/locks");
         reject_linked_ancestors(root, &locks, true)?;
         fs::create_dir_all(&locks).map_err(|source| io_error(&locks, source))?;
@@ -2965,6 +2969,14 @@ mod tests {
             },
         );
         assert!(operations > 5, "{operations}");
+    }
+
+    #[test]
+    fn a_root_without_a_name_is_never_locked() {
+        assert!(matches!(
+            ProjectLock::acquire(Path::new("/"), "run", "now"),
+            Err(LifecycleError::UnsafePath(_))
+        ));
     }
 
     #[test]
