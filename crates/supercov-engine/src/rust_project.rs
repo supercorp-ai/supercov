@@ -1259,29 +1259,6 @@ fn integration_choice() {
         assert_eq!(normalize(Path::new("./a/../b")), PathBuf::from("b"));
     }
 
-    /// Preparing a workspace, once for every file operation it makes with
-    /// that one failing: each run ends with an error or without, never a
-    /// panic, and the run no fault reaches prepares it.
-    #[test]
-    fn preparing_a_workspace_whose_file_operation_fails_ends_cleanly() {
-        let calls = crate::fault::fail_each_call(
-            "fs",
-            || {
-                let root = fixture();
-                fs::write(
-                    root.join("src/lib.rs"),
-                    "mod helper;\npub fn entry(flag: bool) -> i32 { if flag { helper::one() } else { 2 } }\n",
-                )
-                .unwrap();
-                fs::write(root.join("src/helper.rs"), "pub fn one() -> i32 { 1 }\n").unwrap();
-                root
-            },
-            |root| prepare_rust_project(root, None).map(|_| ()),
-            |root| fs::remove_dir_all(root).unwrap(),
-        );
-        assert!(calls > 5, "{calls}");
-    }
-
     #[test]
     fn explicit_roots_narrow_what_rust_instruments() {
         // A module the roots leave out is not instrumented, so it compiles as

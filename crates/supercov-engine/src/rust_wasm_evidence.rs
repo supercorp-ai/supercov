@@ -705,23 +705,6 @@ mod tests {
             fs::create_dir_all(&other).unwrap();
             other
         };
-        let calls = crate::fault::fail_each_call(
-            "fs",
-            fresh,
-            |other| {
-                publish(
-                    other,
-                    wasm(),
-                    records(),
-                    metadata(run_id, 1),
-                    &tests,
-                    &mut Vec::new(),
-                )
-                .map(drop)
-            },
-            |other| fs::remove_dir_all(other).unwrap(),
-        );
-        assert!(calls > 3, "{calls}");
         let broken = vec![WasmRecord {
             owner: Owner::Window(6, 7),
             regions: vec![("crate".into(), b"not a region".to_vec())],

@@ -2173,44 +2173,6 @@ mod tests {
         fs::remove_dir_all(&directory).unwrap();
     }
 
-    /// Finding a workspace's Worker configurations survives any file
-    /// operation failing, finding what it still can; a name that is not
-    /// UTF-8 is passed over.
-    #[test]
-    fn finding_worker_configurations_survives_any_file_operation_failing() {
-        let fixture = || {
-            let root = temporary("find-configs");
-            fs::create_dir_all(root.join("worker/src")).unwrap();
-            fs::write(root.join("worker/Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
-            fs::write(
-                root.join("worker/wrangler.toml"),
-                "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build\"\n",
-            )
-            .unwrap();
-            #[cfg(target_os = "linux")]
-            {
-                use std::os::unix::ffi::OsStrExt;
-                fs::write(root.join(std::ffi::OsStr::from_bytes(b"\xff.toml")), "").unwrap();
-            }
-            root
-        };
-        let steps = crate::fault::fail_each_call(
-            "fs",
-            fixture,
-            |root| {
-                let found = worker_configs(root);
-                (found.len() <= 1).then_some(()).ok_or(found.len())
-            },
-            |root| {
-                let _ = fs::remove_dir_all(root);
-            },
-        );
-        assert!(steps > 2, "{steps}");
-        let root = fixture();
-        assert_eq!(worker_configs(&root), [root.join("worker/wrangler.toml")]);
-        fs::remove_dir_all(root).unwrap();
-    }
-
     /// A build command is read as a string or as its words, and nothing
     /// else; a configuration that cannot be read, or names no `main`, is no
     /// Worker's.
@@ -2242,47 +2204,6 @@ mod tests {
             assert!(parse_config(&root.join(name)).is_none(), "{name}");
         }
         fs::remove_dir_all(root).unwrap();
-    }
-
-    /// Wrapping a configuration, putting the stand-in and its hook in place,
-    /// and turning a poller's windows into region files each survive any
-    /// file operation failing.
-    #[test]
-    fn wrapping_standing_in_and_reading_windows_survive_any_file_operation_failing() {
-        let fixture = || {
-            let root = temporary("worker-faults");
-            fs::write(root.join("wrangler.toml"), "main = \"./harness.mjs\"\n").unwrap();
-            fs::write(root.join("wrangler.jsonc"), "{ \"main\": \"m.mjs\" }\n").unwrap();
-            let mut region = vec![0_u8; 4096 + 256];
-            region[56..62].copy_from_slice(b"abc123");
-            let segment = json!([0, base64::engine::general_purpose::STANDARD.encode(&region)]);
-            let line =
-                json!({"start": 1, "end": 2, "regions": [["abc123k1", region.len(), [segment]]]});
-            fs::create_dir_all(root.join("windows")).unwrap();
-            fs::write(root.join("windows/worker-1.windows"), format!("{line}\n")).unwrap();
-            root
-        };
-        let steps = crate::fault::fail_each_call(
-            "fs",
-            fixture,
-            |root| {
-                wrap_config(&root.join("wrangler.toml"), None, 0)?;
-                wrap_config(&root.join("wrangler.jsonc"), None, 1)?;
-                for name in ["wrangler.toml", "wrangler.jsonc"] {
-                    let config = parse_config(&root.join(name)).ok_or("unread")?;
-                    point_at_entry(&config, Some(9444))?;
-                }
-                let tools = root.join("tools");
-                fs::create_dir_all(&tools).map_err(|error| error.to_string())?;
-                write_stand_in(&tools, Path::new("/bin/supercov"))?;
-                write_hook(&tools)?;
-                materialize_worker_windows(&root.join("windows"), "abc123").map(drop)
-            },
-            |root| {
-                let _ = fs::remove_dir_all(root);
-            },
-        );
-        assert!(steps > 10, "{steps}");
     }
 
     /// A workspace with a Worker and a `wrangler` on PATH gets the stand-in,

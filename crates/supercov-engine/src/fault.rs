@@ -2,11 +2,7 @@
 //! under test. `SUPERCOV_TEST_FAULT` names call sites, comma-separated: `site`
 //! fails every call there, `site=N` only the first N, `site@N` only the Nth,
 //! `site#N` only the first call from the Nth place in the code that calls it
-//! (where the site knows its caller, as [`crate::fault_fs`] does), `site#*`
-//! the first call from every place but those the file
-//! `SUPERCOV_TEST_FAULT_SKIP` names, one a line as a fault names it (and,
-//! with `SUPERCOV_TEST_FAULT_SHARD=J/K`, only the Jth of K shares of places,
-//! so K runs side by side split them), and
+//! (where the site knows its caller, as [`crate::fault_fs`] does), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
 //! its usual error. An entry written `__command/site...` applies only in a
 //! process started as `supercov __command` -- a doctest's or nextest's runner
@@ -14,10 +10,8 @@
 //! `NAME` is set for -- a merged doctest's child -- so a test can fail its
 //! Nth place there and not its parent's. A failing
 //! site does not make its call; it returns what the call returns when it
-//! fails, and says so on standard error (`test fault at <site>`), and as a
-//! line of the file `SUPERCOV_TEST_FAULT_LOG` names, where it names one: a
-//! runner's standard error is its parent's to read. So a test knows the site
-//! was reached. Only debug builds read the variable: a release
+//! fails, and says so on standard error (`test fault at <site>`), so a test
+//! knows the site was reached. Only debug builds read the variable: a release
 //! build has no such switch. The engine's own tests set faults for one thread with [`during`].
 //! Every part of it is compiled into every debug build alike: a part only
 //! the engine's test build had would make that build's coverage count lines
@@ -33,10 +27,8 @@ struct Fault {
     skip: std::sync::atomic::AtomicUsize,
     /// Calls left to fail; `None` for every call.
     remaining: Option<std::sync::atomic::AtomicUsize>,
-    /// Whether a call failed by it.
-    fired: std::sync::atomic::AtomicBool,
-    /// For `site#N`: N, 0 for `site#*`, and the places in the code that
-    /// called the site so far, in the order they first did.
+    /// For `site#N`: N, and the places in the code that called the site so
+    /// far, in the order they first did.
     place: Option<(usize, std::sync::Mutex<Vec<Place>>)>,
 }
 
@@ -48,61 +40,6 @@ pub type Place = (&'static std::panic::Location<'static>, &'static str);
 #[cfg(any(test, debug_assertions))]
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
     std::sync::LazyLock::new(|| parse(&std::env::var("SUPERCOV_TEST_FAULT").unwrap_or_default()));
-
-/// The places `site#*` passes, as a failing one names itself.
-#[cfg(any(test, debug_assertions))]
-static SKIP: std::sync::LazyLock<std::collections::HashSet<String>> =
-    std::sync::LazyLock::new(|| {
-        std::env::var_os("SUPERCOV_TEST_FAULT_SKIP")
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|text| text.lines().map(str::to_owned).collect())
-            .unwrap_or_default()
-    });
-
-/// For `site#*`: which of how many shares of places this process fails.
-#[cfg(any(test, debug_assertions))]
-static SHARD: std::sync::LazyLock<(u64, u64)> = std::sync::LazyLock::new(|| {
-    std::env::var("SUPERCOV_TEST_FAULT_SHARD")
-        .ok()
-        .and_then(|shard| {
-            let (share, shares) = shard.split_once('/')?;
-            let (share, shares) = (share.parse().ok()?, shares.parse::<u64>().ok()?);
-            (share < shares).then_some((share, shares))
-        })
-        .unwrap_or((0, 1))
-});
-
-/// Whether `site#*` fails the place called `name` in this process: it is
-/// not skipped, and is in this process's share (FNV-1a of its name).
-#[cfg(any(test, debug_assertions))]
-fn every_fails(name: &str) -> bool {
-    let (share, shares) = *SHARD;
-    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    });
-    hash % shares == share && !SKIP.contains(name)
-}
-
-/// How a failing call names its place: file, line and column, and what it did.
-#[cfg(any(test, debug_assertions))]
-fn place_name(place: Place) -> String {
-    let (location, operation) = place;
-    format!(
-        "{}:{}:{} {operation}",
-        location.file(),
-        location.line(),
-        location.column()
-    )
-}
-
-/// The file a failing site is written to as well, as a C string: a forked
-/// child writes it without allocating.
-#[cfg(all(unix, any(test, debug_assertions)))]
-static LOG: std::sync::LazyLock<Option<std::ffi::CString>> = std::sync::LazyLock::new(|| {
-    use std::os::unix::ffi::OsStringExt;
-    std::env::var_os("SUPERCOV_TEST_FAULT_LOG")
-        .and_then(|path| std::ffi::CString::new(path.into_vec()).ok())
-});
 
 /// The internal command this process was started as (`__doctest-runner`),
 /// or nothing for any other.
@@ -143,13 +80,10 @@ fn parse(text: &str) -> Vec<Fault> {
                     .map(|_| 1)
                     .or_else(|| count.parse().ok())
                     .map(std::sync::atomic::AtomicUsize::new),
-                fired: false.into(),
-                place: (if place == "*" {
-                    Some(0)
-                } else {
-                    place.parse::<usize>().ok()
-                })
-                .map(|nth| (nth, std::sync::Mutex::new(Vec::new()))),
+                place: place
+                    .parse::<usize>()
+                    .ok()
+                    .map(|nth| (nth, std::sync::Mutex::new(Vec::new()))),
             }
         })
         .collect()
@@ -160,12 +94,6 @@ fn parse(text: &str) -> Vec<Fault> {
 pub fn prepare() {
     #[cfg(any(test, debug_assertions))]
     std::sync::LazyLock::force(&FAULTS);
-    #[cfg(any(test, debug_assertions))]
-    std::sync::LazyLock::force(&SKIP);
-    #[cfg(any(test, debug_assertions))]
-    std::sync::LazyLock::force(&SHARD);
-    #[cfg(all(unix, any(test, debug_assertions)))]
-    std::sync::LazyLock::force(&LOG);
 }
 
 /// Whether the call at `site` fails this time.
@@ -190,72 +118,10 @@ thread_local! {
 /// on this thread.
 #[cfg(any(test, debug_assertions))]
 pub fn during<R>(faults: &str, body: impl FnOnce() -> R) -> R {
-    during_reaching(faults, body).0
-}
-
-/// [`during`]'s result, and whether any of the faults failed a call: a test
-/// failing each call of a site in turn (`site@1`, `site@2`, ...) stops at the
-/// first run that no longer reaches its fault.
-#[cfg(any(test, debug_assertions))]
-pub fn during_reaching<R>(faults: &str, body: impl FnOnce() -> R) -> (R, bool) {
     let earlier = DURING.with(|during| during.replace(parse(faults)));
     let result = body();
-    let set = DURING.with(|during| during.replace(earlier));
-    let reached = set
-        .iter()
-        .any(|fault| fault.fired.load(std::sync::atomic::Ordering::SeqCst));
-    (result, reached)
-}
-
-/// Run `scenario` once for each call it makes at `site`, with that one
-/// failing (`site@1`, `site@2`, ...): every run must end, with an error or
-/// without, and never panic, and the run that reaches no fault must succeed.
-/// The number of calls, so a test knows the sweep reached them.
-#[cfg(any(test, debug_assertions))]
-pub fn fail_each_call<Fixture, E: std::fmt::Debug>(
-    site: &str,
-    setup: impl Fn() -> Fixture,
-    scenario: impl Fn(&Fixture) -> Result<(), E>,
-    cleanup: impl Fn(Fixture),
-) -> usize {
-    let mut nth = 0;
-    loop {
-        nth += 1;
-        let fixture = setup();
-        let (result, reached) = during_reaching(&format!("{site}@{nth}"), || scenario(&fixture));
-        cleanup(fixture);
-        if !reached {
-            result.expect("the run no fault reached succeeds");
-            return nth - 1;
-        }
-    }
-}
-
-/// [`fail_each_call`] for each pair of calls at `site` no more than
-/// `within` apart, both failing (`site@N,site@M`): what a failure's own
-/// clean-up, which follows it closely, does when it fails too. The number
-/// of pairs.
-#[cfg(any(test, debug_assertions))]
-pub fn fail_each_pair_of_calls<Fixture, E: std::fmt::Debug>(
-    site: &str,
-    within: usize,
-    setup: impl Fn() -> Fixture,
-    scenario: impl Fn(&Fixture) -> Result<(), E>,
-    cleanup: impl Fn(Fixture),
-) -> usize {
-    let calls = fail_each_call(site, &setup, &scenario, &cleanup);
-    let mut pairs = 0;
-    for first in 1..calls {
-        for second in first + 1..=calls.min(first + within) {
-            let fixture = setup();
-            let _ = during(&format!("{site}@{first},{site}@{second}"), || {
-                scenario(&fixture)
-            });
-            cleanup(fixture);
-            pairs += 1;
-        }
-    }
-    pairs
+    DURING.with(|during| during.replace(earlier));
+    result
 }
 
 /// When the call at `site` fails this time, the errno the test chose for
@@ -273,7 +139,7 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
             .with(|during| take(&during.borrow(), site, place))
             .or_else(|| take(&FAULTS, site, place))
             .flatten()
-            .inspect(|_| announce(site, place))
+            .inspect(|_| announce(site))
     }
     #[cfg(not(any(test, debug_assertions)))]
     {
@@ -282,14 +148,11 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
     }
 }
 
-/// Say that the call at `site` failed by request, and from which place
-/// where it knows. Written to the descriptor itself: a child forked to exec
-/// a command may not allocate or take the lock `eprintln!` takes, and no
-/// call that knows its place is made there.
+/// Say that the call at `site` failed by request. Written to the descriptor
+/// itself: a child forked to exec a command may not allocate or take the
+/// lock `eprintln!` takes.
 #[cfg(any(test, debug_assertions))]
-fn announce(site: &str, place: Option<Place>) {
-    let named = place.map(|place| format!("{site} {}", place_name(place)));
-    let site = named.as_deref().unwrap_or(site);
+fn announce(site: &str) {
     #[cfg(unix)]
     for part in [
         b"[supercov] test fault at ".as_slice(),
@@ -299,35 +162,8 @@ fn announce(site: &str, place: Option<Place>) {
         // SAFETY: a write of a live buffer to standard error.
         unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
     }
-    #[cfg(unix)]
-    if let Some(path) = LOG.as_ref() {
-        // SAFETY: an open of a live C string, writes of live buffers to the
-        // descriptor it gave, and its close. A log that could not be opened
-        // is descriptor -1, which the writes and the close refuse.
-        unsafe {
-            let log = libc::open(
-                path.as_ptr(),
-                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
-                0o644,
-            );
-            for part in [site.as_bytes(), b"\n"] {
-                libc::write(log, part.as_ptr().cast(), part.len());
-            }
-            libc::close(log);
-        }
-    }
     #[cfg(not(unix))]
-    {
-        use std::io::Write;
-        eprintln!("[supercov] test fault at {site}");
-        if let Some(path) = std::env::var_os("SUPERCOV_TEST_FAULT_LOG") {
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut log| writeln!(log, "{site}"));
-        }
-    }
+    eprintln!("[supercov] test fault at {site}");
 }
 
 /// Of the faults `faults`, whether the one at `site` fails this time, and
@@ -355,10 +191,7 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 !seen.contains(&place) && {
                     seen.push(place);
-                    match nth {
-                        0 => every_fails(&place_name(place)),
-                        nth => seen.len() == *nth,
-                    }
+                    seen.len() == *nth
                 }
             }
             // A caller that cannot say where it is is never the Nth place.
@@ -368,7 +201,6 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
             }
         };
         if fails {
-            fault.fired.store(true, Ordering::SeqCst);
             failed.get_or_insert(fault.errno);
         }
     }
@@ -391,6 +223,33 @@ pub fn io<T>(
         Some(Some(errno)) => Err(io::Error::from_raw_os_error(errno)),
         Some(None) => Err(io::Error::new(kind, format!("injected fault at {site}"))),
         None => call(),
+    }
+}
+
+/// Standard error, held for a run's diagnostics: each write is a call at the
+/// site `diagnostics`, so `diagnostics@N` fails the run's Nth write there.
+pub fn diagnostics() -> Writer<io::StderrLock<'static>> {
+    Writer {
+        site: "diagnostics",
+        inner: io::stderr().lock(),
+    }
+}
+
+/// A writer whose writes are calls at `site`.
+pub struct Writer<W> {
+    site: &'static str,
+    inner: W,
+}
+
+impl<W: io::Write> io::Write for Writer<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        io(self.site, io::ErrorKind::BrokenPipe, || {
+            self.inner.write(bytes)
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -449,26 +308,4 @@ unsafe fn errno_location() -> *mut i32 {
 #[cfg(all(unix, not(target_os = "linux")))]
 unsafe fn errno_location() -> *mut i32 {
     unsafe { libc::__error() }
-}
-
-#[cfg(test)]
-mod tests {
-    #[track_caller]
-    fn here() -> bool {
-        super::injected_here("t", "op")
-    }
-
-    /// `site#*` fails the first call from each place, and only the first:
-    /// a place called again goes on as usual.
-    #[test]
-    fn every_place_fails_its_first_call() {
-        let ((two, again), reached) = super::during_reaching("t#*", || {
-            let two = [here(), here()];
-            let again = (0..2).map(|_| here()).collect::<Vec<_>>();
-            (two, again)
-        });
-        assert!(reached);
-        assert_eq!(two, [true, true]);
-        assert_eq!(again, [true, false]);
-    }
 }

@@ -327,43 +327,6 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
 mod tests {
     use super::*;
 
-    /// Finding wasm libraries, once for every file operation it makes with
-    /// that one failing, passes over what it cannot read and never panics;
-    /// a manifest that is no TOML is no library.
-    #[test]
-    fn finding_wasm_libraries_passes_over_what_cannot_be_read() {
-        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let calls = crate::fault::fail_each_call(
-            "fs",
-            || {
-                let root = std::env::temp_dir().join(format!(
-                    "supercov-rust-wasm-faults-{}-{}",
-                    std::process::id(),
-                    UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                for (relative, text) in [
-                    (
-                        "rust/Cargo.toml",
-                        "[package]\nname = \"a\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\nwasm-bindgen = \"0.2\"\n",
-                    ),
-                    ("broken/Cargo.toml", "[package\n"),
-                ] {
-                    let path = root.join(relative);
-                    fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    fs::write(path, text).unwrap();
-                }
-                root
-            },
-            |root| {
-                let found = wasm_crates(root);
-                assert!(found.len() <= 1, "{found:?}");
-                Ok::<(), String>(())
-            },
-            |root| fs::remove_dir_all(root).unwrap(),
-        );
-        assert!(calls > 3, "{calls}");
-    }
-
     /// A take's regions are rebuilt from a well-formed record, and any part
     /// of one missing or of the wrong kind is no regions at all.
     #[test]

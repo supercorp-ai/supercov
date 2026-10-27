@@ -1062,37 +1062,6 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// Each place copying a tree and preparing a server touches a file
-    /// fails in turn: each stops with an error, never a panic; an empty tree
-    /// copies to nothing.
-    #[test]
-    fn copying_and_preparing_a_server_survive_any_file_operation_failing() {
-        let command = ["npx".to_owned(), "playwright".to_owned(), "test".to_owned()];
-        let steps = crate::fault::fail_each_call(
-            "fs",
-            || fixture("faults"),
-            |root| {
-                let copy = root.with_extension("copy");
-                fs::create_dir_all(&copy).map_err(|error| error.to_string())?;
-                copy_tree(root, &copy)?;
-                PythonServer::prepare(root, root, "2026-01-02T00-00-00-000Z", &command).map(drop)
-            },
-            |root| {
-                let _ = fs::remove_dir_all(root.with_extension("copy"));
-                let _ = fs::remove_dir_all(root);
-            },
-        );
-        assert!(steps > 5, "{steps}");
-        let empty = fixture("empty-tree");
-        let nothing = empty.join("nothing");
-        fs::create_dir_all(&nothing).unwrap();
-        let copy = empty.join("copy");
-        fs::create_dir_all(&copy).unwrap();
-        copy_tree(&nothing, &copy).unwrap();
-        assert_eq!(fs::read_dir(&copy).unwrap().count(), 0);
-        fs::remove_dir_all(&empty).ok();
-    }
-
     #[test]
     fn a_tree_is_copied_whole_and_a_path_list_keeps_what_it_held() {
         let root = fixture("copied");

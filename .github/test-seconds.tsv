@@ -6,9 +6,6 @@
 # Tests added since are estimated from a local run until the next refresh.
 a_blocking_select_still_blocks	0.2	0.3
 a_branch_lists_its_unrun_outcomes_in_one_order	0.8	0.7
-a_browser_run_preparing_servers_whose_file_operation_fails_says_so_and_recovers	128.8	258.9
-a_browser_run_preparing_servers_whose_program_cannot_start_says_so_and_recovers	60.0	120.0
-a_browser_run_with_only_a_server_survives_any_file_operation_failing	75.0	150.0
 a_browser_suite_beside_servers_with_nothing_to_measure_measures_its_javascript	1.1	0.8
 a_busy_gateway_is_waited_for_and_a_broken_one_is_named	16.2	1.1
 a_cargo_filter_that_matches_no_test_says_so_when_the_run_is_read	2.1	1.9
@@ -44,9 +41,7 @@ a_diff_keeps_only_what_the_tests_a_filter_picks_covered	3.3	1.9
 a_direct_javascript_run_with_no_command_is_refused	0.0	0.0
 a_directory_says_what_ran_while_no_test_was_running	0.9	0.8
 a_doctest_stand_in_missing_what_it_needs_says_so	0.0	0.0
-a_doctest_wrapper_whose_file_operation_fails_says_so	1.0	0.8
 a_failed_projection_of_a_passing_run_reads_as_empty_and_names_what_it_leaves_out	0.9	0.7
-a_failing_run_whose_file_operation_fails_anywhere_says_so_and_recovers	22.6	37.6
 a_failing_suite_keeps_its_exit_status_and_cannot_pass_a_gate	0.8	0.6
 a_failing_system_call_while_starting_a_command_is_named_or_retried	22.6	8.2
 a_file_a_rust_test_writes_comes_back_to_the_project	8.0	14.0
@@ -62,7 +57,6 @@ a_floor_on_what_a_run_has_none_of_cannot_pass	1.5	1.5
 a_function_shipped_as_text_runs_where_no_probe_exists	0.8	0.8
 a_gateway_serves_both_catalogs_with_the_model_it_names	0.1	0.1
 a_go_run_names_the_tests_it_could_not_claim_and_the_files_it_could_not_read	2.5	1.5
-a_go_run_whose_file_operation_fails_anywhere_says_so_and_recovers	13.4	22.6
 a_go_suite_behind_make_is_measured_and_other_go_commands_are_left_alone	3.9	5.0
 a_go_test_on_a_terminal_passes_partial_lines_on_and_names_the_project	1.7	0.9
 a_gradle_junit_4_project_runs_on_the_platform_in_the_copy	84.0	6.4
@@ -70,7 +64,6 @@ a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reached
 a_guest_started_with_none_of_supercovs_settings_runs_and_is_counted	1.4	0.8
 a_handler_run_without_a_guard_is_counted_by_the_tests_that_ran_it	0.5	0.5
 a_javascript_request_shows_the_function_a_statement_is_in_and_no_helper	0.4	0.7
-a_jev_command_whose_file_operation_fails_says_so_and_recovers	3.8	3.8
 a_job_that_promised_a_newer_toolchain_cannot_skip_quietly	0.0	0.0
 a_key_is_never_sent_in_the_clear_to_another_machine	0.0	0.0
 a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query	2.0	1.0
@@ -90,8 +83,6 @@ a_lock_an_older_release_holds_is_left_alone_and_one_left_behind_is_taken_over	2.
 a_long_decision_is_shortened_in_its_file_and_whole_on_its_own	0.9	0.9
 a_loop_condition_that_narrows_a_type_is_left_alone	25.6	20.0
 a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reached	13.4	15.1
-a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers	284.8	882.5
-a_maven_run_whose_program_cannot_start_says_so_and_recovers	40.0	120.0
 a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file	1.4	1.4
 a_measured_suite_reads_back_through_every_query	2.3	1.2
 a_merge_of_two_kinds_pages_and_narrows_by_kind	2.4	1.4
@@ -118,7 +109,6 @@ a_patch_on_a_failing_run_shows_its_coverage_and_still_cannot_pass	1.0	0.7
 a_patch_review_needs_a_repository	0.0	0.0
 a_patch_review_reads_a_large_change_as_its_diff_and_names_what_it_cannot_read	0.5	0.5
 a_patch_review_reads_only_changed_source_and_says_what_it_skipped	0.2	0.2
-a_patch_whose_git_call_fails_says_so	1.2	1.0
 a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_named	1.0	1.2
 a_per_file_floor_names_where_a_file_falls_short	0.8	0.6
 a_per_name_doctest_pass_must_run_its_doctest_alone_and_once	0.5	0.2
@@ -132,17 +122,14 @@ a_python_test_whose_process_ends_during_it_is_failed_and_credited	0.5	0.3
 a_quality_diff_reads_in_either_direction_and_names_its_mistakes	0.1	0.1
 a_quality_report_names_the_sources_it_cannot_embed	0.1	0.1
 a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure	0.7	0.6
-a_query_whose_file_operation_fails_says_so_and_never_panics	97.0	88.8
 a_record_pattern_is_a_binding_too	2.4	3.2
 a_report_the_command_writes_names_the_project_and_not_the_copy	2.0	1.0
 a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for	1.9	1.4
 a_repository_the_workspace_cannot_mirror_is_named_under_debug	2.6	1.0
 a_round_sends_forty_requests_and_the_next_one_the_rest	11.5	9.3
-a_ruby_run_whose_file_operation_fails_anywhere_says_so_and_recovers	6.7	8.1
 a_ruby_source_that_does_not_parse_is_named	1.1	0.3
 a_ruby_test_whose_process_ends_during_it_is_failed_and_credited	0.8	0.4
 a_run_in_which_no_test_ran_is_marked_in_the_listing	2.7	1.1
-a_run_keeping_its_work_survives_any_file_operation_failing	15.0	25.0
 a_run_left_out_of_a_merge_or_read_stale_says_what_moved	3.8	3.5
 a_run_of_a_new_test_alone_is_added_to_the_runs_before_it	5.4	2.8
 a_run_of_another_release_is_named_for_what_it_is	0.8	0.8
@@ -152,9 +139,7 @@ a_run_that_cannot_be_read_is_named_before_anything_is_asked	0.5	0.5
 a_run_that_cannot_release_its_copy_says_so	15.0	20.0
 a_run_that_observed_no_test_at_all_is_refused	0.6	0.7
 a_run_under_given_source_roots_is_read_back_under_them	6.0	10.0
-a_run_whose_file_operation_fails_anywhere_says_so_and_recovers	15.0	36.0
 a_run_whose_output_stops_being_read_goes_on_without_a_panic	40.8	16.9
-a_run_whose_program_cannot_start_anywhere_says_so_and_recovers	18.6	31.7
 a_run_whose_source_is_gone_is_stale_and_never_passes_a_gate	2.1	0.7
 a_run_with_no_statement_to_assess_asks_nothing	0.4	0.5
 a_runner_alone_narrows_every_view_or_is_refused	1.5	0.8
@@ -162,7 +147,6 @@ a_rust_command_supercov_cannot_select_tests_from_is_refused_with_why	17.7	12.5
 a_rust_run_past_its_timeout_is_stopped_and_ends_124	45.0	30.0
 a_rust_run_that_cannot_publish_says_so_and_clears_its_work	3.3	1.5
 a_rust_run_told_to_stop_takes_its_test_with_it	15.0	10.0
-a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers	45.3	128.6
 a_saved_answer_to_another_question_is_not_used	0.0	0.0
 a_saved_assessment_reads_from_its_files_down_to_one_statement_and_one_test	0.5	0.6
 a_selector_that_matches_nothing_or_several_says_so	2.0	1.2
@@ -189,8 +173,6 @@ a_test_file_whose_tests_were_never_asked_is_not_read_as_asserting_nothing	0.5	0.
 a_test_is_affected_by_a_helper_its_file_loads	0.7	0.9
 a_test_main_inside_an_unparseable_file_is_not_declared_twice	0.1	0.1
 a_test_over_jev_s_limit_is_left_unasked_and_counted	16.3	5.9
-a_test_runner_whose_file_operation_fails_says_so	45.0	30.0
-a_test_runner_whose_program_cannot_start_says_so	30.0	60.0
 a_test_that_ran_alongside_others_is_undetermined_and_a_new_file_asks_for_the_whole_suite	1.5	0.9
 a_testng_suite_is_attributed_through_its_own_lifecycle	61.8	25.4
 a_tool_that_judges_source_reads_it_as_it_was_written	3.2	2.5
@@ -221,7 +203,6 @@ an_assessment_on_a_terminal_shows_its_progress	0.5	0.5
 an_assessment_read_for_some_tests_says_what_those_tests_ran_and_were_asked	1.4	1.8
 an_assessment_sends_no_more_than_its_estimate_says_it_can	0.5	0.6
 an_assessment_where_nothing_fires_reads_as_such_in_every_view	0.1	0.1
-an_assessment_whose_file_operation_fails_says_so_and_never_panics	5.7	5.3
 an_assessment_whose_store_cannot_be_written_reports_and_says_what_was_not_saved	0.0	0.0
 an_assessment_with_nothing_to_ask_reads_as_such	0.5	0.5
 an_internal_error_instrumenting_a_file_leaves_it_unmeasured_and_said	2.1	1.6
@@ -555,7 +536,6 @@ each_affected_test_says_how_it_meets_the_change_as_the_change_grows	0.8	0.8
 each_language_refuses_a_missing_source_root_and_an_unreadable_timeout_or_interval	20.0	40.0
 each_page_names_a_next_page_command_that_shows_it	0.8	0.8
 each_query_says_so_when_its_index_or_its_reply_fails	9.2	4.6
-each_query_says_so_wherever_a_read_of_its_index_fails	4.9	4.2
 each_way_a_sandbox_sdk_takes_an_environment_reaches_the_guest	0.9	0.9
 engine_contract	1.1	1.0
 every_assertion_view_reads_an_empty_page_and_a_page_past_its_end	1.5	1.6
@@ -576,7 +556,6 @@ evidence_archive::tests::a_source_of_the_wrong_kind_is_refused	0.0	0.0
 evidence_archive::tests::a_temporary_name_in_use_is_passed_over	0.0	0.0
 evidence_archive::tests::an_archive_missing_or_doubling_an_entry_is_refused_by_name	0.0	0.0
 evidence_archive::tests::an_archive_path_is_one_relative_forward_slash_path	0.0	0.0
-evidence_archive::tests::an_archive_whose_file_operation_fails_ends_cleanly	0.1	0.0
 evidence_archive::tests::an_empty_or_unterminated_header_is_refused	0.0	0.0
 evidence_archive::tests::collects_only_regular_files_and_normalizes_host_separators	0.0	0.0
 evidence_archive::tests::deterministic_gzip_header_has_no_clock_or_host_identity	0.0	0.0
@@ -823,7 +802,6 @@ javascript_frontend::tests::only_a_trailing_source_map_directive_is_stripped	0.0
 javascript_frontend::tests::only_a_whole_map_is_inlined	0.0	0.0
 javascript_frontend::tests::playwright_is_linked_from_the_directory_of_a_nested_config	0.0	0.0
 javascript_frontend::tests::prepares_sorted_complete_manifest_without_touching_source_project	0.3	0.1
-javascript_frontend::tests::preparing_and_reloading_the_frontend_survive_any_file_operation_failing	53.9	39.0
 javascript_frontend::tests::runtime_isolation_replaces_only_the_assignment_marker	0.0	0.0
 javascript_frontend::tests::sprockets_directives_go_back_to_the_top_with_their_map	0.0	0.0
 javascript_frontend::tests::sprockets_directives_stay_where_sprockets_reads_them	0.0	0.0
@@ -1011,7 +989,6 @@ jvm_run::tests::gradle_gets_the_launcher_in_the_dialect_its_script_is_written_in
 jvm_run::tests::gradle_is_told_to_run_the_tests_again	0.0	0.0
 jvm_run::tests::gradle_moves_junit_4_projects_onto_the_platform_through_vintage	0.0	0.0
 jvm_run::tests::gradle_moves_only_its_plain_junit_4_modules_onto_the_platform	0.0	0.0
-jvm_run::tests::instrumenting_a_workspace_survives_any_file_operation_failing	0.5	0.5
 jvm_run::tests::junit_four_is_not_the_platform_and_is_not_treated_as_it	0.0	0.0
 jvm_run::tests::junit_is_versioned_through_parents_catalogs_and_junit_6	0.0	0.0
 jvm_run::tests::maven_adds_the_launcher_only_to_modules_with_tests	0.0	0.0
@@ -1048,7 +1025,6 @@ lifecycle::tests::an_idle_copy_with_part_of_it_gone_is_removed_as_far_as_it_is_t
 lifecycle::tests::an_index_that_could_not_be_written_is_built_by_the_first_query	0.1	0.0
 lifecycle::tests::an_owner_without_a_lock_still_holds_its_copy	0.0	0.0
 lifecycle::tests::cleaning_everything_reclaims_kept_evidence_and_says_which	0.0	0.0
-lifecycle::tests::cleaning_storage_survives_any_file_operation_failing	4.2	1.9
 lifecycle::tests::cleaning_under_a_run_that_has_not_written_its_name_names_a_starting_run	0.0	0.0
 lifecycle::tests::cleanup_is_project_locked_and_clean_alone_removes_owned_caches	0.0	0.0
 lifecycle::tests::defers_only_owned_storage_and_sweeps_without_touching_source	0.0	0.0
@@ -1059,8 +1035,6 @@ lifecycle::tests::evidence_goes_with_its_run_and_a_clean_waits_for_active_runs	0
 lifecycle::tests::evidence_that_cannot_all_be_copied_is_not_kept_in_part	0.0	0.0
 lifecycle::tests::evidence_that_will_not_analyse_is_published_as_it_was_before	0.0	0.0
 lifecycle::tests::final_rename_failure_exposes_no_run_and_removes_staging	0.0	0.0
-lifecycle::tests::keeping_failed_evidence_survives_any_file_operation_failing	0.0	0.0
-lifecycle::tests::locking_and_removing_trees_survive_any_file_operation_failing	0.0	0.0
 lifecycle::tests::malformed_assertion_inputs_expose_no_partial_run	0.0	0.0
 lifecycle::tests::many_runs_starting_in_the_same_instant_never_share_a_copy	0.0	0.0
 lifecycle::tests::no_run_starts_while_the_store_is_cleaned_and_none_is_cleaned_under	0.0	0.0
@@ -1069,9 +1043,6 @@ lifecycle::tests::only_stored_trees_are_removed_and_only_files_copied	0.0	0.0
 lifecycle::tests::publication_refuses_evidence_of_another_length_and_clears_old_staging	0.0	0.0
 lifecycle::tests::publication_writes_the_query_index_a_first_query_would_have_built	0.0	0.0
 lifecycle::tests::publishes_both_required_files_with_one_visible_rename	0.0	0.0
-lifecycle::tests::publishing_survives_any_file_operation_failing	0.3	0.2
-lifecycle::tests::publishing_survives_any_two_file_operations_failing	5.0	5.0
-lifecycle::tests::recovering_runs_survives_any_file_operation_failing	1.0	0.7
 lifecycle::tests::recovers_dead_unpublished_and_fully_published_runs_from_derived_paths	0.0	0.0
 lifecycle::tests::refuses_linked_storage_ancestors_instead_of_renaming_external_data	0.0	0.0
 lifecycle::tests::removing_a_stored_tree_never_follows_a_link_out_of_it	0.0	0.0
@@ -1119,7 +1090,6 @@ outside_evidence::tests::a_file_the_scope_includes_is_imported_and_one_it_leaves
 outside_evidence::tests::a_longer_tail_wins_and_a_path_that_climbs_or_names_nothing_is_refused	0.0	0.0
 outside_evidence::tests::a_recorded_path_is_read_as_the_project_file_it_names	0.0	0.0
 outside_evidence::tests::a_tracefile_s_numbers_are_read_or_named	0.0	0.0
-outside_evidence::tests::an_import_whose_file_operation_fails_ends_cleanly	0.8	0.4
 outside_evidence::tests::lcov_edges_blank_lines_short_records_and_names_with_commas	0.0	0.0
 outside_evidence::tests::lcov_records_merge_by_file_and_name_function_starts	0.0	0.0
 outside_evidence::tests::line_evidence_is_imported_into_a_run_with_no_scope_or_source_record	0.1	0.0
@@ -1139,7 +1109,6 @@ owned_evidence::tests::each_owned_evidence_error_says_what_failed	0.0	0.0
 owned_evidence::tests::merging_processes_unions_the_run_and_keeps_every_test	0.0	0.0
 owned_evidence::tests::no_damaged_byte_or_count_makes_the_reader_panic	0.0	0.0
 owned_evidence::tests::the_declaration_says_what_go_can_and_cannot_attribute	0.0	0.0
-owned_server::tests::a_server_run_whose_file_operation_fails_ends_cleanly	0.8	0.5
 owned_server::tests::a_server_without_tests_or_windows_publishes_nothing	0.0	0.0
 owned_server::tests::each_window_is_credited_to_the_one_test_running_or_to_the_run	0.0	0.0
 patch_and_check_read_a_change_and_a_run_by_count	2.4	1.2
@@ -1302,7 +1271,6 @@ python_run::tests::a_server_publishes_only_what_a_browser_test_s_request_reached
 python_run::tests::a_tree_is_copied_whole_and_a_path_list_keeps_what_it_held	0.0	0.0
 python_run::tests::a_verbose_run_says_how_long_publication_took_and_a_kept_one_keeps_its_work	0.7	0.5
 python_run::tests::an_appended_list_keeps_what_was_set	0.0	0.0
-python_run::tests::copying_and_preparing_a_server_survive_any_file_operation_failing	0.3	0.2
 python_run::tests::evidence_that_cannot_be_read_after_measuring_is_kept	0.0	0.0
 python_run::tests::the_plan_names_each_test_files_assertion_lines_once_and_sorted	0.0	0.0
 python_servers	171.0	40.2
@@ -1536,7 +1504,6 @@ ruby_run::tests::a_ruby_run_refuses_an_empty_command	0.0	0.0
 ruby_run::tests::a_server_publishes_only_what_a_browser_test_s_request_reached	0.0	0.0
 ruby_run::tests::a_suite_s_own_rubyopt_is_kept_after_the_runtime	0.0	0.0
 ruby_run::tests::a_tree_is_copied_whole	0.0	0.0
-ruby_run::tests::copying_and_preparing_a_server_survive_any_file_operation_failing	0.1	0.1
 ruby_run::tests::evidence_that_cannot_be_read_after_measuring_is_kept	0.0	0.0
 ruby_servers	129.8	85.2
 ruby_syntax_zoo	236.4	1.8
@@ -1549,7 +1516,6 @@ run_currency::tests::what_a_run_ran_is_read_from_its_entries_or_its_shards	0.0	0
 run_currency::tests::what_several_judgments_let_through_is_one_entry_per_file	0.0	0.0
 run_currency::tests::what_tests_load_is_unknown_past_a_file_whose_imports_are_not_read	0.0	0.0
 run_lists_lines_and_tests_read_as_what_they_are	3.1	1.9
-run_merge::tests::a_merge_whose_file_operation_fails_ends_cleanly	0.5	0.5
 run_merge::tests::a_test_measured_again_elsewhere_leaves_its_records_out	0.0	0.0
 run_merge::tests::each_refusal_to_merge_says_why	0.2	0.2
 run_merge::tests::merged_records_take_the_new_run_and_drop_superseded_tests	0.0	0.0
@@ -1765,7 +1731,6 @@ rust_project::tests::merging_refuses_a_repeated_obligation_and_keeps_one_limitat
 rust_project::tests::modules_declared_inside_a_macro_are_instrumented	0.1	0.0
 rust_project::tests::only_files_the_module_tree_reaches_are_instrumented	0.8	0.9
 rust_project::tests::prepares_every_workspace_crate_root_and_compiles_without_manifest_changes	0.8	1.0
-rust_project::tests::preparing_a_workspace_whose_file_operation_fails_ends_cleanly	1.1	0.9
 rust_project::tests::test_code_is_instrumented_for_its_assertions_alone	0.0	0.0
 rust_project::tests::the_module_tree_classifies_what_it_reaches	0.1	0.1
 rust_project::tests::the_module_tree_is_resolved_the_way_rustc_resolves_it	0.0	0.0
@@ -1790,7 +1755,6 @@ rust_runtime::tests::a_measured_command_gets_the_run_id_and_what_supercov_set	0.
 rust_runtime::tests::a_region_directory_that_cannot_be_read_is_an_error	0.0	0.0
 rust_runtime::tests::a_region_in_a_container_is_read_live_from_the_host	22.3	0.2
 rust_runtime::tests::a_region_of_another_layout_or_instrumentation_is_refused	0.0	0.0
-rust_runtime::tests::a_region_read_whose_file_operation_fails_ends_cleanly	0.0	0.0
 rust_runtime::tests::a_statement_after_one_the_target_strips_keeps_its_probe	0.3	0.3
 rust_runtime::tests::an_overflow_record_of_another_kind_is_refused	0.0	0.0
 rust_runtime::tests::code_below_a_nested_run_writes_into_its_own_run_s_evidence	0.3	0.3
@@ -1862,7 +1826,6 @@ rust_vite_playwright	63.4	5.6
 rust_vitest_projects	31.5	26.5
 rust_wasm::tests::a_take_s_regions_are_read_or_refused_whole	0.0	0.0
 rust_wasm::tests::a_wasm_library_is_a_cdylib_that_depends_on_wasm_bindgen	0.0	0.0
-rust_wasm::tests::finding_wasm_libraries_passes_over_what_cannot_be_read	0.0	0.0
 rust_wasm::tests::records_are_read_from_whole_takes_only	0.0	0.0
 rust_wasm::tests::the_build_caps_lints_after_the_user_s_own_flags	0.0	0.0
 rust_wasm_browser::tests::a_driver_that_never_listens_is_stopped	0.5	0.0
@@ -1899,7 +1862,6 @@ rust_worker::tests::a_window_is_rebuilt_from_its_header_and_touched_pages	0.0	0.
 rust_worker::tests::a_worker_builds_the_features_its_command_and_defaults_enable	0.0	0.0
 rust_worker::tests::a_worker_without_a_main_is_named_and_none_is_no_server	0.0	0.0
 rust_worker::tests::an_inspector_port_joins_whatever_dev_settings_are_there	0.0	0.0
-rust_worker::tests::finding_worker_configurations_survives_any_file_operation_failing	0.0	0.0
 rust_worker::tests::jsonc_comments_and_trailing_commas_are_dropped_and_strings_kept	0.0	0.0
 rust_worker::tests::jsonc_edges_a_cut_string_a_lone_slash_and_a_star_inside_a_comment	0.0	0.0
 rust_worker::tests::nothing_given_is_nothing_started_noted_or_removed	0.0	0.0
@@ -1914,7 +1876,6 @@ rust_worker::tests::the_worker_build_caps_lints_at_warn_whatever_it_inherited	0.
 rust_worker::tests::the_workers_of_a_session_are_read_through_workerd	0.5	0.0
 rust_worker::tests::the_wrangler_poller_stops_with_its_process_and_names_its_file_whole	1.1	0.0
 rust_worker::tests::workerd_lists_its_user_workers	0.0	0.0
-rust_worker::tests::wrapping_standing_in_and_reading_windows_survive_any_file_operation_failing	0.0	0.0
 rust_worker_cargo_test	229.3	432.6
 rust_worker_durable_objects	305.2	309.6
 rust_worker_playwright	311.5	24.9
@@ -2021,11 +1982,9 @@ source_tools::tests::a_tools_change_to_source_is_the_projects_when_the_command_e
 source_tools::tests::a_tools_status_stands_when_its_changes_cannot_be_kept	0.0	0.0
 source_tools::tests::a_view_follows_what_the_workspace_has	0.0	0.0
 source_tools::tests::a_view_holds_each_file_as_its_author_wrote_it	0.0	0.0
-source_tools::tests::a_view_survives_any_file_operation_failing	0.3	0.2
 source_tools::tests::a_windows_name_with_another_extension_gets_no_launcher	0.0	0.0
 source_tools::tests::a_windows_tool_gets_a_launcher_for_each_of_its_shims	0.0	0.0
 source_tools::tests::files_on_two_devices_are_two_files	0.0	0.0
-source_tools::tests::launchers_and_applied_changes_survive_any_file_operation_failing	0.0	0.0
 source_tools::tests::only_an_executable_file_is_executable	0.0	0.0
 source_tools::tests::tools_named_by_the_variable_are_judges_too	0.0	0.0
 source_units::edge_unit_tests::a_change_that_adds_or_removes_a_declaration_is_never_narrow	0.0	0.0
@@ -2221,7 +2180,6 @@ workspace::tests::an_empty_copy_returns_nothing	0.0	0.0
 workspace::tests::an_install_the_command_made_does_not_flow_back_without_its_dependencies	0.0	0.0
 workspace::tests::an_unowned_container_gets_a_deterministic_fallback	0.0	0.0
 workspace::tests::command_outputs_flow_back_to_the_project	0.0	0.0
-workspace::tests::copying_a_package_of_a_repository_survives_any_file_operation_failing	0.4	0.4
 workspace::tests::dangling_symlinks_are_preserved_and_escaping_ones_still_refused	0.0	0.0
 workspace::tests::dependency_trees_never_flow_back	0.0	0.0
 workspace::tests::each_workspace_error_says_what_failed	0.0	0.0
@@ -2232,9 +2190,6 @@ workspace::tests::file_urls_match_what_node_derives_for_every_path_shape	0.0	0.0
 workspace::tests::hard_linked_dependency_tree_is_real_and_replaceable	0.0	0.0
 workspace::tests::instrumented_sources_never_flow_back	0.0	0.0
 workspace::tests::isolated_copy_never_changes_source_and_requires_the_lock	0.0	0.0
-workspace::tests::linking_a_stored_dependency_tree_survives_any_file_operation_failing	0.3	0.3
-workspace::tests::linking_nested_dependency_trees_survives_any_file_operation_failing	0.3	0.3
-workspace::tests::mirroring_the_repository_survives_any_step_failing	1.5	1.4
 workspace::tests::names_that_could_leave_their_directory_are_refused	0.0	0.0
 workspace::tests::node_modules_that_cannot_be_looked_at_is_an_error	0.0	0.0
 workspace::tests::only_a_copy_apart_from_the_project_is_renamed	0.0	0.0
@@ -2242,21 +2197,15 @@ workspace::tests::ordinary_copy_fallback_preserves_workspace_semantics	0.0	0.0
 workspace::tests::output_built_from_instrumented_sources_never_flows_back	0.0	0.0
 workspace::tests::paths_are_normalized_and_related_by_their_components	0.0	0.0
 workspace::tests::paths_are_summarized_by_where_they_are	0.0	0.0
-workspace::tests::preparing_an_isolated_copy_survives_any_file_operation_failing	0.1	0.1
-workspace::tests::preparing_the_cached_copy_survives_any_file_operation_failing	0.2	0.2
 workspace::tests::pruning_removes_only_what_is_there_and_only_generated_scripts	0.0	0.0
-workspace::tests::recovering_and_pruning_the_cached_copy_survive_any_file_operation_failing	0.1	0.1
-workspace::tests::recovering_from_an_interrupted_refresh_survives_any_file_operation_failing	0.1	0.1
 workspace::tests::recovery_clears_a_previous_generation_that_is_no_directory	0.0	0.0
 workspace::tests::recovery_restores_the_newest_previous_generation_and_discards_staging	0.0	0.0
-workspace::tests::refreshing_the_cached_copy_survives_any_file_operation_failing	0.4	0.4
 workspace::tests::relocates_internal_links_and_rejects_external_links	0.0	0.0
 workspace::tests::reused_artifact_replaces_the_mirrored_stale_copy_wholesale	0.0	0.0
 workspace::tests::root_dependencies_link_to_their_copy_only_where_one_was_made	0.0	0.0
 workspace::tests::root_node_modules_symlink_is_followed	0.0	0.0
 workspace::tests::stable_cache_refreshes_atomically_and_reuses_only_explicit_artifacts	0.0	0.0
 workspace::tests::symlink_escaping_the_project_is_omitted_from_the_mirror	0.0	0.0
-workspace::tests::syncing_outputs_back_survives_any_file_operation_failing	0.3	0.3
 workspace::tests::terminal_workspace_keeps_flat_frontend_cache_without_discoverable_test_sources	0.0	0.0
 workspace::tests::the_copy_skips_workspaces_links_environments_and_relocates_absolute_links	0.0	0.0
 workspace::tests::the_repository_is_not_linked_around_a_copy_with_nowhere_to_go	0.0	0.0

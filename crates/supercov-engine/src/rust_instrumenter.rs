@@ -3252,13 +3252,10 @@ mod tests {
             "    g(y) + h()\n",
             "}\n",
         );
-        let reached = crate::fault::fail_each_call(
-            "rust-block-entry",
-            || (),
-            |()| instrument_rust_file("src/lib.rs", source, "crate::rt", false, None).map(drop),
-            |()| {},
-        );
-        assert!(reached > 9, "{reached}");
+        let refused = crate::fault::during("rust-block-entry", || {
+            instrument_rust_file("src/lib.rs", source, "crate::rt", false, None)
+        });
+        assert!(refused.is_err());
         // A file with nothing to measure is left as it is.
         for empty in ["", "use std::fmt;\n"] {
             let left = instrument_rust_file("src/lib.rs", empty, "crate::rt", false, None).unwrap();

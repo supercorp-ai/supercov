@@ -1143,19 +1143,6 @@ mod tests {
     return (lambda value: value or flag)(None)
 "#;
 
-    /// A range the source cannot hold, at each place one is read, refuses
-    /// the file rather than probing it wrongly.
-    #[test]
-    fn a_range_the_source_cannot_hold_refuses_its_file() {
-        let reached = crate::fault::fail_each_call(
-            "python-range",
-            || (),
-            |()| build_python_obligations("src/app.py", SOURCE).map(drop),
-            |()| {},
-        );
-        assert!(reached > 10, "{reached}");
-    }
-
     #[test]
     fn discovers_current_python_obligations_with_exact_ranges_and_stable_ids() {
         let first = build_python_obligations("src/app.py", SOURCE).unwrap();

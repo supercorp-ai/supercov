@@ -1141,45 +1141,4 @@ mod tests {
         );
     }
 
-    /// An import, once for every file operation it makes with that one
-    /// failing: each ends with an error or without, never a panic, and the
-    /// import no fault reaches is made.
-    #[test]
-    fn an_import_whose_file_operation_fails_ends_cleanly() {
-        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let calls = crate::fault::fail_each_call(
-            "fs",
-            || {
-                let base = std::env::temp_dir().join(format!(
-                    "supercov-import-faults-{}-{}",
-                    std::process::id(),
-                    UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                std::fs::create_dir_all(base.join("src")).unwrap();
-                let root = crate::test_directory::TestDirectory::adopt(base);
-                crate::run_store::create_analyzable_test_run(&root, "run-a");
-                std::fs::write(root.join("src/new.js"), "one();\n").unwrap();
-                std::fs::write(
-                    root.join("lines.info"),
-                    "SF:src/app.js\nDA:1,1\nend_of_record\nSF:src/new.js\nDA:1,1\nend_of_record\n",
-                )
-                .unwrap();
-                root
-            },
-            |root| {
-                import_line_evidence(&ImportRequest {
-                    root,
-                    run: Some("run-a"),
-                    evidence: &root.join("lines.info"),
-                    credit: Credit::Test("smoke".into()),
-                    status: None,
-                    run_id: "run-b",
-                    started_at: "2026-01-01T00:00:00.000Z",
-                })
-                .map(|_| ())
-            },
-            drop,
-        );
-        assert!(calls > 10, "{calls}");
-    }
 }

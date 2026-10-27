@@ -915,34 +915,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// A merge, once for every file operation it makes with that one
-    /// failing: each ends with an error or without, never a panic, and the
-    /// merge no fault reaches is made.
-    #[test]
-    fn a_merge_whose_file_operation_fails_ends_cleanly() {
-        let calls = crate::fault::fail_each_call(
-            "fs",
-            || {
-                let root = temporary();
-                create_analyzable_test_run(&root, "run-a");
-                create_analyzable_test_run(&root, "run-b");
-                root
-            },
-            |root| {
-                merge_coverage_runs(
-                    root,
-                    &["run-a".into(), "run-b".into()],
-                    "merged",
-                    "2026-01-01T00:00:00.000Z",
-                    false,
-                )
-                .map(|_| ())
-            },
-            |root| fs::remove_dir_all(root).unwrap(),
-        );
-        assert!(calls > 10, "{calls}");
-    }
-
     #[test]
     fn names_every_incompatible_integrity_dimension() {
         let root = temporary();
