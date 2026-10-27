@@ -2265,6 +2265,23 @@ mod tests {
                 "invalid Cargo target cfg key",
             ),
             ("[build]\ntarget=5\n", &["test"][..], "build.target"),
+            ("[build\n", &["test"][..], "invalid Cargo configuration"),
+            ("[build]\nrustflags=5\n", &["test"][..], "rustflags"),
+            (
+                "[target.'cfg(all())']\nrustflags=5\n",
+                &["test"][..],
+                "rustflags",
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\nrunner=''\n[target.aarch64-apple-darwin]\nrunner=''\n",
+                &["test"][..],
+                "cannot be empty",
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n",
+                &["test"][..],
+                "outside/run",
+            ),
             (
                 "",
                 &["test", "--target", "missing-spec.json"][..],
@@ -2281,6 +2298,10 @@ mod tests {
             for (variable, said) in [
                 ("CARGO_BUILD_TARGET", "CARGO_BUILD_TARGET is not UTF-8"),
                 ("CARGO_BUILD_RUSTFLAGS", "is not UTF-8"),
+                (
+                    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER",
+                    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER is not UTF-8",
+                ),
             ] {
                 let error = refused(
                     "",
