@@ -888,6 +888,15 @@ mod tests {
             Some("app/__init__.py")
         );
         assert_eq!(resolve_import(&temp, "app/views.py", "os"), None);
+        // A relative import of the package itself names no module, and a
+        // JavaScript path that climbs is read lexically.
+        assert_eq!(resolve_import(&temp, "app/views.py", "."), None);
+        std::fs::create_dir_all(temp.join("app/sub")).unwrap();
+        std::fs::write(temp.join("app/shared.js"), "").unwrap();
+        assert_eq!(
+            resolve_import(&temp, "app/sub/page.js", "../shared").as_deref(),
+            Some("app/shared.js")
+        );
         // A module importing itself, and one above the root, resolve to
         // nothing.
         assert_eq!(resolve_import(&temp, "app/views.py", ".views"), None);
