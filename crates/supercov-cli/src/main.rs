@@ -2786,6 +2786,47 @@ fn full_suite_hints(root: &Path, command: &[String], observed_kinds: &[String]) 
     )]
 }
 
+/// Record in a file's data, which a reader takes for the whole file, that
+/// this page was cut to fit one reply. The record is part of the reply, so
+/// the page is fitted with it.
+fn record_page_cut(output: &mut IndexedQueryOutput, asked: usize) {
+    let page = output.pagination.clone().expect(PAGED);
+    if let supercov_engine::indexed_query::IndexedQueryData::FileDetail(data) = &mut output.data {
+        data.page_cut = Some(supercov_engine::coverage_query::PageCut {
+            asked,
+            returned: page.returned,
+            next_offset: page.next_offset,
+        });
+    }
+}
+
+/// Say on stderr that this page was cut to fit one reply.
+fn say_page_cut(output: &IndexedQueryOutput, asked: usize) {
+    let page = output.pagination.as_ref().expect(PAGED);
+    // A page cut to fit always has more after it: what fits is fewer than
+    // were asked for, and as many were there to return.
+    eprintln!(
+        "[supercov] this page holds {} of the {asked} entries asked for, as many as fit in one reply ({} in all); the rest start at --offset {}",
+        page.returned,
+        page.total,
+        page.offset + page.returned
+    );
+}
+
+/// How many entries of a page too large for one reply would fit, when it
+/// is that and not something else.
+fn page_that_fits(output: &IndexedQueryOutput) -> Option<usize> {
+    match output.agent_json() {
+        Err(supercov_engine::indexed_query::IndexedQueryError::PageTooLarge { fits, .. }) => {
+            Some(fits)
+        }
+        _ => None,
+    }
+}
+
+/// A page is cut to fit only where it is paginated.
+const PAGED: &str = "a page cut to fit is paginated";
+
 enum PublicQueryOutput {
     Runs {
         data: RunListData,
@@ -2836,58 +2877,6 @@ impl PublicQueryOutput {
             page.limit = returned;
             page.has_more = true;
             page.next_offset = Some(page.offset + returned);
-        }
-    }
-
-    /// Record in a file's data, which a reader takes for the whole file,
-    /// that this page was cut to fit one reply. The record is part of the
-    /// reply, so the page is fitted with it.
-    fn record_page_cut(&mut self, asked: usize) {
-        let Self::Coverage { output, .. } = self else {
-            return;
-        };
-        let Some(page) = output.pagination.clone() else {
-            return;
-        };
-        if let supercov_engine::indexed_query::IndexedQueryData::FileDetail(data) = &mut output.data
-        {
-            data.page_cut = Some(supercov_engine::coverage_query::PageCut {
-                asked,
-                returned: page.returned,
-                next_offset: page.next_offset,
-            });
-        }
-    }
-
-    /// Say on stderr that this page was cut to fit one reply.
-    fn say_page_cut(&self, asked: usize) {
-        let Self::Coverage { output, .. } = self else {
-            return;
-        };
-        let Some(page) = &output.pagination else {
-            return;
-        };
-        // A page cut to fit always has more after it: what fits is fewer
-        // than were asked for, and as many were there to return.
-        eprintln!(
-            "[supercov] this page holds {} of the {asked} entries asked for, as many as fit in one reply ({} in all); the rest start at --offset {}",
-            page.returned,
-            page.total,
-            page.offset + page.returned
-        );
-    }
-
-    /// How many entries of a page too large for one reply would fit, when
-    /// it is that and not something else.
-    fn page_that_fits(&self) -> Option<usize> {
-        let Self::Coverage { output, .. } = self else {
-            return None;
-        };
-        match output.agent_json() {
-            Err(supercov_engine::indexed_query::IndexedQueryError::PageTooLarge {
-                fits, ..
-            }) => Some(fits),
-            _ => None,
         }
     }
 
@@ -2983,322 +2972,319 @@ fn execute_public_query(
             request,
             newer_run_id,
             ..
-        } => {
-            let mut request = (**request).clone();
-            let inventory = public_run_inventory(root).map_err(run_store_agent_error)?;
-            let run =
-                select_run(&inventory, Some(&request.run_id)).map_err(run_store_agent_error)?;
-            request.run_id.clone_from(&run.id);
-            request
-                .valid
-                .get_or_insert(run.metadata.test_exit_code == Some(0));
-            request.test_exit_code = run.metadata.test_exit_code;
-            let mut warnings = Vec::new();
-            let mut diff_inputs = None;
-            {
-                let comparison = checkout_comparison(root, run);
-                request.stale.get_or_insert(comparison.stale);
-                request
-                    .stale_reasons
-                    .get_or_insert_with(|| comparison.reasons.clone());
-                // A query about some files is stale when those files
-                // changed, or what decides every file did; tests added
-                // since the run change nothing a line of source reads.
-                let queried = queried_files(&request);
-                let changed = if comparison.stale {
-                    changed_since_run(root, run)
-                } else {
-                    Vec::new()
-                };
-                let scoped_stale = |changed: &[String]| {
-                    comparison.reasons.iter().any(|reason| {
-                        reason != "test files changed" && reason != "instrumented source changed"
-                    }) || queried.iter().any(|file| changed.contains(file))
-                };
-                if comparison.stale && !queried.is_empty() {
-                    if scoped_stale(&changed) {
-                        let mine = queried
-                            .iter()
-                            .filter(|file| changed.contains(file))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        warnings.push(if mine.is_empty() {
-                            format!(
-                                "[supercov] stale run {}: {}",
-                                run.id,
-                                comparison.reasons.join(", ")
-                            )
-                        } else {
-                            format!(
-                                "[supercov] stale run {}: {} changed since the run",
-                                run.id,
-                                mine.join(", ")
-                            )
-                        });
-                    }
-                } else if comparison.stale {
-                    warnings.push(stale_run_warning(&run.id, &comparison.reasons, &changed));
-                }
-            }
-            let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
-                // One line past the end of the file is no line: reading it as
-                // code the run did not measure would be an answer.
-                // A `line` request always names its file and line.
-                let (file, line) = (
-                    request.file.as_deref().unwrap_or_default(),
-                    request.line.unwrap_or_default(),
-                );
-                if request.command == "line"
-                    && request.more_lines.is_empty()
-                    && let Ok(contents) = fs::read_to_string(root.join(file))
-                    && line > contents.lines().count()
-                {
-                    return Err(agent_json::AgentError {
-                        code: agent_json::ErrorCode::InvalidArgument,
-                        message: format!(
-                            "{file} has {} lines; there is no line {line}",
-                            contents.lines().count()
-                        ),
-                        retryable: false,
-                        details: Some(serde_json::json!({ "file": file, "line": line })),
-                    });
-                }
-                let progress = ProgressLine::start("loading run evidence");
-                let test_filter = request.test_filter();
-                let container = open_query_index_for(run, test_filter.as_ref()).map_err(|error| {
-                    if let RunIndexError::Report(ReportError::NoTestMatches(filter)) = &error {
-                        return agent_json::AgentError {
-                            code: agent_json::ErrorCode::TestFilterEmpty,
-                            message: format!("No tests match {filter}"),
-                            retryable: false,
-                            details: Some(serde_json::json!({ "filter": filter })),
-                        };
-                    }
-                    let message = if matches!(
-                        error,
-                        RunIndexError::Report(ReportError::NoEvidence(_))
-                    ) {
-                        match run.metadata.test_exit_code {
-                            // A command that passed with nothing recorded ran
-                            // no test: a filter that matched none, most often.
-                            Some(0) => "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test.".into(),
-                            Some(code) => format!(
-                                "The wrapped command exited {code} before publishing queryable coverage evidence. Inspect that command's original output and rerun after it passes."
-                            ),
-                            None => "The wrapped command ended without an exit status or queryable coverage evidence. Inspect that command's original output and rerun.".into(),
-                        }
-                    } else {
-                        format!("Failed to open coverage index: {error}")
-                    };
-                    internal_agent_error(message)
-                })?;
-                let index = CoverageIndex::new(&container).map_err(|error| {
-                    internal_agent_error(format!("Failed to read coverage index: {error}"))
-                })?;
-                drop(progress);
-                let report = if request.command == "minimize" {
-                    Some(
-                        analyze_stored_run_filtered(run, test_filter.as_ref())
-                            .map_err(|error| internal_agent_error(error.to_string()))?,
+        } => execute_coverage_query(root, request, newer_run_id.as_deref())
+            .map(|(output, warnings)| PublicQueryOutput::Coverage { output, warnings }),
+    }
+}
+
+/// A coverage query, answered from its run's index, with the warnings the
+/// run's state calls for.
+fn execute_coverage_query(
+    root: &Path,
+    request: &IndexedQueryRequest,
+    newer_run_id: Option<&str>,
+) -> Result<(IndexedQueryOutput, Vec<String>), PublicQueryExecutionError> {
+    let mut request = request.clone();
+    let inventory = public_run_inventory(root).map_err(run_store_agent_error)?;
+    let run = select_run(&inventory, Some(&request.run_id)).map_err(run_store_agent_error)?;
+    request.run_id.clone_from(&run.id);
+    request
+        .valid
+        .get_or_insert(run.metadata.test_exit_code == Some(0));
+    request.test_exit_code = run.metadata.test_exit_code;
+    let mut warnings = Vec::new();
+    let mut diff_inputs = None;
+    {
+        let comparison = checkout_comparison(root, run);
+        request.stale.get_or_insert(comparison.stale);
+        request
+            .stale_reasons
+            .get_or_insert_with(|| comparison.reasons.clone());
+        // A query about some files is stale when those files
+        // changed, or what decides every file did; tests added
+        // since the run change nothing a line of source reads.
+        let queried = queried_files(&request);
+        let changed = if comparison.stale {
+            changed_since_run(root, run)
+        } else {
+            Vec::new()
+        };
+        let scoped_stale = |changed: &[String]| {
+            comparison.reasons.iter().any(|reason| {
+                reason != "test files changed" && reason != "instrumented source changed"
+            }) || queried.iter().any(|file| changed.contains(file))
+        };
+        if comparison.stale && !queried.is_empty() {
+            if scoped_stale(&changed) {
+                let mine = queried
+                    .iter()
+                    .filter(|file| changed.contains(file))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                warnings.push(if mine.is_empty() {
+                    format!(
+                        "[supercov] stale run {}: {}",
+                        run.id,
+                        comparison.reasons.join(", ")
                     )
                 } else {
-                    None
-                };
-
-                let newer_container;
-                let newer_index;
-                let newer_query = if request.command == "diff" {
-                    let selector = newer_run_id.as_deref().ok_or_else(|| {
-                        supercov_engine::indexed_query::IndexedQueryError::MissingNewerRun
-                            .agent_error()
-                    })?;
-                    let newer_run =
-                        select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
-                    // A run compared with itself was warned about above.
-                    if newer_run.id != run.id {
-                        let comparison = checkout_comparison(root, newer_run);
-                        if comparison.stale {
-                            warnings.push(stale_run_warning(
-                                &newer_run.id,
-                                &comparison.reasons,
-                                &changed_since_run(root, newer_run),
-                            ));
-                        }
+                    format!(
+                        "[supercov] stale run {}: {} changed since the run",
+                        run.id,
+                        mine.join(", ")
+                    )
+                });
+            }
+        } else if comparison.stale {
+            warnings.push(stale_run_warning(&run.id, &comparison.reasons, &changed));
+        }
+    }
+    let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
+        // One line past the end of the file is no line: reading it as
+        // code the run did not measure would be an answer.
+        // A `line` request always names its file and line.
+        let (file, line) = (
+            request.file.as_deref().unwrap_or_default(),
+            request.line.unwrap_or_default(),
+        );
+        if request.command == "line"
+            && request.more_lines.is_empty()
+            && let Ok(contents) = fs::read_to_string(root.join(file))
+            && line > contents.lines().count()
+        {
+            return Err(agent_json::AgentError {
+                code: agent_json::ErrorCode::InvalidArgument,
+                message: format!(
+                    "{file} has {} lines; there is no line {line}",
+                    contents.lines().count()
+                ),
+                retryable: false,
+                details: Some(serde_json::json!({ "file": file, "line": line })),
+            });
+        }
+        let progress = ProgressLine::start("loading run evidence");
+        let test_filter = request.test_filter();
+        let container = open_query_index_for(run, test_filter.as_ref()).map_err(|error| {
+                if let RunIndexError::Report(ReportError::NoTestMatches(filter)) = &error {
+                    return agent_json::AgentError {
+                        code: agent_json::ErrorCode::TestFilterEmpty,
+                        message: format!("No tests match {filter}"),
+                        retryable: false,
+                        details: Some(serde_json::json!({ "filter": filter })),
+                    };
+                }
+                let message = if matches!(
+                    error,
+                    RunIndexError::Report(ReportError::NoEvidence(_))
+                ) {
+                    match run.metadata.test_exit_code {
+                        // A command that passed with nothing recorded ran
+                        // no test: a filter that matched none, most often.
+                        Some(0) => "The wrapped command passed and ran no test Supercov could record, so there is no coverage to read; check that its test filter matches a test.".into(),
+                        Some(code) => format!(
+                            "The wrapped command exited {code} before publishing queryable coverage evidence. Inspect that command's original output and rerun after it passes."
+                        ),
+                        None => "The wrapped command ended without an exit status or queryable coverage evidence. Inspect that command's original output and rerun.".into(),
                     }
-                    let (older, newer) = (
-                        &run.metadata.integrity.fingerprint,
-                        &newer_run.metadata.integrity.fingerprint,
-                    );
-                    // A stored run's fingerprints are sha256 digests, or it
-                    // is not read at all.
-                    diff_inputs = Some(supercov_engine::coverage_query::CoverageDiffInputs {
-                        source_changed: older.source != newer.source
-                            || older.dependencies != newer.dependencies
-                            || older.configuration != newer.configuration,
-                        tests_changed: older.tests != newer.tests,
-                    });
-                    let comparison_progress = ProgressLine::start("loading comparison run");
-                    newer_container = open_query_index_for(newer_run, test_filter.as_ref())
-                        .map_err(|error| {
-                            internal_agent_error(format!(
-                                "Failed to open newer coverage index: {error}"
-                            ))
-                        })?;
-                    newer_index = CoverageIndex::new(&newer_container).map_err(|error| {
-                        internal_agent_error(format!(
-                            "Failed to read newer coverage index: {error}"
-                        ))
-                    })?;
-                    drop(comparison_progress);
-                    Some(NewerQuery {
-                        run_id: &newer_run.id,
-                        index: &newer_index,
-                    })
                 } else {
-                    None
+                    format!("Failed to open coverage index: {error}")
                 };
-                query_indexed(&index, report.as_ref(), &request, newer_query)
-                    .map_err(|error| error.agent_error())
-            })();
-            // A line past the end of its file is no line, as it is when asked
-            // alone: it fails, the others stand; all failing fails the call.
-            let result = result.and_then(|mut output| {
+                internal_agent_error(message)
+            })?;
+        let index = CoverageIndex::new(&container).map_err(|error| {
+            internal_agent_error(format!("Failed to read coverage index: {error}"))
+        })?;
+        drop(progress);
+        let report = if request.command == "minimize" {
+            Some(
+                analyze_stored_run_filtered(run, test_filter.as_ref())
+                    .map_err(|error| internal_agent_error(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        let newer_container;
+        let newer_index;
+        let newer_query = if request.command == "diff" {
+            let selector = newer_run_id.ok_or_else(|| {
+                supercov_engine::indexed_query::IndexedQueryError::MissingNewerRun.agent_error()
+            })?;
+            let newer_run =
+                select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
+            // A run compared with itself was warned about above.
+            if newer_run.id != run.id {
+                let comparison = checkout_comparison(root, newer_run);
+                if comparison.stale {
+                    warnings.push(stale_run_warning(
+                        &newer_run.id,
+                        &comparison.reasons,
+                        &changed_since_run(root, newer_run),
+                    ));
+                }
+            }
+            let (older, newer) = (
+                &run.metadata.integrity.fingerprint,
+                &newer_run.metadata.integrity.fingerprint,
+            );
+            // A stored run's fingerprints are sha256 digests, or it
+            // is not read at all.
+            diff_inputs = Some(supercov_engine::coverage_query::CoverageDiffInputs {
+                source_changed: older.source != newer.source
+                    || older.dependencies != newer.dependencies
+                    || older.configuration != newer.configuration,
+                tests_changed: older.tests != newer.tests,
+            });
+            let comparison_progress = ProgressLine::start("loading comparison run");
+            newer_container =
+                open_query_index_for(newer_run, test_filter.as_ref()).map_err(|error| {
+                    internal_agent_error(format!("Failed to open newer coverage index: {error}"))
+                })?;
+            newer_index = CoverageIndex::new(&newer_container).map_err(|error| {
+                internal_agent_error(format!("Failed to read newer coverage index: {error}"))
+            })?;
+            drop(comparison_progress);
+            Some(NewerQuery {
+                run_id: &newer_run.id,
+                index: &newer_index,
+            })
+        } else {
+            None
+        };
+        query_indexed(&index, report.as_ref(), &request, newer_query)
+            .map_err(|error| error.agent_error())
+    })();
+    // A line past the end of its file is no line, as it is when asked
+    // alone: it fails, the others stand; all failing fails the call.
+    let result = result.and_then(|mut output| {
+        if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) = &mut output.data {
+            let mut kept = Vec::new();
+            let mut pages = Vec::new();
+            for (line, page) in std::mem::take(&mut data.lines)
+                .into_iter()
+                .zip(std::mem::take(&mut data.pages))
+            {
+                let location = match &line {
+                    supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
+                        &data.location
+                    }
+                    supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                        &data.location
+                    }
+                };
+                let lines_in_file = fs::read_to_string(root.join(&location.file))
+                    .ok()
+                    .map(|contents| contents.lines().count());
+                match lines_in_file {
+                    Some(count) if location.line > count => {
+                        data.failed
+                            .push(supercov_engine::indexed_query::CoverageLineFailure {
+                                location: format!("{}:{}", location.file, location.line),
+                                code: agent_json::ErrorCode::InvalidArgument,
+                                message: format!(
+                                    "{} has {count} lines; there is no line {}",
+                                    location.file, location.line
+                                ),
+                            });
+                    }
+                    _ => {
+                        kept.push(line);
+                        pages.push(page);
+                    }
+                }
+            }
+            data.lines = kept;
+            data.pages = pages;
+            if data.lines.is_empty()
+                && let Some(first) = data.failed.first()
+            {
+                return Err(agent_json::AgentError {
+                    code: first.code,
+                    message: first.message.clone(),
+                    retryable: false,
+                    details: Some(serde_json::json!({ "location": first.location })),
+                });
+            }
+        }
+        Ok(output)
+    });
+    result
+            .map(|mut output| {
+                let recorded = matches!(
+                    output.data,
+                    supercov_engine::indexed_query::IndexedQueryData::Line(_)
+                        | supercov_engine::indexed_query::IndexedQueryData::Lines(_)
+                )
+                .then(|| supercov_engine::source_manifest::load_manifest(run).ok())
+                .flatten()
+                .map(|stored| stored.manifest.files);
+                if let supercov_engine::indexed_query::IndexedQueryData::Line(data) =
+                    &mut output.data
+                {
+                    hydrate_line_source_from_working_tree(root, recorded.as_ref(), data);
+                }
+                // Each line of several is given what one line is given.
                 if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) =
                     &mut output.data
                 {
-                    let mut kept = Vec::new();
-                    let mut pages = Vec::new();
-                    for (line, page) in std::mem::take(&mut data.lines)
-                        .into_iter()
-                        .zip(std::mem::take(&mut data.pages))
-                    {
-                        let location = match &line {
-                            supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
-                                &data.location
-                            }
-                            supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
-                                &data.location
-                            }
-                        };
-                        let lines_in_file = fs::read_to_string(root.join(&location.file))
-                            .ok()
-                            .map(|contents| contents.lines().count());
-                        match lines_in_file {
-                            Some(count) if location.line > count => {
-                                data.failed.push(
-                                    supercov_engine::indexed_query::CoverageLineFailure {
-                                        location: format!("{}:{}", location.file, location.line),
-                                        code: agent_json::ErrorCode::InvalidArgument,
-                                        message: format!(
-                                            "{} has {count} lines; there is no line {}",
-                                            location.file, location.line
-                                        ),
-                                    },
-                                );
-                            }
-                            _ => {
-                                kept.push(line);
-                                pages.push(page);
-                            }
-                        }
-                    }
-                    data.lines = kept;
-                    data.pages = pages;
-                    if data.lines.is_empty()
-                        && let Some(first) = data.failed.first()
-                    {
-                        return Err(agent_json::AgentError {
-                            code: first.code,
-                            message: first.message.clone(),
-                            retryable: false,
-                            details: Some(serde_json::json!({ "location": first.location })),
-                        });
+                    for line in &mut data.lines {
+                        hydrate_line_source_from_working_tree(root, recorded.as_ref(), line);
+                        line_assertions(run, line);
                     }
                 }
-                Ok(output)
-            });
-            result
-                .map(|mut output| {
-                    let recorded = matches!(
-                        output.data,
-                        supercov_engine::indexed_query::IndexedQueryData::Line(_)
-                            | supercov_engine::indexed_query::IndexedQueryData::Lines(_)
-                    )
-                    .then(|| supercov_engine::source_manifest::load_manifest(run).ok())
-                    .flatten()
-                    .map(|stored| stored.manifest.files);
-                    if let supercov_engine::indexed_query::IndexedQueryData::Line(data) =
-                        &mut output.data
-                    {
-                        hydrate_line_source_from_working_tree(root, recorded.as_ref(), data);
+                if let supercov_engine::indexed_query::IndexedQueryData::Diff(data) =
+                    &mut output.data
+                {
+                    data.inputs = diff_inputs;
+                }
+                match &mut output.data {
+                    supercov_engine::indexed_query::IndexedQueryData::FileDetail(data) => {
+                        data.assertions = Some(assertions_command::for_file(run, &data.file));
                     }
-                    // Each line of several is given what one line is given.
-                    if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) =
-                        &mut output.data
-                    {
-                        for line in &mut data.lines {
-                            hydrate_line_source_from_working_tree(root, recorded.as_ref(), line);
-                            line_assertions(run, line);
-                        }
+                    supercov_engine::indexed_query::IndexedQueryData::Line(data) => {
+                        line_assertions(run, data);
                     }
-                    if let supercov_engine::indexed_query::IndexedQueryData::Diff(data) =
-                        &mut output.data
-                    {
-                        data.inputs = diff_inputs;
-                    }
-                    match &mut output.data {
-                        supercov_engine::indexed_query::IndexedQueryData::FileDetail(data) => {
-                            data.assertions = Some(assertions_command::for_file(run, &data.file));
-                        }
-                        supercov_engine::indexed_query::IndexedQueryData::Line(data) => {
-                            line_assertions(run, data);
-                        }
-                        _ => {}
-                    }
-                    if let supercov_engine::indexed_query::IndexedQueryData::TestsWithoutEvidence(
-                        data,
-                    ) = &mut output.data
-                    {
-                        mark_tests_that_import_no_measured_source(root, run, &mut data.tests);
-                    }
-                    if let supercov_engine::indexed_query::IndexedQueryData::Summary(data) =
-                        &mut output.data
-                    {
-                        data.command.clone_from(&run.metadata.command);
-                        data.merged_across = run.metadata.merged_across.clone().unwrap_or_default();
-                        data.companions = run.metadata.companions.clone().unwrap_or_default();
-                        data.assertion_coverage = Some(match assertions_command::saved(run) {
-                            Some(result) => serde_json::json!({"available": true, "summary": result["summary"], "basis": result["basis"], "model": result["model"]}),
-                            None => serde_json::json!({"available": false, "assess": format!("{} runs {} assertions assess", crate::launcher_command(), run.id)}),
-                        });
+                    _ => {}
+                }
+                if let supercov_engine::indexed_query::IndexedQueryData::TestsWithoutEvidence(
+                    data,
+                ) = &mut output.data
+                {
+                    mark_tests_that_import_no_measured_source(root, run, &mut data.tests);
+                }
+                if let supercov_engine::indexed_query::IndexedQueryData::Summary(data) =
+                    &mut output.data
+                {
+                    data.command.clone_from(&run.metadata.command);
+                    data.merged_across = run.metadata.merged_across.clone().unwrap_or_default();
+                    data.companions = run.metadata.companions.clone().unwrap_or_default();
+                    data.assertion_coverage = Some(match assertions_command::saved(run) {
+                        Some(result) => serde_json::json!({"available": true, "summary": result["summary"], "basis": result["basis"], "model": result["model"]}),
+                        None => serde_json::json!({"available": false, "assess": format!("{} runs {} assertions assess", crate::launcher_command(), run.id)}),
+                    });
 
-                        let observed_kinds = data
-                            .coverage_by_kind
-                            .iter()
-                            .filter_map(|entry| entry.kind.clone())
-                            .collect::<Vec<_>>();
-                        data.hints = full_suite_hints(root, &run.metadata.command, &observed_kinds);
-                        // The copy the run's command ran in, while it is there.
-                        data.workspace = run
-                            .metadata
-                            .copy
-                            .and_then(|copy| {
-                                supercov_engine::workspace::copy_path(root, copy).ok()
-                            })
-                            .filter(|path| path.is_dir())
-                            .map(|path| path.display().to_string());
-                    }
-                    PublicQueryOutput::Coverage {
-                        output,
-                        warnings: warnings.clone(),
-                    }
-                })
-                .map_err(|error| PublicQueryExecutionError {
-                    error: Box::new(error),
-                    warnings,
-                })
-        }
-    }
+                    let observed_kinds = data
+                        .coverage_by_kind
+                        .iter()
+                        .filter_map(|entry| entry.kind.clone())
+                        .collect::<Vec<_>>();
+                    data.hints = full_suite_hints(root, &run.metadata.command, &observed_kinds);
+                    // The copy the run's command ran in, while it is there.
+                    data.workspace = run
+                        .metadata
+                        .copy
+                        .and_then(|copy| {
+                            supercov_engine::workspace::copy_path(root, copy).ok()
+                        })
+                        .filter(|path| path.is_dir())
+                        .map(|path| path.display().to_string());
+                }
+                (output, warnings.clone())
+            })
+            .map_err(|error| PublicQueryExecutionError {
+                error: Box::new(error),
+                warnings,
+            })
 }
 
 fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
@@ -3390,38 +3376,39 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
             let mut invocation = invocation;
             let mut output = output;
             output.fit_lines();
-            let asked = match &invocation {
-                PublicQueryInvocation::Coverage { request, .. } => Some(request.limit),
-                _ => None,
-            };
-            while let Some(fits) = output.page_that_fits() {
-                let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
-                    break;
-                };
-                // What fits is fewer than the page returned, which is at most
-                // its limit; the limit falls each time, so this ends.
-                request.limit = fits.min(request.limit - 1);
-                match execute_public_query(&root, &invocation) {
-                    Ok(smaller) => {
-                        output = smaller;
-                        output.record_page_cut(asked.unwrap_or_default());
-                    }
-                    Err(failure) => {
-                        print!(
-                            "{}",
-                            agent_json::failure(Some(&agent_command), &failure.error)
-                        );
-                        return ExitCode::from(2);
+            if let (
+                PublicQueryInvocation::Coverage {
+                    request,
+                    newer_run_id,
+                    ..
+                },
+                PublicQueryOutput::Coverage { output: page, .. },
+            ) = (&mut invocation, &mut output)
+            {
+                let asked = request.limit;
+                while let Some(fits) = page_that_fits(page) {
+                    // What fits is fewer than the page returned, which is at
+                    // most its limit; the limit falls each time, so this ends.
+                    request.limit = fits.min(request.limit - 1);
+                    match execute_coverage_query(&root, request, newer_run_id.as_deref()) {
+                        Ok((smaller, _)) => {
+                            *page = smaller;
+                            record_page_cut(page, asked);
+                        }
+                        Err(failure) => {
+                            print!(
+                                "{}",
+                                agent_json::failure(Some(&agent_command), &failure.error)
+                            );
+                            return ExitCode::from(2);
+                        }
                     }
                 }
-            }
-            // A page cut to fit says so, in the reply and beside it: taken
-            // for the whole of a file, page one hid most of its gaps.
-            if let (Some(asked), PublicQueryInvocation::Coverage { request, .. }) =
-                (asked, &invocation)
-                && request.limit < asked
-            {
-                output.say_page_cut(asked);
+                // A page cut to fit says so, in the reply and beside it: taken
+                // for the whole of a file, page one hid most of its gaps.
+                if request.limit < asked {
+                    say_page_cut(page, asked);
+                }
             }
             match output.agent_json() {
                 Ok(output) => {
@@ -4065,11 +4052,21 @@ mod tests {
             &["npm".into(), "run".into(), "test:unit".into()],
             &["unit".into()],
         );
-        fs::remove_dir_all(&root).unwrap();
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("only the `unit` test kind"));
         assert!(hints[0].contains("test:e2e"));
         assert!(hints[0].contains(&format!("{} -- npm test", launcher_command())));
+        // A package file that is not JSON, or names no scripts, hints nothing.
+        for package in ["{ not json", r#"{"name":"p"}"#] {
+            fs::write(root.join("package.json"), package).unwrap();
+            let hints = full_suite_hints(
+                &root,
+                &["npm".into(), "run".into(), "test:unit".into()],
+                &["unit".into()],
+            );
+            assert!(hints.is_empty(), "{package}");
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
