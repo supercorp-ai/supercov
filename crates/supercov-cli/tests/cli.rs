@@ -13102,6 +13102,69 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     }
 }
 
+/// The places of a run's `role` runners -- `__doctest-runner`,
+/// `__nextest-runner`, which Cargo starts for each test -- failed one at a
+/// time (`role/fs#N`, every runner failing its Nth): each run ends, a runner
+/// that failed saying so, and never panics; the sweep stops at the first N no
+/// runner reached, and a run with no fault then succeeds. How many it made.
+fn fail_each_place_of_a_runner(label: &str, role: &str, command: &[&str]) -> usize {
+    let project = Project::empty(label);
+    small_crate(&project);
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let log = project.root.with_extension("faults.log");
+    let mut nth = 1;
+    loop {
+        let _ = std::fs::remove_file(&log);
+        let fault = format!("{role}/fs#{nth}");
+        let ran = project.supercov_with(
+            command,
+            &[
+                ("SUPERCOV_TEST_FAULT", &fault),
+                ("SUPERCOV_TEST_FAULT_LOG", log.to_str().unwrap()),
+            ],
+        );
+        // A failing runner fails its test, and `cargo test` exits 101 for a
+        // failed test: a panic is told by its own words.
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert!(
+            !said.contains("panicked at"),
+            "{label} with {fault} panicked:\n{said}"
+        );
+        if !log.exists() {
+            break;
+        }
+        nth += 1;
+    }
+    let _ = std::fs::remove_file(&log);
+    project.supercov(command).succeeds();
+    nth - 1
+}
+
+/// A doctest's runner, and nextest's where it is installed, each failing
+/// at every place it makes a file operation.
+#[test]
+fn a_test_runner_whose_file_operation_fails_says_so() {
+    let reached = fail_each_place_of_a_runner(
+        "runner-faults-doctest",
+        supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT,
+        &["--", "cargo", "test", "-q"],
+    );
+    assert!(reached > 3, "{reached}");
+    let nextest = std::process::Command::new("cargo")
+        .args(["nextest", "--version"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if nextest {
+        let reached = fail_each_place_of_a_runner(
+            "runner-faults-nextest",
+            supercov_engine::rust_owned_nextest::RUNNER_MODE_ARGUMENT,
+            &["--", "cargo", "nextest", "run"],
+        );
+        assert!(reached > 3, "{reached}");
+    }
+}
+
 /// `runs patch` reads the change from git: each git call failing in turn
 /// (`SUPERCOV_TEST_FAULT=git@N`) is named and ends the command with `2`, never
 /// a panic, and the call no fault reaches answers as usual.

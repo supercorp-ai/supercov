@@ -2358,6 +2358,11 @@ mod tests {
             )
         });
         assert_eq!(errno.unwrap_err().raw_os_error(), Some(2));
+        // A fault for another process's role is none of this one's.
+        let elsewhere = crate::fault::during("__no-such-command/named", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(elsewhere.is_ok());
     }
 
     fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {

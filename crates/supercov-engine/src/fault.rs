@@ -4,10 +4,14 @@
 //! `site#N` only the first call from the Nth place in the code that calls it
 //! (where the site knows its caller, as [`crate::fault_fs`] does), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
-//! its usual error. A failing
+//! its usual error. An entry written `__command/site...` applies only in a
+//! process started as `supercov __command` -- a doctest's or nextest's runner
+//! -- so a test can fail its Nth place there and not its parent's. A failing
 //! site does not make its call; it returns what the call returns when it
-//! fails, and says so on standard error (`test fault at <site>`), so a test
-//! knows the site was reached. Only debug builds read the variable: a release
+//! fails, and says so on standard error (`test fault at <site>`), and as a
+//! line of the file `SUPERCOV_TEST_FAULT_LOG` names, where it names one: a
+//! runner's standard error is its parent's to read. So a test knows the site
+//! was reached. Only debug builds read the variable: a release
 //! build has no such switch. The engine's own tests set faults for one thread with [`during`].
 //! Every part of it is compiled into every debug build alike: a part only
 //! the engine's test build had would make that build's coverage count lines
@@ -39,10 +43,36 @@ pub type Place = (&'static std::panic::Location<'static>, &'static str);
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
     std::sync::LazyLock::new(|| parse(&std::env::var("SUPERCOV_TEST_FAULT").unwrap_or_default()));
 
+/// The file a failing site is written to as well, as a C string: a forked
+/// child writes it without allocating.
+#[cfg(all(unix, any(test, debug_assertions)))]
+static LOG: std::sync::LazyLock<Option<std::ffi::CString>> = std::sync::LazyLock::new(|| {
+    use std::os::unix::ffi::OsStringExt;
+    std::env::var_os("SUPERCOV_TEST_FAULT_LOG")
+        .and_then(|path| std::ffi::CString::new(path.into_vec()).ok())
+});
+
+/// The internal command this process was started as (`__doctest-runner`),
+/// or nothing for any other.
+#[cfg(any(test, debug_assertions))]
+fn process_role() -> String {
+    std::env::args_os()
+        .nth(1)
+        .and_then(|first| first.into_string().ok())
+        .filter(|first| first.starts_with("__"))
+        .unwrap_or_default()
+}
+
 #[cfg(any(test, debug_assertions))]
 fn parse(text: &str) -> Vec<Fault> {
+    let role = process_role();
     text.split(',')
         .filter(|entry| !entry.is_empty())
+        // An entry for another process's role is none of this one's.
+        .filter_map(|entry| match entry.split_once('/') {
+            Some((named, rest)) => (named == role).then_some(rest),
+            None => Some(entry),
+        })
         .map(|entry| {
             let (site, count) = entry.split_once('=').unwrap_or((entry, ""));
             let (site, place) = site.split_once('#').unwrap_or((site, ""));
@@ -72,6 +102,8 @@ fn parse(text: &str) -> Vec<Fault> {
 pub fn prepare() {
     #[cfg(any(test, debug_assertions))]
     std::sync::LazyLock::force(&FAULTS);
+    #[cfg(all(unix, any(test, debug_assertions)))]
+    std::sync::LazyLock::force(&LOG);
 }
 
 /// Whether the call at `site` fails this time.
@@ -166,6 +198,24 @@ fn announce(site: &str) {
     ] {
         // SAFETY: a write of a live buffer to standard error.
         unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
+    }
+    #[cfg(unix)]
+    if let Some(path) = LOG.as_ref() {
+        // SAFETY: an open of a live C string, writes of live buffers to the
+        // descriptor it gave, and its close.
+        unsafe {
+            let log = libc::open(
+                path.as_ptr(),
+                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
+                0o644,
+            );
+            if log >= 0 {
+                for part in [site.as_bytes(), b"\n"] {
+                    libc::write(log, part.as_ptr().cast(), part.len());
+                }
+                libc::close(log);
+            }
+        }
     }
     #[cfg(not(unix))]
     eprintln!("[supercov] test fault at {site}");
