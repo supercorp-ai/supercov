@@ -14483,6 +14483,12 @@ fn source_and_check_refuse_what_they_cannot_read() {
         "{}",
         large.stdout()
     );
+    // A diff narrowed by a title keeps the narrowing in its paging.
+    let older = project.latest();
+    project.measure(&[]);
+    project
+        .supercov(&["diff", &older, "latest", "--title", "total"])
+        .succeeds();
     let huge = project.supercov(&[
         "runs",
         "latest",
