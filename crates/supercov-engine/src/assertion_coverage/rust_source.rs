@@ -1980,6 +1980,13 @@ pub fn shapes(p: &Point, n: u32, text: &str) -> Option<u32> {
             );
             let signatures = signatures([("src/lib.rs", edited.as_str())].into_iter());
             let _ = replacements("src/lib.rs", &edited, &signatures);
+            // And with a bracket or an operator added there, which leaves
+            // other nodes without their parts.
+            for added in ["(", ")", "?"] {
+                let edited = format!("{}{added}{}", &source[..cut], &source[cut..]);
+                let read = super::signatures([("src/lib.rs", edited.as_str())].into_iter());
+                let _ = replacements("src/lib.rs", &edited, &read);
+            }
         }
     }
 
@@ -2895,5 +2902,13 @@ fn f() -> ((), u8) {
             Some("&v[..0]".into())
         );
         assert_eq!(changed("&v]", None, &crate_view), None);
+        // A float, an ordering and a vector each have a value of their own.
+        for (ty, value) in [
+            ("f64", "0.0"),
+            ("std::cmp::Ordering", "std::cmp::Ordering::Less"),
+            ("Vec<u8>", "Vec::new()"),
+        ] {
+            assert_eq!(value_of(ty, &crate_view, 0).as_deref(), Some(value), "{ty}");
+        }
     }
 }
