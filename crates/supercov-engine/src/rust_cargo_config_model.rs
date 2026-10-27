@@ -644,7 +644,8 @@ mod tests {
         fs::write(
             project.join(".cargo/config.toml"),
             concat!(
-                "include=[\"first.toml\",\"second.toml\"]\n",
+                // A table naming only its path is an include like any other.
+                "include=[\"first.toml\",{path=\"second.toml\"}]\n",
                 "[target.host]\nrunner=[\"local\",\"--local\"]\n",
                 "[build]\nrustflags=[\"local\"]\n",
             ),
@@ -979,7 +980,8 @@ mod tests {
             CargoConfigValue::from_toml(toml::from_str(text).unwrap(), &definition)
                 .map_err(|error| error.to_string())
         };
-        let config = value("flag=true\nnumber=1\nnames=['a','b']\nmixed=['a',1]\n").unwrap();
+        let config =
+            value("flag=true\nnumber=1\nnames=['a','b']\nmixed=['a',1]\nsingle='a'\n").unwrap();
         assert_eq!(config.at(&[]), Some(&config));
         assert_eq!(
             config.at(&["flag"]).unwrap().kind,
@@ -995,6 +997,10 @@ mod tests {
             Some(vec!["a", "b"])
         );
         assert_eq!(config.at(&["mixed"]).unwrap().string_list(), None);
+        assert_eq!(
+            config.at(&["single"]).unwrap().string_list(),
+            Some(vec!["a"])
+        );
         assert_eq!(config.at(&["number"]).unwrap().string_list(), None);
         let cwd = Path::new("/work");
         let refusal = |path: &[&str]| {
