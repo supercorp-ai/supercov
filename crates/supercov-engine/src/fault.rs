@@ -232,7 +232,17 @@ pub fn io_here<T>(
     kind: io::ErrorKind,
     call: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    match failing_at(site, Some(std::panic::Location::caller())) {
+    io_at(site, kind, std::panic::Location::caller(), call)
+}
+
+/// [`io_here`], for a call made at `place`.
+pub fn io_at<T>(
+    site: &str,
+    kind: io::ErrorKind,
+    place: Place,
+    call: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    match failing_at(site, Some(place)) {
         Some(Some(errno)) => Err(io::Error::from_raw_os_error(errno)),
         Some(None) => Err(io::Error::new(kind, format!("injected fault at {site}"))),
         None => call(),

@@ -49,9 +49,33 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
     checked(|| std::fs::read(path))
 }
 
+/// A directory's entries, the first of which a test can fail as reading
+/// it does: once per listing, so that a sweep grows by a call, not by the
+/// size of the directory.
+pub struct ReadDir {
+    entries: std::fs::ReadDir,
+    first: Option<crate::fault::Place>,
+}
+
+impl Iterator for ReadDir {
+    type Item = io::Result<DirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.entries.next()?;
+        Some(match self.first.take() {
+            Some(place) => crate::fault::io_at("fs", io::ErrorKind::Other, place, || entry),
+            None => entry,
+        })
+    }
+}
+
 #[track_caller]
 pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
-    checked(|| std::fs::read_dir(path))
+    let place = std::panic::Location::caller();
+    checked(|| std::fs::read_dir(path)).map(|entries| ReadDir {
+        entries,
+        first: Some(place),
+    })
 }
 
 #[track_caller]
