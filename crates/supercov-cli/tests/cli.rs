@@ -12902,6 +12902,56 @@ fn a_rust_run_whose_own_step_fails_says_so() {
     }
 }
 
+/// A crate holding a Rust Worker, with a `wrangler` installed: the run puts
+/// its own `wrangler` first on the tests' PATH. Each step of that failing --
+/// the tools directory made, the stand-in written and made runnable, the
+/// inspector hook written -- ends the run, naming the file it could not make.
+#[cfg(unix)]
+#[test]
+fn a_rust_run_that_cannot_put_its_wrangler_in_place_says_so() {
+    for fault in [
+        "fs.create_dir_all@11",
+        "fs.write@5",
+        "fs.set_permissions@1",
+        "fs.write@6",
+    ] {
+        let project = Project::empty("worker-stand-in");
+        small_crate(&project);
+        project.write(
+            "worker/Cargo.toml",
+            "[package]\nname = \"edge\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        project.write("worker/src/lib.rs", "pub fn edge() {}\n");
+        project.write(
+            "worker/wrangler.toml",
+            "name = \"edge\"\nmain = \"build/worker/shim.mjs\"\ncompatibility_date = \"2026-10-01\"\n\n[build]\ncommand = \"worker-build --release\"\n",
+        );
+        project.write_script("bin/wrangler", "#!/bin/sh\necho wrangler\n");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let path = format!(
+            "{}:{}",
+            project.root.join("bin").display(),
+            std::env::var("PATH").unwrap()
+        );
+        let ran = project.supercov_with(
+            &["--", "cargo", "test", "-q"],
+            &[("SUPERCOV_TEST_FAULT", fault), ("PATH", &path)],
+        );
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {said}");
+        assert!(
+            said.contains("rust-evidence")
+                && said.contains("wrangler")
+                && !said.contains("panicked at"),
+            "{fault}: {said}"
+        );
+        project
+            .supercov_with(&["--", "cargo", "test", "-q"], &[("PATH", &path)])
+            .succeeds();
+    }
+}
+
 #[test]
 fn a_go_run_whose_own_step_fails_says_so() {
     let Some(go) = go() else {
@@ -13890,11 +13940,6 @@ fn small_crate(project: &Project) {
     project.write(".gitignore", "target/\n");
 }
 
-/// The places of a run's `role` runners -- `__doctest-runner`,
-/// `__nextest-runner`, which Cargo starts for each test -- failed one at a
-/// time (`role/fs#N`, every runner failing its Nth): each run ends, a runner
-/// that failed saying so, and never panics; the sweep stops at the first N no
-/// runner reached, and a run with no fault then succeeds. How many it made.
 /// A project's label, the fixture that writes it, and the command it runs.
 type LanguageRun = (&'static str, fn(&Project), Vec<String>);
 
