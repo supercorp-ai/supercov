@@ -966,7 +966,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
         .min(plans.len().max(1));
     let launch_error = Mutex::new(None::<RustTestRunnerError>);
     std::thread::scope(|scope| {
-        for _ in 0..workers {
+        (0..workers).for_each(|_| {
             scope.spawn(|| {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
@@ -984,7 +984,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
                     }
                 }
             });
-        }
+        });
     });
     if let Some(error) = launch_error.into_inner().expect("doctest error lock") {
         return Err(error);

@@ -2384,7 +2384,7 @@ pub fn run_prepared_rust_tests(
         .iter()
         .any(|argument| matches!(argument.as_str(), "--nocapture" | "--no-capture"));
     std::thread::scope(|scope| {
-        for _ in 0..workers {
+        (0..workers).for_each(|_| {
             scope.spawn(|| {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
@@ -2447,7 +2447,7 @@ pub fn run_prepared_rust_tests(
                         .push(result);
                 }
             });
-        }
+        });
     });
     let mut outcomes = outcomes
         .into_inner()

@@ -8449,11 +8449,11 @@ fn reachable_vector_count(expression: &Expression<'_>, conditions: &[Span]) -> u
         .map(|(index, span)| (span_key(*span), index))
         .collect::<HashMap<_, _>>();
     let mut vectors = HashSet::new();
-    for assignment in 0..(1_usize << conditions.len()) {
+    (0..(1_usize << conditions.len())).for_each(|assignment| {
         let mut encoded = 0;
         let outcome = evaluate(expression, assignment, &mut encoded, &indices);
         vectors.insert(encoded * 2 + usize::from(outcome));
-    }
+    });
     vectors.len()
 }
 
