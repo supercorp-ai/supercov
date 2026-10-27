@@ -2223,6 +2223,13 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
     project
         .supercov(&["__supervise", "--", "sh", "-c", "exit 3"])
         .exits(3);
+    // A command that cannot start is said to, and fails.
+    assert!(
+        !project
+            .supercov(&["__supervise", "--", "/nonexistent/supercov-command"])
+            .exits(1)
+            .is_empty()
+    );
     for name in [
         "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
         "SUPERCOV_COMMAND_TIMEOUT_MS",

@@ -3470,16 +3470,13 @@ fn run_js_direct() -> ExitCode {
         .and_then(|path| fs::canonicalize(path).ok());
     let mut diagnostics = std::io::stderr().lock();
     match supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics) {
-        Ok(result) => match serde_json::to_string(&result) {
-            Ok(output) => {
-                println!("{output}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("[supercov] failed to serialize direct JavaScript run: {error}");
-                ExitCode::from(2)
-            }
-        },
+        Ok(result) => {
+            println!(
+                "{}",
+                serde_json::to_string(&result).expect("plain data serializes")
+            );
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("[supercov] direct JavaScript run failed: {error}");
             ExitCode::from(2)
@@ -3559,10 +3556,8 @@ fn supervise() -> ExitCode {
         },
         &mut stderr,
     ) {
-        Ok(result) => match u8::try_from(result.exit_code()) {
-            Ok(code) => ExitCode::from(code),
-            Err(_) => ExitCode::FAILURE,
-        },
+        // A code no byte holds (Windows has them) is a failure.
+        Ok(result) => ExitCode::from(u8::try_from(result.exit_code()).unwrap_or(1)),
         Err(error) => {
             eprintln!("[supercov] {error}");
             ExitCode::FAILURE
@@ -3589,7 +3584,7 @@ fn spawn_trash_sweeper(root: &Path) {
     let still_sweeping = sweep_trash_within(root, patience);
     *START_SWEEP
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = still_sweeping;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = still_sweeping;
 }
 
 /// The sweep started with the command, while it may still be running. It
@@ -3608,7 +3603,7 @@ fn finish_trash_sweep(root: &Path) {
     supercov_engine::lifecycle::finish_background_sweep(patience);
     let start = START_SWEEP
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     let still_sweeping = start.and_then(|child| {
         // A test makes it still be at it, however fast the trash empties.

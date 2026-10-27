@@ -90,7 +90,8 @@ mod windows_job {
     static JOB: Mutex<Option<JobHandle>> = Mutex::new(None);
 
     fn job() -> std::sync::MutexGuard<'static, Option<JobHandle>> {
-        JOB.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        JOB.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn create() {
