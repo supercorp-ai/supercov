@@ -506,6 +506,24 @@ fn a_command_on_a_terminal_reads_what_is_typed() {
 
 #[cfg(unix)]
 #[test]
+fn bytes_a_command_writes_to_a_terminal_that_are_not_text_pass_on_unchanged() {
+    // A binary dump, or a terminal in another encoding: nothing in it is a
+    // name to put right, and it reaches the terminal as it was written.
+    let project = Project::cart("terminal-bytes");
+    project.write(
+        "bytes.mjs",
+        "process.stdout.write(Buffer.from([0x62, 0xff, 0xfe, 0x0a]));\nconsole.log('after the bytes');\n",
+    );
+    project.commit("bytes");
+    let mut terminal = common::OnTerminal::start(&project, &["--", "node", "bytes.mjs"]);
+    terminal.wait_for("after the bytes");
+    let (code, seen) = terminal.finish();
+    assert_eq!(code, 0, "{seen}");
+    assert!(seen.contains("b\u{fffd}\u{fffd}"), "{seen:?}");
+}
+
+#[cfg(unix)]
+#[test]
 fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     // With the terminal lent, Ctrl-C reaches the command and not Supercov.
     // The run is still one that was interrupted: its status, and no record.

@@ -347,6 +347,7 @@ assessments_and_reviews_refuse_plainly_and_say_when_nothing_changed	0.7	0.7
 ava_tests_running_at_once_are_attributed_each_to_its_own	5.8	5.4
 background_by_time	13.0	10.5
 both_streams_into_one_file_name_the_project	1.0	0.8
+bytes_a_command_writes_to_a_terminal_that_are_not_text_pass_on_unchanged	3.0	4.0
 cargo_configuration_and_target_flags_reach_the_measured_build	39.7	7.0
 cargo_configuration_planted_in_the_rust_workspace_is_refused	1.7	1.5
 cargo_flags_the_build_owns_are_left_to_it_and_runs_with_no_test_are_refused	4.0	5.1
