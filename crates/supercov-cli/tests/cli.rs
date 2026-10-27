@@ -12899,8 +12899,26 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.write@7",
             "fs.read_to_string@7",
             "fs.read_to_string@8",
+            // The module walked and read: a directory, an entry, a source, go.mod.
+            "fs.read_dir@2",
+            "fs.file_type@1",
+            "fs.read@4",
+            "fs.read_to_string@3",
+            "fs.read_to_string@6",
             "spawn",
         ],
+    );
+    // A source that is not UTF-8 is left unmeasured, and named.
+    let project = Project::empty("go-not-utf8");
+    go_project(&project);
+    std::fs::write(project.root.join("bytes.go"), [0xff, 0xfe, b'\n']).unwrap();
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let ran = project.supercov(&["--", go, "test", "./..."]);
+    assert!(
+        ran.stderr().contains("bytes.go") && ran.stderr().contains("UTF-8"),
+        "{}",
+        ran.stderr()
     );
 }
 
