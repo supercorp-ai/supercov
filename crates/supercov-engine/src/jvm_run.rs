@@ -1780,15 +1780,14 @@ pub fn run_direct_jvm(
                 }
                 continue;
             }
-            let mut forked = Vec::new();
-            for path in &written {
-                let bytes =
-                    fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-                forked.push(
-                    read_evidence(&bytes)
-                        .map_err(|error| format!("{}: {error}", path.display()))?,
-                );
-            }
+            let forked = written
+                .iter()
+                .map(|path| {
+                    let bytes =
+                        fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+                    read_evidence(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let evidence = merge_evidence(forked);
             for test in &evidence.tests {
                 outcomes.push(OwnedTestOutcome {
@@ -1993,9 +1992,12 @@ impl JvmServer {
         if project.instrumented.is_empty() {
             return Ok(None);
         }
-        for (relative, instrumented) in &project.instrumented {
-            write(&workspace.join(relative), instrumented)?;
-        }
+        project
+            .instrumented
+            .iter()
+            .try_for_each(|(relative, instrumented)| {
+                write(&workspace.join(relative), instrumented)
+            })?;
         let probe_count = project
             .probes
             .keys()
@@ -2008,7 +2010,8 @@ impl JvmServer {
             .iter()
             .map(|(relative, _)| module_of(relative))
             .collect::<BTreeSet<_>>();
-        for module in &modules {
+        // A source instrumented above is in a module.
+        modules.iter().try_for_each(|module| {
             write(
                 &workspace
                     .join(module)
@@ -2016,8 +2019,8 @@ impl JvmServer {
                     .join(PACKAGE_DIRECTORY)
                     .join("Supercov.java"),
                 &runtime,
-            )?;
-        }
+            )
+        })?;
         let directory = root.join(".supercov/work").join(run_id).join("jvm");
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         Ok(Some(Self {
