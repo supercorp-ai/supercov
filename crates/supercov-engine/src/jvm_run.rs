@@ -1163,12 +1163,12 @@ fn instrument_workspace(
             .iter()
             .find_map(|name| fs::read_to_string(workspace.join(name)).ok())
             .unwrap_or_default();
-        for name in names {
-            if let Ok(own) = fs::read_to_string(workspace.join(directory).join(name)) {
-                text.push('\n');
-                text.push_str(&own);
-                break;
-            }
+        let own = names
+            .iter()
+            .find_map(|name| fs::read_to_string(workspace.join(directory).join(name)).ok());
+        if let Some(own) = own {
+            text.push('\n');
+            text.push_str(&own);
         }
         frameworks(&with_catalog(&text, &catalog))
     };
@@ -1192,11 +1192,12 @@ fn instrument_workspace(
     // nothing at all.
     // `prepare_jvm_project` refuses a project with neither, so there is at
     // least one module.
-    for module in modules.keys().cloned().collect::<Vec<_>>() {
+    let listed = modules.keys().cloned().collect::<Vec<_>>();
+    listed.into_iter().for_each(|module| {
         if workspace.join(&module).join("src/test").is_dir() {
             modules.insert(module, true);
         }
-    }
+    });
 
     let modules = modules
         .into_iter()
