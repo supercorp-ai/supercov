@@ -3843,9 +3843,17 @@ mod tests {
             words("cargo test \\\n  --workspace \"a\\\nb\""),
             ["cargo", "test", "--workspace", "ab"]
         );
-        for broken in ["cargo test 'open", "cargo test \"open", r"cargo test \"] {
+        for broken in [
+            "cargo test 'open",
+            "cargo test \"open",
+            r"cargo test \",
+            "cargo test \"open\\",
+        ] {
             assert!(shell_words(broken).is_err(), "{broken}");
         }
+        // Nothing is no words, and no arguments build as none.
+        assert!(words("").is_empty());
+        assert!(build_owned_arguments(Vec::new()).unwrap().is_empty());
     }
 
     #[test]
