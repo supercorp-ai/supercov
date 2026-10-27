@@ -125,6 +125,7 @@ fn lexical_descendant(root: &Path, path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+#[track_caller]
 fn reject_linked_ancestors(
     root: &Path,
     path: &Path,
@@ -185,6 +186,7 @@ fn unique_name() -> String {
 /// idiom, on the generated node_modules directory it had just created -- and
 /// NTFS journals directory metadata without an explicit sync. Every place
 /// that syncs a directory goes through here so the rule is stated once.
+#[track_caller]
 pub(crate) fn sync_directory_handle(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -197,10 +199,12 @@ pub(crate) fn sync_directory_handle(path: &Path) -> io::Result<()> {
     }
 }
 
+#[track_caller]
 pub(crate) fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
     sync_directory_handle(path).map_err(|source| io_error(path, source))
 }
 
+#[track_caller]
 pub(crate) fn atomic_rename(source: &Path, destination: &Path) -> Result<(), LifecycleError> {
     let source_parent = source
         .parent()
@@ -217,6 +221,7 @@ pub(crate) fn atomic_rename(source: &Path, destination: &Path) -> Result<(), Lif
     Ok(())
 }
 
+#[track_caller]
 pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
     let parent = path
         .parent()
@@ -256,6 +261,7 @@ pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(),
     Err(LifecycleError::LockUnavailable)
 }
 
+#[track_caller]
 pub fn remove_stored_tree_deferred(
     project_root: &Path,
     target: &Path,
@@ -472,6 +478,7 @@ fn state_path(root: &Path, id: &str) -> PathBuf {
     root.join(".supercov/work").join(id).join("state.json")
 }
 
+#[track_caller]
 pub fn write_run_state(root: &Path, state: &RunState) -> Result<(), LifecycleError> {
     checked_id(&state.id)?;
     let mut bytes = serde_json::to_vec_pretty(state).expect("plain data serializes");
@@ -479,6 +486,7 @@ pub fn write_run_state(root: &Path, state: &RunState) -> Result<(), LifecycleErr
     atomic_write(root, &state_path(root, &state.id), &bytes)
 }
 
+#[track_caller]
 fn read_state(root: &Path, id: &str) -> Result<Option<RunState>, LifecycleError> {
     checked_id(id)?;
     let path = state_path(root, id);
@@ -492,6 +500,7 @@ fn read_state(root: &Path, id: &str) -> Result<Option<RunState>, LifecycleError>
         .map_err(|error| LifecycleError::InvalidState(error.to_string()))
 }
 
+#[track_caller]
 pub fn update_run_state(
     root: &Path,
     id: &str,
@@ -508,6 +517,7 @@ pub fn update_run_state(
     Ok(state)
 }
 
+#[track_caller]
 pub fn interrupt_run_state(
     root: &Path,
     id: &str,
@@ -1113,6 +1123,7 @@ fn published_run(root: &Path, id: &str) -> bool {
             .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
+#[track_caller]
 pub fn finalize_published_run(root: &Path, id: &str) -> Result<bool, LifecycleError> {
     checked_id(id)?;
     if !published_run(root, id) {
