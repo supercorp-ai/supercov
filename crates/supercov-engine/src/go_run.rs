@@ -369,20 +369,26 @@ fn instrument_sources(
         .into_iter()
         .filter(|(directory, _)| measured.contains(directory))
         .map(|(directory, names)| {
-            let mut counts: Vec<(usize, String)> = Vec::new();
-            for name in names {
-                match counts.iter_mut().find(|(_, seen)| *seen == name) {
-                    Some((count, _)) => *count += 1,
-                    None => counts.push((1, name)),
-                }
-            }
+            let mut counts =
+                names
+                    .into_iter()
+                    .fold(Vec::<(usize, String)>::new(), |mut counts, name| {
+                        match counts.iter_mut().find(|(_, seen)| *seen == name) {
+                            Some((count, _)) => *count += 1,
+                            None => counts.push((1, name)),
+                        }
+                        counts
+                    });
             // The first of the most declared, so a tie goes to the tests.
-            let mut best = 0;
-            for (index, (count, _)) in counts.iter().enumerate() {
-                if *count > counts[best].0 {
-                    best = index;
-                }
-            }
+            let best = counts
+                .iter()
+                .enumerate()
+                .fold(
+                    0,
+                    |best, (index, (count, _))| {
+                        if *count > counts[best].0 { index } else { best }
+                    },
+                );
             (directory, counts.swap_remove(best).1)
         })
         .collect();
@@ -1109,6 +1115,15 @@ impl GoServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file that does not parse is named for the project as it stands.
+    #[test]
+    fn a_file_that_does_not_parse_is_left_as_written() {
+        assert_eq!(
+            named_for_the_project(Path::new("/shop"), "a.go", "package (\n"),
+            "package (\n"
+        );
+    }
 
     #[test]
     fn the_package_clause_is_found_past_whatever_precedes_it() {
