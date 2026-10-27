@@ -5862,6 +5862,47 @@ fn every_human_query_pages_and_names_its_filters() {
     assert!(!gained.is_empty(), "{gained}");
 }
 
+/// A file changed past reading -- its new text no longer parses -- is
+/// named changed by its bytes, whether it is the test's own file or code the
+/// test ran; a helper the tests load that is gone is named removed.
+#[test]
+fn a_change_past_reading_and_a_removed_helper_name_the_tests_they_reach() {
+    let project = Project::empty("changed-past-reading");
+    project.write(
+        "package.json",
+        r#"{ "name": "past-reading", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/a.js",
+        "export const a = (x) => (x > 1 ? 'big' : 'small');\n",
+    );
+    project.write("test/helper.js", "export const helper = () => 1;\n");
+    project.write(
+        "test/a.test.js",
+        "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { a } from '../src/a.js';\nimport { helper } from './helper.js';\n\ntest('a', () => {\n  assert.equal(a(2), 'big');\n  assert.equal(helper(), 1);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("past reading");
+    project.measure(&["test/a.test.js"]);
+    project.write("src/a.js", "export const a = (x) => (x > 1 ? 'big' : ;\n");
+    project.write(
+        "test/a.test.js",
+        "import assert from 'node:assert/strict';\ntest('a', () => {\n",
+    );
+    std::fs::remove_file(project.root.join("test/helper.js")).unwrap();
+    let affected = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &affected,
+        &[
+            "test file changed",
+            "src/a.js changed (this test ran code in it)",
+            "test/helper.js removed",
+        ],
+    );
+}
+
 #[test]
 fn changes_since_a_run_name_the_tests_they_reach_and_block_a_merge() {
     let project = Project::empty("changes-since");
