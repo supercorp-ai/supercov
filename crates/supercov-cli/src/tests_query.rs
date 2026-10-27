@@ -1052,5 +1052,14 @@ mod tests {
         );
         assert!(text.contains("  src/a.js  bodies  add (line 1)"), "{text}");
         assert!(text.contains("matches the run"), "{text}");
+        // A test with no reason listed, a tree that differs with none given,
+        // and one that could not be compared.
+        let mut data = data;
+        data["affected"][0]["reasons"] = json!([]);
+        data["workingTree"] = json!({"stale": true});
+        let text = render(&data);
+        assert!(text.contains("differs from the run:\n"), "{text}");
+        data["workingTree"] = json!({});
+        assert!(render(&data).contains("could not be compared"));
     }
 }

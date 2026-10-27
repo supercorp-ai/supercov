@@ -13752,6 +13752,7 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
             "unit",
         ],
         &["tests", "affected", "--kind", "unit"],
+        &["runs", "latest", "tests", "affected", "--json"],
         &["runs", "latest", "gaps", "--kind", "unit", "--json"],
         &["diff", &older, "latest", "--json"],
         &["diff", &older, "latest"],
