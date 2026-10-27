@@ -667,7 +667,7 @@ impl<'a> Collector<'a> {
         // which conditions were evaluated and what the decision came to, so a
         // probe beside it would store the same fact twice and charge for it on
         // every evaluation.
-        for (index, leaf) in leaves.iter().enumerate() {
+        leaves.iter().enumerate().for_each(|(index, leaf)| {
             // Wrapping an operand keeps short-circuiting intact: Go evaluates a
             // call argument only when the call is reached, so the right-hand
             // wrapper runs exactly when the unwrapped operand would have.
@@ -686,7 +686,7 @@ impl<'a> Collector<'a> {
             };
             self.edit(leaf.start_byte(), 20, open);
             self.edit(leaf.end_byte(), 20, close.to_owned());
-        }
+        });
         self.decisions.push(DecisionMeta {
             id,
             file: self.file.to_owned(),
@@ -797,8 +797,8 @@ impl<'a> Collector<'a> {
                 let mut cases = Vec::new();
                 let mut has_default = false;
                 let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    match child.kind() {
+                node.children(&mut cursor)
+                    .for_each(|child| match child.kind() {
                         "expression_case" | "type_case" | "communication_case" => {
                             cases.push((self.text(child), Some(child)))
                         }
@@ -807,8 +807,7 @@ impl<'a> Collector<'a> {
                             cases.push(("default".to_owned(), Some(child)));
                         }
                         _ => {}
-                    }
-                }
+                    });
                 // A switch with no default can match nothing, which is an
                 // outcome a reader has to see, and synthesising the clause is
                 // the only way to observe it: an added `default` holding
@@ -2170,6 +2169,29 @@ func classify(a int, b bool) string {
         };
         assert_eq!(limitation["kind"], "value-decision-before-generics");
         assert_eq!(limitation["line"], 7);
+    }
+
+    /// An empty file, a select with no case, and the scan's helpers at the
+    /// ends of what they are given.
+    #[test]
+    fn nothing_to_read_is_read_as_nothing() {
+        let (mut next, mut decisions) = (0, 0);
+        let empty = build_go_obligations("m.go", "", &mut next, &mut decisions).expect("go");
+        assert!(empty.edits.is_empty());
+        let blocking = "package p\n\nfunc f() {\n\tselect {}\n}\n";
+        let obligations =
+            build_go_obligations("m.go", blocking, &mut next, &mut decisions).expect("go");
+        assert!(
+            obligations
+                .edits
+                .iter()
+                .all(|edit| !edit.text.contains("default")),
+            "{:?}",
+            obligations.edits
+        );
+        assert_eq!(stand_in_for_new_values(""), None);
+        assert_eq!(closing_parenthesis(b"(", 1), None);
+        assert!(!in_function_body(parse("package p\n").unwrap().root_node()));
     }
 
     #[test]
