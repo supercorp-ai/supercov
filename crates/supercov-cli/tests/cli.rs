@@ -9892,6 +9892,13 @@ fn query_numbers_and_shapes_are_checked_before_anything_is_read() {
             .exits(2)
             .contains("gaps --format takes jsonl")
     );
+    // An export whose run was taken for an option's value names no run.
+    assert!(
+        project
+            .supercov(&["runs", "--offset", "gaps", "--format", "jsonl"])
+            .exits(2)
+            .contains("usage: supercov runs <run-id> gaps --format jsonl")
+    );
     let unwritable = on_run(&[
         "gaps",
         "--format",
@@ -12569,6 +12576,21 @@ fn a_query_whose_file_operation_fails_says_so_and_never_panics() {
             "total",
         ],
         &["runs", "latest", "test", "total"],
+        // Pages and the JSON envelope are the export's own to choose.
+        &[
+            "runs",
+            "latest",
+            "gaps",
+            "--format",
+            "jsonl",
+            "--output",
+            "faults.jsonl",
+            "--offset",
+            "1",
+            "--limit",
+            "1",
+            "--json",
+        ],
         &["runs", "latest", "minimize"],
         &["diff", &first, "latest"],
     ] {
