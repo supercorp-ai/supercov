@@ -3257,6 +3257,12 @@ mod tests {
             |()| {},
         );
         assert!(reached > 9, "{reached}");
+        // A file with nothing to measure is left as it is.
+        for empty in ["", "use std::fmt;\n"] {
+            let left = instrument_rust_file("src/lib.rs", empty, "crate::rt", false, None).unwrap();
+            assert_eq!(left.code, empty);
+            assert!(left.manifest.points.is_empty());
+        }
         for fault in ["rust-insertions", "rust-unparsable-transform"] {
             let refused = crate::fault::during(fault, || {
                 instrument_rust_file("src/lib.rs", source, "crate::rt", false, None)
