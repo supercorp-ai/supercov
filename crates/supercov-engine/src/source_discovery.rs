@@ -1559,6 +1559,35 @@ mod tests {
         ));
     }
 
+    /// A source or package directory whose name is not UTF-8 is refused by
+    /// name rather than read as some other. (macOS names none.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tree_holding_a_name_that_is_not_utf8_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-non-utf8-tree-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::write(root.join("src/a.js"), "").unwrap();
+        let odd = std::ffi::OsStr::from_bytes(b"\xff");
+        fs::write(root.join("src").join(odd).with_extension("js"), "").unwrap();
+        assert!(matches!(
+            discover_source_scope(&root, None),
+            Err(SourceDiscoveryError::NonUtf8Path(_))
+        ));
+        fs::remove_file(root.join("src").join(odd).with_extension("js")).unwrap();
+        fs::create_dir(root.join(odd)).unwrap();
+        assert!(matches!(
+            discover_source_scope(&root, None),
+            Err(SourceDiscoveryError::NonUtf8Path(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A bundler's output is a script under an asset directory with an
     /// eight-character hash that has a digit or both cases.
     #[test]
