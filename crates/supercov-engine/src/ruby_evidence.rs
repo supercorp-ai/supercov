@@ -1082,8 +1082,9 @@ pub fn build_ruby_frontend_run(
         test_exit_code,
         root,
     )?;
-    for raw in &mut run.request.raw_results {
-        let Some(scope) = &raw.scope else { continue };
+    // `build_from_evidence` refuses a run with no test outcome.
+    run.request.raw_results.iter_mut().for_each(|raw| {
+        let Some(scope) = &raw.scope else { return };
         let key = (
             scope.worker_id.clone(),
             scope.test_id.clone(),
@@ -1093,7 +1094,7 @@ pub fn build_ruby_frontend_run(
         if by_time.contains(&key) && raw.attribution == crate::coverage_report::ATTRIBUTION_EXACT {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
     Ok(run)
 }
 
@@ -1111,7 +1112,8 @@ pub fn build_ruby_server_run(
 ) -> Result<RubyFrontendRun, RubyEvidenceError> {
     let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
     let mut by_attempt = BTreeMap::new();
-    for test in served {
+    // The caller publishes no server run when no browser test reported.
+    served.iter().for_each(|test| {
         let key = (test.worker.clone(), test.test_id.clone(), test.retry);
         let outcome = match test.status.as_str() {
             "passed" => "passed",
@@ -1127,7 +1129,7 @@ pub fn build_ruby_server_run(
             .runners
             .insert(key.clone(), test.provenance.runner.clone());
         by_attempt.insert(key, test);
-    }
+    });
     let by_time = credit_requests_by_time(&mut evidence, |evidence, transport, at, _| {
         crate::served_tests::owner(served, evidence.served_by.get(transport), at)
             .map(|test| (test.worker.clone(), test.test_id.clone(), test.retry))
@@ -1140,7 +1142,8 @@ pub fn build_ruby_server_run(
         test_exit_code,
         root,
     )?;
-    for raw in &mut run.request.raw_results {
+    // A run with no test outcome is refused before this.
+    run.request.raw_results.iter_mut().for_each(|raw| {
         let Some(test) = raw.scope.as_ref().and_then(|scope| {
             by_attempt.get(&(
                 scope.worker_id.clone(),
@@ -1148,7 +1151,7 @@ pub fn build_ruby_server_run(
                 raw.retry.unwrap_or(0),
             ))
         }) else {
-            continue;
+            return;
         };
         raw.test = test.name.clone();
         raw.title = Some(test.title.clone());
@@ -1162,7 +1165,7 @@ pub fn build_ruby_server_run(
         {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
     run.tests = run
         .request
         .raw_results
@@ -1724,6 +1727,15 @@ fn build_from_evidence(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// An attempt reported more than once keeps its worst outcome: a
+    /// failure over a skip, a skip over a pass.
+    #[test]
+    fn outcomes_are_ranked_failure_skip_pass() {
+        use super::outcome_severity;
+        assert!(outcome_severity("error") > outcome_severity("skipped"));
+        assert!(outcome_severity("skipped") > outcome_severity("passed"));
+    }
+
     /// An outcome written before records named their runner is RSpec's.
     #[test]
     fn an_outcome_that_names_no_runner_is_rspecs() {
