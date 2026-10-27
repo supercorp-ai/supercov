@@ -13064,8 +13064,11 @@ fn fail_each_place_at_with(
                 project.git(&["init", "-q"]);
                 project.commit("fixture");
                 let mut nth = first;
+                // A diagnostic write has no place in the code to count, only
+                // its turn: the run's Nth.
+                let count = if site == "diagnostics" { '@' } else { '#' };
                 loop {
-                    let fault = format!("{site}#{nth}");
+                    let fault = format!("{site}{count}{nth}");
                     forget_reused_builds(&project.root.join(".supercov/workspaces"));
                     let mut variables = environment.to_vec();
                     variables.push(("SUPERCOV_TEST_FAULT", &fault));
@@ -13348,6 +13351,71 @@ fn a_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
         ],
     );
     assert!(javascript > 50 && python > 50, "{javascript} {python}");
+}
+
+/// A run whose diagnostics cannot be written, at each write in turn: it
+/// ends, never panicking, and without the fault it succeeds.
+#[test]
+fn a_run_whose_diagnostics_cannot_be_written_ends_without_panicking() {
+    let python_command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    let mut reached = vec![
+        fail_each_place_at(
+            "diagnostics",
+            "diagnostics-rs",
+            small_crate,
+            &["--", "cargo", "test", "-q"],
+            0,
+        ),
+        fail_each_place_at(
+            "diagnostics",
+            "diagnostics-js",
+            javascript_project,
+            &["--", "node", "--test"],
+            0,
+        ),
+        // A failing test and a source that does not parse say more.
+        fail_each_place_at(
+            "diagnostics",
+            "diagnostics-js-failing",
+            |project| {
+                javascript_project(project);
+                project.write("src/broken.js", "export const = ;\n");
+                project.edit("test/cart.test.js", "3));", "4));");
+            },
+            &["--", "node", "--test"],
+            1,
+        ),
+        fail_each_place_at(
+            "diagnostics",
+            "diagnostics-py",
+            python_project,
+            &python_command,
+            0,
+        ),
+    ];
+    if let Some(go) = go() {
+        reached.push(fail_each_place_at(
+            "diagnostics",
+            "diagnostics-go",
+            go_project,
+            &["--", go, "test", "./..."],
+            0,
+        ));
+    }
+    #[cfg(unix)]
+    if let Some(ruby) = ruby() {
+        let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
+        reached.push(fail_each_place_at(
+            "diagnostics",
+            "diagnostics-rb",
+            ruby_project,
+            &command,
+            0,
+        ));
+    }
+    assert!(reached.iter().all(|writes| *writes > 0), "{reached:?}");
 }
 
 #[cfg(unix)]

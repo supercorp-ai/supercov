@@ -322,6 +322,31 @@ pub fn io<T>(
     }
 }
 
+/// Standard error, held for a run's diagnostics: each write is a call at the
+/// site `diagnostics`, so `diagnostics@N` fails the run's Nth write there.
+pub fn diagnostics() -> Writer<io::StderrLock<'static>> {
+    Writer {
+        site: "diagnostics",
+        inner: io::stderr().lock(),
+    }
+}
+
+/// A writer whose writes are calls at `site`.
+pub struct Writer<W> {
+    site: &'static str,
+    inner: W,
+}
+
+impl<W: io::Write> io::Write for Writer<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        io(self.site, io::ErrorKind::BrokenPipe, || self.inner.write(bytes))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// [`io`], for the call `operation` made where the caller of a
 /// `#[track_caller]` function is: `site#N` counts the places it is called
 /// from.

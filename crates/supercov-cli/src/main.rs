@@ -2275,7 +2275,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             run_id,
             started_at,
         };
-        let mut diagnostics = std::io::stderr().lock();
+        let mut diagnostics = supercov_engine::fault::diagnostics();
         let result = supercov_engine::rust_run::run_direct_rust(&request, &mut diagnostics);
         finish_trash_sweep(&root);
         return match result {
@@ -2302,7 +2302,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             started_at,
             exact_attribution: options.exact_attribution,
         };
-        let mut diagnostics = std::io::stderr().lock();
+        let mut diagnostics = supercov_engine::fault::diagnostics();
         let result = supercov_engine::go_run::run_direct_go(&request, &mut diagnostics);
         finish_trash_sweep(&root);
         return match result {
@@ -2356,7 +2356,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             started_at,
             exact_attribution: options.exact_attribution,
         };
-        let mut diagnostics = std::io::stderr().lock();
+        let mut diagnostics = supercov_engine::fault::diagnostics();
         let result = supercov_engine::jvm_run::run_direct_jvm(&request, &mut diagnostics);
         finish_trash_sweep(&root);
         return match result {
@@ -2382,7 +2382,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             run_id,
             started_at,
         };
-        let mut diagnostics = std::io::stderr().lock();
+        let mut diagnostics = supercov_engine::fault::diagnostics();
         let result = supercov_engine::python_run::run_direct_python(&request, &mut diagnostics);
         finish_trash_sweep(&root);
         return match result {
@@ -2411,7 +2411,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             run_id,
             started_at,
         };
-        let mut diagnostics = std::io::stderr().lock();
+        let mut diagnostics = supercov_engine::fault::diagnostics();
         let result = supercov_engine::ruby_run::run_direct_ruby(&request, &mut diagnostics);
         finish_trash_sweep(&root);
         return match result {
@@ -2444,7 +2444,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         started_at: Some(started_at),
         watchdog_program,
     };
-    let mut diagnostics = std::io::stderr().lock();
+    let mut diagnostics = supercov_engine::fault::diagnostics();
     let result = supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics);
     finish_trash_sweep(&root);
     match result {
@@ -3506,7 +3506,7 @@ fn run_js_direct() -> ExitCode {
     request.watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
-    let mut diagnostics = std::io::stderr().lock();
+    let mut diagnostics = supercov_engine::fault::diagnostics();
     match supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics) {
         Ok(result) => {
             println!(
