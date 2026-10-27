@@ -1320,6 +1320,29 @@ mod tests {
 
     /// A report is titled by the package's name when it has a usable one,
     /// and by its directory otherwise.
+    /// An assessment that lists no file, or one without its path or digest,
+    /// proves no source; none to collect is none collected.
+    #[test]
+    fn an_assessment_without_a_whole_file_list_names_no_source() {
+        use serde_json::json;
+        assert_eq!(assessment_source(&json!("files")), None);
+        assert_eq!(assessment_source(&json!([])), None);
+        for file in [
+            json!({"sha256": "x"}),
+            json!({"path": 1, "sha256": "x"}),
+            json!({"path": "a.js"}),
+            json!({"path": "a.js", "sha256": 1}),
+        ] {
+            assert_eq!(assessment_source(&json!([file])), None, "{file}");
+        }
+        assert_eq!(
+            assessment_source(&json!([{"path": "a.js", "sha256": "x"}])),
+            Some(BTreeMap::from([("a.js".to_owned(), "x".to_owned())]))
+        );
+        let (sources, omitted) = collect_quality_sources(Path::new("."), &json!([]));
+        assert!(sources.is_empty() && omitted.is_empty());
+    }
+
     #[test]
     fn a_report_is_titled_by_the_package_or_its_directory() {
         let root = std::env::temp_dir().join(format!(
@@ -1383,6 +1406,11 @@ mod tests {
         assert!(parse_options(&["--runs".into(), "0".into()]).is_err());
         assert!(parse_options(&["--runs".into(), "21".into()]).is_err());
         assert!(parse_options(&["--wat".into()]).is_err());
+        // Asked for help, the answer is the help.
+        assert_eq!(
+            parse_options(&["-h".into()]).err(),
+            Some(help().to_string())
+        );
     }
 
     #[test]
