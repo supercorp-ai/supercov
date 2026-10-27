@@ -2748,7 +2748,10 @@ fn cleaning_an_assessment_lane_preserves_the_other_lane() {
     fs::remove_dir_all(&snapshots).unwrap();
     fs::write(&snapshots, "not a directory").unwrap();
     let refused = clean(&temp.0, "security", 0, true).unwrap_err();
-    assert!(refused.starts_with("cannot read security snapshots:"), "{refused}");
+    assert!(
+        refused.starts_with("cannot read security snapshots:"),
+        "{refused}"
+    );
 }
 
 #[test]
@@ -3633,5 +3636,56 @@ fn reports_render_whatever_they_hold() {
     assert_eq!(
         top_findings(&[finding("a"), finding("b"), finding("c"), finding("d")]),
         "a 0.90, b 0.90, c 0.90, +1 more"
+    );
+}
+
+/// What an answer carries is read as far as it goes: a line asked as a
+/// Choice and answered otherwise is no classification, a label without its
+/// sink kind reaches none, and a report without its usage says nothing spent.
+#[test]
+fn an_answer_is_read_as_far_as_it_goes() {
+    let choice = |choice: &str, confidence| Answer::Choice {
+        choice: choice.into(),
+        probabilities: BTreeMap::new(),
+        confidence,
+    };
+    let response = |answers: Vec<(&str, Answer)>| ApiResponse {
+        model: MODEL.to_owned(),
+        answers: answers
+            .into_iter()
+            .map(|(id, answer)| (id.to_owned(), answer))
+            .collect(),
+        usage: Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+    };
+    let classified = classifications(&response(vec![
+        ("n0", Answer::Noul { noul: 0.9 }),
+        ("n1", choice("injection_sink", 0.9)),
+        ("n2", choice("none", 0.9)),
+        ("n3", choice("injection_sink", 0.1)),
+    ]));
+    assert_eq!(
+        classified,
+        BTreeMap::from([(1, "injection_sink".to_owned())])
+    );
+    let labels = function_labels(&response(vec![(
+        "f0_takes_outside",
+        Answer::Noul { noul: 0.8 },
+    )]));
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].sink_kind, "none");
+    assert_eq!(labels[0].sanitises, 1.0);
+    assert_eq!(spent_line(&json!({}), Instrument::Catalog), None);
+    let none =
+        json!({"usage_this_run": {"input_tokens": 0}, "usage_from_cache": {"input_tokens": 0}});
+    assert_eq!(spent_line(&none, Instrument::Catalog), None);
+    let some =
+        json!({"usage_this_run": {"input_tokens": 10}, "usage_from_cache": {"input_tokens": 5}});
+    assert!(
+        spent_line(&some, Instrument::Security)
+            .unwrap()
+            .contains("10 input tokens this run")
     );
 }
