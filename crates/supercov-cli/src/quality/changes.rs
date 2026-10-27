@@ -345,7 +345,12 @@ pub fn first_added_line(patch: &str) -> Option<u32> {
             continue;
         };
         let after = rest.split(" +").nth(1)?;
-        let number = after.split([',', ' ', '@']).next()?.parse::<u32>().ok()?;
+        let number = after
+            .split([',', ' ', '@'])
+            .next()
+            .unwrap_or_default()
+            .parse::<u32>()
+            .ok()?;
         return Some(number.max(1));
     }
     None

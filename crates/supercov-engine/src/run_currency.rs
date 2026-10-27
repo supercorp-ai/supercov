@@ -97,7 +97,7 @@ impl Ran {
     /// Which of the two entries a path is, in a run or a merge of runs.
     fn wanted(path: &str, merged: bool) -> Option<&'static str> {
         let name = if merged {
-            path.rsplit('/').next()?
+            path.rsplit('/').next().unwrap_or_default()
         } else {
             path
         };

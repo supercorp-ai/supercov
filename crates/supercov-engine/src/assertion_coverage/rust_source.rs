@@ -1073,7 +1073,7 @@ fn other_variant(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
     {
-        let name = path.rsplit("::").next()?;
+        let name = path.rsplit("::").next().unwrap_or_default();
         let name = if name == "Self" { ty? } else { name };
         if let Some(units) = enums.get(name) {
             return units
@@ -1096,7 +1096,7 @@ fn other_variant(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String
 fn record(r: &ast::RecordExpr, crate_view: &Crate) -> Option<String> {
     // `Self { .. }` in an impl names the impl's own type.
     let path = resolve_self(&r.path()?.syntax().text().to_string(), r.syntax());
-    let name = path.rsplit("::").next()?;
+    let name = path.rsplit("::").next().unwrap_or_default();
     let types = crate_view.signatures.structs.get(name)?;
     let list = r.record_expr_field_list()?;
     let fields = list

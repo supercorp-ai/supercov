@@ -1200,7 +1200,14 @@ fn named_by_tests<'a>(
                 narrow: false,
                 ..
             } => {
-                let stem = file.rsplit('/').next()?.split('.').next()?.to_owned();
+                let stem = file
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .split('.')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
                 let mut names = before
                     .units
                     .iter()

@@ -190,7 +190,11 @@ fn declared_entry_points(directory: &Path) -> Vec<PathBuf> {
         })
         .filter_map(|target| {
             // A subpath pattern such as `./dist/*.js` names the directory.
-            let prefix = target.split('*').next()?.trim_end_matches('/');
+            let prefix = target
+                .split('*')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('/');
             let prefix = prefix.strip_prefix("./").unwrap_or(prefix);
             if prefix.is_empty() || prefix.starts_with('/') || prefix.starts_with("..") {
                 return None;

@@ -306,7 +306,8 @@ fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
         if reader.read_line(&mut size).ok()? == 0 {
             return None;
         }
-        let size = usize::from_str_radix(size.split(';').next()?.trim(), 16).ok()?;
+        let size =
+            usize::from_str_radix(size.split(';').next().unwrap_or_default().trim(), 16).ok()?;
         if size == 0 {
             loop {
                 let mut trailer = String::new();

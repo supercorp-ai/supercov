@@ -714,7 +714,12 @@ fn inspector_targets(port: u16) -> Vec<String> {
 
 /// The port of an inspector URL the hook noted: `ws://127.0.0.1:<port>`.
 fn inspector_port(url: &str) -> Option<u16> {
-    url.trim_end_matches('/').rsplit(':').next()?.parse().ok()
+    url.trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .ok()
 }
 
 /// Reads every Worker of each `wrangler dev` whose notes land in a

@@ -1056,7 +1056,11 @@ fn entry_targets(directory: &Path, manifest: &Value) -> Vec<PathBuf> {
             if !target.starts_with('.') || target.contains("node_modules") {
                 return None;
             }
-            let prefix = target.split('*').next()?.trim_end_matches('/');
+            let prefix = target
+                .split('*')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('/');
             (!prefix.is_empty()).then(|| resolve(directory, prefix))
         })
         .collect()

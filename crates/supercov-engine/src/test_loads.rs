@@ -930,11 +930,15 @@ fn ruby_requires(source: &str) -> Option<Vec<RubyRequire>> {
 }
 
 pub fn configuration_runner(file: &str) -> Option<&'static str> {
-    let name = file.rsplit('/').next()?.to_ascii_lowercase();
+    let name = file
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if !name.contains(".config.") && !name.contains(".workspace.") {
         return None;
     }
-    let stem = name.split('.').next()?;
+    let stem = name.split('.').next().unwrap_or_default();
     match stem {
         "playwright" | "playwright-ct" => Some("playwright"),
         "vitest" => Some("vitest"),

@@ -994,7 +994,8 @@ fn url_path_segment(name: &str) -> String {
 fn parse_rfc3339_ms(text: &str) -> Option<i64> {
     let (date, rest) = text.split_once('T')?;
     let mut date_parts = date.split('-');
-    let year: i64 = date_parts.next()?.parse().ok()?;
+    // A split's first piece is always there; an empty one parses as nothing.
+    let year: i64 = date_parts.next().unwrap_or_default().parse().ok()?;
     let month: i64 = date_parts.next()?.parse().ok()?;
     let day: i64 = date_parts.next()?.parse().ok()?;
     let (time, offset_seconds) = if let Some(time) = rest.strip_suffix('Z') {
@@ -1004,13 +1005,13 @@ fn parse_rfc3339_ms(text: &str) -> Option<i64> {
         let (time, offset) = rest.split_at(index);
         let sign = if offset.starts_with('-') { -1 } else { 1 };
         let mut parts = offset[1..].split(':');
-        let hours: i64 = parts.next()?.parse().ok()?;
+        let hours: i64 = parts.next().unwrap_or_default().parse().ok()?;
         let minutes: i64 = parts.next().unwrap_or("0").parse().ok()?;
         (time, sign * (hours * 3600 + minutes * 60))
     };
     let (clock, fraction) = time.split_once('.').unwrap_or((time, "0"));
     let mut clock_parts = clock.split(':');
-    let hour: i64 = clock_parts.next()?.parse().ok()?;
+    let hour: i64 = clock_parts.next().unwrap_or_default().parse().ok()?;
     let minute: i64 = clock_parts.next()?.parse().ok()?;
     let second: i64 = clock_parts.next()?.parse().ok()?;
     // By characters: a fraction that is not digits is no time, not a panic.
@@ -1724,6 +1725,7 @@ mod tests {
             "ghcr.io/org/app:1.2@sha256"
         );
         assert_eq!(url_path_segment("a b?c#d"), "a%20b%3Fc%23d");
+        assert_eq!(url_path_segment(""), "");
     }
 
     #[test]
@@ -2013,6 +2015,7 @@ mod tests {
             "2026-10-17T",
             "2026-x-17T21:05:37Z",
             "2026-10T21:05:37Z",
+            "2026T21:05:37Z",
             "2026-10-xT21:05:37Z",
             "2026--T21:05:37Z",
             "2026-10-17T21:05:37",
