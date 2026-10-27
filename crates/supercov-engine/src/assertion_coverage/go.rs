@@ -382,6 +382,13 @@ mod tests {
             change_at(&starts, 13, "fmt.Println(z)", go),
             Some(Change::Skip)
         );
+        // A constant and a comment in a body are no statement to change, and
+        // a change that writes no value rewrites nothing.
+        let body = "package a\n\nfunc g() int {\n\tconst c = 1\n\t// note\n\treturn c\n}\n";
+        let starts_of_body = statement_starts(body);
+        assert_eq!(change_at(&starts_of_body, 4, "const c = 1", go), None);
+        assert_eq!(change_at(&starts_of_body, 5, "// note", go), None);
+        assert_eq!(rewrite(body, 6, Change::Skip), None);
         assert_eq!(condition("} else if x := f(); x > 0 {"), "x := f(); x > 0");
         let test =
             "package a\n\nfunc TestF(t *testing.T) {\n\tif f(1) != 2 {\n\t\tt.Fatal()\n\t}\n}\n";
