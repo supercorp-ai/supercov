@@ -2765,6 +2765,17 @@ fn made() -> Thing {
         }
     }
 
+    /// A tuple's elements and a match's arms are typed by their shapes, so a
+    /// boolean among them is the part changed, wherever it is read again.
+    #[test]
+    fn a_tuple_s_and_a_match_s_parts_are_typed_by_their_shapes() {
+        let source = "fn f(s: &str, x: u8) {\n    let t = (false, s.as_str(), x.to_string(), make());\n    let m = match x {\n        1 => true,\n        _ => false,\n    };\n    let k = (m, t);\n}\n";
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        assert_eq!(r[&2][0].1, "(true, s.as_str(), x.to_string(), make())");
+        assert!(r[&3][0].1.starts_with("!(match x {"), "{}", r[&3][0].1);
+        assert_eq!(r[&7][0].1, "(!(m), t)");
+    }
+
     /// The rarest readings: an associated type with a value, a tuple element
     /// whose change is itself, a closure whose changed body is a block
     /// already, a `let` that names nothing, and a slice-shaped text with no
