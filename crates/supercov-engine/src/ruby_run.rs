@@ -85,11 +85,12 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
 
 fn write_runtime(directory: &Path) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
-    for (name, contents) in embedded_runtime_files() {
-        let path = directory.join(name);
-        fs::write(&path, contents).map_err(|error| format!("{}: {error}", path.display()))?;
-    }
-    Ok(())
+    embedded_runtime_files()
+        .into_iter()
+        .try_for_each(|(name, contents)| {
+            let path = directory.join(name);
+            fs::write(&path, contents).map_err(|error| format!("{}: {error}", path.display()))
+        })
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
@@ -738,9 +739,11 @@ mod tests {
     use super::*;
 
     fn project(name: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
-            "supercov-ruby-run-{}-{}-{name}",
+            "supercov-ruby-run-{}-{}-{}-{name}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -843,6 +846,34 @@ mod tests {
         );
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&copy).ok();
+    }
+
+    #[test]
+    fn copying_and_preparing_a_server_survive_any_file_operation_failing() {
+        let command = ["npx".to_owned(), "playwright".to_owned(), "test".to_owned()];
+        let steps = crate::fault::fail_each_call(
+            "fs",
+            || project("faults"),
+            |root| {
+                let copy = root.with_extension("copy");
+                fs::create_dir_all(&copy).map_err(|error| error.to_string())?;
+                copy_tree(root, &copy)?;
+                RubyServer::prepare(root, root, "2026-01-02T00-00-00-000Z", &command).map(drop)
+            },
+            |root| {
+                let _ = fs::remove_dir_all(root.with_extension("copy"));
+                let _ = fs::remove_dir_all(root);
+            },
+        );
+        assert!(steps > 5, "{steps}");
+        let empty = project("empty-tree");
+        let nothing = empty.join("nothing");
+        fs::create_dir_all(&nothing).unwrap();
+        let copy = empty.join("copy");
+        fs::create_dir_all(&copy).unwrap();
+        copy_tree(&nothing, &copy).unwrap();
+        assert_eq!(fs::read_dir(&copy).unwrap().count(), 0);
+        fs::remove_dir_all(&empty).ok();
     }
 
     fn server_metadata(server: &RubyServer) -> RunMetadata {
