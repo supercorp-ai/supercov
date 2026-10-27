@@ -7,7 +7,7 @@
 use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, Write},
+    io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -619,7 +619,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
             }
             Err(source) => return Err(io_error(&temporary, source)),
         };
-        timed(&SETUP.write_ns, || output.write_all(contents))
+        timed(&SETUP.write_ns, || fs::write_all(&mut output, contents))
             .map_err(|source| io_error(&temporary, source))?;
         // This file is not forced to disk, deliberately. Everything the
         // frontend writes lives in the regenerable workspace cache and is
