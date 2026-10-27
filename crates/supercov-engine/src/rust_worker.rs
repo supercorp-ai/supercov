@@ -123,6 +123,14 @@ struct WorkerConfig {
 /// A plain walk: a `.gitignore` above the project (a monorepo's, or the
 /// checkout a fixture sits in) must not hide the project itself.
 fn worker_configs(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    collect_worker_configs(root, 0, &mut found);
+    found.sort();
+    found
+}
+
+/// The Worker configurations in `directory` and, to six levels, below it.
+fn collect_worker_configs(directory: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     const SKIPPED: &[&str] = &[
         "node_modules",
         "target",
@@ -132,42 +140,35 @@ fn worker_configs(root: &Path) -> Vec<PathBuf> {
         ".supercov",
         ".wrangler",
     ];
-    let mut found = Vec::new();
-    let mut directories = vec![(root.to_path_buf(), 0)];
-    while let Some((directory, depth)) = directories.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                if depth < 6 && !SKIPPED.contains(&name) {
-                    directories.push((path, depth + 1));
-                }
-                continue;
+        let Ok(kind) = fs::file_type(&entry) else {
+            continue;
+        };
+        if kind.is_dir() {
+            if depth < 6 && !SKIPPED.contains(&name) {
+                collect_worker_configs(&path, depth + 1, found);
             }
-            if !kind.is_file()
-                || !matches!(name, "wrangler.toml" | "wrangler.json" | "wrangler.jsonc")
-            {
-                continue;
-            }
-            let builds_rust = read_config(&path).is_some_and(|(_, document)| {
-                build_command(&document).is_some_and(|command| command.contains("worker-build"))
-            });
-            if builds_rust && path.with_file_name("Cargo.toml").is_file() {
-                found.push(path);
-            }
+            continue;
+        }
+        if !kind.is_file() || !matches!(name, "wrangler.toml" | "wrangler.json" | "wrangler.jsonc")
+        {
+            continue;
+        }
+        let builds_rust = read_config(&path).is_some_and(|(_, document)| {
+            build_command(&document).is_some_and(|command| command.contains("worker-build"))
+        });
+        if builds_rust && path.with_file_name("Cargo.toml").is_file() {
+            found.push(path);
         }
     }
-    found.sort();
-    found
 }
 
 /// A configuration as JSON whatever it was written in.
@@ -2167,6 +2168,44 @@ mod tests {
         assert_eq!(region_token(&ours), Some("abc123"));
         assert_eq!(region_token(&[0_u8; 10]), None);
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// Finding a workspace's Worker configurations survives any file
+    /// operation failing, finding what it still can; a name that is not
+    /// UTF-8 is passed over.
+    #[test]
+    fn finding_worker_configurations_survives_any_file_operation_failing() {
+        let fixture = || {
+            let root = temporary("find-configs");
+            fs::create_dir_all(root.join("worker/src")).unwrap();
+            fs::write(root.join("worker/Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
+            fs::write(
+                root.join("worker/wrangler.toml"),
+                "main = \"build/worker/shim.mjs\"\n[build]\ncommand = \"worker-build\"\n",
+            )
+            .unwrap();
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                fs::write(root.join(std::ffi::OsStr::from_bytes(b"\xff.toml")), "").unwrap();
+            }
+            root
+        };
+        let steps = crate::fault::fail_each_call(
+            "fs",
+            fixture,
+            |root| {
+                let found = worker_configs(root);
+                (found.len() <= 1).then_some(()).ok_or(found.len())
+            },
+            |root| {
+                let _ = fs::remove_dir_all(root);
+            },
+        );
+        assert!(steps > 2, "{steps}");
+        let root = fixture();
+        assert_eq!(worker_configs(&root), [root.join("worker/wrangler.toml")]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A build command is read as a string or as its words, and nothing
