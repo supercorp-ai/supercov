@@ -1452,11 +1452,11 @@ pub fn watch_parent_process_group() -> io::Result<()> {
         .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
         .filter(|descriptor| !matches!(*descriptor, 0 | 3))
         .collect::<Vec<_>>();
-    for descriptor in descriptors {
+    descriptors.into_iter().for_each(|descriptor| {
         // SAFETY: closing a descriptor that the directory iterator already
         // released, or one concurrently absent, is harmless.
         let _ = unsafe { libc::close(descriptor) };
-    }
+    });
     let ready = [1_u8];
     // SAFETY: pre-exec mapped the private readiness pipe to descriptor 3.
     if unsafe { libc::write(3, ready.as_ptr().cast(), ready.len()) } != 1 {
@@ -1660,6 +1660,13 @@ fn write_diagnostic(child: &Child, started: Instant, verbose: bool, writer: &mut
         diagnostic.lines().next().unwrap_or(diagnostic.as_str())
     };
     let _ = writeln!(writer, "{}", diagnostic).and_then(|_| writer.flush());
+}
+
+/// The first time after `now` on the schedule that `next` starts, however
+/// many intervals have passed.
+fn next_interval(next: Instant, now: Instant, interval: Duration) -> Instant {
+    let behind = now.duration_since(next).as_nanos() / interval.as_nanos();
+    next + interval * u32::try_from(behind + 1).unwrap_or(u32::MAX)
 }
 
 fn validate_options(options: SupervisionOptions) -> Result<(), SupervisionError> {
@@ -1905,9 +1912,7 @@ impl ProcessSupervisor {
             }
             if now >= next_diagnostic && !timed_out {
                 write_diagnostic(child, started, verbose, writer);
-                while next_diagnostic <= now {
-                    next_diagnostic += options.diagnostic_interval;
-                }
+                next_diagnostic = next_interval(next_diagnostic, now, options.diagnostic_interval);
             }
             if termination.is_some_and(|(terminated_at, _)| {
                 now.duration_since(terminated_at) >= options.termination_grace
@@ -2097,9 +2102,7 @@ impl ProcessSupervisor {
             }
             if now >= next_diagnostic && !timed_out {
                 write_diagnostic(child, started, verbose, writer);
-                while next_diagnostic <= now {
-                    next_diagnostic += options.diagnostic_interval;
-                }
+                next_diagnostic = next_interval(next_diagnostic, now, options.diagnostic_interval);
             }
             if !escalated
                 && termination.is_some_and(|terminated_at| {
@@ -2171,6 +2174,17 @@ pub fn supervise_captured_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_next_diagnostic_is_the_first_on_its_schedule_after_now() {
+        let start = Instant::now();
+        let second = Duration::from_secs(1);
+        assert_eq!(next_interval(start, start, second), start + second);
+        assert_eq!(
+            next_interval(start, start + Duration::from_millis(2500), second),
+            start + 3 * second
+        );
+    }
 
     /// Somewhere a relay can write that the test can read afterwards.
     #[derive(Clone, Default)]
