@@ -136,6 +136,18 @@ fn counted(counter: &AtomicU64) -> u64 {
     counter.load(Ordering::Relaxed)
 }
 
+/// The error a test injects in place of instrumenting a file: a broken
+/// invariant of Supercov's own, which stops the run.
+fn injected_instrumentation_error<T>() -> Result<T, crate::js_instrumenter::CandidateError> {
+    Err(
+        crate::js_instrumenter::CandidateError::CommentPreservation {
+            expected: 0,
+            actual: 0,
+            detail: "injected".into(),
+        },
+    )
+}
+
 fn timed<T>(counter: &AtomicU64, operation: impl FnOnce() -> T) -> T {
     let started = Instant::now();
     let value = operation();
@@ -1654,7 +1666,9 @@ pub fn prepare_javascript_frontend(
         let capability_wrapper = runtime_specifier(file, "capability.mjs")?;
         let elide = crate::typescript_imports::elides_type_imports(workspace, file, command);
         let instrumented = timed(&SETUP.instrument_ns, || {
-            instrument_with_import_policy(&source, file, &capability_wrapper, elide)
+            crate::fault::or("instrument-source", injected_instrumentation_error, || {
+                instrument_with_import_policy(&source, file, &capability_wrapper, elide)
+            })
         });
         let mut output = match instrumented {
             Ok(output) => output,
@@ -1772,25 +1786,28 @@ pub fn prepare_javascript_frontend(
             .then(|| runtime_specifier(&entry.file, "capability.mjs"))
             .transpose()?;
         let assertion_runtime = runtime_specifier(&entry.file, "bootstrap.cjs")?;
-        let output =
-            match crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
-                &source,
-                &entry.file,
-                std::slice::from_ref(&project.playwright_module),
-                capability_wrapper.as_deref(),
-                Some(&assertion_runtime),
-            ) {
-                Ok(output) => output,
-                // A test file the parser rejects is left as written; its runner
-                // reports it, and it has no assertions to track.
-                Err(crate::js_instrumenter::CandidateError::Parse(_)) => continue,
-                Err(source) => {
-                    return Err(JavascriptFrontendError::Instrument {
-                        file: entry.file.clone(),
-                        source,
-                    });
-                }
-            };
+        let instrumented =
+            crate::fault::or("instrument-test", injected_instrumentation_error, || {
+                crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
+                    &source,
+                    &entry.file,
+                    std::slice::from_ref(&project.playwright_module),
+                    capability_wrapper.as_deref(),
+                    Some(&assertion_runtime),
+                )
+            });
+        let output = match instrumented {
+            Ok(output) => output,
+            // A test file the parser rejects is left as written; its runner
+            // reports it, and it has no assertions to track.
+            Err(crate::js_instrumenter::CandidateError::Parse(_)) => continue,
+            Err(source) => {
+                return Err(JavascriptFrontendError::Instrument {
+                    file: entry.file.clone(),
+                    source,
+                });
+            }
+        };
         if output.assertions > 0 || output.capability_imports > 0 {
             keep_authored(workspace, &mut authored, &entry.file, &source)?;
             atomic_write(&path, output.code.as_bytes())?;
@@ -2280,6 +2297,20 @@ mod tests {
             },
         );
         assert!(steps > 20, "{steps}");
+        // Supercov breaking its own invariant on a source or a test file stops
+        // the preparation, naming the file.
+        for site in ["instrument-source", "instrument-test"] {
+            let (source_root, workspace, project) = fixture();
+            let prepared = crate::fault::during(site, || {
+                prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[])
+            });
+            assert!(
+                matches!(prepared, Err(JavascriptFrontendError::Instrument { .. })),
+                "{site}: {prepared:?}"
+            );
+            let _ = fs::remove_dir_all(source_root);
+            let _ = fs::remove_dir_all(workspace);
+        }
     }
 
     #[test]
