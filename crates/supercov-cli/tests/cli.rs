@@ -13113,6 +13113,66 @@ fn fail_each_place_at_with(
     reached.into_inner()
 }
 
+/// A run that succeeds and then cannot release its copy: each language
+/// says so and fails, or, where it gives the lock up when it ends
+/// (JavaScript), still answers; none panics. A sweep failing every place in
+/// one run fails the release only after something that already ended it.
+#[test]
+fn a_run_that_cannot_release_its_copy_says_so() {
+    let python = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    let mut runs: Vec<(&str, fn(&Project), Vec<&str>, bool)> = vec![
+        (
+            "release-rs",
+            small_crate,
+            vec!["--", "cargo", "test", "-q"],
+            true,
+        ),
+        (
+            "release-js",
+            javascript_project,
+            vec!["--", "node", "--test"],
+            false,
+        ),
+        ("release-py", python_project, python.to_vec(), true),
+    ];
+    let go = go();
+    if let Some(go) = go {
+        runs.push((
+            "release-go",
+            go_project,
+            vec!["--", go, "test", "./..."],
+            true,
+        ));
+    }
+    #[cfg(unix)]
+    let ruby = ruby();
+    #[cfg(unix)]
+    if let Some(ruby) = &ruby {
+        runs.push((
+            "release-rb",
+            ruby_project,
+            vec!["--", ruby.as_str(), "-Ilib", "test/w_test.rb"],
+            true,
+        ));
+    }
+    for (label, write, command, fails) in runs {
+        let project = Project::empty(label);
+        write(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran = project.supercov_with(&command, &[("SUPERCOV_TEST_FAULT", "copy-release")]);
+        let said = ran.stderr();
+        assert!(!said.contains("panicked at"), "{label}: {said}");
+        assert!(
+            said.contains("test fault at copy-release"),
+            "{label}: {said}"
+        );
+        assert_eq!(ran.code() != 0, fails, "{label}: {said}");
+    }
+}
+
 /// A run whose standard error stops being read after each number of lines
 /// in turn -- `supercov -- npm test 2>&1 | head` -- goes on without it and
 /// never panics. How many runs it took.

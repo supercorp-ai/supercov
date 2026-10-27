@@ -149,6 +149,7 @@ a_run_of_another_release_is_named_for_what_it_is	0.8	0.8
 a_run_of_one_test_script_points_at_the_whole_suite_however_it_was_named	8.3	7.0
 a_run_of_two_test_kinds_narrows_pages_and_groups	5.4	1.8
 a_run_that_cannot_be_read_is_named_before_anything_is_asked	0.5	0.5
+a_run_that_cannot_release_its_copy_says_so	15.0	20.0
 a_run_that_observed_no_test_at_all_is_refused	0.6	0.7
 a_run_under_given_source_roots_is_read_back_under_them	6.0	10.0
 a_run_whose_file_operation_fails_anywhere_says_so_and_recovers	15.0	36.0

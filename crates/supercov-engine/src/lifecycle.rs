@@ -802,6 +802,10 @@ impl ProjectLock {
             .root
             .join(".supercov/locks")
             .join(format!("{}.json", copy_lock_name(self.copy)));
+        // A release that fails after a run that succeeded: what a run that
+        // fails at each place in turn never reaches, its run having failed.
+        crate::fault::io("copy-release", io::ErrorKind::Other, || Ok(()))
+            .map_err(|source| io_error(&path, source))?;
         if read_owner(&path).is_some_and(|owner| owner == self.owner) {
             fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
         }
