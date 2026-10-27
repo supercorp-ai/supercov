@@ -425,6 +425,19 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    /// A name that is not UTF-8 stops discovery, naming it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_is_named() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = fixture("not-utf8");
+        write(&root, "lib/good.rb", "def f(x) = x\n");
+        fs::write(root.join(std::ffi::OsStr::from_bytes(b"lib/\xff.rb")), "").unwrap();
+        let refused = discover_ruby_files(&root).unwrap_err();
+        assert!(refused.contains("non-UTF-8 path"), "{refused}");
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn roots_named_for_a_browser_suites_javascript_mean_no_ruby_server() {
         let root = fixture("roots-name-javascript");

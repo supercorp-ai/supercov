@@ -556,6 +556,26 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    /// A source that is not UTF-8 is not measured and says why; a name
+    /// that is not UTF-8 stops discovery, naming it.
+    #[test]
+    fn a_source_or_name_that_is_not_utf8_is_named() {
+        let root = fixture("not-utf8");
+        write(&root, "pkg/good.py", "def f(x):\n    return x\n");
+        fs::write(root.join("pkg/binary.py"), [0xff, 0xfe, b'\n']).unwrap();
+        let project = prepare_python_project(&root, None).unwrap();
+        let said = serde_json::to_string(&project.manifest).unwrap();
+        assert!(said.contains("source is not valid UTF-8"), "{said}");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::write(root.join(std::ffi::OsStr::from_bytes(b"pkg/\xff.py")), "").unwrap();
+            let refused = discover_python_files(&root).unwrap_err();
+            assert!(refused.contains("non-UTF-8 path"), "{refused}");
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn roots_named_for_a_browser_suites_javascript_mean_no_python_server() {
         let root = fixture("roots-name-javascript");
