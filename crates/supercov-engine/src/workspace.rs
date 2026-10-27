@@ -3939,6 +3939,47 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A root `node_modules` linked into a store in the project, holding a
+    /// link to one of the project's workspace packages, an empty scope and a
+    /// tool that judges source; it survives each file operation failing.
+    #[cfg(unix)]
+    #[test]
+    fn linking_a_stored_dependency_tree_survives_any_file_operation_failing() {
+        let stored = || {
+            let (root, lock) = varied_project();
+            fs::remove_dir_all(root.join("node_modules")).unwrap();
+            let store = root.join("store/node_modules");
+            fs::create_dir_all(store.join(".bin")).unwrap();
+            fs::write(store.join(".bin/biome"), "#!/bin/sh\n").unwrap();
+            fs::create_dir_all(store.join("@empty")).unwrap();
+            fs::create_dir_all(root.join("packages/money")).unwrap();
+            fs::write(root.join("packages/money/index.js"), "money").unwrap();
+            std::os::unix::fs::symlink("../../packages/money", store.join("money")).unwrap();
+            std::os::unix::fs::symlink("store/node_modules", root.join("node_modules")).unwrap();
+            (root, lock)
+        };
+        let (root, mut lock) = stored();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert_eq!(
+            fs::read_link(workspace.join("node_modules/money")).unwrap(),
+            Path::new("../packages/money")
+        );
+        assert!(
+            fs::read_dir(workspace.join("node_modules/@empty"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let operations = fail_each_file_operation(
+            stored,
+            |(root, lock)| prepare_isolated_workspace(root, "run", lock).map(drop),
+            release,
+        );
+        assert!(operations > 20, "{operations}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn linking_nested_dependency_trees_survives_any_file_operation_failing() {
