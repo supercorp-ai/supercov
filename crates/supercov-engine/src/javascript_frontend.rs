@@ -308,6 +308,7 @@ pub fn javascript_frontend_reuse_paths(cache: &JavascriptFrontendCache) -> Vec<P
 }
 
 fn restore_cached_file(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendError> {
+    // A path read back from the cache is checked, not trusted.
     let parent = path
         .parent()
         .ok_or_else(|| JavascriptFrontendError::UnsafeSourcePath(path.display().to_string()))?;
@@ -593,7 +594,7 @@ fn describe_ancestors(path: &Path) -> String {
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendError> {
     let parent = path
         .parent()
-        .ok_or_else(|| JavascriptFrontendError::UnsafeSourcePath(path.display().to_string()))?;
+        .expect("a file of the workspace has a directory");
     let temporary = parent.join(format!(".supercov-write-{}", unique()));
     let result = (|| {
         let open = || fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary);
@@ -827,25 +828,19 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
         &generated.join("package.json"),
         b"{\"private\":true,\"type\":\"module\"}\n",
     )?;
-    for (name, bytes) in RUNTIME_FILES {
+    RUNTIME_FILES.iter().try_for_each(|(name, bytes)| {
         let destination = generated.join(name);
-        let source_path = PathBuf::from(format!("embedded:{name}"));
         let bytes = strip_source_map_reference(bytes.to_vec());
         if *name == "runtime.mjs" {
-            let text = String::from_utf8(bytes).map_err(|source| {
-                io_error(
-                    &source_path,
-                    io::Error::new(io::ErrorKind::InvalidData, source),
-                )
-            })?;
+            let text = String::from_utf8(bytes).expect("the embedded runtime is UTF-8");
             atomic_write(
                 &destination,
                 isolate_runtime(&text, collector_id)?.as_bytes(),
-            )?;
+            )
         } else {
-            atomic_write(&destination, &bytes)?;
+            atomic_write(&destination, &bytes)
         }
-    }
+    })?;
     atomic_write(
         &generated.join("runtime.d.mts"),
         runtime_declarations().as_bytes(),
