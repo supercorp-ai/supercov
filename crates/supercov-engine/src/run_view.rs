@@ -629,6 +629,16 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
 mod tests {
     use super::*;
 
+    /// A file with no extension has no neighbourhood of measured files.
+    #[test]
+    fn a_name_without_an_extension_has_no_neighbourhood() {
+        assert_eq!(neighbourhood("Makefile"), None);
+        assert_eq!(
+            neighbourhood("src/a.js"),
+            Some(("src".to_owned(), "js".to_owned()))
+        );
+    }
+
     fn metric(covered: usize, eligible: usize) -> MetricView {
         MetricView {
             metric: Metric::Lines,
