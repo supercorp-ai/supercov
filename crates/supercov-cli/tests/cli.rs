@@ -1048,6 +1048,7 @@ fn help_and_bundled_guides_need_no_project() {
         vec!["help"],
         vec!["--help"],
         vec!["runs", "--help"],
+        vec!["report", "--help"],
         vec!["runs", "latest", "--help"],
     ] {
         let help = project.supercov(&args).succeeds();
@@ -12818,6 +12819,8 @@ fn a_command_started_in_a_removed_directory_says_so() {
         &["--", "node", "--test"],
         &["runs", "latest", "--json"],
         &["runs", "latest", "gaps", "--json"],
+        &["report", "--no-open"],
+        &["report", "--no-open", "--output", "r.html"],
     ];
     for command in commands {
         let gone = project
