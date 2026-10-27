@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Write},
+    ops::ControlFlow,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -503,8 +504,7 @@ fn lexical_normalize(path: &Path) -> Option<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Prefix(_) | Component::RootDir => normalized.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
                 if !normalized.pop() {
@@ -903,14 +903,8 @@ fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
     if common == 0 {
         return Err(WorkspaceError::UnsafePath(to.into()));
     }
-    let mut relative = PathBuf::new();
-    for _ in common..from_components.len() {
-        relative.push("..");
-    }
-    for component in &to_components[common..] {
-        relative.push(component.as_os_str());
-    }
-    Ok(relative)
+    let up = std::iter::repeat_n(Component::ParentDir, from_components.len() - common);
+    Ok(up.chain(to_components[common..].iter().copied()).collect())
 }
 
 /// One entry of the root `node_modules`. A package of the project's own
@@ -1419,18 +1413,22 @@ fn validate_writeback_destination(root: &Path, relative: &Path) -> Result<(), Wo
         return Err(WorkspaceError::UnsafePath(relative.into()));
     }
     let mut current = root.to_owned();
-    for component in relative.components() {
+    let checked = relative.components().try_for_each(|component| {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(WorkspaceError::UnsafePath(current));
+                ControlFlow::Break(Err(WorkspaceError::UnsafePath(current.clone())))
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(error) => return Err(io_error(&current, error)),
+            Ok(_) => ControlFlow::Continue(()),
+            // Nothing below a path that is not there can be a link.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => ControlFlow::Break(Ok(())),
+            Err(error) => ControlFlow::Break(Err(io_error(&current, error))),
         }
+    });
+    match checked {
+        ControlFlow::Break(result) => result,
+        ControlFlow::Continue(()) => Ok(()),
     }
-    Ok(())
 }
 
 /// Paths by the place a reader would look for them: each top-level directory
@@ -2767,6 +2765,7 @@ mod tests {
             ".next/ 3, coverage/ 1, notes.txt, out/ 1, 2 elsewhere"
         );
         assert_eq!(summarize_paths(&paths[..1]), ".next/ 1");
+        assert_eq!(summarize_paths(&[]), "");
     }
 
     #[test]
@@ -3693,6 +3692,7 @@ mod tests {
         assert_eq!(lexical_normalize(&path("/a/./b/../c")), Some(path("/a/c")));
         assert_eq!(lexical_normalize(&path("a/../..")), None);
         assert_eq!(lexical_normalize(&path("")), Some(path("")));
+        assert_eq!(lexical_normalize(&path("./a")), Some(path("a")));
         assert!(inside(&path("/r"), &path("/r")));
         assert!(inside(&path("/r"), &path("/r/a/b")));
         assert!(!inside(&path("/r"), &path("/r/../x")));
