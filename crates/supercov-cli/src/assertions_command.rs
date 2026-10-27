@@ -450,6 +450,11 @@ impl Pass<'_> {
     /// answered without a request.
     fn seed(&mut self, cache: &Cache) -> usize {
         let mut reused = 0;
+        // No saved answer to find: a key for every statement and test it
+        // goes to first is not worth making.
+        if cache.answers.is_empty() {
+            return reused;
+        }
         for s in 0..self.population.statements.len() {
             for t in self.orders[s].clone() {
                 if self.answers[s].iter().any(|(x, _)| *x == t) {

@@ -266,6 +266,71 @@ pub struct Population {
     files: std::sync::Mutex<BTreeMap<String, Option<std::sync::Arc<str>>>>,
     /// Whether a test file contains a text fragment, by (file, fragment).
     quotes: std::sync::Mutex<std::collections::HashMap<(String, String), bool>>,
+    /// Each test's code, found once: every request and every cache key of the
+    /// test shows the same code, and finding it searches the whole test file.
+    test_codes: Vec<std::sync::OnceLock<String>>,
+    /// The same with line numbers taken out, as cache keys hold it.
+    unnumbered_test_codes: Vec<std::sync::OnceLock<String>>,
+    /// Each file's lines, comments and functions, worked out once: every
+    /// request and every cache key shows code of the same files.
+    views: std::sync::Mutex<BTreeMap<String, std::sync::Arc<FileView>>>,
+}
+
+/// A source file as the requests show it: its lines from one, which are
+/// comments, and the functions and statement starts asked about within it.
+struct FileView {
+    source: std::sync::Arc<str>,
+    /// Where each line starts, and one past the end of the file.
+    starts: Vec<usize>,
+    /// By line, from one at index zero.
+    comment: Vec<bool>,
+    /// The lines that are code, from one.
+    code: Vec<usize>,
+    functions: std::sync::OnceLock<Vec<(usize, usize)>>,
+    begins: std::sync::OnceLock<BTreeSet<usize>>,
+}
+
+impl FileView {
+    fn new(language: Language, source: std::sync::Arc<str>) -> FileView {
+        let mut starts = vec![0];
+        starts.extend(source.match_indices('\n').map(|(i, _)| i + 1));
+        starts.push(source.len() + 1);
+        let comment = (1..starts.len())
+            .map(|i| language.comment(&source[starts[i - 1]..starts[i] - 1]))
+            .collect::<Vec<_>>();
+        let code = (1..=comment.len()).filter(|&i| !comment[i - 1]).collect();
+        FileView {
+            source,
+            starts,
+            comment,
+            code,
+            functions: Default::default(),
+            begins: Default::default(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.comment.len()
+    }
+
+    /// A line, from one.
+    fn line(&self, line: usize) -> &str {
+        &self.source[self.starts[line - 1]..self.starts[line] - 1]
+    }
+
+    /// Where a line is among the code lines; none for a comment.
+    fn position(&self, line: usize) -> Option<usize> {
+        self.code.binary_search(&line).ok()
+    }
+
+    fn functions(&self, language: Language, file: &str) -> &[(usize, usize)] {
+        self.functions
+            .get_or_init(|| outermost_functions(language, file, &self.source))
+    }
+
+    fn begins(&self, find: impl FnOnce() -> BTreeSet<usize>) -> &BTreeSet<usize> {
+        self.begins.get_or_init(find)
+    }
 }
 
 /// The executed statements of a run and the tests that ran them. `sources` are
@@ -546,6 +611,8 @@ pub fn population_from(
         }
     }
     let source_files = statements.iter().map(|s| s.file.clone()).collect();
+    let test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
+    let unnumbered_test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
     Ok(Population {
         root: root.to_path_buf(),
         language,
@@ -556,6 +623,9 @@ pub fn population_from(
         jvm_files,
         files: Default::default(),
         quotes: Default::default(),
+        test_codes,
+        unnumbered_test_codes,
+        views: Default::default(),
     })
 }
 
@@ -1191,7 +1261,7 @@ fn describe(name: &str, separator: &str) -> String {
 impl Population {
     /// Read these files from here rather than the checkout: a run's sources
     /// as they were assessed, once the checkout has moved on.
-    pub fn with_files(self, files: BTreeMap<String, String>) -> Self {
+    pub fn with_files(mut self, files: BTreeMap<String, String>) -> Self {
         {
             let mut cache = self
                 .files
@@ -1201,6 +1271,15 @@ impl Population {
                 cache.insert(file, Some(text.into()));
             }
         }
+        // Test code found before is code of the files replaced.
+        for code in self
+            .test_codes
+            .iter_mut()
+            .chain(&mut self.unnumbered_test_codes)
+        {
+            *code = std::sync::OnceLock::new();
+        }
+        self.views = Default::default();
         self
     }
 
@@ -1227,6 +1306,20 @@ impl Population {
                     .map(Into::into)
             })
             .clone()
+    }
+
+    fn view(&self, file: &str) -> Option<std::sync::Arc<FileView>> {
+        let source = self.read(file)?;
+        let mut views = self
+            .views
+            .lock()
+            .expect("the view cache is only read and filled");
+        Some(
+            views
+                .entry(file.to_owned())
+                .or_insert_with(|| std::sync::Arc::new(FileView::new(self.language, source)))
+                .clone(),
+        )
     }
 
     /// Whether `test`'s file contains one of these fragments.
@@ -1276,7 +1369,7 @@ impl Population {
             )
         };
         let mut all = s.tests.clone();
-        all.sort_by_key(key);
+        all.sort_by_cached_key(key);
         if all.len() <= k {
             return all;
         }
@@ -1396,6 +1489,12 @@ impl Population {
     /// The test's code: the file's first lines and the test's own body, found
     /// by its title, comment lines left out.
     pub fn test_code(&self, test: usize) -> String {
+        self.test_codes[test]
+            .get_or_init(|| self.find_test_code(test))
+            .clone()
+    }
+
+    fn find_test_code(&self, test: usize) -> String {
         match self.language {
             Language::Python => return self.python_test_code(test),
             Language::JavaScript => {}
@@ -1702,43 +1801,34 @@ impl Population {
         let mut out = BTreeMap::new();
         let mut total = 0;
         for f in files {
-            let Some(source) = self.read(&f) else {
+            let Some(view) = self.view(&f) else {
                 continue;
             };
-            let text = source.split('\n').collect::<Vec<_>>();
             let r = ran.get(&f).unwrap_or(&empty);
-            let code = (1..=text.len())
-                .filter(|&i| !self.language.comment(text[i - 1]))
-                .collect::<Vec<_>>();
-            let pos = code
-                .iter()
-                .enumerate()
-                .map(|(n, &i)| (i, n))
-                .collect::<BTreeMap<_, _>>();
             let around = |l: usize, w: usize| -> Vec<usize> {
-                match pos.get(&l) {
-                    Some(&n) => code[n.saturating_sub(w)..(n + w + 1).min(code.len())].to_vec(),
-                    None => (l.saturating_sub(w).max(1)..=(l + w).min(text.len())).collect(),
+                match view.position(l) {
+                    Some(n) => {
+                        view.code[n.saturating_sub(w)..(n + w + 1).min(view.code.len())].to_vec()
+                    }
+                    None => (l.saturating_sub(w).max(1)..=(l + w).min(view.len())).collect(),
                 }
             };
-            let mut show = BTreeSet::new();
-            for &l in r {
-                show.extend(around(l, CONTEXT_LINES));
-            }
-            for &l in want.get(&f).unwrap_or(&empty) {
-                show.extend(around(l, WINDOW_LINES));
-            }
-            // How far the file was going to be shown, for the line that says
-            // how much of it is not. Every line `around` gives is one of the
-            // file's, counted from one.
-            let end = show
-                .iter()
-                .rev()
-                .copied()
-                .find(|&i| !self.language.comment(text[i - 1]))
-                .unwrap_or(0);
-            if within {
-                let functions = outermost_functions(self.language, &f, &source);
+            // The last line of `around(l, w)` that is code: how far it shows
+            // the file, without listing it.
+            let reach = |l: usize, w: usize| -> usize {
+                match view.position(l) {
+                    Some(n) => view.code[(n + w).min(view.code.len() - 1)],
+                    None => (l.saturating_sub(w).max(1)..=(l + w).min(view.len()))
+                        .rev()
+                        .find(|&i| !view.comment[i - 1])
+                        .unwrap_or(0),
+                }
+            };
+            // Within a function, only what lies in the functions kept is
+            // shown: the lines the test ran elsewhere in a large file are
+            // never listed (each request listed them all, then dropped them).
+            let kept = within.then(|| {
+                let functions = view.functions(self.language, &f);
                 let around =
                     |l: usize| (l.saturating_sub(OUTSIDE_A_FUNCTION), l + OUTSIDE_A_FUNCTION);
                 let function = |l: usize| {
@@ -1748,12 +1838,13 @@ impl Population {
                         .find(|&(from, to)| from <= l && l <= to)
                 };
                 // The lines an assessed statement of this file begins on.
-                let begins = self
-                    .statements
-                    .iter()
-                    .filter(|s| s.file == f)
-                    .map(|s| s.line)
-                    .collect::<BTreeSet<_>>();
+                let begins = view.begins(|| {
+                    self.statements
+                        .iter()
+                        .filter(|s| s.file == f)
+                        .map(|s| s.line)
+                        .collect()
+                });
                 let mut kept = Vec::new();
                 for statement in asked.iter().map(|&a| &self.statements[a]) {
                     if statement.file != f {
@@ -1775,12 +1866,71 @@ impl Population {
                         );
                     }
                 }
+                kept
+            });
+            let mut show = BTreeSet::new();
+            match &kept {
+                None => {
+                    for &l in r {
+                        show.extend(around(l, CONTEXT_LINES));
+                    }
+                }
+                Some(kept) => {
+                    // A ran line whose context can reach a kept range: within
+                    // CONTEXT_LINES of its code lines, or of its lines.
+                    for &(from, to) in kept {
+                        let first = view.code.partition_point(|&c| c < from);
+                        let last = view.code.partition_point(|&c| c <= to);
+                        let lo = view
+                            .code
+                            .get(first.saturating_sub(CONTEXT_LINES))
+                            .copied()
+                            .unwrap_or(usize::MAX)
+                            .min(from.saturating_sub(CONTEXT_LINES));
+                        let hi = (last + CONTEXT_LINES)
+                            .checked_sub(1)
+                            .and_then(|n| view.code.get(n.min(view.code.len().saturating_sub(1))))
+                            .copied()
+                            .unwrap_or(0)
+                            .max(to.saturating_add(CONTEXT_LINES));
+                        if lo <= hi {
+                            for &l in r.range(lo..=hi) {
+                                show.extend(around(l, CONTEXT_LINES));
+                            }
+                        }
+                    }
+                }
+            }
+            for &l in want.get(&f).unwrap_or(&empty) {
+                show.extend(around(l, WINDOW_LINES));
+            }
+            // How far the file was going to be shown, for the line that says
+            // how much of it is not. Every line `around` gives is one of the
+            // file's, counted from one.
+            // No line before a ran code line reaches further than it does.
+            let mut reached = 0;
+            for &l in r.iter().rev() {
+                reached = reached.max(reach(l, CONTEXT_LINES));
+                if view.position(l).is_some() {
+                    break;
+                }
+            }
+            let end = std::iter::once(reached)
+                .chain(
+                    want.get(&f)
+                        .unwrap_or(&empty)
+                        .iter()
+                        .map(|&l| reach(l, WINDOW_LINES)),
+                )
+                .max()
+                .unwrap_or(0);
+            if let Some(kept) = &kept {
                 show.retain(|i| kept.iter().any(|&(from, to)| from <= *i && *i <= to));
             }
             let mut lines = Vec::new();
             let mut last = 0;
             for i in show {
-                if self.language.comment(text[i - 1]) {
+                if view.comment[i - 1] {
                     continue;
                 }
                 if i != last + 1 {
@@ -1790,7 +1940,7 @@ impl Population {
                     "{}{:5} {}",
                     if r.contains(&i) { '▶' } else { ' ' },
                     i,
-                    text[i - 1]
+                    view.line(i)
                 ));
                 last = i;
             }
@@ -2035,7 +2185,7 @@ impl Population {
             true,
             &t.file,
             &t.name,
-            strip_numbers(&self.test_code(test)),
+            self.unnumbered_test_codes[test].get_or_init(|| strip_numbers(&self.test_code(test))),
             self.helpers(test, 1)
                 .into_iter()
                 .map(|(f, b)| (f, strip_numbers(&b)))
