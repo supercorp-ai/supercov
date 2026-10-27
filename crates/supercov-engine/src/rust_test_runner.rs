@@ -997,7 +997,8 @@ fn build_test_artifacts(
             .manifest_path
             .as_deref()
             .and_then(Path::parent)
-            .map_or_else(|| project.workspace_root.clone(), Path::to_path_buf);
+            .unwrap_or(&project.workspace_root)
+            .to_path_buf();
         artifacts.push(TestArtifact {
             executable,
             package_directory,
@@ -1731,24 +1732,24 @@ fn running_line(
 /// none.
 fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
     use std::io::IsTerminal;
-    let asked =
-        colour_flag(&invocation.arguments).or_else(|| std::env::var("CARGO_TERM_COLOR").ok());
     cargo_colour_choice(
-        asked.as_deref(),
+        colour_flag(&invocation.arguments).as_deref(),
         &|name| std::env::var(name).ok(),
         std::io::stderr().is_terminal(),
     )
 }
 
-/// What Cargo decides from what was asked, its environment, and whether its
-/// lines go to a terminal.
+/// What Cargo decides from what was asked (`--color`, or else
+/// `CARGO_TERM_COLOR`), its environment, and whether its lines go to a
+/// terminal.
 fn cargo_colour_choice(
     asked: Option<&str>,
     variable: &dyn Fn(&str) -> Option<String>,
     terminal: bool,
 ) -> bool {
     let set = |name: &str| variable(name).filter(|value| !value.is_empty());
-    match asked {
+    let asked = asked.map(str::to_owned).or_else(|| set("CARGO_TERM_COLOR"));
+    match asked.as_deref() {
         Some("always") => true,
         Some("never") => false,
         // As Cargo decides it when left to: forced, refused, and otherwise
@@ -2776,6 +2777,19 @@ mod tests {
             (None, &[("TERM", "xterm")][..], false, false),
             (Some("auto"), &[("TERM", "dumb")][..], true, cfg!(windows)),
             (None, &[][..], true, cfg!(windows)),
+            (None, &[("CARGO_TERM_COLOR", "always")][..], false, true),
+            (
+                Some("never"),
+                &[("CARGO_TERM_COLOR", "always")][..],
+                false,
+                false,
+            ),
+            (
+                None,
+                &[("CARGO_TERM_COLOR", ""), ("TERM", "xterm")][..],
+                true,
+                true,
+            ),
         ] {
             assert_eq!(
                 cargo_colour_choice(asked, &env(pairs), terminal),
@@ -2786,6 +2800,17 @@ mod tests {
         assert!(!shows_colours(false, Some("xterm")));
         assert_eq!(shows_colours(true, Some("")), cfg!(windows));
         assert!(shows_colours(true, Some("xterm-256color")));
+        let libtest = |choice: &str| {
+            super::libtest_colours(
+                &super::cargo_invocation(
+                    &std::env::temp_dir(),
+                    &words(&format!("cargo test -- --color {choice}")),
+                )
+                .unwrap(),
+            )
+        };
+        assert!(libtest("always"));
+        assert!(!libtest("never"));
     }
 
     #[test]
@@ -2795,6 +2820,7 @@ mod tests {
             "file:///tmp/a%20b/%23hook.mjs"
         );
         assert_eq!(file_url(Path::new("/srv/hook.mjs")), "file:///srv/hook.mjs");
+        assert_eq!(file_url(Path::new("")), "file:///");
     }
 
     #[test]
@@ -3003,6 +3029,13 @@ mod tests {
             ambient(&[("GECKODRIVER", "/opt/geckodriver")]),
             Some("geckodriver".into())
         );
+        // No driver anywhere is no browser; a Chrome driver that cannot
+        // start is named with why.
+        assert_eq!(ambient(&[]), None);
+        assert!(
+            ambient(&[("CHROMEDRIVER", "/nonexistent/chromedriver")])
+                .is_some_and(|browser| browser.starts_with("Chrome (")),
+        );
         assert_eq!(
             ambient(&[
                 ("GECKODRIVER", "/opt/geckodriver"),
@@ -3029,6 +3062,12 @@ mod tests {
         assert_eq!(
             std::env::split_paths(&environment[0].1).collect::<Vec<_>>(),
             ["/", "/lib"].map(PathBuf::from)
+        );
+        // A directory the variable cannot hold leaves the loader as it was.
+        #[cfg(unix)]
+        assert_eq!(
+            library_path_environment(Path::new("/a:b"), Path::new("/fixture"), None),
+            []
         );
     }
 
@@ -3251,6 +3290,75 @@ mod tests {
         );
     }
 
+    /// A writer that takes nothing, as a closed standard error.
+    struct Closed;
+
+    impl Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_gate_left_out_takes_its_decisions_and_a_closed_writer_is_an_error() {
+        let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
+        let source = concat!(
+            "#[cfg(feature = \"f\")]\n",
+            "pub fn f(a: bool, b: bool) -> i32 { if a && b { 1 } else { 2 } }\n",
+            "#[cfg(feature = \"g\")]\n",
+            "pub fn g(a: bool, b: bool) -> i32 { if a || b { 1 } else { 2 } }\n",
+        );
+        let mut manifest = crate::rust_instrumenter::instrument_rust_file_numbered(
+            "src/lib.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            None,
+            &mut probes,
+        )
+        .unwrap()
+        .manifest;
+        assert_eq!(probes.cfgs.len(), 2, "{:?}", probes.cfgs);
+        manifest.unmeasured = manifest
+            .points
+            .iter()
+            .map(|point| point.id.clone())
+            .collect();
+        let (decisions, branches) = (manifest.decisions.len(), manifest.branches.len());
+        assert!(decisions >= 2 && branches >= 4, "{decisions} {branches}");
+        // The first gate was left out of every build, the second built.
+        let settled = settle_cfg_gates_with(&manifest, &probes, &[1, 2], &mut Vec::new()).unwrap();
+        let kept = |file_line: &dyn Fn(usize) -> bool| {
+            settled
+                .decisions
+                .iter()
+                .all(|decision| file_line(decision.line))
+                && settled.branches.iter().all(|branch| file_line(branch.line))
+        };
+        assert!(settled.decisions.len() < decisions);
+        assert!(settled.branches.len() < branches);
+        assert!(settled.unmeasured.len() < manifest.unmeasured.len());
+        assert!(kept(&|line| line >= probes.cfgs[1].line));
+        for gates in [[1, 2], [0, 2]] {
+            let error = settle_cfg_gates_with(&manifest, &probes, &gates, &mut Closed).unwrap_err();
+            assert!(matches!(error, RustTestRunnerError::Io(_)), "{error}");
+        }
+        let declined = BTreeSet::from(["a.rs".to_owned()]);
+        assert!(matches!(
+            report_declined(&declined, &mut Closed),
+            Err(RustTestRunnerError::Io(_))
+        ));
+        let workers = [("a.rs".to_owned(), "no test started it".to_owned())];
+        assert!(matches!(
+            report_unmeasured_workers(&workers, &mut Closed),
+            Err(RustTestRunnerError::Io(_))
+        ));
+    }
+
     #[test]
     fn files_the_build_did_not_read_are_declined_only_on_this_builds_depinfo() {
         let root = scratch("declined-sources");
@@ -3270,10 +3378,24 @@ mod tests {
             {"file": "src/lib.rs", "status": "included"},
             "not an entry",
         ]}));
+        // A boundary in a file left out goes with it; one with no file stays.
+        project.manifest.limitations = vec![
+            serde_json::json!({"id": "gone", "file": "src/gone.rs"}),
+            serde_json::json!({"id": "kept", "file": "src/lib.rs"}),
+            serde_json::json!({"id": "anywhere"}),
+        ];
         // A Worker's crate that `wrangler dev` built counts.
         let also = BTreeSet::from(["src/worker.rs".to_owned()]);
         let (manifest, declined) = decline_uncompiled_sources(&project, &also);
         assert_eq!(declined, BTreeSet::from(["src/gone.rs".to_owned()]));
+        assert_eq!(
+            manifest
+                .limitations
+                .iter()
+                .map(|limitation| limitation["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["kept", "anywhere"]
+        );
         let entries = manifest.scope.unwrap()["entries"].clone();
         assert_eq!(entries[0]["status"], "excluded");
         assert_eq!(entries[1]["status"], "included");
