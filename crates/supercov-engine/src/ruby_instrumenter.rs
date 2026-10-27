@@ -36,7 +36,6 @@ use ruby_prism::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::{
     coverage_analysis::PointKind,
@@ -652,16 +651,8 @@ pub struct RubyFileObligations {
 }
 
 fn stable_id(file: &str, kind: &str, start: usize, end: usize, suffix: &str) -> String {
-    let mut hash = Sha256::new();
-    for value in [file, kind, &start.to_string(), &end.to_string(), suffix] {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let encoded: String = digest[..12]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let encoded =
+        crate::stable_ids::digest(&[file, kind, &start.to_string(), &end.to_string(), suffix]);
     format!("rb:{kind}:{encoded}")
 }
 

@@ -91,6 +91,7 @@ pub mod source_discovery;
 pub mod source_manifest;
 pub mod source_tools;
 pub mod source_units;
+mod stable_ids;
 pub mod support_reach;
 #[cfg(test)]
 mod test_directory;

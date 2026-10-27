@@ -12,7 +12,6 @@ use ra_ap_syntax::{
     ast::{self, BinaryOp, HasAttrs, HasLoopBody, HasName, LogicOp},
 };
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::{
     coverage_analysis::PointKind,
@@ -658,19 +657,9 @@ impl<'a> SourceLocations<'a> {
 }
 
 fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
-    let mut hash = Sha256::new();
     let start = usize::from(range.start()).to_string();
     let end = usize::from(range.end()).to_string();
-    for value in [file, kind, &start, &end, suffix] {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(24);
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
+    let encoded = crate::stable_ids::digest(&[file, kind, &start, &end, suffix]);
     format!("rs:{kind}:{encoded}")
 }
 

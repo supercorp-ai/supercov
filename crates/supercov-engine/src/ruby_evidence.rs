@@ -17,7 +17,6 @@ use std::{
 use memmap2::MmapOptions;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use supercov_contracts::{
     AttributionPrecision, ExecutionModel, FrontendAttribution, FrontendLimitation,
     FrontendLimitationScope, FrontendRunDeclaration, FrontendRunnerDeclaration,
@@ -249,20 +248,7 @@ impl std::fmt::Display for RubyEvidenceError {
 impl std::error::Error for RubyEvidenceError {}
 
 fn stable_id(prefix: &str, values: &[&str]) -> String {
-    let mut hash = Sha256::new();
-    for value in values {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(prefix.len() + 25);
-    encoded.push_str(prefix);
-    encoded.push(':');
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("string formatting");
-    }
-    encoded
+    crate::stable_ids::prefixed(prefix, values)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

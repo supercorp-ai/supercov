@@ -457,21 +457,7 @@ pub fn merge_evidence(parts: Vec<OwnedEvidence>) -> OwnedEvidence {
 /// A short, stable identity derived from what makes the thing itself, so two
 /// runs of the same test agree on what to call it.
 fn stable_id(prefix: &str, values: &[&str]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    for value in values {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(prefix.len() + 25);
-    encoded.push_str(prefix);
-    encoded.push(':');
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("string formatting");
-    }
-    encoded
+    crate::stable_ids::prefixed(prefix, values)
 }
 
 /// The obligation each probe answers for, by id.

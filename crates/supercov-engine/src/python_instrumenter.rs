@@ -18,7 +18,6 @@ use ruff_python_ast::{
 use ruff_python_parser::parse_module;
 use ruff_text_size::{Ranged, TextRange};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{
     coverage_analysis::PointKind,
@@ -316,19 +315,9 @@ impl<'a> SourceLocations<'a> {
 }
 
 fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
-    let mut hash = Sha256::new();
     let start = range.start().to_usize().to_string();
     let end = range.end().to_usize().to_string();
-    for value in [file, kind, &start, &end, suffix] {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(24);
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
+    let encoded = crate::stable_ids::digest(&[file, kind, &start, &end, suffix]);
     format!("py:{kind}:{encoded}")
 }
 

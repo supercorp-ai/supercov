@@ -90,18 +90,7 @@ pub(crate) fn stable_obligation_id(
     start: usize,
     end: usize,
 ) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    for value in [file, kind, &start.to_string(), &end.to_string()] {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(24);
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
+    let encoded = crate::stable_ids::digest(&[file, kind, &start.to_string(), &end.to_string()]);
     format!("{language}:{kind}:{encoded}")
 }
 
