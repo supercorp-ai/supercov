@@ -128,16 +128,16 @@ pub fn change_questions() -> Map<String, Value> {
             )
         })
         .collect();
-    for risk in risks() {
-        questions.insert(
+    questions.extend(risks().iter().map(|risk| {
+        (
             risk.id.clone(),
             noul(
                 format!("{CHANGE_PREFIX_PLAIN}{}", risk.task),
                 &risk.present,
                 &risk.absent,
             ),
-        );
-    }
+        )
+    }));
     questions.extend(security::change_questions());
     questions
 }
@@ -446,12 +446,11 @@ pub mod security {
         offset: usize,
         among: &[String],
     ) -> Map<String, Value> {
-        let mut criteria = Map::new();
-        for c in checks() {
-            if among.contains(&c.id) {
-                criteria.insert(c.id.clone(), Value::String(short(&c.id).to_owned()));
-            }
-        }
+        let mut criteria = checks()
+            .iter()
+            .filter(|c| among.contains(&c.id))
+            .map(|c| (c.id.clone(), Value::String(short(&c.id).to_owned())))
+            .collect::<Map<String, Value>>();
         criteria.insert(
             "none".into(),
             Value::String("none of these; an ordinary line".into()),

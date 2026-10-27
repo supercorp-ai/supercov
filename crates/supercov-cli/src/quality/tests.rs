@@ -3713,3 +3713,11 @@ fn every_quality_view_renders_with_nothing_in_it() {
         "unknown quality view: odd\n"
     );
 }
+
+/// Each security check is described in a line, and a check of no known
+/// kind in none.
+#[test]
+fn each_security_check_has_a_short_description() {
+    assert!(catalog::security::short("insecure_configuration").contains("TLS verification"));
+    assert_eq!(catalog::security::short("no_such_check"), "");
+}
