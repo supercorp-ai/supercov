@@ -1999,14 +1999,14 @@ fn render_files(run: &str, data: &Value) -> String {
     out.push_str(&format!(
         "\nFiles, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to {MAX_TESTS} of the tests that run a statement are asked, so a test never asked can still catch it.\n NOT ASSERTED  ASSERTED  FILE\n",
     ));
-    for file in &files {
+    files.iter().for_each(|file| {
         out.push_str(&format!(
             " {:>12}  {:>8}  {}\n",
             file["notAsserted"].as_u64().unwrap_or(0),
             format!("{}/{}", file["asserted"], file["statements"]),
             file["file"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
@@ -2057,14 +2057,14 @@ fn render_weak(run: &str, data: &Value) -> String {
         return out;
     };
     out.push_str("\nAn asserted statement is one some test was judged to catch; the judgment is the test's strongest answer. Checked by applying each change, a verdict on an answer under 75% was wrong about 1 time in 20, and one on a stronger answer about 1 in 50. Files, most such statements first:\n  WEAK  ASSERTED  FILE\n");
-    for file in &files {
+    files.iter().for_each(|file| {
         out.push_str(&format!(
             " {:>5}  {:>8}  {}\n",
             file["weaklyAsserted"].as_u64().unwrap_or(0),
             file["asserted"].as_u64().unwrap_or(0),
             file["file"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
@@ -2102,7 +2102,7 @@ fn render_weak_file(run: &str, data: &Value) -> String {
         return out;
     };
     out.push_str("\nThe least certain first. Each was settled by the test named, at the answer shown; the tests not asked were not judged.\n  LINE  STATEMENT  (change)  answer  tests asked  test\n");
-    for st in &weak {
+    weak.iter().for_each(|st| {
         out.push_str(&format!(
             " {:>5}  {}  ({})  {:.0}%  {} of {}  {}\n",
             st["line"].as_u64().unwrap_or(0),
@@ -2113,7 +2113,7 @@ fn render_weak_file(run: &str, data: &Value) -> String {
             st["testsRunningIt"],
             st["test"]["name"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
@@ -2165,7 +2165,7 @@ fn render_file(run: &str, data: &Value) -> String {
         return out;
     };
     out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MAX_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
-    for st in &not {
+    not.iter().for_each(|st| {
         let closest = st["test"]["name"]
             .as_str()
             .map(|name| {
@@ -2188,7 +2188,7 @@ fn render_file(run: &str, data: &Value) -> String {
             st["text"].as_str().unwrap_or(""),
             st["change"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
