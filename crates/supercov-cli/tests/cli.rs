@@ -13122,7 +13122,9 @@ fn a_run_that_cannot_release_its_copy_says_so() {
     let python = [
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
-    let mut runs: Vec<(&str, fn(&Project), Vec<&str>, bool)> = vec![
+    // A label, the project, its command, and whether the run fails.
+    type ReleaseRun<'a> = (&'a str, fn(&Project), Vec<&'a str>, bool);
+    let mut runs: Vec<ReleaseRun> = vec![
         (
             "release-rs",
             small_crate,
