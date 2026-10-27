@@ -12807,3 +12807,63 @@ fn import_with_no_arguments_names_what_it_needs() {
     assert_ne!(ran.code(), 0, "{}", ran.stderr());
     assert!(ran.stderr().contains("import"), "{}", ran.stderr());
 }
+
+/// A patch asked of a run whose suite failed, of a run whose source has
+/// changed, and of a run with nothing to annotate: each says what it can,
+/// and an unknown base or a reply too large is named.
+#[test]
+fn a_patch_of_a_failed_or_stale_run_says_what_it_can() {
+    let project = Project::cart("patch-blocked");
+    project.write(
+        "test/fails.test.js",
+        "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails', () => assert.equal(1, 2));\n",
+    );
+    project.commit("a failing test");
+    project.supercov(&["--", "node", "--test"]).exits(1);
+    let unknown = project.supercov(&["runs", "patch", "--base", "no-such-ref"]);
+    assert_ne!(unknown.code(), 0, "{}", unknown.stderr());
+    let faulted = project.supercov_with(
+        &["runs", "patch", "--base", "HEAD", "--json"],
+        &[("SUPERCOV_TEST_FAULT", "reply-too-large")],
+    );
+    assert!(
+        faulted.stderr().contains("response exceeds"),
+        "{}",
+        faulted.stderr()
+    );
+    // Stale: the source changed since the run.
+    project.write("src/cart.js", "export const total = () => 0;\n");
+    let stale = project.supercov_with(
+        &["runs", "patch", "--base", "HEAD", "--json"],
+        &[("SUPERCOV_TEST_FAULT", "reply-too-large")],
+    );
+    assert!(
+        stale.stderr().contains("response exceeds"),
+        "{}",
+        stale.stderr()
+    );
+    let human = project.supercov(&["runs", "patch", "--base", "HEAD"]);
+    assert!(
+        human.stderr().contains("this run cannot"),
+        "{}",
+        human.stderr()
+    );
+    // Nothing changed against HEAD on a passing run: nothing to annotate.
+    let clean = Project::cart("patch-clean");
+    clean.measure(&[]);
+    let annotated = clean.supercov(&["runs", "patch", "--base", "HEAD", "--annotate", "github"]);
+    assert!(
+        !annotated.stdout().contains("::warning"),
+        "{}",
+        annotated.stdout()
+    );
+    let faulted = clean.supercov_with(
+        &["runs", "patch", "--base", "HEAD", "--json"],
+        &[("SUPERCOV_TEST_FAULT", "reply-too-large")],
+    );
+    assert!(
+        faulted.stderr().contains("response exceeds"),
+        "{}",
+        faulted.stderr()
+    );
+}

@@ -200,7 +200,7 @@ fn hydrate_line_source_from_working_tree(
         return;
     };
     let changed = file_changed_since_run(root, recorded, &location.file);
-    *source = Some(line.into());
+    *source = Some(line);
     *origin = Some(
         if changed == Some(true) {
             "working-tree-stale"
@@ -1230,7 +1230,7 @@ fn render_check(
         Outcome::Fail { violations } => {
             out.push_str(&format!("\nFAIL: {} floor(s) not met.\n", violations.len()));
             // A failed check has a floor it did not meet.
-            violations.into_iter().for_each(|violation| {
+            violations.iter().for_each(|violation| {
                 let scope = violation.file.as_deref().unwrap_or("(whole run)");
                 out.push_str(&format!(
                     "  {scope}: {} {}  {}/{} below {}\n",
@@ -1540,9 +1540,8 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
                 );
             } else {
                 eprintln!("[supercov] this run cannot pass a patch gate:");
-                for reason in &reasons {
-                    eprintln!("  {reason}");
-                }
+                // Each blocker is a reason.
+                reasons.iter().for_each(|reason| eprintln!("  {reason}"));
                 print!("{}", render_patch(&patch, &base, None, false));
             }
             return Ok(2);
@@ -1564,9 +1563,7 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
                 );
             } else {
                 eprintln!("[supercov] this run cannot map a patch:");
-                for reason in &reasons {
-                    eprintln!("  {reason}");
-                }
+                reasons.iter().for_each(|reason| eprintln!("  {reason}"));
             }
             return Ok(2);
         }
