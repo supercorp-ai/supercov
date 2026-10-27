@@ -560,14 +560,15 @@ pub fn import_python_coverage_json(
         })
         .collect::<Vec<_>>();
     let mut arcs_by_line = BTreeMap::<(String, i64), BTreeSet<i64>>::new();
-    for file in &export.files {
+    // A valid export measured a file at least.
+    export.files.iter().for_each(|file| {
         for [from, to] in file.executed_branches.iter().chain(&file.missing_branches) {
             arcs_by_line
                 .entry((file.path.clone(), *from))
                 .or_default()
                 .insert(*to);
         }
-    }
+    });
     let branch_alternatives = arcs_by_line
         .iter()
         .flat_map(|((file, from), destinations)| {
@@ -794,25 +795,30 @@ pub fn import_python_coverage_json(
         .flat_map(|snapshot| snapshot.hits.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
-    for file in &export.files {
-        for line in &file.executed_lines {
-            if !observed_hits.contains(&line_id(&file.path, *line)) {
-                return Err(PythonFrontendError::UnattributedExecutedLine(
-                    file.path.clone(),
-                    *line,
-                ));
+    // A valid export measured a file at least.
+    export
+        .files
+        .iter()
+        .try_for_each(|file| -> Result<(), PythonFrontendError> {
+            for line in &file.executed_lines {
+                if !observed_hits.contains(&line_id(&file.path, *line)) {
+                    return Err(PythonFrontendError::UnattributedExecutedLine(
+                        file.path.clone(),
+                        *line,
+                    ));
+                }
             }
-        }
-        for [from, to] in &file.executed_branches {
-            if !observed_hits.contains(&alternative_id(&file.path, *from, *to)) {
-                return Err(PythonFrontendError::UnattributedExecutedBranch(
-                    file.path.clone(),
-                    *from,
-                    *to,
-                ));
+            for [from, to] in &file.executed_branches {
+                if !observed_hits.contains(&alternative_id(&file.path, *from, *to)) {
+                    return Err(PythonFrontendError::UnattributedExecutedBranch(
+                        file.path.clone(),
+                        *from,
+                        *to,
+                    ));
+                }
             }
-        }
-    }
+            Ok(())
+        })?;
 
     let declaration = FrontendRunDeclaration {
         protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -955,6 +961,11 @@ mod tests {
                 .iter()
                 .all(|raw| raw.role != "test")
         );
+        // A context that saw no file.
+        export["contexts"] = json!([{"kind": "background", "workerId": "main", "files": []}]);
+        let unseen = import(&export);
+        assert_eq!(unseen.request.manifest.points.len(), 1);
+        assert_ne!(stable_id("p", &[]), stable_id("q", &[]));
     }
 
     /// The oracle importer refuses an export that breaks any one of its
