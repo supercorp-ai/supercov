@@ -693,6 +693,76 @@ mod tests {
                 named("background", "failed")
             ]
         );
+        // Each file operation failing in turn, a region that is not one, and
+        // a stream that refuses either line: each ends with an error, never
+        // a panic.
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fresh = || {
+            let other = root.join(format!(
+                "attempt-{}",
+                UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&other).unwrap();
+            other
+        };
+        let calls = crate::fault::fail_each_call(
+            "fs",
+            fresh,
+            |other| {
+                publish(
+                    other,
+                    wasm(),
+                    records(),
+                    metadata(run_id, 1),
+                    &tests,
+                    &mut Vec::new(),
+                )
+                .map(drop)
+            },
+            |other| fs::remove_dir_all(other).unwrap(),
+        );
+        assert!(calls > 3, "{calls}");
+        let broken = vec![WasmRecord {
+            owner: Owner::Window(6, 7),
+            regions: vec![("crate".into(), b"not a region".to_vec())],
+        }];
+        assert!(
+            publish(
+                &fresh(),
+                wasm(),
+                broken,
+                metadata(run_id, 1),
+                &tests,
+                &mut Vec::new()
+            )
+            .is_err()
+        );
+        struct Refusing(&'static str);
+        impl Write for Refusing {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                if String::from_utf8_lossy(buffer).contains(self.0) {
+                    return Err(std::io::Error::other("closed"));
+                }
+                Ok(buffer.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for refused in ["coverage:", "of those test(s)"] {
+            assert!(
+                publish(
+                    &fresh(),
+                    wasm(),
+                    records(),
+                    metadata(run_id, 1),
+                    &tests,
+                    &mut Refusing(refused)
+                )
+                .is_err(),
+                "{refused}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
