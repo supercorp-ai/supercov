@@ -5882,9 +5882,16 @@ pub fn documented(value: i32) -> i32 {
             "fn f() -> Vec<u8> { let v = vec!(0; 3); v }\n",
             "fn f() -> Vec<u8> { let v = vec![1 => 2]; v }\n",
             "fn f() { vec![0; 3]; }\n",
+            // A `matches!` with no pattern has none to blank.
+            "fn f(x: u8) -> bool { matches!(x) }\n",
         ] {
             assert_eq!(view(kept), kept);
         }
+        // An attribute on the macro stays; only `vec!` itself goes.
+        assert_eq!(
+            view("fn f() -> Vec<u8> { let v = #[allow(unused)] vec![0; 3]; v }\n"),
+            "fn f() -> Vec<u8> { let v = #[allow(unused)] &   [0; 3]; v }\n"
+        );
         assert_eq!(
             view("fn f() -> Vec<u8> {\n    let v = vec!\n        [0; 3];\n    v\n}\n"),
             "fn f() -> Vec<u8> {\n    let v = &   \n        [0; 3];\n    v\n}\n"
