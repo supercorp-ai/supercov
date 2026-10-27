@@ -12820,6 +12820,17 @@ fn exact_attribution_runs_the_command_after_it() {
 /// stopped one left and succeeds. Four projects `write` lays out share the
 /// places. The most places a run reached.
 fn fail_each_place_of_a_run(label: &str, write: fn(&Project), command: &[&str]) -> usize {
+    fail_each_place_of_a_run_ending(label, write, command, 0)
+}
+
+/// [`fail_each_place_of_a_run`] for a command that, with no fault, exits
+/// `code`.
+fn fail_each_place_of_a_run_ending(
+    label: &str,
+    write: fn(&Project),
+    command: &[&str],
+    code: i32,
+) -> usize {
     const PROJECTS: usize = 4;
     let reached = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -12845,11 +12856,32 @@ fn fail_each_place_of_a_run(label: &str, write: fn(&Project), command: &[&str]) 
                     reached.fetch_max(nth, std::sync::atomic::Ordering::Relaxed);
                     nth += PROJECTS;
                 }
-                project.supercov(command).succeeds();
+                project.supercov(command).exits(code);
             });
         }
     });
     reached.into_inner()
+}
+
+/// A run whose test fails, once for every place it makes a file operation,
+/// with that one failing: each ends, never panicking, and without a fault
+/// it says the test failed.
+#[test]
+fn a_failing_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
+    let reached = fail_each_place_of_a_run_ending(
+        "run-faults-failing",
+        |project| {
+            project.write("package.json", r#"{ "name": "failing", "type": "module" }"#);
+            project.write("src/one.js", "export const one = () => 1;\n");
+            project.write(
+                "test/one.test.js",
+                "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { one } from \"../src/one.js\";\ntest(\"one\", () => assert.equal(one(), 2));\n",
+            );
+        },
+        &["--", "node", "--test"],
+        1,
+    );
+    assert!(reached > 50, "{reached}");
 }
 
 /// A Python source that does not parse carries no obligations, and the run

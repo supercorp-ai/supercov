@@ -47,6 +47,7 @@ a_directory_says_what_ran_while_no_test_was_running	0.8	0.8
 a_doctest_stand_in_missing_what_it_needs_says_so	0.1	0.0
 a_doctest_wrapper_whose_file_operation_fails_says_so	1.0	0.9
 a_failed_projection_of_a_passing_run_reads_as_empty_and_names_what_it_leaves_out	0.8	0.7
+a_failing_run_whose_file_operation_fails_anywhere_says_so_and_recovers	35.0	70.0
 a_failing_suite_keeps_its_exit_status_and_cannot_pass_a_gate	0.6	0.6
 a_failing_system_call_while_starting_a_command_is_named_or_retried	6.7	7.0
 a_file_a_test_deletes_in_the_copy_is_named_and_kept	1.8	1.2
