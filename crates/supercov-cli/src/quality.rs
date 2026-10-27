@@ -1604,57 +1604,73 @@ fn catalog_windows(
         within_budget(&instrument.file_request(path, text)).is_some()
     };
     let mut pieces: Vec<Window> = Vec::new();
-    for candidate in window_candidates(path, source, &starts) {
-        if fits(&candidate) {
-            pieces.push(candidate);
-            continue;
-        }
-        // A window has at least its first line.
-        (candidate.start_line..=candidate.end_line).try_for_each(|line| {
-            let piece = Window {
+    // There is always a window: the whole file, when nothing divides it.
+    window_candidates(path, source, &starts)
+        .into_iter()
+        .try_for_each(|candidate| {
+            if fits(&candidate) {
+                pieces.push(candidate);
+                return Ok(());
+            }
+            // A window has at least its first line.
+            (candidate.start_line..=candidate.end_line).try_for_each(|line| {
+                let piece = Window {
+                    index: 0,
+                    of: 0,
+                    start_line: line,
+                    end_line: line,
+                    declarations: candidate.declarations.clone(),
+                };
+                if !fits(&piece) {
+                    return Err(format!(
+                        "file is over the request budget and line {line} alone is too; \
+                     it is probably minified or embeds data"
+                    ));
+                }
+                pieces.push(piece);
+                Ok(())
+            })
+        })?;
+    Ok(merged_windows(pieces, source, &starts, fits))
+}
+
+/// `pieces` merged in turn while the merged window `fits`, then numbered,
+/// each with its text.
+fn merged_windows(
+    pieces: Vec<Window>,
+    source: &str,
+    starts: &[usize],
+    fits: impl Fn(&Window) -> bool,
+) -> Vec<(Window, String)> {
+    let planned = pieces
+        .into_iter()
+        .fold(Vec::<Window>::new(), |mut planned, candidate| {
+            let merged = planned.last().map(|open| Window {
                 index: 0,
                 of: 0,
-                start_line: line,
-                end_line: line,
-                declarations: candidate.declarations.clone(),
-            };
-            if !fits(&piece) {
-                return Err(format!(
-                    "file is over the request budget and line {line} alone is too; \
-                     it is probably minified or embeds data"
-                ));
+                start_line: open.start_line,
+                end_line: candidate.end_line,
+                declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
+            });
+            match merged {
+                Some(merged) if fits(&merged) => {
+                    *planned.last_mut().expect("a window to merge into") = merged;
+                }
+                _ => planned.push(candidate),
             }
-            pieces.push(piece);
-            Ok(())
-        })?;
-    }
-    let mut planned: Vec<Window> = Vec::new();
-    for candidate in pieces {
-        let merged = planned.last().map(|open| Window {
-            index: open.index,
-            of: open.of,
-            start_line: open.start_line,
-            end_line: candidate.end_line,
-            declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
+            planned
         });
-        match merged {
-            Some(merged) if fits(&merged) => {
-                *planned.last_mut().expect("a window to merge into") = merged;
-            }
-            _ => planned.push(candidate),
-        }
-    }
     let total = planned.len();
-    Ok(planned
+    planned
         .into_iter()
         .enumerate()
         .map(|(index, mut window)| {
             window.index = index + 1;
             window.of = total;
-            let text = window_source(source, &starts, &window).to_owned();
+            let text = window_source(source, starts, &window).to_owned();
             (window, text)
         })
-        .collect())
+        .collect()
 }
 
 /// One subject to ask the smell catalog about: a file as it stands, or a file
@@ -2055,10 +2071,10 @@ fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, Strin
     let half = MAX_REQUEST_TOKENS * BYTES_PER_TOKEN / 2;
     let bytes = |window: &Window| window_source(source, &starts, window).len();
     let mut cut: Vec<Window> = Vec::new();
-    for window in declared {
+    declared.into_iter().for_each(|window| {
         if bytes(&window) <= half || window.end_line - window.start_line < 200 {
             cut.push(window);
-            continue;
+            return;
         }
         // Over two hundred lines: cut every two hundred, the last cut
         // ending where the window does.
@@ -2077,34 +2093,10 @@ fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, Strin
             }
             start = end + 1;
         }
-    }
-    let mut planned: Vec<Window> = Vec::new();
-    for candidate in cut {
-        let merged = planned.last().map(|open| Window {
-            index: 0,
-            of: 0,
-            start_line: open.start_line,
-            end_line: candidate.end_line,
-            declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
-        });
-        match merged {
-            Some(merged) if bytes(&merged) <= half => {
-                *planned.last_mut().expect("a window to merge into") = merged;
-            }
-            _ => planned.push(candidate),
-        }
-    }
-    let total = planned.len();
-    Ok(planned
-        .into_iter()
-        .enumerate()
-        .map(|(i, mut window)| {
-            window.index = i + 1;
-            window.of = total;
-            let text = window_source(source, &starts, &window).to_string();
-            (window, text)
-        })
-        .collect())
+    });
+    Ok(merged_windows(cut, source, &starts, |window| {
+        bytes(window) <= half
+    }))
 }
 
 fn ask_lines(
