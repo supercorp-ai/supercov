@@ -13618,7 +13618,8 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
         &["--", "cargo", "test", "-q"],
     );
     assert!(reached >= 2, "{reached}");
-    // And rustdoc's stand-in, which the doctests' runners inherit.
+    // And rustdoc's stand-in, told by its variable (it starts rustdoc
+    // without it, so the doctests' runners are not).
     let reached = fail_each_place_of_a_runner_in(
         "runner-faults-rustdoc",
         small_crate,
@@ -13637,13 +13638,23 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
 #[test]
 fn a_test_runner_whose_program_cannot_start_says_so() {
     let doctests = supercov_engine::rust_owned_doctests::WRAPPER_ROOT_ENV;
+    // rustdoc's stand-in starts rustdoc; a doctest's runner its doctest.
     let reached = fail_each_place_of_a_runner_in(
-        "runner-spawn-doctest",
+        "runner-spawn-rustdoc",
         small_crate,
         &format!("env:{doctests}/spawn"),
         &["--", "cargo", "test", "-q"],
     );
-    // Each starts one program: rustdoc, or the doctest it runs.
+    assert!(reached > 0, "{reached}");
+    let reached = fail_each_place_of_a_runner_in(
+        "runner-spawn-doctest",
+        small_crate,
+        &format!(
+            "{}/spawn",
+            supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT
+        ),
+        &["--", "cargo", "test", "-q"],
+    );
     assert!(reached > 0, "{reached}");
     let reached = fail_each_place_of_a_runner_in(
         "runner-spawn-merged",
