@@ -335,6 +335,38 @@ fn an_assessment_sends_no_more_than_its_estimate_says_it_can() {
     );
 }
 
+/// An assessment of each kind, once for each place in the code that makes a
+/// file operation, with that place's first call failing: it may stop, but
+/// says why and never panics, and the one no fault reaches succeeds.
+#[test]
+fn an_assessment_whose_file_operation_fails_says_so_and_never_panics() {
+    let project = Project::cart("assess-faults");
+    let run = project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_yes);
+    for command in [
+        &["runs", &run, "assertions", "assess", "--refresh"][..],
+        &["quality"],
+        &["security"],
+    ] {
+        for place in 1.. {
+            let fault = format!("fs#{place}");
+            let mut environment = through(&base).to_vec();
+            environment.push(("SUPERCOV_TEST_FAULT", fault.as_str()));
+            let ran = project.supercov_with(command, &environment);
+            let said = ran.stderr();
+            assert!(
+                !said.contains("panicked at") && ran.code() != 101,
+                "{command:?} with {fault}:\n{said}"
+            );
+            if !said.contains("[supercov] test fault at fs") {
+                ran.succeeds();
+                assert!(place > 3, "{command:?} reached {place} places");
+                break;
+            }
+        }
+    }
+}
+
 #[test]
 fn a_statement_no_asked_test_catches_says_which_test_files_were_not_asked() {
     // One function forty tests run, in four files. Eighteen are asked at
