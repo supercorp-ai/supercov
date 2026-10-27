@@ -490,8 +490,8 @@ fn platform_of_jupiter(text: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
         .collect::<String>();
-    let mut parts = version.splitn(3, '.');
-    let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
+    let (major, rest) = version.split_once('.')?;
+    let (minor, patch) = rest.split_once('.')?;
     if minor.is_empty() || patch.is_empty() || !minor.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -3120,6 +3120,10 @@ mod tests {
             "{effective}"
         );
         let other = child.replace("<version>1</version>", "<version>2</version>");
+        // A pom whose properties block is empty names nothing to fill.
+        let bare =
+            "<project><properties></properties><dependency>${junit.version}</dependency></project>";
+        assert!(maven_effective_in(&root, bare, None).contains("${junit.version}"));
         for read in [
             maven_effective_in(&root, &other, Some(&repository)),
             maven_effective_in(&root, child, None),
@@ -3133,6 +3137,19 @@ mod tests {
         }
         assert_eq!(xml_block("<a>open", "a"), None);
         assert!(xml_children("").is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A tree with no test source set gets no listener anywhere, and still
+    /// has its sources instrumented.
+    #[test]
+    fn a_tree_without_tests_gets_no_listener() {
+        let root = temporary_root("no-tests");
+        java_module(&root, "docs", false);
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        assert!(instrumented.modules.iter().all(|module| !module.has_tests));
+        assert!(!root.join("docs/src/test").exists());
         fs::remove_dir_all(&root).ok();
     }
 
