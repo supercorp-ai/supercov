@@ -12851,6 +12851,23 @@ fn a_run_whose_own_step_fails_says_so() {
             ],
         ));
     }
+    if nextest_installed() {
+        // Nextest's runner fails the attempt, and nextest exits 100.
+        runs.push((
+            "own-step-nextest",
+            small_crate,
+            vec!["--", "cargo", "nextest", "run"],
+            &[
+                "fs.write@5",
+                "__nextest-runner/spawn@1",
+                "__nextest-runner/fs.read@1",
+                "__nextest-runner/fs.create_dir_all@1",
+                "__nextest-runner/fs.create_dir_all@2",
+                "__nextest-runner/fs.open_with@1",
+                "__nextest-runner/fs.write@1",
+            ],
+        ));
+    }
     if std::process::Command::new("mvn")
         .arg("--version")
         .output()
