@@ -89,11 +89,11 @@ jobs:
             [ "$attempt" = 3 ] && exit 1
           done
           sudo chown -R "$USER" ~/apt-archives
-      - run: cargo build --release -p supercov
+      - run: cargo build --profile measure -p supercov
       - uses: actions/upload-artifact@v4
         with:
           name: supercov-self-${{ matrix.os }}
-          path: target/release/supercov
+          path: target/measure/supercov
           retention-days: 3
 
   measure:
@@ -254,15 +254,21 @@ jobs:
               test && /^fn [a-z0-9_]+\(/ { match($0, /fn [a-z0-9_]+/); print substr($0, RSTART + 3, RLENGTH - 3); test = 0; next }
               test && !/^#\[/ { test = 0 }' "$1"
           }
-          # Slice 9's: every second test of the CLI's, and the Maven, Gradle
-          # and overhead tests, the longest test binaries of slice 0.
-          moved="$(tests_of crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')
-          $(for file in jvm_run jvm_frontend jvm_overhead go_overhead; do tests_of "crates/supercov-engine/tests/$file.rs"; done)"
+          # Slice 9's: every second test of the CLI's.
+          moved="$(tests_of crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')"
+          # Dealt among the gate slices with the gates, at each binary's
+          # seconds per test in a run (8, 2026-10-27): slices 0 and 9 took
+          # 493 s and 550 s of tests with these, the gate slices 184-304 s.
+          # Both overhead tests are named `instrumentation_overhead`.
+          pooled="$(tests_of crates/supercov-engine/tests/jvm_run.rs | sed 's/$/ 47/')
+          $(tests_of crates/supercov-engine/tests/jvm_frontend.rs | sed 's/$/ 22/')
+          instrumentation_overhead 126
+          $(tests_of crates/supercov-cli/tests/jev.rs | sed 's/$/ 4/')"
           # The Kotlin corpus test parses projects `kotlin-grammar` checks
           # out; it measures the vendored C grammar, not Supercov.
           corpus="every_file_of_the_corpus_parses_or_is_known_not_to"
           if [ "$slice" = 0 ]; then
-            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $moved $corpus)
+            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $moved $(echo "$pooled" | awk '{print $1}') $corpus)
             echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
           elif [ "$slice" = 9 ]; then
             # The whole workspace builds here too; only these tests run.
@@ -271,9 +277,10 @@ jobs:
             # Longest first, each to the slice with the least so far, by the
             # seconds each took (a gate not timed counts as a minute): dealt
             # in turn, one slice drew 487 s of gates and another 81 s.
-            picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '
+            picked=$(printf '%s\n%s\n' "$gates" "$pooled" | awk -v n="$SLICES" -v s="$slice" '
               FILENAME == ".github/gate-seconds.tsv" { if ($0 !~ /^#/) seconds[$1] = $2; next }
-              { gate[++count] = $1; cost[count] = ($1 in seconds) ? seconds[$1] : 60 }
+              NF == 0 { next }
+              { gate[++count] = $1; cost[count] = NF > 1 ? $2 : ($1 in seconds) ? seconds[$1] : 60 }
               END {
                 for (i = 1; i <= count; i++) order[i] = i
                 for (i = 1; i <= count; i++) for (j = i + 1; j <= count; j++)

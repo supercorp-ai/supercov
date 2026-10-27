@@ -66,6 +66,13 @@ opt-level = 3
 panic = "abort"
 strip = "symbols"
 
+# The self-coverage workflow's measuring build: release code without the
+# whole-program optimisation that took most of that build's six minutes.
+[profile.measure]
+inherits = "release"
+codegen-units = 16
+lto = "off"
+
 # Debug-build supercov acts as the per-crate rustc proxy in gates and
 # dogfoods, and companion selection content-hashes multi-megabyte binaries
 # on every invocation. Unoptimized sha2 turns that into tens of seconds per
