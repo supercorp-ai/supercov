@@ -2518,6 +2518,10 @@ mod tests {
             None
         );
         assert_eq!(named_modules(JvmBuild::Maven, &words("mvn test")), None);
+        // A build tool alone runs everything; a module list it was not given
+        // names none.
+        assert_eq!(named_modules(JvmBuild::Gradle, &words("gradle")), None);
+        assert_eq!(named_modules(JvmBuild::Maven, &words("mvn -pl")), None);
         assert_eq!(
             named_modules(JvmBuild::Maven, &words("mvn --projects ./core test")),
             Some(BTreeSet::from(["core".to_owned()]))
@@ -2581,6 +2585,8 @@ mod tests {
             Some("1.10.0-M1")
         );
         assert_eq!(platform_of_jupiter("6.0.1").as_deref(), Some("6.0.1"));
+        assert_eq!(platform_of_jupiter("5"), None);
+        assert_eq!(platform_of_jupiter("5.1"), None);
         for unknown in [
             "${junit.version}",
             "5.10",
