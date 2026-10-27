@@ -593,22 +593,20 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
                                 "the changed statements not asserted keep their first entries",
                             ),
                         ];
-                        let mut shortened = None;
-                        for (within, key, note) in lists {
+                        let shortened = lists.into_iter().find_map(|(within, key, note)| {
                             let at = match within {
                                 Some(within) => &mut data[within],
                                 None => &mut data,
                             };
                             let listed = at[key].as_array().map_or(0, Vec::len);
-                            if listed > 0 {
+                            (listed > 0).then(|| {
                                 let count = format!("{key}Count");
                                 let total = at[&count].as_u64().unwrap_or(listed as u64);
                                 at[&count] = json!(total);
                                 at[key] = json!(at[key].as_array().unwrap()[..listed / 2]);
-                                shortened = Some(note);
-                                break;
-                            }
-                        }
+                                note
+                            })
+                        });
                         let Some(note) = shortened else {
                             return Err(size);
                         };
@@ -869,7 +867,8 @@ fn render(data: &Value) -> String {
         out.push_str("\nNo captured file has changed.\n");
     } else {
         out.push_str("\nChanged files:\n");
-        for file in &files {
+        // Some: no file is the case above.
+        files.iter().for_each(|file| {
             out.push_str(&format!(
                 "  {}  {}{}\n",
                 file["file"].as_str().unwrap_or(""),
@@ -879,7 +878,7 @@ fn render(data: &Value) -> String {
                     .map(|d| format!("  {d}"))
                     .unwrap_or_default()
             ));
-        }
+        });
     }
     let tree = &data["workingTree"];
     match tree["stale"] {
@@ -914,6 +913,7 @@ mod tests {
             [true, true, false, false, true]
         );
         assert_eq!(aligned(&statements, &[]), [false; 5]);
+        assert!(aligned(&[], &words("x")).is_empty());
         assert_eq!(aligned(&["x", "y"], &words("x")), [true, false]);
         assert_eq!(aligned(&["y", "x"], &words("x y")), [false, true]);
         let many = (0..2001).map(|i| format!("s{i}")).collect::<Vec<_>>();
