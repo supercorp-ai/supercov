@@ -13037,6 +13037,145 @@ fn each_query_refuses_when_a_read_or_write_it_makes_fails() {
             ],
             "coverage-index-read#6",
         ),
+        // A report and an export: each record they read.
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#1",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#2",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#3",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#4",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#5",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#6",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#7",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#8",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#9",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "r.html"],
+            "coverage-index-read#10",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "coverage-index-read#11",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "coverage-index-read#12",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "coverage-index-read#13",
+        ),
+        (
+            vec![
+                "report",
+                "--no-open",
+                "--output",
+                "c.html",
+                "--compare",
+                &first,
+            ],
+            "coverage-index-read#14",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#1",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#2",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#3",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#4",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#5",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#6",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#7",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#8",
+        ),
+        (
+            vec![
+                "runs", "latest", "gaps", "--format", "jsonl", "--output", "j.jsonl", "--json",
+            ],
+            "coverage-index-read#9",
+        ),
         // The run store: its listing, a run's metadata and its evidence.
         (vec!["runs"], "fs.symlink_metadata@1"),
         (vec!["runs"], "fs.read_dir@1"),
@@ -13094,6 +13233,14 @@ fn each_query_refuses_when_a_read_or_write_it_makes_fails() {
                 &first,
             ],
             "fs.read_to_end_from@1",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "w.html"],
+            "fs.write_all@1",
+        ),
+        (
+            vec!["report", "--no-open", "--output", "w.html"],
+            "fs.sync_all@1",
         ),
         // What a query writes: a report, a tracefile, an export.
         (
@@ -13272,6 +13419,52 @@ fn a_merge_whose_step_fails_says_so() {
             "{fault}: {said}"
         );
     }
+}
+
+/// The report carries a run's scope where the run has one -- measured under
+/// given source roots -- and refuses when reading that scope fails; it reads
+/// a run published before statement spans were kept by analysing it again;
+/// and it refuses a comparison run that does not exist.
+#[test]
+fn the_report_reads_what_each_run_kept() {
+    let project = Project::cart("report-kept");
+    project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_SOURCE_ROOTS", "src")],
+        )
+        .succeeds();
+    project
+        .supercov(&["report", "--no-open", "--output", "scoped.html"])
+        .succeeds();
+    let data = report_data(&std::fs::read_to_string(project.root.join("scoped.html")).unwrap());
+    assert!(data["runs"][0]["scope"].is_object(), "{}", data["runs"][0]);
+    // The scope is the last record the report reads from the index.
+    let refused = project.supercov_with(
+        &["report", "--no-open", "--output", "unread.html"],
+        &[("SUPERCOV_TEST_FAULT", "coverage-index-read#16")],
+    );
+    assert_eq!(refused.code(), 2, "{}", refused.stderr());
+    assert!(
+        refused.stderr().contains("could not read scope"),
+        "{}",
+        refused.stderr()
+    );
+    // Spans written before this version kept them are worked out again.
+    let run = project.latest();
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&run)
+            .join("statement-spans.json"),
+    )
+    .unwrap();
+    project
+        .supercov(&["report", "--no-open", "--output", "again.html"])
+        .succeeds();
+    let unknown = project.supercov(&["report", "--no-open", "--compare", "run_missing"]);
+    assert_eq!(unknown.code(), 2, "{}", unknown.stderr());
 }
 
 /// A run that succeeds and then cannot release its copy: each language
