@@ -5275,8 +5275,9 @@ fn a_run_with_no_statement_to_assess_asks_nothing() {
 fn a_jev_command_whose_file_operation_fails_says_so_and_recovers() {
     let (base, _seen) = gateway(MODEL, answer_yes);
     let jev = through(&base);
-    let commands: [&[&str]; 10] = [
+    let commands: [&[&str]; 11] = [
         &["security", "patch"],
+        &["quality", "scope"],
         &["quality", "--dry-run"],
         &["quality"],
         &["quality", "src/cart.js"],
