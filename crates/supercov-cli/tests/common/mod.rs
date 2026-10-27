@@ -188,6 +188,15 @@ impl Project {
     }
 
     pub fn supercov_with(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
+        let mut command = self.supercov_command(args);
+        Ran {
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            output: command.envs(env.iter().copied()).output().unwrap(),
+        }
+    }
+
+    /// The command `supercov_with` runs, for a test that starts it its own way.
+    pub fn supercov_command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_supercov"));
         command.args(args).current_dir(&self.root);
         for name in [
@@ -210,10 +219,7 @@ impl Project {
                 command.env_remove(name);
             }
         }
-        Ran {
-            args: args.iter().map(|arg| arg.to_string()).collect(),
-            output: command.envs(env.iter().copied()).output().unwrap(),
-        }
+        command
     }
 
     /// Measures `node --test` with these extra arguments and returns the run.

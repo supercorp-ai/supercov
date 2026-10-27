@@ -9,6 +9,7 @@
 
 **Fixed**
 
+- Supercov panicked when its output stopped being read part way, as `supercov -- npm test 2>&1 | head` or `supercov runs latest gaps | head` stops reading it; it goes on without printing what is no longer read.
 - A JavaScript or TypeScript file Supercov could not parse was reported one column to the right of the error.
 - `security` read a line question the provider refused as finding nothing on those lines; their lines are counted as not checked one by one, as lines whose question did not fit already were.
 - A `--json` page cut to fit one reply could still be refused as too large: the note saying where the rest starts was added after the page was fitted. The page is fitted with its note.

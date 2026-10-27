@@ -8,6 +8,16 @@
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("Supercov builds for 64-bit targets only");
 
+// Standard error that cannot be written is not Supercov's failure:
+// `supercov -- npm test 2>&1 | head` closes it early, and std's `eprintln!`
+// panics then. This writes where it does and passes over a write that fails.
+macro_rules! eprintln {
+    ($($argument:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($argument)*);
+    }};
+}
+
 pub mod agent_json;
 pub mod assertion_coverage;
 pub mod child_signal_guard;

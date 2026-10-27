@@ -25,6 +25,35 @@ use supercov_engine::{
 };
 use time::{OffsetDateTime, macros::format_description};
 
+// Standard output and error that cannot be written are not Supercov's
+// failure: `supercov -- npm test 2>&1 | head` closes them early, and std's
+// printing macros panic then. These write where they do and pass over a
+// write that fails.
+macro_rules! println {
+    ($($argument:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($argument)*);
+    }};
+}
+macro_rules! print {
+    ($($argument:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($argument)*);
+    }};
+}
+macro_rules! eprintln {
+    ($($argument:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($argument)*);
+    }};
+}
+macro_rules! eprint {
+    ($($argument:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stderr(), $($argument)*);
+    }};
+}
+
 mod assertions_command;
 mod gaps_export;
 mod html_report;

@@ -12902,6 +12902,50 @@ fn fail_each_place_of_a_run_ending(
     reached.into_inner()
 }
 
+/// A run whose standard error stops being read after each number of lines
+/// in turn -- `supercov -- npm test 2>&1 | head` -- goes on without it and
+/// never panics. How many runs it took.
+fn close_diagnostics_after_each_line(project: &Project, command: &[&str]) -> usize {
+    use std::io::BufRead;
+    let mut lines = 0;
+    loop {
+        let mut child = project
+            .supercov_command(command)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut reader = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut read = 0;
+        let mut line = String::new();
+        while read < lines && reader.read_line(&mut line).unwrap_or(0) > 0 {
+            read += 1;
+        }
+        drop(reader);
+        let status = child.wait().unwrap();
+        assert_ne!(
+            status.code(),
+            Some(101),
+            "panicked with stderr closed after {lines} line(s)"
+        );
+        if read < lines {
+            return lines;
+        }
+        lines += 1;
+    }
+}
+
+#[test]
+fn a_run_whose_output_stops_being_read_goes_on_without_a_panic() {
+    let project = Project::cart("closed-diagnostics");
+    assert!(close_diagnostics_after_each_line(&project, &["--", "node", "--test"]) > 2);
+    let crate_project = Project::empty("closed-diagnostics-rust");
+    small_crate(&crate_project);
+    crate_project.git(&["init", "-q"]);
+    crate_project.commit("fixture");
+    assert!(close_diagnostics_after_each_line(&crate_project, &["--", "cargo", "test", "-q"]) > 2);
+}
+
 /// A run whose test fails, once for every place it makes a file operation,
 /// with that one failing: each ends, never panicking, and without a fault
 /// it says the test failed.
