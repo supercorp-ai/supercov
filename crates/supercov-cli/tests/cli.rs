@@ -12821,6 +12821,12 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
         javascript_project,
         &["--", "node", "--test"],
         &[
+            // The project's packages looked for: a directory, one below it,
+            // an entry's type; then the source walk's root.
+            "fs.read_dir@2",
+            "fs.read_dir@3",
+            "fs.file_type@1",
+            "fs.symlink_metadata@9",
             "fs.canonicalize@2",
             "fs.create_dir_all@13",
             "fs.rename@5",
