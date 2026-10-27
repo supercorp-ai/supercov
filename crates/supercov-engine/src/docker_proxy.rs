@@ -458,19 +458,25 @@ fn read_body(head: &Head, reader: &mut impl BufRead) -> io::Result<Vec<u8>> {
     if !head.chunked() {
         return Ok(encoded);
     }
+    // `relay_body` read every size line as text and copied every chunk
+    // whole, so what it wrote decodes.
     let mut decoded = Vec::new();
     let mut cursor = io::Cursor::new(encoded);
     loop {
         let mut size_line = String::new();
-        cursor.read_line(&mut size_line)?;
+        cursor
+            .read_line(&mut size_line)
+            .expect("each size line was read as text");
         let size =
             usize::from_str_radix(size_line.trim().split(';').next().unwrap_or("").trim(), 16)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
+                .expect("each chunk size was read");
         if size == 0 {
             return Ok(decoded);
         }
         let mut chunk = vec![0; size + 2];
-        cursor.read_exact(&mut chunk)?;
+        cursor
+            .read_exact(&mut chunk)
+            .expect("each chunk was copied whole");
         decoded.extend_from_slice(&chunk[..size]);
     }
 }
@@ -525,15 +531,42 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
     let mut client_writer = client;
     let mut upstream_reader = BufReader::new(upstream.try_clone()?);
     let mut upstream_writer = upstream;
+    if relay_messages(
+        &mut client_reader,
+        &mut client_writer,
+        &mut upstream_reader,
+        &mut upstream_writer,
+        shared,
+    )? {
+        return splice(
+            client_reader,
+            client_writer,
+            upstream_reader,
+            upstream_writer,
+        );
+    }
+    Ok(())
+}
+
+/// Each request from the client and the daemon's answer to it, until either
+/// side is done; true when both agreed to hand the connection over to a
+/// stream, which the caller splices.
+fn relay_messages(
+    client_reader: &mut impl BufRead,
+    client_writer: &mut impl Write,
+    upstream_reader: &mut impl BufRead,
+    upstream_writer: &mut impl Write,
+    shared: &Shared,
+) -> io::Result<bool> {
     loop {
-        let Some(mut request) = read_head(&mut client_reader)? else {
-            return Ok(());
+        let Some(mut request) = read_head(client_reader)? else {
+            return Ok(false);
         };
         let (method, path) = endpoint(&request);
         let creating = method == "POST" && path == "/containers/create";
         let mut created_context = None;
         if creating {
-            let body = read_body(&request, &mut client_reader)?;
+            let body = read_body(&request, client_reader)?;
             let (body, context) = match serde_json::from_slice::<Value>(&body) {
                 Ok(config) => {
                     let (config, context) = shared.instrument(config);
@@ -544,11 +577,11 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
             created_context = context;
             request.without("transfer-encoding");
             request.set("Content-Length", body.len().to_string());
-            request.write(&mut upstream_writer)?;
+            request.write(upstream_writer)?;
             upstream_writer.write_all(&body)?;
             upstream_writer.flush()?;
         } else {
-            request.write(&mut upstream_writer)?;
+            request.write(upstream_writer)?;
             upstream_writer.flush()?;
             if request
                 .header("expect")
@@ -556,38 +589,33 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
             {
                 // The daemon answers `100 Continue` (or refuses) before the
                 // body is sent.
-                let Some(interim) = read_head(&mut upstream_reader)? else {
-                    return Ok(());
+                let Some(interim) = read_head(upstream_reader)? else {
+                    return Ok(false);
                 };
-                interim.write(&mut client_writer)?;
+                interim.write(client_writer)?;
                 client_writer.flush()?;
                 if !interim.start.contains(" 100") {
                     if !bodiless(&request, &interim) {
-                        relay_body(&interim, &mut upstream_reader, &mut client_writer)?;
+                        relay_body(&interim, upstream_reader, client_writer)?;
                     }
                     continue;
                 }
             }
-            relay_body(&request, &mut client_reader, &mut upstream_writer)?;
+            relay_body(&request, client_reader, upstream_writer)?;
         }
-        let Some(response) = read_head(&mut upstream_reader)? else {
-            return Ok(());
+        let Some(response) = read_head(upstream_reader)? else {
+            return Ok(false);
         };
-        response.write(&mut client_writer)?;
+        response.write(client_writer)?;
         client_writer.flush()?;
         if hijacked(&request, &response) {
-            return splice(
-                client_reader,
-                client_writer,
-                upstream_reader,
-                upstream_writer,
-            );
+            return Ok(true);
         }
         if bodiless(&request, &response) {
             continue;
         }
         if let Some(context) = created_context {
-            let body = read_body(&response, &mut upstream_reader)?;
+            let body = read_body(&response, upstream_reader)?;
             // Recorded before the client hears of it: a client that has its
             // answer may end the run, and the run's end reads the record.
             if let Ok(created) = serde_json::from_slice::<Value>(&body)
@@ -608,10 +636,10 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
         }
         if !response.chunked() && response.content_length().is_none() {
             // Delimited by the connection closing.
-            io::copy(&mut upstream_reader, &mut client_writer)?;
-            return Ok(());
+            io::copy(upstream_reader, client_writer)?;
+            return Ok(false);
         }
-        relay_body(&response, &mut upstream_reader, &mut client_writer)?;
+        relay_body(&response, upstream_reader, client_writer)?;
     }
 }
 
@@ -639,10 +667,19 @@ fn splice(
 /// One request to the daemon, made by the relay itself: the body of the
 /// answer when it succeeded.
 fn daemon_request(socket: &Path, method: &str, path: &str, body: Option<&[u8]>) -> Option<Vec<u8>> {
-    let mut stream = UnixStream::connect(socket).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .ok()?;
+    let stream = UnixStream::connect(socket).ok()?;
+    // A connected socket takes a timeout: only an unconnected one refuses.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    daemon_exchange(stream, method, path, body)
+}
+
+/// [`daemon_request`] over a stream already open to the daemon.
+fn daemon_exchange(
+    mut stream: impl Read + Write,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Option<Vec<u8>> {
     let body = body.unwrap_or_default();
     write!(
         stream,
@@ -1915,6 +1952,24 @@ mod tests {
             None
         );
         assert!(shared.built.lock().unwrap().is_empty());
+        // Empty binds and mounts have nothing to rewrite, and no settings
+        // add only what marks the container as the run's.
+        let mut config = json!({"HostConfig": {"Binds": [], "Mounts": []}});
+        shared.rewrite_socket_mounts(&mut config);
+        assert_eq!(config, json!({"HostConfig": {"Binds": [], "Mounts": []}}));
+        let bare = ProxySettings {
+            environment: Vec::new(),
+            ..settings(&directory)
+        };
+        let mut config = json!({});
+        add_settings(&mut config, &bare, &BTreeMap::new());
+        assert_eq!(
+            config["Env"],
+            json!([
+                "SUPERCOV_CONTAINER=1",
+                "PYTHONPYCACHEPREFIX=/tmp/supercov-pycache"
+            ])
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2078,6 +2133,185 @@ mod tests {
             self.count_call()?;
             self.inner.flush()
         }
+    }
+
+    /// One connection's messages, relayed over streams that each fail at
+    /// the `left`th call any of them makes; what the daemon was sent and the
+    /// client answered, or the relay's error.
+    fn relay_with(
+        shared: &Shared,
+        client: &[u8],
+        daemon: &[u8],
+        left: usize,
+    ) -> (io::Result<bool>, Vec<u8>, Vec<u8>, bool) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(left));
+        let faulty = |inner| Faulty {
+            inner,
+            left: calls.clone(),
+        };
+        let mut client_reader = BufReader::new(faulty(client));
+        let mut upstream_reader = BufReader::new(faulty(daemon));
+        let mut client_writer = Faulty {
+            inner: Vec::new(),
+            left: calls.clone(),
+        };
+        let mut upstream_writer = Faulty {
+            inner: Vec::new(),
+            left: calls.clone(),
+        };
+        let relayed = relay_messages(
+            &mut client_reader,
+            &mut client_writer,
+            &mut upstream_reader,
+            &mut upstream_writer,
+            shared,
+        );
+        let failed = calls.get() == usize::MAX;
+        (relayed, upstream_writer.inner, client_writer.inner, failed)
+    }
+
+    /// Both ends of a connection in memory: what the other side sends, and
+    /// what is sent to it.
+    struct Duplex<'a> {
+        input: &'a [u8],
+        output: Vec<u8>,
+    }
+
+    impl Read for Duplex<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for Duplex<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.output.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The relay's own request to the daemon, over a stream that fails at
+    /// each call in turn: a failure is no answer, and with none the body of
+    /// a sized or a close-delimited answer is the answer, a refusal none.
+    #[test]
+    fn a_request_of_the_relay_s_own_fails_to_no_answer() {
+        for (answer, body) in [
+            (
+                &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"[..],
+                Some(&b"OK"[..]),
+            ),
+            (b"HTTP/1.1 200 OK\r\n\r\nall of it", Some(b"all of it")),
+            (b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", None),
+        ] {
+            let mut nth = 0;
+            loop {
+                let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+                let stream = Faulty {
+                    inner: Duplex {
+                        input: answer,
+                        output: Vec::new(),
+                    },
+                    left: left.clone(),
+                };
+                let answered = daemon_exchange(stream, "GET", "/images/x/json", Some(b"{}"));
+                if left.get() != usize::MAX {
+                    assert_eq!(answered.as_deref(), body);
+                    break;
+                }
+                assert_eq!(answered, None, "{nth}");
+                nth += 1;
+            }
+            assert!(nth > 3, "{nth}");
+        }
+        // A daemon that closes before it answers answers nothing.
+        let silent = Duplex {
+            input: b"",
+            output: Vec::new(),
+        };
+        assert_eq!(daemon_exchange(silent, "GET", "/_ping", None), None);
+    }
+
+    /// Every kind of exchange on one connection -- a continue granted and
+    /// one refused, a create the daemon answers chunked and one it answers
+    /// sized, a create whose body is not JSON, and an answer the daemon's
+    /// closing ends -- relayed once for each read or write with that one
+    /// failing: each failure is the relay's error, never a panic.
+    #[test]
+    fn a_connection_whose_stream_fails_anywhere_ends_with_an_error() {
+        let directory = temporary("relay-faults");
+        let shared = Shared {
+            settings: settings(&directory),
+            upstream: directory.join("d.sock"),
+            socket: directory.join("p.sock"),
+            started_ms: now_ms(),
+            created: Mutex::default(),
+            built: Mutex::default(),
+        };
+        let create = br#"{"Image":"shop"}"#;
+        let client = [
+            &b"POST /build HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\nbody"[..],
+            b"POST /refuse HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n",
+            format!(
+                "POST /containers/create HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                create.len()
+            )
+            .as_bytes(),
+            create,
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                create.len()
+            )
+            .as_bytes(),
+            create,
+            b"POST /containers/create HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
+            b"GET /logs HTTP/1.1\r\n\r\n",
+        ]
+        .concat();
+        let daemon = [
+            &b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"[..],
+            b"HTTP/1.1 417 Expectation Failed\r\nContent-Length: 4\r\n\r\nnope",
+            b"HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\nC\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n",
+            b"HTTP/1.1 201 Created\r\nContent-Length: 12\r\n\r\n{\"Id\":\"two\"}",
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\nno",
+            b"HTTP/1.1 200 OK\r\n\r\nall of it",
+        ]
+        .concat();
+        let mut nth = 0;
+        loop {
+            let (relayed, _, answered, failed) = relay_with(&shared, &client, &daemon, nth);
+            if !failed {
+                assert!(!relayed.unwrap());
+                let answered = String::from_utf8(answered).unwrap();
+                assert!(answered.ends_with("all of it"), "{answered}");
+                assert!(
+                    answered.contains("c\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n"),
+                    "{answered}"
+                );
+                break;
+            }
+            assert!(relayed.is_err(), "{nth}");
+            nth += 1;
+        }
+        assert!(nth > 100, "{nth}");
+        // A daemon gone before it answers ends the connection quietly, as
+        // does a client that asked to hand it over to a stream.
+        for client in [
+            &b"GET /_ping HTTP/1.1\r\n\r\n"[..],
+            b"POST /build HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n",
+        ] {
+            assert!(!relay_with(&shared, client, b"", usize::MAX - 1).0.unwrap());
+        }
+        let (handed, _, _, _) = relay_with(
+            &shared,
+            b"POST /attach HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+            b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+            usize::MAX - 1,
+        );
+        assert!(handed.unwrap());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     /// Relaying a message whose stream fails at each read in turn, and then
