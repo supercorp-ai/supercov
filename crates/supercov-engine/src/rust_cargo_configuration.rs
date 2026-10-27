@@ -12,7 +12,7 @@ use crate::fault_process::Launch;
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::OsString,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Command,
     str::FromStr,
 };
@@ -797,14 +797,14 @@ fn runner_program(
     path: PathBuf,
 ) -> Result<RustCargoRunnerProgram, RustCargoConfigurationError> {
     if path.is_absolute() {
+        // A relative runner climbs out of the workspace as Cargo reads it:
+        // to where it then names, as on Windows, whose verbatim root resolves
+        // `..` when joined. Inside the workspace it moves with the copy.
+        let path = crate::source_discovery::lexical_normalize(&path);
         if let Ok(relative) = path.strip_prefix(root) {
-            if relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, Component::Normal(_)))
-            {
+            if relative.as_os_str().is_empty() {
                 return Err(RustCargoConfigurationError::Invalid(format!(
-                    "runner path is not a regular workspace-relative path: {}",
+                    "runner path is the workspace itself: {}",
                     path.display()
                 )));
             }
@@ -1104,8 +1104,8 @@ mod tests {
     }
 
     /// A runner path is relative to the workspace when inside it, absolute
-    /// when outside, a name to search for when bare, and refused when it is
-    /// the workspace itself, climbs out of it, or is left relative.
+    /// when outside -- `..` read where it leads -- a name to search for when
+    /// bare, and refused when it is the workspace itself or left relative.
     #[test]
     fn a_runner_path_is_read_against_the_workspace() {
         use crate::test_directory::native;
@@ -1130,9 +1130,54 @@ mod tests {
                 value: "wasm-runner".into()
             }
         );
-        for refused in [native("/w"), native("/w/../x"), "tools/run".to_owned()] {
+        // Out of the workspace and back in, or out for good, as Cargo reads it.
+        assert_eq!(
+            read(&native("/w/tools/../bin/run")).unwrap(),
+            RustCargoRunnerProgram::WorkspaceRelative {
+                value: "bin/run".into()
+            }
+        );
+        assert_eq!(
+            read(&native("/w/../x")).unwrap(),
+            RustCargoRunnerProgram::Absolute {
+                value: native("/x").into()
+            }
+        );
+        for refused in [native("/w"), native("/w/bin/.."), "tools/run".to_owned()] {
             assert!(read(&refused).is_err(), "{refused}");
         }
+    }
+
+    /// A configured runner that climbs out of the workspace runs from where
+    /// it leads, on every platform alike.
+    #[test]
+    fn a_runner_out_of_the_workspace_runs_from_where_it_leads() {
+        let root = fixture();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n[target.x86_64-pc-windows-msvc]\nrunner='../../outside/run'\n",
+        )
+        .unwrap();
+        let mut real_host = model_inputs();
+        real_host.host_override = None;
+        let plan = resolve_with_inputs(&root, &root, &invocation(&["test"]), real_host).unwrap();
+        let runner = plan.targets[0]
+            .underlying_runner
+            .as_ref()
+            .expect("a runner");
+        let RustCargoRunnerProgram::Absolute { value } = &runner.program else {
+            panic!("{runner:?}");
+        };
+        assert!(
+            value.ends_with(Path::new("outside").join("run")),
+            "{value:?}"
+        );
+        assert!(
+            !value
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// `--config` takes its value from the next word or after `=`, and one
@@ -2425,15 +2470,6 @@ mod tests {
         ] {
             let error = refused(config, arguments, real_host.clone());
             assert!(error.contains(said), "{config} {arguments:?}: {error}");
-        }
-        // A runner that climbs out of the workspace. On Windows the root is
-        // a verbatim path, which resolves `..` when joined, so the climb
-        // reads as a path outside and is taken as one.
-        #[cfg(unix)]
-        {
-            let config = "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n";
-            let error = refused(config, &["test"], real_host.clone());
-            assert!(error.contains("outside/run"), "{error}");
         }
         #[cfg(unix)]
         {

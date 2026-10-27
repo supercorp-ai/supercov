@@ -492,7 +492,7 @@ fn root_contains(roots: &[PathBuf], path: &Path) -> bool {
     })
 }
 
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     let mut output = PathBuf::new();
     for component in path.components() {
         match component {
