@@ -675,7 +675,8 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
     } else {
         let packages = package_roots(root);
         let mut roots = BTreeSet::new();
-        for package in &packages {
+        // The root is one at least.
+        packages.iter().for_each(|package| {
             // A .NET project keeps its sources in the project directory itself,
             // so the directory is a root whatever it also contains. Without
             // this, `System.Reactive.Async/Internal` became the only root
@@ -683,7 +684,7 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
             // beside the project file was left unclassified.
             if package != root && variable_manifest(package) == Some(true) {
                 roots.insert(package.clone());
-                continue;
+                return;
             }
             let mut candidates: Vec<PathBuf> = conventional_directories(package);
             candidates.extend(declared_entry_points(package));
@@ -695,7 +696,7 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
             } else {
                 roots.extend(candidates);
             }
-        }
+        });
         roots
     };
 
@@ -922,6 +923,23 @@ mod tests {
         assert_eq!(declared_members(&flat).len(), 1);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(flat).unwrap();
+    }
+
+    /// Empty manifests and empty directories declare nothing.
+    #[test]
+    fn empty_manifests_and_directories_declare_nothing() {
+        let root = directory(&[
+            ("Cargo.toml", ""),
+            ("package.json", r#"{"workspaces":["empty/*"]}"#),
+        ]);
+        std::fs::create_dir(root.join("empty")).unwrap();
+        assert!(declared_entry_points(&root).is_empty());
+        assert!(declared_members(&root).is_empty());
+        let empty = root.join("empty");
+        assert_eq!(variable_manifest(&empty), None);
+        assert!(conventional_directories(&empty).is_empty());
+        assert_eq!(package_roots(&empty), BTreeSet::from([empty.clone()]));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Tool configuration by its name, and a served file left out as a
