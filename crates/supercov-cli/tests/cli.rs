@@ -12996,6 +12996,51 @@ fn a_go_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     assert!(reached > 50, "{reached}");
 }
 
+/// A Playwright run whose project also holds a Python and a Ruby server's
+/// source, which Supercov prepares to measure beside the browser tests: once
+/// for every place it makes a file operation, with that one failing, it ends
+/// saying so and never panics, and then succeeds.
+#[cfg(unix)]
+#[test]
+fn a_browser_run_preparing_servers_whose_file_operation_fails_says_so_and_recovers() {
+    fn browser_project(project: &Project) {
+        project.write(
+            "package.json",
+            r#"{ "name": "browser-faults", "private": true, "type": "module" }"#,
+        );
+        let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+        std::os::unix::fs::symlink(
+            modules.canonicalize().unwrap(),
+            project.root.join("node_modules"),
+        )
+        .unwrap();
+        project.write(".gitignore", "node_modules\n");
+        project.write("src/one.js", "export const one = () => 1;\n");
+        project.write(
+            "playwright.config.js",
+            "export default { testDir: \"tests\", reporter: \"line\" };\n",
+        );
+        project.write(
+            "tests/one.spec.js",
+            "import { expect, test } from \"@playwright/test\";\nimport { one } from \"../src/one.js\";\ntest(\"one\", () => { expect(one()).toBe(1); });\n",
+        );
+        project.write(
+            "app/server.py",
+            "def handle(n):\n    return n * 2 if n else 0\n",
+        );
+        project.write(
+            "app/server.rb",
+            "def handle(n)\n  n.zero? ? 0 : n * 2\nend\n",
+        );
+    }
+    let reached = fail_each_place_of_a_run(
+        "run-faults-browser",
+        browser_project,
+        &["--", "npx", "playwright", "test"],
+    );
+    assert!(reached > 50, "{reached}");
+}
+
 /// A crate with a unit test and a doctest.
 fn small_crate(project: &Project) {
     project.write(
