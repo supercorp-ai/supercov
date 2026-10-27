@@ -348,7 +348,8 @@ fn render_areas(
             .chain(["All".to_owned()])
             .collect::<Vec<_>>(),
     ];
-    for area in &data.areas {
+    // Every file is in an area, and a run has a file.
+    data.areas.iter().for_each(|area| {
         let total = dimension_for_metric(&area.totals, metric);
         table.push(
             [area.directory.clone(), count(area.files), count(total)]
@@ -362,7 +363,7 @@ fn render_areas(
                 .chain([percent(dimension_for_metric(&area.covered, metric), total)])
                 .collect(),
         );
-    }
+    });
     let widths = (0..table[0].len())
         .map(|column| {
             table
@@ -1444,7 +1445,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ));
                 // Which value each one never took, and the run that would
                 // show it deciding: what a test has to do.
-                for condition in &row.missing {
+                // A decision with a gap misses a condition at least.
+                row.missing.iter().for_each(|condition| {
                     lines.push(format!(
                         "    {}",
                         condition_gap(
@@ -1453,7 +1455,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             &condition.needs
                         )
                     ));
-                }
+                });
             }
             if data.decisions.is_empty() {
                 lines.push(String::new());
