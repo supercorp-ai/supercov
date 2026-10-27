@@ -3721,3 +3721,25 @@ fn each_security_check_has_a_short_description() {
     assert!(catalog::security::short("insecure_configuration").contains("TLS verification"));
     assert_eq!(catalog::security::short("no_such_check"), "");
 }
+
+/// From a directory below the repository's root, a change is named as that
+/// directory names it, and a file beside it is not one of its changes.
+#[test]
+fn a_directory_below_the_root_names_its_changes_as_it_names_them() {
+    let temp = repository();
+    temp.write("pkg/a.rs", "fn a() {}\n");
+    temp.write("other.rs", "fn o() {}\n");
+    git_in(&temp.0, &["add", "-A"]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("pkg/a.rs", "fn a() { let x = 1; }\n");
+    temp.write("other.rs", "fn o() { let y = 2; }\n");
+    let found = changes::collect(&temp.0.join("pkg"), &changes::Range::Unstaged, &[]).unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.rs"]
+    );
+    assert_eq!(found[0].before, "fn a() {}\n");
+}
