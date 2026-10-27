@@ -178,7 +178,7 @@ fn read_config(path: &Path) -> Option<(String, Value)> {
         .is_some_and(|extension| extension == "toml")
     {
         let table = text.parse::<toml::Table>().ok()?;
-        serde_json::to_value(table).ok()?
+        serde_json::to_value(table).expect("a TOML table is JSON")
     } else {
         serde_json::from_str(&strip_jsonc(&text)).ok()?
     };
@@ -2169,6 +2169,39 @@ mod tests {
         fs::remove_dir_all(&directory).unwrap();
     }
 
+    /// A build command is read as a string or as its words, and nothing
+    /// else; a configuration that cannot be read, or names no `main`, is no
+    /// Worker's.
+    #[test]
+    fn a_configuration_is_read_only_as_far_as_it_says() {
+        for (document, command) in [
+            (json!({}), None),
+            (json!({"build": {}}), None),
+            (
+                json!({"build": {"command": "worker-build"}}),
+                Some("worker-build"),
+            ),
+            (
+                json!({"build": {"command": ["worker-build", "--release", 1]}}),
+                Some("worker-build --release"),
+            ),
+            (json!({"build": {"command": 7}}), None),
+        ] {
+            assert_eq!(build_command(&document).as_deref(), command, "{document}");
+        }
+        let root = temporary("configs");
+        for (name, text) in [
+            ("broken.toml", "main = \"m.mjs\"\n["),
+            ("broken.jsonc", "{ \"main\": "),
+            ("no-main.jsonc", "{}"),
+            ("number-main.jsonc", "{ \"main\": 1 }"),
+        ] {
+            fs::write(root.join(name), text).unwrap();
+            assert!(parse_config(&root.join(name)).is_none(), "{name}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Wrapping a configuration, putting the stand-in and its hook in place,
     /// and turning a poller's windows into region files each survive any
     /// file operation failing.
@@ -2181,7 +2214,8 @@ mod tests {
             let mut region = vec![0_u8; 4096 + 256];
             region[56..62].copy_from_slice(b"abc123");
             let segment = json!([0, base64::engine::general_purpose::STANDARD.encode(&region)]);
-            let line = json!({"start": 1, "end": 2, "regions": [["abc123k1", region.len(), [segment]]]});
+            let line =
+                json!({"start": 1, "end": 2, "regions": [["abc123k1", region.len(), [segment]]]});
             fs::create_dir_all(root.join("windows")).unwrap();
             fs::write(root.join("windows/worker-1.windows"), format!("{line}\n")).unwrap();
             root
