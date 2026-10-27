@@ -12973,6 +12973,20 @@ fn a_run_whose_output_stops_being_read_goes_on_without_a_panic() {
     crate_project.git(&["init", "-q"]);
     crate_project.commit("fixture");
     assert!(close_diagnostics_after_each_line(&crate_project, &["--", "cargo", "test", "-q"]) > 2);
+    if nextest_installed() {
+        assert!(
+            close_diagnostics_after_each_line(&crate_project, &["--", "cargo", "nextest", "run"])
+                > 2
+        );
+    }
+}
+
+/// Whether `cargo nextest` runs here.
+fn nextest_installed() -> bool {
+    std::process::Command::new("cargo")
+        .args(["nextest", "--version"])
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// A run whose test fails, once for every place it makes a file operation,
@@ -13242,11 +13256,7 @@ fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
         fail_each_place_of_a_run("run-faults-rs", small_crate, &["--", "cargo", "test", "-q"]);
     assert!(reached > 50, "{reached}");
     // And through nextest, where it is installed.
-    let nextest = std::process::Command::new("cargo")
-        .args(["nextest", "--version"])
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if nextest {
+    if nextest_installed() {
         let reached = fail_each_place_of_a_run(
             "run-faults-nextest",
             small_crate,
@@ -13292,6 +13302,16 @@ fn a_run_whose_program_cannot_start_anywhere_says_so_and_recovers() {
         rust > 3 && javascript > 0 && python > 0,
         "{rust} {javascript} {python}"
     );
+    if nextest_installed() {
+        let reached = fail_each_place_at(
+            "spawn",
+            "spawn-faults-nextest",
+            small_crate,
+            &["--", "cargo", "nextest", "run"],
+            0,
+        );
+        assert!(reached > 3, "{reached}");
+    }
     if let Some(go) = go() {
         let reached = fail_each_place_at(
             "spawn",
@@ -13364,11 +13384,7 @@ fn a_test_runner_whose_file_operation_fails_says_so() {
         &["--", "cargo", "test", "-q"],
     );
     assert!(reached > 3, "{reached}");
-    let nextest = std::process::Command::new("cargo")
-        .args(["nextest", "--version"])
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if nextest {
+    if nextest_installed() {
         let reached = fail_each_place_of_a_runner(
             "runner-faults-nextest",
             supercov_engine::rust_owned_nextest::RUNNER_MODE_ARGUMENT,
