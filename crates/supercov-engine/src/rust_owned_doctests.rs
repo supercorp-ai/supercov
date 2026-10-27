@@ -1419,6 +1419,31 @@ mod tests {
         let case = told("", "3").unwrap();
         assert_eq!((case.index, case.token.as_str()), (3, "x"));
         assert_eq!(case.binary, Path::new("x"));
+        // A value that is not UTF-8 is no index and no token.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            for (odd, lack) in [
+                (RUSTDOC_RUN_NB_TEST_ENV, "case index"),
+                (
+                    crate::rust_runtime::PROBE_TOKEN_ENV,
+                    "instrumentation token",
+                ),
+            ] {
+                let error = ChildCase::from_variables(|name| {
+                    Some(if name == odd {
+                        std::ffi::OsString::from_vec(vec![0xff])
+                    } else if name == RUSTDOC_RUN_NB_TEST_ENV {
+                        "3".into()
+                    } else {
+                        "x".into()
+                    })
+                })
+                .err()
+                .unwrap();
+                assert!(error.to_string().contains(lack), "{error}");
+            }
+        }
     }
 
     #[test]
