@@ -1768,14 +1768,8 @@ pub(crate) fn open_query_index_for(
     }
 }
 
-/// Resolve a run and build the shared view every workflow command reads.
-pub(crate) fn load_run_view(
-    selector: Option<&str>,
-) -> Result<supercov_engine::run_view::RunView, String> {
-    load_run_view_filtered(selector, None)
-}
-
-/// [`load_run_view`] for only the tests `filter` picks.
+/// Resolve a run and build the shared view every workflow command reads, for
+/// only the tests `filter` picks.
 pub(crate) fn load_run_view_filtered(
     selector: Option<&str>,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
@@ -1789,7 +1783,17 @@ pub(crate) fn load_run_view_filtered(
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    let comparison = checkout_comparison(&root, run);
+    run_view_of(&root, run, filter)
+}
+
+/// The view of `run` in the checkout at `root`, for only the tests `filter`
+/// picks.
+fn run_view_of(
+    root: &Path,
+    run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<supercov_engine::run_view::RunView, String> {
+    let comparison = checkout_comparison(root, run);
     let report = analyze_stored_run_filtered(run, filter)?;
     let passed = run.metadata.test_exit_code == Some(0);
     // A passing run is read whole, as its summary reads it: what passing
@@ -1813,29 +1817,42 @@ pub(crate) fn load_run_view_filtered(
     .map_err(|error| format!("{error:?}"))
 }
 
-/// Which lines of which files a saved run's assessed assertions cover: the
-/// statements `assertions assess` judged asserted. `None` when the run was not
+/// The view of the run `selector` picks and, for a security assessment,
+/// the lines its assessed assertions cover and the tests that ran each
+/// covered point: the run read once. Lines are `None` when the run was not
 /// assessed, which is not an error and is not the same as nothing asserted:
 /// no test was asked.
-pub(crate) fn load_asserted_lines(
+#[allow(clippy::type_complexity)]
+pub(crate) fn load_run_coverage(
     selector: Option<&str>,
-) -> Result<Option<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>>, String> {
+    security: bool,
+) -> Result<
+    (
+        supercov_engine::run_view::RunView,
+        Option<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>>,
+        Vec<(String, usize, Vec<String>)>,
+    ),
+    String,
+> {
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    Ok(assertions_command::asserted_lines(run))
+    let view = run_view_of(&root, run, None)?;
+    if !security {
+        return Ok((view, None, Vec::new()));
+    }
+    Ok((
+        view,
+        assertions_command::asserted_lines(run),
+        point_tests(run)?,
+    ))
 }
 
-/// Which tests executed which lines, from a saved run: every covered
-/// statement with the tests credited for it. This is the run's own account of
-/// what ran together, which no import graph can give: a handler and a helper
-/// reached only through a lookup table are still executed by one test.
-pub(crate) fn load_point_tests(
-    selector: Option<&str>,
-) -> Result<Vec<(String, usize, Vec<String>)>, String> {
-    let root = std::env::current_dir().map_err(|error| error.to_string())?;
-    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
-    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+/// Which tests executed which lines in `run`: every covered statement with
+/// the tests credited for it. This is the run's own account of what ran
+/// together, which no import graph can give: a handler and a helper reached
+/// only through a lookup table are still executed by one test.
+fn point_tests(run: &StoredRun) -> Result<Vec<(String, usize, Vec<String>)>, String> {
     let coverage = supercov_engine::source_manifest::coverage(run)?;
     Ok(coverage
         .view

@@ -3974,15 +3974,7 @@ struct RunCoverage {
 /// asked, which is not a judgment that the tests catch nothing.
 fn load_run_coverage(selector: &str, security: bool) -> Result<RunCoverage, String> {
     let selector = (selector != "latest").then_some(selector);
-    let view = crate::load_run_view(selector)?;
-    let (asserted, points) = if security {
-        (
-            crate::load_asserted_lines(selector)?,
-            crate::load_point_tests(selector)?,
-        )
-    } else {
-        (None, Vec::new())
-    };
+    let (view, asserted, points) = crate::load_run_coverage(selector, security)?;
     Ok(RunCoverage {
         view,
         asserted,
