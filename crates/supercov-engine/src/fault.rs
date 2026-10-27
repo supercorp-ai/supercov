@@ -2,7 +2,9 @@
 //! under test. `SUPERCOV_TEST_FAULT` names call sites, comma-separated: `site`
 //! fails every call there, `site=N` only the first N, `site@N` only the Nth,
 //! `site#N` only the first call from the Nth place in the code that calls it
-//! (where the site knows its caller, as [`crate::fault_fs`] does), and
+//! (where the site knows its caller, as [`crate::fault_fs`] does),
+//! `site.operation` only the calls that make that operation (`fs.hard_link`,
+//! where the caller names what it does), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
 //! its usual error. An entry written `__command/site...` applies only in a
 //! process started as `supercov __command` -- a doctest's or nextest's runner
@@ -178,10 +180,21 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
         .is_ok()
     };
     // Every entry naming the site counts its own calls, so `fs@3,fs@7`
-    // fails the third and the seventh.
+    // fails the third and the seventh. `site.operation` names only the calls
+    // that make that operation: `fs.hard_link` fails each hard link.
+    let named_here = |fault: &&Fault| {
+        fault.site == site
+            || place.is_some_and(|(_, operation)| {
+                fault
+                    .site
+                    .strip_prefix(site)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    == Some(operation)
+            })
+    };
     let mut named = false;
     let mut failed = None;
-    for fault in faults.iter().filter(|fault| fault.site == site) {
+    for fault in faults.iter().filter(named_here) {
         named = true;
         let fails = match (&fault.place, place) {
             // The first call from a place not seen before, when it is the Nth.
@@ -315,6 +328,16 @@ mod tests {
     #[track_caller]
     fn here() -> bool {
         super::injected_here("t", "op")
+    }
+
+    /// `site.operation` fails the calls that make that operation, and no
+    /// other: a call that names another goes on.
+    #[test]
+    fn an_operation_is_failed_by_its_name() {
+        let other = || super::injected_here("t", "other");
+        let (named, unnamed) = super::during("t.op", || (here(), other()));
+        assert!(named);
+        assert!(!unnamed);
     }
 
     /// `site#N` fails the first call from the Nth place only: an earlier
