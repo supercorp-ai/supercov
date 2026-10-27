@@ -1,6 +1,7 @@
 //! Cargo workspace discovery and isolated owned-Rust frontend preparation.
 
 use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
@@ -179,7 +180,7 @@ fn cargo_metadata(root: &Path) -> Result<CargoMetadata, RustProjectError> {
         .args(["metadata", "--format-version=1", "--no-deps"])
         .current_dir(root)
         .env("CARGO_TARGET_DIR", copy_target_directory(root))
-        .output()
+        .launch_output()
         .map_err(|error| RustProjectError::MetadataLaunch(error.to_string()))?;
     if !output.status.success() {
         return Err(RustProjectError::MetadataFailed(

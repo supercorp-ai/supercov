@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 use supercov_engine::fault_fs as fs;
+use supercov_engine::fault_process::Launch;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1361,7 +1362,7 @@ fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
         Command::new("git")
             .args(arguments)
             .current_dir(root)
-            .output()
+            .launch_output()
     })
     .map_err(|error| format!("could not run git: {error}"))?;
     if !output.status.success() {
@@ -3687,7 +3688,7 @@ fn sweep_trash_within(root: &Path, patience: Duration) -> Option<std::process::C
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let child = command.spawn().ok()?;
+    let child = command.launch().ok()?;
     // The sweep is given until `patience` runs out to finish, so that a
     // command launched right after Supercov does not find the trash on its
     // way out. Past that it goes on by itself: the independent process group
