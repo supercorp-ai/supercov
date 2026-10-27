@@ -815,8 +815,8 @@ impl ProjectLock {
             .root
             .join(".supercov/locks")
             .join(format!("{}.json", copy_lock_name(self.copy)));
-        // A release that fails after a run that succeeded: what a run that
-        // fails at each place in turn never reaches, its run having failed.
+        // A release that fails after a run that succeeded, which a test
+        // names directly: no other failure reaches it with the run intact.
         crate::fault::io("copy-release", io::ErrorKind::Other, || Ok(()))
             .map_err(|source| io_error(&path, source))?;
         if read_owner(&path).is_some_and(|owner| owner == self.owner) {
@@ -2996,6 +2996,161 @@ mod tests {
         recover_abandoned_runs(&root, "now").unwrap();
         assert!(!container.join("workspace-2").exists());
         sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A publication refuses each of its own steps that fails, in the
+    /// order it takes them: hashing the evidence, its staging directory,
+    /// the copy and its hash, `run.json` written, the staging directory
+    /// synced, `runs` made, the move into it, and `runs` synced.
+    #[test]
+    fn a_publication_refuses_each_step_that_fails() {
+        let id = "2026-01-01T00-00-00-100Z";
+        for fault in [
+            "fs.open",
+            "fs.create_dir_all",
+            "fs.open@2",
+            "fs.open@3",
+            "fs.open@4",
+            "fs.open@8",
+            "fs.create_dir_all@3",
+            "fs.rename@2",
+            "fs.open@9",
+        ] {
+            let root = project();
+            let (evidence, metadata) = analysable_evidence(&root, id);
+            let published =
+                crate::fault::during(fault, || publish_run(&root, &metadata, &evidence));
+            assert!(published.is_err(), "{fault}");
+            assert!(
+                !root
+                    .join(".supercov/runs")
+                    .join(id)
+                    .join("run.json")
+                    .exists()
+                    || fault == "fs.open@9"
+            );
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Taking a project's lock refuses each step that fails: its directory,
+    /// the store's lock, the copy's lock, and its owner's name written; and
+    /// a release that cannot remove that name.
+    #[test]
+    fn taking_and_releasing_a_project_lock_refuse_each_step_that_fails() {
+        // `.gitignore` is made first, then the store's lock, then the copy's.
+        for fault in [
+            "fs.create_dir_all",
+            "fs.open_with@2",
+            "fs.open_with@3",
+            "fs.write",
+        ] {
+            let root = project();
+            let taken = crate::fault::during(fault, || ProjectLock::acquire(&root, "run", "now"));
+            assert!(taken.is_err(), "{fault}");
+            fs::remove_dir_all(root).unwrap();
+        }
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        assert!(crate::fault::during("fs.remove_file", || lock.release()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Sweeping the trash: an empty trash removes nothing; a lock it cannot
+    /// write, or a stale one it cannot clear, is refused.
+    #[test]
+    fn sweeping_the_trash_refuses_a_lock_it_cannot_make() {
+        let root = project();
+        let trash = root.join(TRASH);
+        fs::create_dir_all(&trash).unwrap();
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
+        fs::write(trash.join("old"), "x").unwrap();
+        assert!(crate::fault::during("fs.write_all", || sweep_trash(&root)).is_err());
+        // A lock left by a process that is gone is cleared, unless it cannot be.
+        fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
+        assert!(crate::fault::during("fs.remove_file", || sweep_trash(&root)).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Updating a run's state refuses a state that is missing, unreadable
+    /// or not JSON, and one it cannot write; so does marking it interrupted.
+    #[test]
+    fn updating_a_run_state_refuses_what_it_cannot_read_or_write() {
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        let update = |root: &Path| {
+            update_run_state(root, id, RunStateStatus::Testing, "now", None).map(drop)
+        };
+        let interrupt = |root: &Path| interrupt_run_state(root, id, "now", "SIGINT").map(drop);
+        for change in [
+            &update as &dyn Fn(&Path) -> Result<(), LifecycleError>,
+            &interrupt,
+        ] {
+            assert!(change(&root).is_err(), "a missing state");
+            write_run_state(&root, &state(&root, id, RunStateStatus::Testing, u32::MAX)).unwrap();
+            assert!(
+                crate::fault::during("fs.read", || change(&root)).is_err(),
+                "read"
+            );
+            assert!(
+                crate::fault::during("fs.open_with", || change(&root)).is_err(),
+                "write"
+            );
+            fs::write(state_path(&root, id), "not json").unwrap();
+            assert!(change(&root).is_err(), "not JSON");
+            fs::remove_file(state_path(&root, id)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The file helpers refuse each step that fails: a rename's directory,
+    /// the rename, and syncing either directory; a write's directory and the
+    /// sync after it; a hash's metadata, open and read.
+    #[cfg(unix)]
+    #[test]
+    fn the_file_helpers_refuse_each_step_that_fails() {
+        let root = project();
+        fs::create_dir_all(root.join("from")).unwrap();
+        for fault in ["fs.create_dir_all", "fs.rename", "fs.open", "fs.open@2"] {
+            fs::write(root.join("from/file"), "x").unwrap();
+            let renamed = crate::fault::during(fault, || {
+                atomic_rename(&root.join("from/file"), &root.join("to/file"))
+            });
+            assert!(renamed.is_err(), "rename {fault}");
+            let _ = fs::remove_file(root.join("to/file"));
+        }
+        for fault in ["fs.create_dir_all", "fs.open"] {
+            let written = crate::fault::during(fault, || {
+                atomic_write(&root, &root.join("state/value.json"), b"{}")
+            });
+            assert!(written.is_err(), "write {fault}");
+        }
+        fs::write(root.join("evidence"), "bytes").unwrap();
+        for fault in ["fs.symlink_metadata", "fs.open", "fs.read_from"] {
+            let hashed = crate::fault::during(fault, || file_sha256(&root.join("evidence")));
+            assert!(hashed.is_err(), "hash {fault}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Where a file cannot be cloned (Linux), a copy refuses each step that
+    /// fails: opening either file, the copy, and syncing what was copied.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_plain_copy_refuses_each_step_that_fails() {
+        let root = project();
+        fs::write(root.join("archive"), "evidence").unwrap();
+        for fault in ["fs.open", "fs.open_with", "fs.copy_between", "fs.sync_all"] {
+            let copied = crate::fault::during(fault, || {
+                copy_regular_file(
+                    &root.join("archive"),
+                    &root.join(format!("copy-{}", unique_name())),
+                )
+            });
+            assert!(copied.is_err(), "{fault}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
