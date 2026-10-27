@@ -586,6 +586,28 @@ fn run_direct_rust_timed(
 mod tests {
     use super::*;
 
+    /// A link in the project is part of what identifies a run, by where it
+    /// points; an empty directory adds nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_the_project_is_part_of_its_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-inputs-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='a'\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        let command = ["cargo".to_owned(), "test".to_owned()];
+        let plain = collect_integrity_inputs(&root, &command).unwrap();
+        std::os::unix::fs::symlink("lib.rs", root.join("src/alias.rs")).unwrap();
+        let linked = collect_integrity_inputs(&root, &command).unwrap();
+        assert_ne!(format!("{plain:?}"), format!("{linked:?}"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn project(name: &str) -> PathBuf {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
