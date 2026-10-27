@@ -4023,6 +4023,10 @@ mod tests {
                     "id": "macro", "kind": "semantic-safety", "file": "w.rs", "line": 4,
                     "column": 0, "source": "m!()", "reason": "a macro", "blocking": false
                 }),
+                serde_json::json!({
+                    "id": "beside", "kind": "semantic-safety", "file": "a.rs", "line": 4,
+                    "column": 0, "source": "m!()", "reason": "a macro", "blocking": false
+                }),
             ],
             unmeasured: Vec::new(),
             scope: Some(scope),
@@ -4043,8 +4047,10 @@ mod tests {
             assert_eq!(view.summary.branches.total, 0);
             assert!(view.summary.unmeasured_obligations.unwrap() >= 3);
             // Of the file's limitations only its note stays, and blocks: the
-            // run's measurement is not complete.
-            assert_eq!(view.limitations.len(), 1, "{:?}", view.limitations);
+            // run's measurement is not complete. The file beside it keeps its
+            // own.
+            assert_eq!(view.limitations.len(), 2, "{:?}", view.limitations);
+            assert_eq!(view.limitations[1]["id"], "beside");
             assert_eq!(view.limitations[0]["wholeFile"], true);
             assert!(blocking_limitation(&view.limitations[0]));
             assert!(!view.summary.coverage_complete);
