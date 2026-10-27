@@ -279,6 +279,7 @@ mod tests {
         fs::write(root.join("a.rs"), "a").unwrap();
         fs::create_dir(root.join("dir")).unwrap();
         assert!(digest_files(&root, &["a.rs".into()]).is_some());
+        assert!(digest_files(&root, &[]).is_some());
         assert_eq!(digest_files(&root, &["../a.rs".into()]), None);
         assert_eq!(digest_files(&root, &["dir".into()]), None);
         assert_eq!(digest_files(&root, &["missing.rs".into()]), None);
@@ -401,6 +402,23 @@ mod tests {
         assert!(tampered(&|metadata| metadata.manifest.points.clear()).is_none());
         assert!(tampered(&|metadata| metadata.source_files.reverse()).is_none());
         assert!(tampered(&|_| {}).is_some());
+        // A record that is no JSON is no cache, and a source that cannot be
+        // read is not cached at all.
+        fs::write(workspace.join(CACHE_FILE), "{").unwrap();
+        assert!(read_rust_build_cache(&workspace, &target, "key").is_none());
+        assert_eq!(
+            write_rust_build_cache(
+                &root,
+                &workspace,
+                "key",
+                "time",
+                &["src/missing.rs".into()],
+                &manifest,
+                &crate::rust_instrumenter::RustProbeLayout::default(),
+                &[],
+            ),
+            Err("could not authenticate instrumented Rust sources".into())
+        );
         fs::write(target.join("debug/test-bin"), b"tamper").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_none());
         fs::remove_dir_all(target).unwrap();
