@@ -13044,7 +13044,11 @@ fn fail_each_place_at(
     fail_each_place_at_with(site, label, write, command, code, &[])
 }
 
-/// [`fail_each_place_at`] with `environment` set for every run.
+/// [`fail_each_place_at`] with `environment` set for every run. Each run
+/// fails the first call from every place no earlier run failed
+/// (`site#*`): a failure the run goes on from costs no run of its own, and
+/// what the run then does fails in the same run. Four projects side by side
+/// each take a share of the places. How many places failed.
 fn fail_each_place_at_with(
     site: &str,
     label: &str,
@@ -13053,34 +13057,55 @@ fn fail_each_place_at_with(
     code: i32,
     environment: &[(&str, &str)],
 ) -> usize {
-    const PROJECTS: usize = 4;
+    const SHARES: usize = 4;
     let reached = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        for first in 1..=PROJECTS {
+        for share in 0..SHARES {
             let reached = &reached;
             scope.spawn(move || {
-                let project = Project::empty(&format!("{label}-{first}"));
+                let project = Project::empty(&format!("{label}-{share}"));
                 write(&project);
                 project.git(&["init", "-q"]);
                 project.commit("fixture");
-                let mut nth = first;
+                let skip = project.root.with_extension("skip");
+                let shard = format!("{share}/{SHARES}");
+                let fault = format!("{site}#*");
+                let announced = format!("[supercov] test fault at {site} ");
+                let mut failed = std::collections::BTreeSet::new();
                 loop {
-                    let fault = format!("{site}#{nth}");
+                    std::fs::write(
+                        &skip,
+                        failed.iter().cloned().collect::<Vec<String>>().join("\n"),
+                    )
+                    .unwrap();
                     forget_reused_builds(&project.root.join(".supercov/workspaces"));
                     let mut variables = environment.to_vec();
-                    variables.push(("SUPERCOV_TEST_FAULT", &fault));
+                    variables.extend([
+                        ("SUPERCOV_TEST_FAULT", fault.as_str()),
+                        ("SUPERCOV_TEST_FAULT_SKIP", skip.to_str().unwrap()),
+                        ("SUPERCOV_TEST_FAULT_SHARD", shard.as_str()),
+                    ]);
                     let ran = project.supercov_with(command, &variables);
                     let said = ran.stderr();
+                    // Several failures in one run can fail a test, and
+                    // `cargo test` exits 101 for that: a panic is told by
+                    // its own words.
                     assert!(
-                        !said.contains("panicked at") && ran.code() != 101,
-                        "{label} with {fault} panicked:\n{said}"
+                        !said.contains("panicked at"),
+                        "{label} with {fault} past {} places panicked:\n{said}",
+                        failed.len()
                     );
-                    if !said.contains(&format!("[supercov] test fault at {site}")) {
+                    let before = failed.len();
+                    failed.extend(
+                        said.lines()
+                            .filter_map(|line| line.split_once(announced.as_str()))
+                            .map(|(_, place)| place.to_owned()),
+                    );
+                    if failed.len() == before {
                         break;
                     }
-                    reached.fetch_max(nth, std::sync::atomic::Ordering::Relaxed);
-                    nth += PROJECTS;
                 }
+                reached.fetch_add(failed.len(), std::sync::atomic::Ordering::Relaxed);
                 project.supercov_with(command, environment).exits(code);
             });
         }
@@ -13201,6 +13226,10 @@ fn nextest_installed() -> bool {
 /// A run whose test fails, once for every place it makes a file operation,
 /// with that one failing: each ends, never panicking, and without a fault
 /// it says the test failed.
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_failing_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let reached = fail_each_place_of_a_run_ending(
@@ -13335,6 +13364,10 @@ fn go_project(project: &Project) {
     std::fs::create_dir_all(project.root.join("testdata/empty")).unwrap();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let javascript = fail_each_place_of_a_run(
@@ -13363,6 +13396,10 @@ fn a_ruby_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     assert!(reached > 50, "{reached}");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_go_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let Some(go) = go() else {
@@ -13512,6 +13549,10 @@ fn small_crate(project: &Project) {
     project.write(".gitignore", "target/\n");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_rust_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let reached =
@@ -13781,6 +13822,10 @@ fn a_run_under_given_source_roots_is_read_back_under_them() {
 
 /// A Python or Ruby run asked to keep its work copies its evidence aside,
 /// and each file operation of that failing in turn ends the run cleanly.
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_run_keeping_its_work_survives_any_file_operation_failing() {
     let keep = [("SUPERCOV_KEEP_WORK", "1")];
@@ -13806,6 +13851,10 @@ fn a_run_keeping_its_work_survives_any_file_operation_failing() {
 
 /// A run, once for every place it starts a program, with that start
 /// failing: each ends, never panicking, and without a fault it succeeds.
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_run_whose_program_cannot_start_anywhere_says_so_and_recovers() {
     let rust = fail_each_place_at(
@@ -13922,14 +13971,21 @@ fn fail_each_place_of_a_runner_in(
     project.git(&["init", "-q"]);
     project.commit("fixture");
     let log = project.root.with_extension("faults.log");
-    let mut nth = 1;
+    let skip = project.root.with_extension("skip");
+    let fault = format!("{site}#*");
+    let mut failed = std::collections::BTreeSet::new();
     loop {
         let _ = std::fs::remove_file(&log);
-        let fault = format!("{site}#{nth}");
+        std::fs::write(
+            &skip,
+            failed.iter().cloned().collect::<Vec<String>>().join("\n"),
+        )
+        .unwrap();
         let ran = project.supercov_with(
             command,
             &[
-                ("SUPERCOV_TEST_FAULT", &fault),
+                ("SUPERCOV_TEST_FAULT", fault.as_str()),
+                ("SUPERCOV_TEST_FAULT_SKIP", skip.to_str().unwrap()),
                 ("SUPERCOV_TEST_FAULT_LOG", log.to_str().unwrap()),
             ],
         );
@@ -13938,16 +13994,25 @@ fn fail_each_place_of_a_runner_in(
         let said = format!("{}{}", ran.stdout(), ran.stderr());
         assert!(
             !said.contains("panicked at"),
-            "{label} with {fault} panicked:\n{said}"
+            "{label} with {fault} past {} places panicked:\n{said}",
+            failed.len()
         );
-        if !log.exists() {
+        // Each line names the site and the place that failed.
+        let before = failed.len();
+        failed.extend(
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.split_once(' '))
+                .map(|(_, place)| place.to_owned()),
+        );
+        if failed.len() == before {
             break;
         }
-        nth += 1;
     }
     let _ = std::fs::remove_file(&log);
     project.supercov(command).succeeds();
-    nth - 1
+    failed.len()
 }
 
 /// A doctest's runner, and nextest's where it is installed, each failing
@@ -14118,6 +14183,10 @@ fn small_maven_project(project: &Project) {
     project.write(".gitignore", "target/\n");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_maven_run_whose_file_operation_fails_anywhere_says_so_and_recovers() {
     let maven = std::process::Command::new("mvn")
@@ -14183,6 +14252,10 @@ fn a_skipped_python_or_ruby_test_is_counted_skipped() {
 
 /// A Maven run, once for every place it starts a program, with that start
 /// failing.
+#[cfg_attr(
+    windows,
+    ignore = "a run sweep starts a process per failure; Windows starts them too slowly to finish"
+)]
 #[test]
 fn a_maven_run_whose_program_cannot_start_says_so_and_recovers() {
     let maven = std::process::Command::new("mvn")

@@ -2,7 +2,11 @@
 //! under test. `SUPERCOV_TEST_FAULT` names call sites, comma-separated: `site`
 //! fails every call there, `site=N` only the first N, `site@N` only the Nth,
 //! `site#N` only the first call from the Nth place in the code that calls it
-//! (where the site knows its caller, as [`crate::fault_fs`] does), and
+//! (where the site knows its caller, as [`crate::fault_fs`] does), `site#*`
+//! the first call from every place but those the file
+//! `SUPERCOV_TEST_FAULT_SKIP` names, one a line as a fault names it (and,
+//! with `SUPERCOV_TEST_FAULT_SHARD=J/K`, only the Jth of K shares of places,
+//! so K runs side by side split them), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
 //! its usual error. An entry written `__command/site...` applies only in a
 //! process started as `supercov __command` -- a doctest's or nextest's runner
@@ -31,8 +35,8 @@ struct Fault {
     remaining: Option<std::sync::atomic::AtomicUsize>,
     /// Whether a call failed by it.
     fired: std::sync::atomic::AtomicBool,
-    /// For `site#N`: N, and the places in the code that called the site so
-    /// far, in the order they first did.
+    /// For `site#N`: N, 0 for `site#*`, and the places in the code that
+    /// called the site so far, in the order they first did.
     place: Option<(usize, std::sync::Mutex<Vec<Place>>)>,
 }
 
@@ -44,6 +48,52 @@ pub type Place = (&'static std::panic::Location<'static>, &'static str);
 #[cfg(any(test, debug_assertions))]
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
     std::sync::LazyLock::new(|| parse(&std::env::var("SUPERCOV_TEST_FAULT").unwrap_or_default()));
+
+/// The places `site#*` passes, as a failing one names itself.
+#[cfg(any(test, debug_assertions))]
+static SKIP: std::sync::LazyLock<std::collections::HashSet<String>> =
+    std::sync::LazyLock::new(|| {
+        std::env::var_os("SUPERCOV_TEST_FAULT_SKIP")
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    });
+
+/// For `site#*`: which of how many shares of places this process fails.
+#[cfg(any(test, debug_assertions))]
+static SHARD: std::sync::LazyLock<(u64, u64)> = std::sync::LazyLock::new(|| {
+    std::env::var("SUPERCOV_TEST_FAULT_SHARD")
+        .ok()
+        .and_then(|shard| {
+            let (share, shares) = shard.split_once('/')?;
+            let (share, shares) = (share.parse().ok()?, shares.parse::<u64>().ok()?);
+            (share < shares).then_some((share, shares))
+        })
+        .unwrap_or((0, 1))
+});
+
+/// Whether `site#*` fails the place called `name` in this process: it is
+/// not skipped, and is in this process's share (FNV-1a of its name).
+#[cfg(any(test, debug_assertions))]
+fn every_fails(name: &str) -> bool {
+    let (share, shares) = *SHARD;
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    hash % shares == share && !SKIP.contains(name)
+}
+
+/// How a failing call names its place: file, line and column, and what it did.
+#[cfg(any(test, debug_assertions))]
+fn place_name(place: Place) -> String {
+    let (location, operation) = place;
+    format!(
+        "{}:{}:{} {operation}",
+        location.file(),
+        location.line(),
+        location.column()
+    )
+}
 
 /// The file a failing site is written to as well, as a C string: a forked
 /// child writes it without allocating.
@@ -94,10 +144,12 @@ fn parse(text: &str) -> Vec<Fault> {
                     .or_else(|| count.parse().ok())
                     .map(std::sync::atomic::AtomicUsize::new),
                 fired: false.into(),
-                place: place
-                    .parse::<usize>()
-                    .ok()
-                    .map(|nth| (nth, std::sync::Mutex::new(Vec::new()))),
+                place: (if place == "*" {
+                    Some(0)
+                } else {
+                    place.parse::<usize>().ok()
+                })
+                .map(|nth| (nth, std::sync::Mutex::new(Vec::new()))),
             }
         })
         .collect()
@@ -108,6 +160,10 @@ fn parse(text: &str) -> Vec<Fault> {
 pub fn prepare() {
     #[cfg(any(test, debug_assertions))]
     std::sync::LazyLock::force(&FAULTS);
+    #[cfg(any(test, debug_assertions))]
+    std::sync::LazyLock::force(&SKIP);
+    #[cfg(any(test, debug_assertions))]
+    std::sync::LazyLock::force(&SHARD);
     #[cfg(all(unix, any(test, debug_assertions)))]
     std::sync::LazyLock::force(&LOG);
 }
@@ -217,7 +273,7 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
             .with(|during| take(&during.borrow(), site, place))
             .or_else(|| take(&FAULTS, site, place))
             .flatten()
-            .inspect(|_| announce(site))
+            .inspect(|_| announce(site, place))
     }
     #[cfg(not(any(test, debug_assertions)))]
     {
@@ -226,11 +282,14 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
     }
 }
 
-/// Say that the call at `site` failed by request. Written to the descriptor
-/// itself: a child forked to exec a command may not allocate or take the
-/// lock `eprintln!` takes.
+/// Say that the call at `site` failed by request, and from which place
+/// where it knows. Written to the descriptor itself: a child forked to exec
+/// a command may not allocate or take the lock `eprintln!` takes, and no
+/// call that knows its place is made there.
 #[cfg(any(test, debug_assertions))]
-fn announce(site: &str) {
+fn announce(site: &str, place: Option<Place>) {
+    let named = place.map(|place| format!("{site} {}", place_name(place)));
+    let site = named.as_deref().unwrap_or(site);
     #[cfg(unix)]
     for part in [
         b"[supercov] test fault at ".as_slice(),
@@ -258,7 +317,17 @@ fn announce(site: &str) {
         }
     }
     #[cfg(not(unix))]
-    eprintln!("[supercov] test fault at {site}");
+    {
+        use std::io::Write;
+        eprintln!("[supercov] test fault at {site}");
+        if let Some(path) = std::env::var_os("SUPERCOV_TEST_FAULT_LOG") {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut log| writeln!(log, "{site}"));
+        }
+    }
 }
 
 /// Of the faults `faults`, whether the one at `site` fails this time, and
@@ -286,7 +355,10 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 !seen.contains(&place) && {
                     seen.push(place);
-                    seen.len() == *nth
+                    match nth {
+                        0 => every_fails(&place_name(place)),
+                        nth => seen.len() == *nth,
+                    }
                 }
             }
             // A caller that cannot say where it is is never the Nth place.
@@ -377,4 +449,26 @@ unsafe fn errno_location() -> *mut i32 {
 #[cfg(all(unix, not(target_os = "linux")))]
 unsafe fn errno_location() -> *mut i32 {
     unsafe { libc::__error() }
+}
+
+#[cfg(test)]
+mod tests {
+    #[track_caller]
+    fn here() -> bool {
+        super::injected_here("t", "op")
+    }
+
+    /// `site#*` fails the first call from each place, and only the first:
+    /// a place called again goes on as usual.
+    #[test]
+    fn every_place_fails_its_first_call() {
+        let ((two, again), reached) = super::during_reaching("t#*", || {
+            let two = [here(), here()];
+            let again = (0..2).map(|_| here()).collect::<Vec<_>>();
+            (two, again)
+        });
+        assert!(reached);
+        assert_eq!(two, [true, true]);
+        assert_eq!(again, [true, false]);
+    }
 }
