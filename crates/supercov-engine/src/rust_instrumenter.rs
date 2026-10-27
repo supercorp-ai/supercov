@@ -457,6 +457,15 @@ fn push_wrapper(
     });
 }
 
+/// Spaces in place of `bytes`, their line breaks kept so every line stays
+/// where it was.
+fn blank(bytes: &mut [u8]) {
+    bytes
+        .iter_mut()
+        .filter(|byte| **byte != b'\n')
+        .for_each(|byte| *byte = b' ');
+}
+
 fn push_direct(insertions: &mut Vec<Insertion>, offset: usize, text: String) {
     insertions.push(Insertion {
         offset,
@@ -1487,11 +1496,7 @@ fn rewrite_expression_macros(
             let Some(comma_end) = first_top_level_comma_end(&arguments) else {
                 continue;
             };
-            for byte in &mut rewritten[comma_end - start..end - start - 1] {
-                if *byte != b'\n' {
-                    *byte = b' ';
-                }
-            }
+            blank(&mut rewritten[comma_end - start..end - start - 1]);
         }
         // The arguments must read as a call's argument list.
         let probe = format!(
@@ -1513,11 +1518,7 @@ fn rewrite_expression_macros(
                     let prefix_start = call.attrs().last().map_or(prefix_start, |attribute| {
                         usize::from(attribute.syntax().text_range().end())
                     });
-                    for byte in &mut text[prefix_start..start] {
-                        if *byte != b'\n' {
-                            *byte = b' ';
-                        }
-                    }
+                    blank(&mut text[prefix_start..start]);
                     // A reference where `vec` was, so whatever the macro
                     // starts -- `vec![x; n].into()`, a comparison -- still
                     // starts there, and its probe goes before the macro
