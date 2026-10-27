@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SLICES: 10
+  SLICES: 8
 
 jobs:
   platforms:
@@ -248,55 +248,54 @@ jobs:
             | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
           gates=$(echo "$all" | grep -vxF -f <(echo "$elsewhere" | tr ' ' '\n'))
           slice=${{ matrix.slice }}
+          # The tests a file declares, by name.
+          tests_of() {
+            awk '/^#\[test\]/ { test = 1; next }
+              test && /^fn [a-z0-9_]+\(/ { match($0, /fn [a-z0-9_]+/); print substr($0, RSTART + 3, RLENGTH - 3); test = 0; next }
+              test && !/^#\[/ { test = 0 }' "$1"
+          }
+          # Slice 9's: every second test of the CLI's.
+          moved="$(tests_of crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')"
+          # Dealt among the gate slices with the gates, at each binary's
+          # seconds per test in a run (8, 2026-10-27): slices 0 and 9 took
+          # 493 s and 550 s of tests with these, the gate slices 184-304 s.
+          # Both overhead tests are named `instrumentation_overhead`.
+          pooled="$(tests_of crates/supercov-engine/tests/jvm_run.rs | sed 's/$/ 47/')
+          $(tests_of crates/supercov-engine/tests/jvm_frontend.rs | sed 's/$/ 22/')
+          instrumentation_overhead 126
+          $(tests_of crates/supercov-cli/tests/jev.rs | sed 's/$/ 4/')"
           # The Kotlin corpus test parses projects `kotlin-grammar` checks
           # out; it measures the vendored C grammar, not Supercov.
           corpus="every_file_of_the_corpus_parses_or_is_known_not_to"
-          lists="$RUNNER_TEMP/slices"
-          mkdir -p "$lists"
-          echo "$gates" > "$lists/gates"
-          printf '%s\n' $elsewhere $tests_elsewhere $corpus > "$lists/excluded"
-          # Every gate and every test of two seconds or more, longest first,
-          # each to the slice with the least so far, by the seconds each took
-          # in a run (test-seconds.tsv; a gate not timed there by its CI
-          # seconds, or a minute). Slice 0 starts with the shorter tests, which
-          # only it runs, each with the fifth of a second Supercov spends
-          # between them, and runs any test no run has timed yet. Split by
-          # binary instead, two slices took 493 s and 550 s of tests and the
-          # others 184-304 s.
-          awk -v n="$SLICES" -v s="$slice" -v lists="$lists" '
-            FILENAME == ".github/gate-seconds.tsv" { if ($0 !~ /^#/ && NF) gate_seconds[$1] = $2; next }
-            FILENAME == ".github/test-seconds.tsv" { if ($0 !~ /^#/ && NF) test_seconds[$1] = $2; next }
-            FILENAME == lists "/excluded" { if (NF) excluded[$1] = 1; next }
-            FILENAME == lists "/gates" {
-              if (NF) {
-                unit[++count] = $1; gate[$1] = 1
-                cost[count] = ($1 in test_seconds) ? test_seconds[$1] : ($1 in gate_seconds) ? gate_seconds[$1] : 60
-              }
-              next
-            }
-            END {
-              for (name in test_seconds) {
-                if (name in excluded || name in gate) continue
-                if (test_seconds[name] >= 2) { unit[++count] = name; cost[count] = test_seconds[name] }
-                else load[0] += test_seconds[name] + 0.2
-              }
-              for (i = 1; i <= count; i++) order[i] = i
-              for (i = 1; i <= count; i++) for (j = i + 1; j <= count; j++)
-                if (cost[order[j]] > cost[order[i]] || (cost[order[j]] == cost[order[i]] && unit[order[j]] < unit[order[i]])) { t = order[i]; order[i] = order[j]; order[j] = t }
-              for (i = 1; i <= count; i++) {
-                best = 0
-                for (k = 1; k < n; k++) if (load[k] < load[best]) best = k
-                load[best] += cost[order[i]]
-                if (s == 0 && best != 0) print "--skip " unit[order[i]]
-                if (s != 0 && best == s) print unit[order[i]]
-              }
-              if (s == 0) for (name in excluded) print "--skip " name
-            }' .github/gate-seconds.tsv .github/test-seconds.tsv "$lists/excluded" "$lists/gates" > "$lists/picked"
-          # A slice dealt nothing runs nothing: no name at all would be every test.
-          [ -s "$lists/picked" ] || echo "no_test_was_dealt_to_this_slice" > "$lists/picked"
-          # The whole workspace builds in every slice, so every run counts the
-          # same files; only the tests named run, or all but those skipped.
-          echo "command=cargo test --workspace -- --include-ignored --exact $(tr '\n' ' ' < "$lists/picked")" >> "$GITHUB_OUTPUT"
+          if [ "$slice" = 0 ]; then
+            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $moved $(echo "$pooled" | awk '{print $1}') $corpus)
+            echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
+          elif [ "$slice" = 9 ]; then
+            # The whole workspace builds here too; only these tests run.
+            echo "command=cargo test --workspace -- --include-ignored --exact $(echo $moved)" >> "$GITHUB_OUTPUT"
+          else
+            # Longest first, each to the slice with the least so far, by the
+            # seconds each took (a gate not timed counts as a minute): dealt
+            # in turn, one slice drew 487 s of gates and another 81 s.
+            picked=$(printf '%s\n%s\n' "$gates" "$pooled" | awk -v n="$SLICES" -v s="$slice" '
+              FILENAME == ".github/gate-seconds.tsv" { if ($0 !~ /^#/) seconds[$1] = $2; next }
+              NF == 0 { next }
+              { gate[++count] = $1; cost[count] = NF > 1 ? $2 : ($1 in seconds) ? seconds[$1] : 60 }
+              END {
+                for (i = 1; i <= count; i++) order[i] = i
+                for (i = 1; i <= count; i++) for (j = i + 1; j <= count; j++)
+                  if (cost[order[j]] > cost[order[i]] || (cost[order[j]] == cost[order[i]] && gate[order[j]] < gate[order[i]])) { t = order[i]; order[i] = order[j]; order[j] = t }
+                for (i = 1; i <= count; i++) {
+                  best = 1
+                  for (k = 2; k <= n; k++) if (load[k] < load[best]) best = k
+                  load[best] += cost[order[i]]
+                  if (best == s) printf "%s ", gate[order[i]]
+                }
+              }' .github/gate-seconds.tsv -)
+            # The whole workspace builds in every slice, so every run counts
+            # the same files; only the named gates run.
+            echo "command=cargo test --workspace -- --include-ignored --exact $picked" >> "$GITHUB_OUTPUT"
+          fi
       - name: Measure
         env:
           TEST262_DIR: ${{ runner.temp }}/test262
@@ -306,7 +305,8 @@ jobs:
           SUPERCOV_REQUIRE_RUST_WORKER: "1"
           # Each gate's time, kept with the slice's run.
           SUPERCOV_GATE_TIMINGS: ${{ runner.temp }}/out/gate-timings.tsv
-          # And each test's, which the merged libtest report sums per binary.
+          # And each test's, and its processor seconds; the merged libtest
+          # report sums only its seconds, per binary.
           TEST_SECONDS: ${{ runner.temp }}/out/test-seconds.tsv
         run: |
           chmod +x "$RUNNER_TEMP/self/supercov"
@@ -327,13 +327,16 @@ jobs:
             previous=$argument
           done
           [ -n "$name" ] || exec "$@"
-          # Bash 5's clock, or Perl's where bash is older (macOS's 3.2).
-          now() { [ -n "$EPOCHREALTIME" ] && echo "$EPOCHREALTIME" || perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
-          start=$(now)
-          "$@"
+          # Its seconds and the processor seconds it and its children used:
+          # tests run side by side, so what one costs a slice is the latter.
+          TIMEFORMAT='%R %U %S'
+          report=$(mktemp)
+          { time "$@" 2>&3; } 3>&2 2>"$report"
           status=$?
-          awk -v name="$name" -v start="$start" -v end="$(now)" \
-            'BEGIN { printf "%s\t%.1f\n", name, end - start }' >> "$TEST_SECONDS"
+          read -r real user system < "$report"
+          rm -f "$report"
+          awk -v name="$name" -v real="$real" -v cpu="$(awk -v u="$user" -v s="$system" 'BEGIN { print u + s }')" \
+            'BEGIN { printf "%s\t%.1f\t%.1f\n", name, real, cpu }' >> "$TEST_SECONDS"
           exit $status
           EOF
           chmod +x "$timer"
