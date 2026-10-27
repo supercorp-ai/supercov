@@ -979,6 +979,42 @@ mod tests {
         ));
     }
 
+    /// A file holding every part -- probe totals, a test with tags, probes
+    /// and vectors, a decision table -- cut at any byte is refused.
+    #[test]
+    fn a_file_cut_anywhere_is_refused() {
+        let mut bytes = Vec::new();
+        let put = |bytes: &mut Vec<u8>, value: u64| bytes.extend_from_slice(&value.to_le_bytes());
+        let text = |bytes: &mut Vec<u8>, value: &str| {
+            bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        };
+        put(&mut bytes, 1); // one probe
+        put(&mut bytes, 1);
+        put(&mut bytes, 1); // one test
+        text(&mut bytes, "t");
+        text(&mut bytes, "passed");
+        put(&mut bytes, 0);
+        text(&mut bytes, "node:test");
+        put(&mut bytes, 1);
+        text(&mut bytes, "unit");
+        put(&mut bytes, 1); // one probe hit
+        put(&mut bytes, 0);
+        put(&mut bytes, 1);
+        put(&mut bytes, 1); // one vector
+        put(&mut bytes, 0);
+        put(&mut bytes, 0b01);
+        put(&mut bytes, 1); // one decision
+        put(&mut bytes, 2);
+        put(&mut bytes, 1);
+        put(&mut bytes, 0b01);
+        let whole = read_evidence(&bytes).unwrap();
+        assert_eq!(whole.tests[0].tags, ["unit"]);
+        for cut in 0..bytes.len() {
+            assert!(read_evidence(&bytes[..cut]).is_err(), "cut at {cut}");
+        }
+    }
+
     #[test]
     fn a_run_with_no_tests_is_an_error_not_an_empty_report() {
         // Nothing announced itself and nothing was reached: there is no run
