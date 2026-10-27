@@ -632,14 +632,12 @@ fn read_evidence_file(
                 if let Some(title) = title.filter(|title| !title.is_empty()) {
                     evidence.test_titles.entry(key.clone()).or_insert(title);
                 }
-                if !tags.is_empty() {
+                tags.into_iter().for_each(|tag| {
                     let known = evidence.test_tags.entry(key.clone()).or_default();
-                    for tag in tags {
-                        if !known.contains(&tag) {
-                            known.push(tag);
-                        }
+                    if !known.contains(&tag) {
+                        known.push(tag);
                     }
-                }
+                });
                 fold_outcome(
                     evidence.outcomes.entry(key).or_default(),
                     phase,
@@ -1042,12 +1040,16 @@ impl RubyFrontendRun {
                     .expect("plain data serializes"),
             },
         ];
-        for (index, result) in self.request.raw_results.iter().enumerate() {
-            entries.push(EvidenceArchiveEntry {
-                path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result).expect("plain data serializes"),
-            });
-        }
+        entries.extend(
+            self.request
+                .raw_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| EvidenceArchiveEntry {
+                    path: format!("results/{index:08}/mcdc.json"),
+                    contents: serde_json::to_vec(result).expect("plain data serializes"),
+                }),
+        );
         Ok(entries)
     }
 }
@@ -1261,171 +1263,177 @@ fn build_from_evidence(
             .or_default()
             .push((identity, observations));
     }
-    for ((worker, test, retry), mut outcomes) in outcomes {
-        let runner = runners
-            .get(&(worker.clone(), test.clone(), retry))
-            .cloned()
-            .unwrap_or_else(default_runner);
-        let attempt_identities = identities_by_attempt
-            .remove(&(worker.clone(), test.clone(), retry))
-            .unwrap_or_default();
-        observed_runners.insert(runner.clone());
-        outcomes.sort_by_key(|(phase, _, _)| match phase.as_str() {
-            "setup" => 0,
-            "call" => 1,
-            _ => 2,
-        });
-        let mut phases = Vec::new();
-        let mut runtime = Vec::new();
-        let mut observed_phases = BTreeSet::new();
-        for (position, (phase_name, outcome, xfail)) in outcomes.iter().enumerate() {
-            observed_phases.insert(phase_name.clone());
-            let identity = Identity {
-                worker: worker.clone(),
-                test: test.clone(),
-                retry,
-                phase: phase_name.clone(),
-            };
-            let id = phase_id(run_id, &identity);
-            phases.push(CoveragePhase {
-                id: id.clone(),
-                kind: match phase_name.as_str() {
-                    "call" => "test",
-                    value => value,
-                }
-                .into(),
-                operation: format!("{runner} {phase_name}"),
-                source: Some(test.clone()),
-                caused_by_phase_id: None,
-                started_at_ms: position as i64 * 2 + 1,
-                ended_at_ms: Some(position as i64 * 2 + 2),
-                status: Some(match outcome.as_str() {
-                    "rerun" | "error" => "failed".into(),
-                    value => value.into(),
-                }),
-                error: None,
-            });
-            if let Some((_, observations)) = attempt_identities
-                .iter()
-                .find(|(candidate, _)| candidate.phase == phase_name.as_str())
-            {
-                runtime.push(snapshot(&index, observations, &id)?);
-            }
-            if phase_name != "call" {
-                continue;
-            }
-            // What the test recorded before its first assertion is that
-            // assertion's evidence, linked when the phase passed outright:
-            // a failed, skipped or expected-to-fail phase witnessed nothing.
-            if let Some((identity, observations)) = attempt_identities
-                .iter()
-                .find(|(candidate, _)| candidate.phase == "assertion")
-            {
-                observed_phases.insert("assertion".to_owned());
-                let id = phase_id(run_id, identity);
-                phases.push(CoveragePhase {
-                    id: id.clone(),
-                    kind: "assertion".into(),
-                    operation: format!("{runner} assertion"),
-                    source: Some(test.clone()),
-                    caused_by_phase_id: None,
-                    started_at_ms: position as i64 * 2 + 1,
-                    ended_at_ms: Some(position as i64 * 2 + 2),
-                    status: Some(
-                        if outcome == "passed" && !*xfail {
-                            "passed"
-                        } else {
-                            "failed"
-                        }
-                        .into(),
-                    ),
-                    error: None,
-                });
-                runtime.push(snapshot(&index, observations, &id)?);
-            }
-        }
-        // A phase the runtime entered but the runner never reported (the worker
-        // died inside it) is a failed phase with its evidence kept.
-        for (identity, observations) in attempt_identities {
-            if !observed_phases.contains(&identity.phase) {
-                let id = phase_id(run_id, identity);
-                phases.push(CoveragePhase {
-                    id: id.clone(),
-                    kind: match identity.phase.as_str() {
-                        "call" => "test",
-                        value => value,
-                    }
-                    .into(),
-                    operation: format!("{runner} {}", identity.phase),
-                    source: Some(test.clone()),
-                    caused_by_phase_id: None,
-                    started_at_ms: phases.len() as i64 * 2 + 1,
-                    ended_at_ms: None,
-                    status: Some("failed".into()),
-                    error: Some("the phase started but the runner reported no outcome".into()),
-                });
-                runtime.push(snapshot(&index, observations, &id)?);
-            }
-        }
-        let status = if phases.iter().any(|phase| phase.error.is_some()) {
-            "failed".into()
-        } else {
-            attempt_status(&outcomes)
-        };
-        let test_file = test_files
-            .get(&(worker.clone(), test.clone(), retry))
-            .and_then(|path| relative(root, path))
-            .or_else(|| test.split("::").next().map(str::to_owned));
-        raw_results.push(RawTestResult {
-            span: None,
-            test_id: Some(test.clone()),
-            scope: Some(scope(run_id, &worker, &test, retry)),
-            test: test.clone(),
-            // What the runner named, as the project names it. A runner
-            // identity is not a path, so the old derivation stays only as a
-            // fallback for an adapter that cannot name the file.
-            test_file: test_file.clone(),
-            title: test_titles
+    outcomes
+        .into_iter()
+        .try_for_each(|((worker, test, retry), mut outcomes)| {
+            let runner = runners
                 .get(&(worker.clone(), test.clone(), retry))
                 .cloned()
-                .or_else(|| test.rsplit("::").next().map(str::to_owned)),
-            retry: Some(retry),
-            status: Some(status),
-            expected_status: Some(
-                if outcomes.iter().any(|(_, _, xfail)| *xfail) {
-                    "failed"
-                } else {
-                    "passed"
+                .unwrap_or_else(default_runner);
+            let attempt_identities = identities_by_attempt
+                .remove(&(worker.clone(), test.clone(), retry))
+                .unwrap_or_default();
+            observed_runners.insert(runner.clone());
+            outcomes.sort_by_key(|(phase, _, _)| match phase.as_str() {
+                "setup" => 0,
+                "call" => 1,
+                _ => 2,
+            });
+            let mut phases = Vec::new();
+            let mut runtime = Vec::new();
+            let mut observed_phases = BTreeSet::new();
+            outcomes.iter().enumerate().try_for_each(
+                |(position, (phase_name, outcome, xfail))| {
+                    observed_phases.insert(phase_name.clone());
+                    let identity = Identity {
+                        worker: worker.clone(),
+                        test: test.clone(),
+                        retry,
+                        phase: phase_name.clone(),
+                    };
+                    let id = phase_id(run_id, &identity);
+                    phases.push(CoveragePhase {
+                        id: id.clone(),
+                        kind: match phase_name.as_str() {
+                            "call" => "test",
+                            value => value,
+                        }
+                        .into(),
+                        operation: format!("{runner} {phase_name}"),
+                        source: Some(test.clone()),
+                        caused_by_phase_id: None,
+                        started_at_ms: position as i64 * 2 + 1,
+                        ended_at_ms: Some(position as i64 * 2 + 2),
+                        status: Some(match outcome.as_str() {
+                            "rerun" | "error" => "failed".into(),
+                            value => value.into(),
+                        }),
+                        error: None,
+                    });
+                    if let Some((_, observations)) = attempt_identities
+                        .iter()
+                        .find(|(candidate, _)| candidate.phase == phase_name.as_str())
+                    {
+                        runtime.push(snapshot(&index, observations, &id)?);
+                    }
+                    if phase_name != "call" {
+                        return Ok(());
+                    }
+                    // What the test recorded before its first assertion is that
+                    // assertion's evidence, linked when the phase passed outright:
+                    // a failed, skipped or expected-to-fail phase witnessed nothing.
+                    if let Some((identity, observations)) = attempt_identities
+                        .iter()
+                        .find(|(candidate, _)| candidate.phase == "assertion")
+                    {
+                        observed_phases.insert("assertion".to_owned());
+                        let id = phase_id(run_id, identity);
+                        phases.push(CoveragePhase {
+                            id: id.clone(),
+                            kind: "assertion".into(),
+                            operation: format!("{runner} assertion"),
+                            source: Some(test.clone()),
+                            caused_by_phase_id: None,
+                            started_at_ms: position as i64 * 2 + 1,
+                            ended_at_ms: Some(position as i64 * 2 + 2),
+                            status: Some(
+                                if outcome == "passed" && !*xfail {
+                                    "passed"
+                                } else {
+                                    "failed"
+                                }
+                                .into(),
+                            ),
+                            error: None,
+                        });
+                        runtime.push(snapshot(&index, observations, &id)?);
+                    }
+                    Ok::<(), RubyEvidenceError>(())
+                },
+            )?;
+            // A phase the runtime entered but the runner never reported (the worker
+            // died inside it) is a failed phase with its evidence kept.
+            for (identity, observations) in attempt_identities {
+                if !observed_phases.contains(&identity.phase) {
+                    let id = phase_id(run_id, identity);
+                    phases.push(CoveragePhase {
+                        id: id.clone(),
+                        kind: match identity.phase.as_str() {
+                            "call" => "test",
+                            value => value,
+                        }
+                        .into(),
+                        operation: format!("{runner} {}", identity.phase),
+                        source: Some(test.clone()),
+                        caused_by_phase_id: None,
+                        started_at_ms: phases.len() as i64 * 2 + 1,
+                        ended_at_ms: None,
+                        status: Some("failed".into()),
+                        error: Some("the phase started but the runner reported no outcome".into()),
+                    });
+                    runtime.push(snapshot(&index, observations, &id)?);
                 }
-                .into(),
-            ),
-            flaky: false,
-            provenance: {
-                let tags = test_tags
+            }
+            let status = if phases.iter().any(|phase| phase.error.is_some()) {
+                "failed".into()
+            } else {
+                attempt_status(&outcomes)
+            };
+            let test_file = test_files
+                .get(&(worker.clone(), test.clone(), retry))
+                .and_then(|path| relative(root, path))
+                .or_else(|| test.split("::").next().map(str::to_owned));
+            raw_results.push(RawTestResult {
+                span: None,
+                test_id: Some(test.clone()),
+                scope: Some(scope(run_id, &worker, &test, retry)),
+                test: test.clone(),
+                // What the runner named, as the project names it. A runner
+                // identity is not a path, so the old derivation stays only as a
+                // fallback for an adapter that cannot name the file.
+                test_file: test_file.clone(),
+                title: test_titles
                     .get(&(worker.clone(), test.clone(), retry))
                     .cloned()
-                    .unwrap_or_default();
-                TestProvenance {
-                    runner: runner.clone(),
-                    kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
-                    project: None,
-                    source: RUBY_FRONTEND_VERSION.into(),
-                    tags,
-                }
-            },
-            role: "test".into(),
-            // Ruby 3.3+ probes every statement, so what a test is recorded as
-            // reaching is all of it. Unprobed lines come from Coverage's one-shot
-            // lines, which report a line the first time it executes in the
-            // process and never again: the first test to reach a line is
-            // credited with it, and a test's hits are a lower bound.
-            attribution: attribution.into(),
-            phases,
-            runtime,
-            browser: Vec::new(),
-            server: Vec::new(),
-        });
-    }
+                    .or_else(|| test.rsplit("::").next().map(str::to_owned)),
+                retry: Some(retry),
+                status: Some(status),
+                expected_status: Some(
+                    if outcomes.iter().any(|(_, _, xfail)| *xfail) {
+                        "failed"
+                    } else {
+                        "passed"
+                    }
+                    .into(),
+                ),
+                flaky: false,
+                provenance: {
+                    let tags = test_tags
+                        .get(&(worker.clone(), test.clone(), retry))
+                        .cloned()
+                        .unwrap_or_default();
+                    TestProvenance {
+                        runner: runner.clone(),
+                        kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
+                        project: None,
+                        source: RUBY_FRONTEND_VERSION.into(),
+                        tags,
+                    }
+                },
+                role: "test".into(),
+                // Ruby 3.3+ probes every statement, so what a test is recorded as
+                // reaching is all of it. Unprobed lines come from Coverage's one-shot
+                // lines, which report a line the first time it executes in the
+                // process and never again: the first test to reach a line is
+                // credited with it, and a test's hits are a lower bound.
+                attribution: attribution.into(),
+                phases,
+                runtime,
+                browser: Vec::new(),
+                server: Vec::new(),
+            });
+            Ok::<(), RubyEvidenceError>(())
+        })?;
     // Phases with observations whose test never produced any outcome at all
     // (for example a worker killed during its first phase).
     let default_observed = observed_runners
@@ -1437,25 +1445,29 @@ fn build_from_evidence(
         let runner = default_observed.clone();
         let mut phases = Vec::new();
         let mut runtime = Vec::new();
-        for (position, (identity, observations)) in identities.iter().enumerate() {
-            let id = phase_id(run_id, identity);
-            phases.push(CoveragePhase {
-                id: id.clone(),
-                kind: match identity.phase.as_str() {
-                    "call" => "test",
-                    value => value,
-                }
-                .into(),
-                operation: format!("{runner} {}", identity.phase),
-                source: Some(test.clone()),
-                caused_by_phase_id: None,
-                started_at_ms: position as i64 * 2 + 1,
-                ended_at_ms: None,
-                status: Some("failed".into()),
-                error: Some("the phase started but the runner reported no outcome".into()),
-            });
-            runtime.push(snapshot(&index, observations, &id)?);
-        }
+        identities
+            .iter()
+            .enumerate()
+            .try_for_each(|(position, (identity, observations))| {
+                let id = phase_id(run_id, identity);
+                phases.push(CoveragePhase {
+                    id: id.clone(),
+                    kind: match identity.phase.as_str() {
+                        "call" => "test",
+                        value => value,
+                    }
+                    .into(),
+                    operation: format!("{runner} {}", identity.phase),
+                    source: Some(test.clone()),
+                    caused_by_phase_id: None,
+                    started_at_ms: position as i64 * 2 + 1,
+                    ended_at_ms: None,
+                    status: Some("failed".into()),
+                    error: Some("the phase started but the runner reported no outcome".into()),
+                });
+                runtime.push(snapshot(&index, observations, &id)?);
+                Ok::<(), RubyEvidenceError>(())
+            })?;
         let test_file = test_files
             .get(&(worker.clone(), test.clone(), retry))
             .and_then(|path| relative(root, path))
@@ -1771,6 +1783,8 @@ pub(crate) mod tests {
             Err(error) => error.to_string(),
         };
         assert_eq!(read(&valid), "accepted");
+        // A transport its process never wrote to holds its header alone.
+        assert_eq!(read(&transport(&[])), "accepted");
         // The first frame's header is at 64 and its payload at 80.
         let payload_end = 80 + process.to_string().len();
         assert_ne!(payload_end % 8, 0, "the frame has padding to corrupt");
@@ -2822,5 +2836,77 @@ pub(crate) mod tests {
                 "Supercov measures Ruby 3.3 or newer; the test command ran Ruby 3.2.0",
             ]
         );
+    }
+
+    /// A phase the runtime entered and the runner never reported failed,
+    /// whichever it was; a worker named after the process record is the
+    /// one its records belong to; skipped and errored outcomes are kept.
+    #[test]
+    fn phases_never_reported_and_outcomes_of_every_kind_are_kept() {
+        use serde_json::json;
+        let source = "def f(a)\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let directory = temporary("unreported-phases");
+        fs::write(
+            directory.join("main.7.a.mmap"),
+            transport(&[
+                json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+                json!({"t":"worker","worker":"w1"}),
+                json!({"t":"phase","ctx":1,"at":1,"worker":"w1","test":"T#test_a","retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":1,"id":statement.id}),
+                json!({"t":"outcome","worker":"w1","test":"T#test_a","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"minitest","tags":[]}),
+                json!({"t":"phase","ctx":2,"at":2,"worker":"w1","test":"T#test_a","retry":0,"phase":"teardown"}),
+                json!({"t":"hit","ctx":2,"id":statement.id}),
+                json!({"t":"phase","ctx":3,"at":3,"worker":"w1","test":"T#test_b","retry":0,"phase":"setup"}),
+                json!({"t":"hit","ctx":3,"id":statement.id}),
+                json!({"t":"outcome","worker":"w1","test":"T#test_c","retry":0,"phase":"call","outcome":"skipped","xfail":false,"runner":"minitest"}),
+                json!({"t":"outcome","worker":"w1","test":"T#test_d","retry":0,"phase":"call","outcome":"error","xfail":false,"runner":"minitest"}),
+                json!({"t":"exit","at":9}),
+            ]),
+        )
+        .unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        let result = |test: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|raw| raw.test == test)
+                .unwrap_or_else(|| panic!("{test}"))
+        };
+        let phase = |test: &str, kind: &str| {
+            result(test)
+                .phases
+                .iter()
+                .find(|phase| phase.kind == kind)
+                .map(|phase| (phase.status.clone(), phase.error.is_some()))
+        };
+        assert_eq!(
+            phase("T#test_a", "teardown"),
+            Some((Some("failed".into()), true))
+        );
+        assert_eq!(
+            phase("T#test_b", "setup"),
+            Some((Some("failed".into()), true))
+        );
+        assert_eq!(result("T#test_c").status.as_deref(), Some("skipped"));
+        assert_eq!(result("T#test_d").status.as_deref(), Some("failed"));
+        fs::remove_dir_all(&directory).unwrap();
     }
 }
