@@ -3065,27 +3065,20 @@ fn numbered_file(
             })
         };
         let mut kept = Vec::with_capacity(insertions.len());
-        let mut pending = insertions.into_iter().peekable();
+        let mut pending = insertions.into_iter();
         while let Some(insertion) = pending.next() {
-            match insertion.kind {
-                // `push_wrapper` pushes each wrapper's two halves together;
-                // a half without its pair is kept, as it was written.
-                InsertionKind::Start => {
-                    match pending.next_if(|next| next.kind == InsertionKind::End) {
-                        Some(end) if within(insertion.offset, end.offset) => {}
-                        Some(end) => {
-                            kept.push(insertion);
-                            kept.push(end);
-                        }
-                        None => kept.push(insertion),
-                    }
+            if insertion.kind == InsertionKind::Direct {
+                if !strictly_inside(insertion.offset) {
+                    kept.push(insertion);
                 }
-                InsertionKind::End => kept.push(insertion),
-                InsertionKind::Direct => {
-                    if !strictly_inside(insertion.offset) {
-                        kept.push(insertion);
-                    }
-                }
+                continue;
+            }
+            // `push_wrapper` pushes a wrapper's two halves together, and
+            // nothing comes between them before here.
+            let end = pending.next().expect("a wrapper's end follows its start");
+            if !within(insertion.offset, end.offset) {
+                kept.push(insertion);
+                kept.push(end);
             }
         }
         insertions = kept;
@@ -3502,7 +3495,7 @@ fn main() {
         // A target that names nothing settles only what is no name.
         assert_eq!(TargetCfg::new(&[]).evaluate(&"unix".parse().unwrap()), Some(false));
 
-        let source = "pub fn a() -> u8 { b() }\n#[cfg(windows)]\nfn b() -> u8 { 1 }\n#[cfg(unix)]\nfn b() -> u8 { 2 }\n#[cfg(feature = \"x\")]\nfn c() -> u8 { 3 }\n#[cfg(unix)]\n#[cfg(windows)]\nfn d() -> u8 {\n    4\n}\n";
+        let source = "pub fn a() -> u8 { b() }\n#[cfg(windows)]\nfn b() -> u8 { 1 }\n#[cfg(unix)]\nfn b() -> u8 { 2 }\n#[cfg(feature = \"x\")]\nfn c() -> u8 { 3 }\n#[cfg(unix)]\n#[cfg(windows)]\nfn d() -> u8 {\n    4\n}\npub fn e(a: bool, b: bool) -> bool {\n    a && (b || a)\n}\n";
         let instrumented = instrument_rust_file(
             "src/lib.rs",
             source,
@@ -3524,6 +3517,13 @@ fn main() {
         assert!(lines.contains(&5) && lines.contains(&7), "{lines:?}");
         // Two predicates on one item hold together: unix and windows, never.
         assert!(!lines.contains(&11), "{lines:?}");
+        // A decision whose conditions nest keeps every probe beside code
+        // compiled out.
+        assert!(lines.contains(&14), "{lines:?}");
+        assert_eq!(
+            instrumented.manifest.decisions.iter().filter(|d| d.line == 14).count(),
+            1
+        );
         let windows = &instrumented.code[instrumented.code.find("#[cfg(windows)]").unwrap()
             ..instrumented.code.find("#[cfg(unix)]").unwrap()];
         assert!(!windows.contains("__supercov_runtime_v1"), "{windows}");
