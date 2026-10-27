@@ -11622,6 +11622,18 @@ fn wrap_rustdoc(
     files: &[(&str, &str)],
     args: &[&str],
 ) -> (common::Ran, String) {
+    wrap_rustdoc_with(project, scenario, files, args, &[])
+}
+
+/// [`wrap_rustdoc`], with more of the environment set.
+#[cfg(unix)]
+fn wrap_rustdoc_with(
+    project: &Project,
+    scenario: &str,
+    files: &[(&str, &str)],
+    args: &[&str],
+    more: &[(&str, &str)],
+) -> (common::Ran, String) {
     for (file, contents) in files {
         project.write(&format!("{scenario}/{file}"), contents);
     }
@@ -11629,6 +11641,7 @@ fn wrap_rustdoc(
     project.write_script(&format!("{scenario}/rustdoc"), FAKE_RUSTDOC);
     let directory = project.root.join(scenario);
     let results = directory.join("results");
+    let mut environment = more.to_vec();
     let ran = project.supercov_with(
         args,
         &[
@@ -11642,7 +11655,10 @@ fn wrap_rustdoc(
             ("CARGO_MANIFEST_DIR", project.root.to_str().unwrap()),
             // The run that starts rustdoc names its instrumentation.
             ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
-        ],
+        ]
+        .into_iter()
+        .chain(environment.drain(..))
+        .collect::<Vec<_>>(),
     );
     let recorded = ["00000000.json", "00000000.error"]
         .iter()
@@ -11842,6 +11858,40 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
     );
     let output = ran.exits(101);
     assert!(output.contains("could not launch"), "{output}");
+}
+
+/// The wrapper, and each runtool it starts, run once for every file
+/// operation they make with that one failing: each stops the package and
+/// says why, never panics, and the run no fault reaches records it.
+#[cfg(unix)]
+#[test]
+fn a_doctest_wrapper_whose_file_operation_fails_says_so() {
+    let project = fake_rustdoc_project("rustdoc-faults");
+    let files = [
+        ("merged", "src/lib.rs - a (line 1): test\n"),
+        ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
+        ("standalone", "src/lib.rs - s (line 3): test\n"),
+    ];
+    for nth in 1.. {
+        let scenario = format!("fault-{nth}");
+        let fault = format!("fs@{nth}");
+        let (ran, recorded) = wrap_rustdoc_with(
+            &project,
+            &scenario,
+            &files,
+            &["--test", "src/lib.rs"],
+            &[("SUPERCOV_TEST_FAULT", &fault)],
+        );
+        let stderr = ran.stderr();
+        assert!(!stderr.contains("panicked"), "{fault}: {stderr}");
+        if !stderr.contains("test fault at") {
+            ran.succeeds();
+            let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+            assert_eq!(recorded["cases"].as_array().unwrap().len(), 2, "{recorded}");
+            assert!(nth > 5, "the sweep reached {nth} calls");
+            break;
+        }
+    }
 }
 
 #[cfg(unix)]

@@ -734,17 +734,16 @@ fn listed_names(text: &str) -> Vec<String> {
 
 fn next_sequence(directory: &Path, prefix: &str) -> Result<usize, RustTestRunnerError> {
     fs::create_dir_all(directory).map_err(io_error)?;
-    for candidate in 0..1_000_000_usize {
-        let marker = directory.join(format!("{prefix}{candidate:08}.claim"));
-        match fs::open_with(fs::OpenOptions::new().write(true).create_new(true), &marker) {
-            Ok(_) => return Ok(candidate),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io_error(error)),
-        }
-    }
-    Err(RustTestRunnerError::Io(
-        "too many doctest sequence claims".into(),
-    ))
+    (0_usize..)
+        .find_map(|candidate| {
+            let marker = directory.join(format!("{prefix}{candidate:08}.claim"));
+            match fs::open_with(fs::OpenOptions::new().write(true).create_new(true), &marker) {
+                Ok(_) => Some(Ok(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(io_error(error))),
+            }
+        })
+        .expect("claims are tried until one is made or fails")
 }
 
 fn relay(output: &Output) {
@@ -793,7 +792,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
     let package = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "package".into());
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_default();
     let sequence = next_sequence(&root.join("packages"), "")?;
     let package_dir = root.join("packages").join(format!("{sequence:08}"));
     fs::create_dir_all(package_dir.join("invocations")).map_err(io_error)?;
@@ -1213,7 +1212,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                     .unwrap_or_default();
                 let manifest_dir = fs::read_to_string(package_dir.join("manifest-dir"))
                     .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("."));
+                    .unwrap_or_default();
                 let ran = by_index.keys().copied().collect::<BTreeSet<_>>();
                 quiet_cases(&text, &order, &selected, &ran, &manifest_dir).unwrap_or_default()
             } else {
@@ -1879,5 +1878,38 @@ mod tests {
             !diagnostics.contains("[supercov] Rust doctest failed: src/lib.rs - seen"),
             "{diagnostics}"
         );
+    }
+
+    #[test]
+    fn nothing_given_is_nothing_read() {
+        assert_eq!(parse_rustdoc_arguments(&[]), RustdocArguments::default());
+        assert_eq!(isolate("", &[]), None);
+        let order = ["src/lib.rs - a (line 1)".to_owned()];
+        for summary in [
+            "test result: ok. 0 failed; 0 ignored",
+            "test result: ok. 1 passed; 0 ignored",
+            "test result: ok. 1 passed; 0 failed",
+        ] {
+            assert_eq!(
+                quiet_cases(
+                    summary,
+                    &order,
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
+                    Path::new(".")
+                ),
+                None,
+                "{summary}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_with_no_doctest_package_is_no_doctests() {
+        let (results, diagnostics, exit) = doctests_through(&["test", "--doc"], "", "", "", 0);
+        assert!(results.unwrap().is_empty());
+        assert_eq!(exit, 0);
+        assert_eq!(diagnostics, "");
     }
 }
