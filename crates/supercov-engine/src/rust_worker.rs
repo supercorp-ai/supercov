@@ -2154,11 +2154,25 @@ mod tests {
                 ["fff999k2", theirs.len(), [segment(&theirs)]],
             ],
         });
+        // A line that is no take, and a take of no regions, add nothing.
+        let empty = json!({"start": 1, "end": 2, "regions": []});
+        let windows = directory.join("worker-41.windows");
         fs::write(
-            directory.join("worker-41.windows"),
-            format!("{line}\n{{\"start\": 3, \"end\""),
+            &windows,
+            format!("{{}}\n{empty}\n{line}\n{{\"start\": 3, \"end\""),
         )
         .unwrap();
+        // The takes unread, a region unwritten, the takes left in place:
+        // each is the run's failure, and the takes are there to read again.
+        for fault in ["fs.read_to_string", "fs.write", "fs.remove_file"] {
+            let failed =
+                crate::fault::during(fault, || materialize_worker_windows(&directory, "abc123"));
+            assert!(
+                failed.is_err_and(|error| error.contains("injected")),
+                "{fault}"
+            );
+            assert!(windows.is_file(), "{fault}");
+        }
         let crates = materialize_worker_windows(&directory, "abc123").unwrap();
         assert_eq!(
             crates,
@@ -2169,7 +2183,7 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         names.sort();
-        assert_eq!(names, ["abc123-worker-0000-000000-0.region"]);
+        assert_eq!(names, ["abc123-worker-0000-000002-0.region"]);
         assert_eq!(fs::read(directory.join(&names[0])).unwrap(), ours);
         // Read once: a second pass finds nothing new.
         assert!(
