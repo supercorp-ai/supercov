@@ -285,9 +285,9 @@ fn yields_value(node: Node) -> bool {
 
 /// Whether an `if`, `when` or `try` is used for its value.
 fn used(expression: Node) -> bool {
-    let Some(parent) = expression.parent() else {
-        return false;
-    };
+    let parent = expression
+        .parent()
+        .expect("an expression is never the tree's root");
     match parent.kind() {
         // A statement of its own, unless it ends a block that is a value.
         "block" => yields_value(expression),
@@ -443,6 +443,8 @@ mod tests {
         // Without a nested class, or with an anonymous one, the first.
         assert_eq!(at("app.CartTest#total()"), Some(5));
         assert_eq!(at("app.CartTest$1#total()"), Some(5));
+        // A nested class the file does not declare: the first, as well.
+        assert_eq!(at("app.CartTest$Absent#total()"), Some(5));
         // A name with no parameter list names its method all the same; one
         // the class does not declare is not found.
         assert_eq!(at("app.CartTest$WithItems#total"), Some(13));
