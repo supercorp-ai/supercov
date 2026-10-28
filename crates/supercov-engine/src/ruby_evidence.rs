@@ -354,7 +354,10 @@ fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, R
         // The file is immutable from Supercov's perspective after the wrapped
         // interpreter has exited. No mutable alias is created while this map
         // is alive.
-        let contents = unsafe { MmapOptions::new().map(&file) }
+        let contents =
+            crate::fault::io("ruby-evidence-map", std::io::ErrorKind::Other, || unsafe {
+                MmapOptions::new().map(&file)
+            })
             .map_err(|error| RubyEvidenceError::Io(error.to_string()))?;
         read_evidence_file(&name, &contents, run_id, &mut evidence)?;
     }
@@ -2630,6 +2633,11 @@ pub(crate) mod tests {
             }
             assert_eq!(read(&directory), format!("UnsafeEntry({make:?})"));
         }
+        // A transport that cannot be mapped.
+        let directory = base.join("unmapped");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("a.mmap"), b"").unwrap();
+        assert!(crate::fault::during("ruby-evidence-map", || read(&directory)).starts_with("Io"));
         // macOS names no file that is not UTF-8.
         #[cfg(target_os = "linux")]
         {
