@@ -13109,13 +13109,25 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
     );
     assert_eq!(kept.code(), 0, "{}", kept.stderr());
     reached("launcher-path-text", &kept.stderr());
-    // So does a launcher directory, or launcher, that cannot be made.
+    // So does a run that cannot find its own path to launch tools with.
+    let kept = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "current-exe"), ("PATH", &path)],
+    );
+    assert_eq!(kept.code(), 0, "{}", kept.stderr());
+    reached("current-exe", &kept.stderr());
+    // And a launcher directory that cannot be cleared, or made, or a
+    // launcher that cannot be written.
     for (fault, place) in [
         (
-            "fs.create_dir_all#source_tools.rs:233",
-            "source_tools.rs:233",
+            "fs.symlink_metadata#source_tools.rs:211",
+            "source_tools.rs:211",
         ),
-        ("fs.write#source_tools.rs:241", "source_tools.rs:241"),
+        (
+            "fs.create_dir_all#source_tools.rs:232",
+            "source_tools.rs:232",
+        ),
+        ("fs.write#source_tools.rs:240", "source_tools.rs:240"),
     ] {
         let kept = project.supercov_with(
             &["--", "node", "--test"],

@@ -149,8 +149,7 @@ fn launcher_on(
 
 /// This binary, by a path a shell and `cmd.exe` can both be given.
 pub fn launching_binary() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
+    crate::fault::or("current-exe", || None, || std::env::current_exe().ok())
         .map(crate::workspace::simplified)
 }
 
@@ -339,6 +338,7 @@ fn remove(path: &Path) -> io::Result<()> {
 }
 
 /// Make `link` a symbolic link to `target`, whatever it was.
+#[track_caller]
 fn point(link: &Path, target: &Path) -> io::Result<()> {
     if fs::read_link(link).is_ok_and(|current| current == target) {
         return Ok(());
@@ -746,6 +746,9 @@ mod tests {
             ("view", "fs.remove_file@1"),
             ("view", "fs.create_dir@5"),
             ("view", "fs.symlink@1"),
+            // The project's dependencies, and the boundary, not laid in.
+            ("view", "fs.symlink_metadata#source_tools.rs:418"),
+            ("view", "fs.symlink_metadata#source_tools.rs:440"),
             // What a tool did, brought back alone: a file linked in, one in
             // a directory it made, a link it made.
             ("reconcile", "fs.metadata@1"),
@@ -1311,6 +1314,9 @@ mod tests {
             ),
             "--config=/w/p/biome.json"
         );
+        // An argument that is no text is passed on as it is.
+        let unread = OsStr::from_bytes(b"--config=\xff");
+        assert_eq!(in_view(unread, &[Path::new("/w")], Path::new("/v")), unread);
     }
 
     #[test]
