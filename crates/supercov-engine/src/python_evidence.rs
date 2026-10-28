@@ -3370,6 +3370,34 @@ pub(crate) mod tests {
         run
     }
 
+    /// A server that left no interpreter's evidence, or evidence that is no
+    /// directory, makes no run.
+    #[test]
+    fn a_server_without_evidence_makes_no_run() {
+        let obligations = build_python_obligations("m.py", "x = 1\n").unwrap();
+        let server_run = |directory: &Path| {
+            build_python_server_run(
+                &obligations.manifest,
+                directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+                &[],
+            )
+            .err()
+            .map(|error| format!("{error:?}"))
+        };
+        let directory = temporary("server-without-evidence");
+        let empty = server_run(&directory).unwrap();
+        assert!(!empty.starts_with("Io"), "{empty}");
+        fs::remove_dir_all(&directory).unwrap();
+        fs::write(&directory, b"x").unwrap();
+        let unlisted = server_run(&directory).unwrap();
+        assert!(unlisted.starts_with("Io"), "{unlisted}");
+        fs::remove_file(directory).unwrap();
+    }
+
     #[test]
     fn a_snapshot_that_names_its_phase_analyses_as_the_events_it_replaces() {
         // Python names a snapshot's phase once instead of writing an explicit
