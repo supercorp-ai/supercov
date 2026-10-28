@@ -14,6 +14,9 @@ use std::path::Path;
 /// `Default::default()`, a `let` or assignment's value becoming
 /// `Default::default()`, anything else skipped. Items and `let` without a
 /// value are not assessed.
+/// Ra's parser gives these nodes their parts even in a tree with errors.
+const WHOLE: &str = "the parser gives this node every part its syntax requires";
+
 pub(super) fn statement_starts(source: &str) -> Starts {
     let mut out = Starts::new();
     let parsed = [
@@ -376,7 +379,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                         .fields()
                         .filter_map(|f| {
                             Some((
-                                f.name()?.text().to_string(),
+                                f.name().expect(WHOLE).text().to_string(),
                                 words(&f.ty()?.syntax().text().to_string()),
                             ))
                         })
@@ -454,7 +457,7 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
     let returns = |name: &str| signatures.returns.get(name).cloned().flatten();
     match e {
         ast::Expr::ParenExpr(p) => infer(&p.expr()?, crate_view),
-        ast::Expr::TryExpr(t) => unwrap_try(&infer(&t.expr()?, crate_view)?),
+        ast::Expr::TryExpr(t) => unwrap_try(&infer(&t.expr().expect(WHOLE), crate_view)?),
         ast::Expr::PathExpr(p) => crate_view
             .locals
             .get(&p.syntax().text().to_string())
@@ -472,17 +475,17 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                 format!("({})", types.join(","))
             })
         }
-        ast::Expr::CallExpr(c) => match c.expr()? {
+        ast::Expr::CallExpr(c) => match c.expr().expect(WHOLE) {
             ast::Expr::PathExpr(p) => {
-                let path = p.path()?;
-                let name = path.segment()?.name_ref()?.text().to_string();
+                let path = p.path().expect(WHOLE);
+                let name = path.segment().expect(WHOLE).name_ref()?.text().to_string();
                 if matches!(name.as_str(), "alloc" | "alloc_zeroed" | "realloc") {
                     return Some("*mut u8".into());
                 }
                 if path.qualifier().is_none() {
                     // `Some(x)`; a closure parameter called, `impl Fn() -> T`.
                     if name == "Some" {
-                        let argument = c.arg_list()?.args().next()?;
+                        let argument = c.arg_list().expect(WHOLE).args().next()?;
                         return Some(format!("Option<{}>", infer(&argument, crate_view)?));
                     }
                     if let Some(local) = crate_view.locals.get(&name) {
@@ -503,7 +506,7 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
         },
         ast::Expr::MethodCallExpr(m) => {
             let name = m.name_ref()?.text().to_string();
-            let receiver = m.receiver()?;
+            let receiver = m.receiver().expect(WHOLE);
             // Raw pointers: a pointer moved is the same pointer type; a
             // cast names its target; a read gives what it points at.
             let pointer = || -> Option<String> {
@@ -565,10 +568,11 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
         }
         ast::Expr::MacroExpr(m) => {
             let name = m
-                .macro_call()?
-                .path()?
-                .segment()?
-                .name_ref()?
+                .macro_call()
+                .and_then(|call| call.path())
+                .and_then(|path| path.segment())
+                .and_then(|segment| segment.name_ref())
+                .expect(WHOLE)
                 .text()
                 .to_string();
             match name.as_str() {
@@ -898,23 +902,23 @@ fn changed(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String> {
     }
     let types = ty.and_then(tuple);
     // A tuple written out: one element changed in place.
+    // Two elements at least: `tuple` reads no other.
     if let Some(elements) = tuple(e) {
-        for (i, element) in elements.iter().enumerate() {
+        return elements.iter().enumerate().find_map(|(i, element)| {
             let element_ty = types
                 .as_ref()
                 .filter(|t| t.len() == elements.len())
                 .map(|t| t[i].as_str())
                 .filter(|t| *t != "_")
                 .or_else(|| crate_view.locals.get(element.as_str()).map(String::as_str));
-            if let Some(changed) = changed(element, element_ty, crate_view)
-                && changed != *element
-            {
-                let mut out = elements.clone();
-                out[i] = changed;
-                return Some(format!("({})", out.join(", ")));
-            }
-        }
-        return None;
+            changed(element, element_ty, crate_view)
+                .filter(|changed| changed != element)
+                .map(|changed| {
+                    let mut out = elements.clone();
+                    out[i] = changed;
+                    format!("({})", out.join(", "))
+                })
+        });
     }
     // A tuple computed: computed, then one element changed.
     if let Some(types) = types {
@@ -1097,10 +1101,13 @@ fn other_variant(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String
 /// definition.
 fn record(r: &ast::RecordExpr, crate_view: &Crate) -> Option<String> {
     // `Self { .. }` in an impl names the impl's own type.
-    let path = resolve_self(&r.path()?.syntax().text().to_string(), r.syntax());
+    let path = resolve_self(
+        &r.path().expect(WHOLE).syntax().text().to_string(),
+        r.syntax(),
+    );
     let name = path.rsplit("::").next().unwrap_or_default();
     let types = crate_view.signatures.structs.get(name)?;
-    let list = r.record_expr_field_list()?;
+    let list = r.record_expr_field_list().expect(WHOLE);
     let fields = list
         .fields()
         .map(|f| {
@@ -1385,9 +1392,10 @@ fn return_type(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
 /// The type a block's value has when it is what the function returns: the
 /// body's value, or a branch or arm of an `if` or `match` that is.
 fn tail_type(list: &ast::StmtList) -> Option<String> {
-    let mut node = list.syntax().parent()?; // the block
+    const HELD: &str = "a block, and what it forms, stand in something";
+    let mut node = list.syntax().parent().expect(HELD); // the block
     loop {
-        let parent = node.parent()?;
+        let parent = node.parent().expect(HELD);
         if let Some(f) = ast::Fn::cast(parent.clone()) {
             return Some(
                 f.ret_type()
@@ -1409,9 +1417,9 @@ fn tail_type(list: &ast::StmtList) -> Option<String> {
         // `expression` is the block itself or the `if` or `match` it climbed
         // to. One that stands in a block directly is that block's tail: the
         // parser puts any other expression in a statement of its own.
-        let holder = expression.parent()?;
+        let holder = expression.parent().expect(HELD);
         let list = ast::StmtList::cast(holder)?;
-        node = list.syntax().parent()?;
+        node = list.syntax().parent().expect(HELD);
     }
 }
 
@@ -2651,6 +2659,45 @@ fn f(a: bool) -> u8 {
         assert_eq!(at(8), "Default::default()");
         assert_eq!(at(10), "Default::default()");
         assert_eq!(at(11), "S { y: 0 }", "the named field alone");
+    }
+
+    /// Values whose parts a broken file leaves out, and the rarer shapes a
+    /// whole one has, are read for what they hold. Each broken source has
+    /// an error no edition forgives, so the tree read is the one with gaps.
+    #[test]
+    fn values_missing_their_parts_are_read_for_what_they_hold() {
+        let broken = r#"struct S { pub : u8, y: u8 }
+pub enum Mode { On, Off }
+impl Mode {
+    fn other(&self) -> Mode { Self::On }
+}
+impl { type X = u8; fn x() -> Self::X { 1 } }
+fn f(a: bool, c: bool) -> u8 {
+    let v = a::();
+    let w = try;
+    let x = if c try else { 2 };
+    let y = if c { 1 } else if a try else { 3 };
+    let z = S { y: 1, };
+    let u = ();
+    let p = (1u8, 2u8);
+    let g = |v: u8| -> u8 { return v + 1; };
+    let h = std::ptr::addr_of!(a);
+    let k = m!();
+    g(1)
+}
+fn broken( {
+"#;
+        let signatures = signatures([("src/lib.rs", broken)].into_iter());
+        let r = replacements("src/lib.rs", broken, &signatures);
+        assert!(!r.is_empty());
+        // An `if` whose branch is a `try` written without its block.
+        for value in ["if c try else { 2 }", "if c { 1 } else if a try else { 3 }"] {
+            let source = format!(
+                "fn f(a: bool, c: bool) -> u8 {{\n    let x = {value};\n    x\n}}\nfn broken( {{\n"
+            );
+            let read = super::signatures([("src/lib.rs", source.as_str())].into_iter());
+            let _ = replacements("src/lib.rs", &source, &read);
+        }
     }
 
     /// Text read word by word, brackets that close early, the output of a
