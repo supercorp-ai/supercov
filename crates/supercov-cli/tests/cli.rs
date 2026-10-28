@@ -11971,6 +11971,35 @@ fn a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure() {
     assert!(!refused.contains("wrapped command"), "{refused}");
 }
 
+/// Each query's own read of the index failing -- a decision looked up by its
+/// place, the older and newer run of a diff, the summary's runners -- refuses
+/// the query, and names where.
+#[test]
+fn a_query_whose_own_index_read_fails_is_refused() {
+    let project = Project::cart("index-read-places");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let runs = project.supercov(&["runs", "--json"]).json();
+    let older = runs["data"]["runs"][0]["id"].as_str().unwrap().to_owned();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    for (command, place) in [
+        (
+            vec!["runs", "latest", "decision", "src/cart.js:3"],
+            "coverage_query.rs:1668",
+        ),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2845"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2938@2"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2831@2"),
+        (vec!["runs", "latest", "summary"], "coverage_query.rs:3262"),
+    ] {
+        let fault = format!("coverage-index-read#{place}");
+        let ran = project.supercov_with(&command, &[("SUPERCOV_TEST_FAULT", &fault)]);
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_eq!(ran.code(), 2, "{fault}: {said}");
+        let at = place.split('@').next().unwrap();
+        assert!(fired_at(&said, at), "{fault}: {said}");
+    }
+}
+
 /// An index that cannot be read partway through a command is named as the
 /// failure: the tests a filter picks, the newer run a diff compares with,
 /// read or opened. A failed run whose index cannot be read still exits as
