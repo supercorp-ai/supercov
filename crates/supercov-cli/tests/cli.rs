@@ -15846,6 +15846,106 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
     }
 }
 
+/// A query recomputes a run's inputs to judge whether it is current: the
+/// project's root resolved, its tree walked. Either failing, for a Rust, Go,
+/// Ruby or Java run, reads the run as stale rather than failing the query;
+/// so do source roots the run was measured under that resolve to nothing.
+#[test]
+fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
+    let stale_when = |project: &Project, faults: &[(&str, &str)]| {
+        for (fault, place) in faults {
+            let read =
+                project.supercov_with(&["runs", "latest"], &[("SUPERCOV_TEST_FAULT", fault)]);
+            let said = format!("{}{}", read.stdout(), read.stderr());
+            assert!(fired_at(&said, place), "{fault}: {said}");
+            assert!(said.contains("stale run"), "{fault}: {said}");
+        }
+    };
+    let measured = |label: &str, write: fn(&Project), command: &[&str]| {
+        let project = Project::empty(label);
+        write(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        project.supercov(command).succeeds();
+        project
+    };
+    let project = measured("stale-rust", small_crate, &["--", "cargo", "test", "-q"]);
+    stale_when(
+        &project,
+        &[
+            ("fs.canonicalize#rust_run.rs:245", "rust_run.rs:245"),
+            ("fs.read_dir#rust_run.rs:85", "rust_run.rs:85"),
+        ],
+    );
+    if let Some(go) = go() {
+        let project = measured("stale-go", go_project, &["--", go, "test", "./..."]);
+        stale_when(
+            &project,
+            &[
+                ("fs.canonicalize#go_run.rs:609", "go_run.rs:609"),
+                ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+            ],
+        );
+    }
+    #[cfg(unix)]
+    if let Some(ruby) = ruby() {
+        let project = Project::empty("stale-ruby");
+        ruby_project(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
+        project
+            .supercov_with(&command, &[("SUPERCOV_SOURCE_ROOTS", "lib")])
+            .succeeds();
+        stale_when(
+            &project,
+            &[
+                ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
+                ("fs.read_dir#ruby_project.rs:100", "ruby_project.rs:100"),
+            ],
+        );
+        std::fs::rename(project.root.join("lib"), project.root.join("moved")).unwrap();
+        let read = project.supercov(&["runs", "latest"]);
+        let said = format!("{}{}", read.stdout(), read.stderr());
+        assert!(said.contains("stale run"), "{said}");
+    }
+    if std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        let project = measured(
+            "stale-jvm",
+            small_maven_project,
+            &["--", "mvn", "-q", "test"],
+        );
+        stale_when(
+            &project,
+            &[
+                ("fs.canonicalize#jvm_run.rs:1505", "jvm_run.rs:1505"),
+                ("fs.read_dir#jvm_project.rs:173", "jvm_project.rs:173"),
+            ],
+        );
+    }
+    // And a Python run measured under roots that are gone.
+    let project = Project::empty("stale-python-roots");
+    python_project(&project);
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov_with(
+            &[
+                "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+            ],
+            &[("SUPERCOV_SOURCE_ROOTS", "pkg")],
+        )
+        .succeeds();
+    std::fs::rename(project.root.join("pkg"), project.root.join("moved")).unwrap();
+    let read = project.supercov(&["runs", "latest"]);
+    let said = format!("{}{}", read.stdout(), read.stderr());
+    assert!(said.contains("stale run"), "{said}");
+}
+
 /// A Python test skipped where it is declared, or a Ruby one as it runs, is
 /// in the run, skipped.
 #[test]
