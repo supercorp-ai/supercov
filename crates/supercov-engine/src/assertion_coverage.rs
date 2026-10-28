@@ -3142,6 +3142,17 @@ mod tests {
             change_at(&starts, 8, "a && b", js),
             Some(Change::ExpressionUndefined)
         );
+        // A default export of a value is skipped; of a declaration, not asked.
+        let exported = "export default { a: 1 }\nexport default function g() {}\n";
+        let starts = statement_starts("x.js", exported);
+        assert_eq!(
+            change_at(&starts, 1, "export default { a: 1 }", js),
+            Some(Change::Skip)
+        );
+        assert_eq!(
+            change_at(&starts, 2, "export default function g() {}", js),
+            None
+        );
     }
 
     #[test]
