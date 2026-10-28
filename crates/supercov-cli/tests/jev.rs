@@ -4333,6 +4333,37 @@ fn a_quality_report_names_the_sources_it_cannot_embed() {
     );
 }
 
+/// A security assessment with no run or quality assessment beside it is
+/// reported on its own: the one entry of the report's timeline.
+#[test]
+fn a_security_assessment_alone_is_reported() {
+    let project = Project::cart("security-alone");
+    let (base, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["security"], &through(&base))
+        .succeeds();
+    project
+        .supercov(&["report", "--no-open", "--output", "alone.html"])
+        .succeeds();
+    let html = project.read("alone.html");
+    let marker = r#"<script id="report-data" type="application/octet-stream">"#;
+    let start = html.find(marker).unwrap() + marker.len();
+    let end = start + html[start..].find("</script>").unwrap();
+    use base64::Engine as _;
+    use std::io::Read as _;
+    let compressed = base64::engine::general_purpose::STANDARD
+        .decode(&html[start..end])
+        .unwrap();
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+        .read_to_string(&mut json)
+        .unwrap();
+    let data = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+    let timeline = data["timeline"].as_array().unwrap();
+    assert_eq!(timeline.len(), 1, "{timeline:?}");
+    assert_eq!(timeline[0]["kind"], "security", "{timeline:?}");
+}
+
 #[test]
 fn a_run_that_cannot_be_read_is_named_before_anything_is_asked() {
     let project = Project::cart("bad-run");
