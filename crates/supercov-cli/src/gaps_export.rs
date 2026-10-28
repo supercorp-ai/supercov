@@ -186,7 +186,8 @@ fn file_details(
     let view = request.view().expect("the gaps query read this view");
     let read = supercov_engine::coverage_query::FileDetailSource::read(&index, view)
         .map_err(|error| format!("{error:?}"))?;
-    files
+    // Each file the gaps named is one of the run's.
+    Ok(files
         .iter()
         .map(|file| {
             let (detail, _) = supercov_engine::coverage_query::coverage_file_detail_from(
@@ -202,10 +203,10 @@ fn file_details(
                     limit: usize::MAX,
                 },
             )
-            .map_err(|error| format!("{file}: {error:?}"))?;
-            Ok(detail)
+            .expect("a file the gaps named has its detail");
+            detail
         })
-        .collect()
+        .collect())
 }
 
 /// The options among `arguments` that `file` takes as well, with their values.
