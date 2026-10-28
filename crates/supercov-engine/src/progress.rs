@@ -32,7 +32,7 @@ const QUIET_PERIOD: Duration = Duration::from_millis(120);
 #[cfg(unix)]
 fn status_output() -> Option<std::fs::File> {
     use std::os::fd::FromRawFd;
-    let descriptor = unsafe { libc::dup(2) };
+    let descriptor = crate::fault::libc("status-dup", libc::EMFILE, || unsafe { libc::dup(2) });
     (descriptor >= 0).then(|| unsafe { std::fs::File::from_raw_fd(descriptor) })
 }
 
@@ -100,6 +100,11 @@ mod tests {
     #[test]
     fn the_status_line_starts_only_on_a_terminal() {
         assert!(ProgressLine::start_when(false, "not shown").is_none());
+        // A terminal whose standard error cannot be held for the line.
+        assert!(
+            crate::fault::during("status-dup", || ProgressLine::start_when(true, "not held"))
+                .is_none()
+        );
         let line = ProgressLine::start_when(true, "shown on a terminal");
         assert!(line.is_some());
         drop(line);
