@@ -14569,14 +14569,14 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#6", "python_run.rs:668"),
-        ("fs.create_dir_all#7", "python_run.rs:669"),
-        ("fs.create_dir_all#8", "ruby_run.rs:508"),
-        ("fs.create_dir_all#9", "ruby_run.rs:509"),
-        ("fs.create_dir_all#13", "go_run.rs:305"),
-        ("fs.create_dir_all#14", "go_run.rs:309"),
-        ("fs.create_dir_all#15", "go_run.rs:361"),
-        ("fs.create_dir_all#16", "go_run.rs:400"),
+        ("fs.create_dir_all#python_run.rs:668", "python_run.rs:668"),
+        ("fs.create_dir_all#python_run.rs:669", "python_run.rs:669"),
+        ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
+        ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
+        ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
+        ("fs.create_dir_all#go_run.rs:309", "go_run.rs:309"),
+        ("fs.create_dir_all#go_run.rs:361", "go_run.rs:361"),
+        ("fs.create_dir_all#go_run.rs:400", "go_run.rs:400"),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -14600,11 +14600,11 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
 #[test]
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#9", "jvm_run.rs:2000"),
-        ("fs.create_dir_all#10", "jvm_run.rs:2016"),
-        ("fs.create_dir_all#11", "jvm_run.rs:2026"),
-        ("fs.write#4", "jvm_run.rs:2000"),
-        ("fs.write#5", "jvm_run.rs:2016"),
+        ("fs.create_dir_all#jvm_run.rs:2000", "jvm_run.rs:2000"),
+        ("fs.create_dir_all#jvm_run.rs:2016", "jvm_run.rs:2016"),
+        ("fs.create_dir_all#jvm_run.rs:2026", "jvm_run.rs:2026"),
+        ("fs.write#jvm_run.rs:2000", "jvm_run.rs:2000"),
+        ("fs.write#jvm_run.rs:2016", "jvm_run.rs:2016"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -14647,10 +14647,26 @@ fn a_javascript_run_that_cannot_write_its_diagnostics_says_so() {
 #[test]
 fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
-        ("fs.read#11@1", "python_project.rs:268", "server/app.py"),
-        ("fs.open#1@4", "integrity.rs:426", "server/app.py"),
-        ("fs.read#9@5", "source_capture.rs:54", "server/app.py"),
-        ("fs.write#4@1", "python_run.rs:675", "plan.json"),
+        (
+            "fs.read#python_project.rs:268@1",
+            "python_project.rs:268",
+            "server/app.py",
+        ),
+        (
+            "fs.open#integrity.rs:426@4",
+            "integrity.rs:426",
+            "server/app.py",
+        ),
+        (
+            "fs.read#source_capture.rs:54@5",
+            "source_capture.rs:54",
+            "server/app.py",
+        ),
+        (
+            "fs.write#python_run.rs:675@1",
+            "python_run.rs:675",
+            "plan.json",
+        ),
     ] {
         let project = Project::cart("browser-python");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -14672,11 +14688,27 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
 #[test]
 fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
-        ("fs.read#11@1", "ruby_project.rs:224", "web/app.rb"),
-        ("fs.open#1@4", "integrity.rs:426", "web/app.rb"),
-        ("fs.read#9@5", "source_capture.rs:54", "web/app.rb"),
-        ("fs.write#3@1", "ruby_run.rs:93", "supercov_runtime.rb"),
-        ("fs.write#4@1", "ruby_run.rs:513", "plan.rb"),
+        (
+            "fs.read#ruby_project.rs:224@1",
+            "ruby_project.rs:224",
+            "web/app.rb",
+        ),
+        (
+            "fs.open#integrity.rs:426@4",
+            "integrity.rs:426",
+            "web/app.rb",
+        ),
+        (
+            "fs.read#source_capture.rs:54@5",
+            "source_capture.rs:54",
+            "web/app.rb",
+        ),
+        (
+            "fs.write#ruby_run.rs:93@1",
+            "ruby_run.rs:93",
+            "supercov_runtime.rb",
+        ),
+        ("fs.write#ruby_run.rs:513@1", "ruby_run.rs:513", "plan.rb"),
     ] {
         let project = Project::cart("browser-ruby");
         project.write(".gitignore", "out/\nnode_modules/\n");

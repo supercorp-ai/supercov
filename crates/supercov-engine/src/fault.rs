@@ -4,7 +4,9 @@
 //! `site#N` only the first call from the Nth place in the code that calls it
 //! (where the site knows its caller, as [`crate::fault_fs`] does) and
 //! `site#N@M` only its Mth -- the count of one place, which no walk over a
-//! varying number of files moves --
+//! varying number of files moves -- and `site#file.rs:L` (or
+//! `site#file.rs:L@M`) the call made at line `L` of `file.rs`, whatever
+//! order places are first called in, as threads working at once decide --
 //! `site.operation` only the calls that make that operation (`fs.hard_link`,
 //! where the caller names what it does), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
@@ -31,10 +33,19 @@ struct Fault {
     skip: std::sync::atomic::AtomicUsize,
     /// Calls left to fail; `None` for every call.
     remaining: Option<std::sync::atomic::AtomicUsize>,
-    /// For `site#N`: N, and the places in the code that called the site so
-    /// far, in the order they first did. The calls from the Nth place are
+    /// For `site#...`: the place it names. The calls from that place are
     /// counted by `skip` and `remaining`.
-    place: Option<(usize, std::sync::Mutex<Vec<Place>>)>,
+    place: Option<Named>,
+}
+
+/// The place a `site#...` names.
+#[cfg(any(test, debug_assertions))]
+enum Named {
+    /// The Nth place the site was called from, and those places so far, in
+    /// the order they first called it.
+    Nth(usize, std::sync::Mutex<Vec<Place>>),
+    /// The place at this line of a file of this name.
+    At(String, u32),
 }
 
 /// Where in the code a call was made, and which call it was: a helper marked
@@ -89,10 +100,16 @@ fn parse(text: &str) -> Vec<Fault> {
                     .or_else(|| count.parse().ok())
                     .or_else(|| (!place.is_empty()).then_some(1))
                     .map(std::sync::atomic::AtomicUsize::new),
-                place: place
-                    .parse::<usize>()
-                    .ok()
-                    .map(|nth| (nth, std::sync::Mutex::new(Vec::new()))),
+                place: match place.rsplit_once(':') {
+                    Some((file, line)) => line
+                        .parse()
+                        .ok()
+                        .map(|line| Named::At(file.to_owned(), line)),
+                    None => place
+                        .parse::<usize>()
+                        .ok()
+                        .map(|nth| Named::Nth(nth, std::sync::Mutex::new(Vec::new()))),
+                },
             }
         })
         .collect()
@@ -248,7 +265,7 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
         let fails = match (&fault.place, place) {
             // A call from the Nth place the site was called from, counted
             // as `site@N` counts every call: the first, or the Mth.
-            (Some((nth, seen)), Some(place)) => {
+            (Some(Named::Nth(nth, seen)), Some(place)) => {
                 let mut seen = seen
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -256,6 +273,13 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
                     seen.push(place);
                 }
                 nth.checked_sub(1).and_then(|at| seen.get(at)) == Some(&place)
+                    && !count_down(&fault.skip)
+                    && fault.remaining.as_ref().is_none_or(count_down)
+            }
+            // A call from the place named by its file and line.
+            (Some(Named::At(file, line)), Some((location, _))) => {
+                location.file().rsplit(['/', '\\']).next() == Some(file.as_str())
+                    && location.line() == *line
                     && !count_down(&fault.skip)
                     && fault.remaining.as_ref().is_none_or(count_down)
             }
@@ -411,6 +435,22 @@ mod tests {
         assert!(!first);
         assert!(second);
         assert!(!again);
+    }
+
+    /// `site#file.rs:L` fails the call made at that line only, and with
+    /// `@M` its Mth.
+    #[test]
+    fn a_place_named_by_its_file_and_line_fails_there() {
+        #[rustfmt::skip]
+        let (line, call) = (line!(), || super::injected_here("t", "op"));
+        let calls = super::during(&format!("t#fault.rs:{line}@2"), || {
+            (0..3).map(|_| call()).collect::<Vec<_>>()
+        });
+        assert_eq!(calls, [false, true, false]);
+        let elsewhere = super::during(&format!("t#fault.rs:{}", line + 1), call);
+        assert!(!elsewhere);
+        let unplaced = super::during(&format!("t#fault.rs:{line}"), || super::injected("t"));
+        assert!(!unplaced);
     }
 
     /// `site#N@M` fails the Mth call from the Nth place only.
