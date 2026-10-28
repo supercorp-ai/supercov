@@ -13848,7 +13848,7 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
     for entry in [
-        "fs.create_dir_all@6 => python_run.rs:527",
+        "fs.create_dir_all@6 => python_run.rs:530",
         "fs.read_dir@6 => python_run.rs:104",
         "fs.read_dir@7 => python_run.rs:104",
         "fs.file_type@9 => python_run.rs:107",
@@ -15318,8 +15318,8 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:668", "python_run.rs:668"),
-        ("fs.create_dir_all#python_run.rs:669", "python_run.rs:669"),
+        ("fs.create_dir_all#python_run.rs:671", "python_run.rs:671"),
+        ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
         ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
@@ -15509,8 +15509,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:675@1",
-            "python_run.rs:675",
+            "fs.write#python_run.rs:678@1",
+            "python_run.rs:678",
             "plan.json",
         ),
     ] {

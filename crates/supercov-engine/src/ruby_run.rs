@@ -617,14 +617,11 @@ impl RubyServer {
             // The evidence was recorded under the browser run's id; a run
             // published beside it has its own.
             run.request.run_id = metadata.id.clone();
-            for scope in run
-                .request
+            run.request
                 .raw_results
                 .iter_mut()
                 .filter_map(|raw| raw.scope.as_mut())
-            {
-                scope.run_id = metadata.id.clone();
-            }
+                .for_each(|scope| scope.run_id = metadata.id.clone());
             let work = root.join(".supercov/work").join(&metadata.id);
             fs::create_dir_all(&work).map_err(|error| error.to_string())?;
             let archive_path = work.join("ruby-evidence.raw.gz");

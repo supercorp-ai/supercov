@@ -232,19 +232,22 @@ pub fn current_python_integrity(
 /// deduplicated: a line with two assertions is one line to arm.
 fn assertion_sites(files: &crate::source_manifest::Files) -> BTreeMap<String, Vec<usize>> {
     let mut sites = BTreeMap::<String, Vec<usize>>::new();
-    for (file, text) in files.iter().filter(|(file, _)| file.ends_with(".py")) {
-        let Ok(starts) = assertion_starts(text) else {
-            continue;
-        };
-        let lines = sites.entry(file.clone()).or_default();
-        lines.extend(
-            starts
-                .into_iter()
-                .map(|start| text[..start].bytes().filter(|b| *b == b'\n').count() + 1),
-        );
-        lines.sort_unstable();
-        lines.dedup();
-    }
+    files
+        .iter()
+        .filter(|(file, _)| file.ends_with(".py"))
+        .for_each(|(file, text)| {
+            let Ok(starts) = assertion_starts(text) else {
+                return;
+            };
+            let lines = sites.entry(file.clone()).or_default();
+            lines.extend(
+                starts
+                    .into_iter()
+                    .map(|start| text[..start].bytes().filter(|b| *b == b'\n').count() + 1),
+            );
+            lines.sort_unstable();
+            lines.dedup();
+        });
     sites.retain(|_, lines| !lines.is_empty());
     sites
 }
@@ -774,14 +777,11 @@ impl PythonServer {
             // The evidence was recorded under the browser run's id; a run
             // published beside it has its own.
             run.request.run_id = metadata.id.clone();
-            for scope in run
-                .request
+            run.request
                 .raw_results
                 .iter_mut()
                 .filter_map(|raw| raw.scope.as_mut())
-            {
-                scope.run_id = metadata.id.clone();
-            }
+                .for_each(|scope| scope.run_id = metadata.id.clone());
             run.request.integrity = serde_json::to_value(&self.integrity).ok();
             let work = root.join(".supercov/work").join(&metadata.id);
             fs::create_dir_all(&work).map_err(|error| error.to_string())?;
