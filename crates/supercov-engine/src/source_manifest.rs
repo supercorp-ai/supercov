@@ -1484,6 +1484,16 @@ mod tests {
                 .contains("different source manifests")
         );
         assert_eq!(the_one(&[], named).unwrap(), None);
+        // One that is no JSON is refused, first or after another.
+        for broken in [
+            vec![entry("shards/0/source-inputs.json", "{")],
+            vec![
+                entry("shards/0/source-inputs.json", r#"{"files":{}}"#),
+                entry("shards/1/source-inputs.json", "{"),
+            ],
+        ] {
+            assert!(the_one(&broken, named).is_err());
+        }
     }
 
     /// `byte_column` as it was before it took line starts.
