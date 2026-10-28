@@ -178,9 +178,9 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
     sorted.sort_by_key(std::fs::DirEntry::path);
     for entry in sorted {
         let path = entry.path();
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
+        let relative = path
+            .strip_prefix(root)
+            .expect("a walked entry lies under the root it started from");
         let relative = relative.to_string_lossy().replace('\\', "/");
         let name = path
             .file_name()
@@ -695,6 +695,30 @@ mod tests {
         assert_eq!(project.manifest.decisions.len(), 1);
         assert_eq!(project.decision_widths, [2]);
         assert!(!project.probes.is_empty());
+        // A file that is no text is reported the same way.
+        fs::write(root.join("src/main/java/app/Bytes.java"), [0xff, 0xfe]).unwrap();
+        let project = prepare_jvm_project(&root, None).unwrap();
+        assert!(
+            project
+                .unparseable
+                .iter()
+                .any(|(file, reason)| file.ends_with("Bytes.java") && reason.contains("UTF-8")),
+            "{:?}",
+            project.unparseable
+        );
+        // A listing, an entry, a kind, or a directory below that cannot be
+        // read fails discovery.
+        for fault in [
+            "fs.read_dir",
+            "fs.read_dir entry",
+            "fs.file_type",
+            "fs.read_dir@2",
+        ] {
+            assert!(
+                crate::fault::during(fault, || discover_jvm_files(&root)).is_err(),
+                "{fault}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
