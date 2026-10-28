@@ -1228,14 +1228,20 @@ fn bootstrap_runtime(
     output.code.insert_str(offset, &prelude);
 }
 
+/// A configuration's path in the project. The run's integrity refused one
+/// outside it, a path the run cannot copy.
+fn within_project<'a>(project: &CoverageProject, path: &'a Path) -> &'a Path {
+    path.strip_prefix(&project.root)
+        .expect("the run's integrity refused a configuration outside the project")
+}
+
 fn relocated_project_file(
     workspace: &Path,
     project: &CoverageProject,
     source: Option<&PathBuf>,
 ) -> Option<PathBuf> {
     let source = source?;
-    let relative = source.strip_prefix(&project.root).ok()?;
-    Some(workspace.join(relative))
+    Some(workspace.join(within_project(project, source)))
 }
 
 fn write_vitest_config(
@@ -1366,13 +1372,8 @@ fn link_playwright_package(workspace: &Path, project: &CoverageProject, runtime_
     let Some(config) = project.playwright_config.as_ref() else {
         return;
     };
-    let Some(directory) = config
-        .strip_prefix(&project.root)
-        .ok()
-        .and_then(|relative| workspace.join(relative).parent().map(Path::to_path_buf))
-    else {
-        return;
-    };
+    let config = workspace.join(within_project(project, config));
+    let directory = config.parent().expect("a joined path has a parent");
     let Some(found) = directory
         .ancestors()
         .take_while(|candidate| candidate.starts_with(workspace))
@@ -1972,8 +1973,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1675",
-            "javascript-source-path#javascript_frontend.rs:1791",
+            "javascript-source-path#javascript_frontend.rs:1676",
+            "javascript-source-path#javascript_frontend.rs:1792",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
