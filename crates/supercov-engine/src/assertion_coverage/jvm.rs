@@ -443,6 +443,10 @@ mod tests {
         // Without a nested class, or with an anonymous one, the first.
         assert_eq!(at("app.CartTest#total()"), Some(5));
         assert_eq!(at("app.CartTest$1#total()"), Some(5));
+        // A name with no parameter list names its method all the same; one
+        // the class does not declare is not found.
+        assert_eq!(at("app.CartTest$WithItems#total"), Some(13));
+        assert_eq!(at("app.CartTest#missing()"), None);
         let kotlin = "class CartSpec {\n    inner class Empty {\n        @Test\n        fun `has no total`() {}\n    }\n    inner class EmptyOther {\n        @Test\n        fun `has no total`() {}\n    }\n}\n";
         let lines = kotlin.split('\n').collect::<Vec<_>>();
         assert_eq!(
