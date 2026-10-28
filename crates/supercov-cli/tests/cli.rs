@@ -381,6 +381,16 @@ fn patch_judges_only_the_lines_a_change_touches() {
         annotated.contains("::warning file=src/cart.js,line=20"),
         "{annotated}"
     );
+    // Annotations name files from the top of the repository: git asked
+    // where that is, after the four asks of the patch itself, and failing.
+    let unplaced = project
+        .supercov_with(
+            &["runs", "patch", "--base", "HEAD", "--annotate", "github"],
+            &[("SUPERCOV_TEST_FAULT", "git@5")],
+        )
+        .exits(2);
+    assert!(unplaced.contains("could not run git"), "{unplaced}");
+    assert!(!unplaced.contains("::warning"), "{unplaced}");
 
     // Tested now: the same change passes.
     project.edit(
