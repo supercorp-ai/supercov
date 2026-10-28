@@ -12224,19 +12224,49 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     for (command, place) in [
         (
             vec!["runs", "latest", "decision", "src/cart.js:3"],
-            "coverage_query.rs:1668",
+            "coverage_query.rs:1664",
         ),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2845"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2938@2"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2831@2"),
-        (vec!["runs", "latest", "summary"], "coverage_query.rs:3262"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2841"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2935@2"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2827@2"),
+        (vec!["runs", "latest", "summary"], "coverage_query.rs:3259"),
+        (
+            vec!["runs", "latest", "summary", "--kind", "unit"],
+            "coverage_query.rs:3792",
+        ),
+        (
+            vec![
+                "runs",
+                "latest",
+                "file",
+                "src/cart.js",
+                "--group",
+                "decision",
+                "--kind",
+                "unit",
+            ],
+            "coverage_query.rs:3935",
+        ),
+        (
+            vec![
+                "runs",
+                "latest",
+                "file",
+                "src/cart.js",
+                "--group",
+                "decision",
+                "--kind",
+                "unit",
+            ],
+            "coverage_query.rs:3984",
+        ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3536",
+            "coverage_query.rs:3533",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3544",
+            "coverage_query.rs:3541",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -15116,7 +15146,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // The index read the file details make first.
         if fault.starts_with("coverage-index-read") {
             assert!(
-                refused.contains("coverage_query.rs:2285"),
+                refused.contains("coverage_query.rs:2281"),
                 "{fault}: {refused}"
             );
         }

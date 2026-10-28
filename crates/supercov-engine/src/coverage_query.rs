@@ -1439,17 +1439,13 @@ pub fn coverage_test_query(
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|decision| {
-            Ok(CoverageTestDecision {
-                id: decision.id.clone(),
-                vectors: decision.vectors.clone(),
-                meta: decisions
-                    .get(&decision.id)
-                    .cloned()
-                    .ok_or(QueryError::InvalidRecordSelection)?,
-            })
+        // Every decision a test observed is one of the view's.
+        .map(|decision| CoverageTestDecision {
+            id: decision.id.clone(),
+            vectors: decision.vectors.clone(),
+            meta: decisions[&decision.id].clone(),
         })
-        .collect::<Result<Vec<_>, QueryError>>()?;
+        .collect::<Vec<_>>();
     let phases = all_phases
         .into_iter()
         .skip(options.offset)
@@ -2848,10 +2844,11 @@ fn diff_snapshot(
             metadata.obligation == "branch" && !metadata.tests.is_empty() && picks(&metadata.tests)
         })
         .map(|metadata| {
+            // The index Supercov wrote names each branch outcome's branch.
             let parent = metadata
                 .parent_id
-                .ok_or(QueryError::InvalidRecordSelection)?;
-            Ok((
+                .expect("a branch outcome names its branch");
+            (
                 format!("{parent}:{}", metadata.id),
                 format!(
                     "{}:{} {}",
@@ -2859,9 +2856,9 @@ fn diff_snapshot(
                     metadata.line,
                     metadata.alternative.unwrap_or_default()
                 ),
-            ))
+            )
         })
-        .collect::<Result<HashMap<_, _>, QueryError>>()?;
+        .collect::<HashMap<_, _>>();
     let mcdc = index
         .decision_details(view)?
         .into_iter()
