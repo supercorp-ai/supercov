@@ -792,6 +792,32 @@ fn a_diff_counts_a_dependency_change_as_a_change_in_the_code() {
     assert!(!diff.contains(same_source), "{diff}");
 }
 
+/// A run whose recorded source cannot be read from its evidence, with no
+/// cached copy to read instead, cannot say which tests a change affects.
+#[test]
+fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
+    let project = Project::cart("affected-unreadable");
+    let run = project.measure(&[]);
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&run)
+            .join("source-manifest.cache.json"),
+    )
+    .unwrap();
+    let refused = project.supercov_with(
+        &["runs", "latest", "tests", "affected"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read_from#evidence_archive.rs:636",
+        )],
+    );
+    let said = refused.stderr();
+    assert_eq!(refused.code(), 2, "{said}");
+    assert!(fired_at(&said, "evidence_archive.rs:636"), "{said}");
+}
+
 /// A test whose file is gone since the run is affected, and says why.
 #[test]
 fn a_test_whose_file_was_removed_is_affected() {
