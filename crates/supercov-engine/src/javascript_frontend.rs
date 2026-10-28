@@ -1759,15 +1759,13 @@ pub fn prepare_javascript_frontend(
         // stack traces show the user's real path and line numbers instead
         // of instrumented workspace positions -- Supercov stays invisible
         // in errors. Without this the map was generated and then dropped.
-        let code = match inline_instrumentation_map(
+        let code = inline_instrumentation_map(
             &output.code,
             output.map.as_ref(),
             &project.root.join(file),
             &source,
-        ) {
-            Some(code) => code,
-            None => output.code.clone(),
-        };
+        )
+        .expect("the instrumenter gives every file a whole source map");
         keep_authored(workspace, &mut authored, file, &source)?;
         atomic_write(&path, code.as_bytes())?;
         exclusions.extend(output.excluded_statements);
@@ -1975,7 +1973,7 @@ mod tests {
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
             "javascript-source-path#javascript_frontend.rs:1675",
-            "javascript-source-path#javascript_frontend.rs:1793",
+            "javascript-source-path#javascript_frontend.rs:1791",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
