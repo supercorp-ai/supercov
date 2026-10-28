@@ -15817,6 +15817,35 @@ fn small_maven_project(project: &Project) {
     project.write(".gitignore", "target/\n");
 }
 
+/// A Python run beside a test file that does not parse measures the rest:
+/// the file holds no assertion line to arm. Roots that name nothing are
+/// refused before anything runs. A later query that cannot recompute the
+/// run's inputs reads the run as stale.
+#[test]
+fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing() {
+    let project = Project::empty("python-unparsed");
+    python_project(&project);
+    project.write("tests/helper_broken.py", "def broken(:\n    pass\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    project.supercov(&command).succeeds();
+    let refused = project.supercov_with(&command, &[("SUPERCOV_SOURCE_ROOTS", "nowhere")]);
+    assert_ne!(refused.code(), 0, "{}", refused.stderr());
+    assert!(refused.stderr().contains("nowhere"), "{}", refused.stderr());
+    for (fault, place) in [
+        ("fs.canonicalize#python_run.rs:205", "python_run.rs:205"),
+        ("fs.read_dir#python_project.rs:125", "python_project.rs:125"),
+    ] {
+        let read = project.supercov_with(&["runs", "latest"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = format!("{}{}", read.stdout(), read.stderr());
+        assert!(fired_at(&said, place), "{fault}: {said}");
+        assert!(said.contains("stale run"), "{fault}: {said}");
+    }
+}
+
 /// A Python test skipped where it is declared, or a Ruby one as it runs, is
 /// in the run, skipped.
 #[test]
