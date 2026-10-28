@@ -14906,6 +14906,30 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     }
 }
 
+/// A test file the run cannot read to mark its assertions is run as it is:
+/// the run goes on, and its assertions are not attributed.
+#[test]
+fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
+    let project = Project::cart("assertions-unread");
+    let read = project.supercov(&["--", "node", "--test"]).exits(0);
+    assert!(
+        read.contains("attributed 3 native node:assert call(s)"),
+        "{read}"
+    );
+    let project = Project::cart("assertions-unread-fault");
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read_to_string#javascript_frontend.rs:1790@2",
+        )],
+    );
+    let stderr = ran.stderr();
+    assert_eq!(ran.code(), 0, "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1790"), "{stderr}");
+    assert!(!stderr.contains("attributed 3"), "{stderr}");
+}
+
 /// A JavaScript run whose diagnostics cannot be written once its command is
 /// set up -- the line naming the copy it runs in, the line before the
 /// tests start -- ends the run rather than going on unseen.
