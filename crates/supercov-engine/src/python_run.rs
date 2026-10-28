@@ -1067,7 +1067,10 @@ mod tests {
         let root = fixture("copied");
         let copy = root.with_extension("copy");
         fs::create_dir_all(&copy).unwrap();
+        // An empty directory is copied as one.
+        fs::create_dir_all(root.join("empty")).unwrap();
         copy_tree(&root, &copy).unwrap();
+        assert!(copy.join("empty").is_dir());
         assert_eq!(
             fs::read_to_string(copy.join("vendor/pkg/b.py")).unwrap(),
             "def g():\n    return 1\n"

@@ -839,7 +839,10 @@ mod tests {
         let root = project("copied");
         let copy = root.with_extension("copy");
         fs::create_dir_all(&copy).unwrap();
+        // An empty directory is copied as one.
+        fs::create_dir_all(root.join("empty")).unwrap();
         copy_tree(&root, &copy).unwrap();
+        assert!(copy.join("empty").is_dir());
         assert_eq!(
             fs::read_to_string(copy.join("lib/m.rb")).unwrap(),
             "def f(a)\n  a ? 1 : 2\nend\n"
