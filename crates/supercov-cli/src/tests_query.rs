@@ -203,13 +203,16 @@ pub fn command(args: &[String]) -> ExitCode {
                             .as_str()
                             .is_some_and(|v| dropped.contains(&v))
                     })
-                    .filter_map(|t| {
-                        let value = t[key].as_str()?;
-                        Some(if names {
+                    .map(|t| {
+                        // Every affected test is named by its file and name.
+                        let value = t[key]
+                            .as_str()
+                            .expect("an affected test has a file and a name");
+                        if names {
                             runner_filter_name(t["file"].as_str().unwrap_or(""), value)
                         } else {
                             value.to_owned()
-                        })
+                        }
                     })
                     .collect::<Vec<_>>();
                 // Ranked when there is an assessment (most likely to catch
