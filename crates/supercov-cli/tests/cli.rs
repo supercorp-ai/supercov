@@ -17581,3 +17581,23 @@ fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
     assert_eq!(refused.code(), 2, "{said}");
     assert!(fired_at(&said, "coverage_query.rs:3382"), "{said}");
 }
+
+/// A record the run's evidence holds that is no JSON -- a process that tore
+/// it as it died -- refuses the run and names the file and line.
+#[test]
+fn a_run_whose_evidence_holds_a_torn_record_is_refused() {
+    let project = Project::cart("torn-record");
+    project.write(
+        "test/tear.test.js",
+        "import test from \"node:test\";\nimport fs from \"node:fs\";\nimport path from \"node:path\";\n\ntest(\"tears a record\", () => {\n  const directory = path.join(process.env.SUPERCOV_SERVER_EVIDENCE_ROOT, process.env.SUPERCOV_RUN_ID);\n  fs.mkdirSync(directory, { recursive: true });\n  fs.writeFileSync(path.join(directory, \"torn.mcdc.jsonl\"), \"{\\\"test\\\":\\n\");\n});\n",
+    );
+    project.commit("tear");
+    let ran = project.supercov(&["--", "node", "--test"]);
+    assert_ne!(ran.code(), 0, "{}", ran.stderr());
+    assert!(
+        ran.stderr()
+            .contains("invalid server/torn.mcdc.jsonl record at line 1"),
+        "{}",
+        ran.stderr()
+    );
+}
