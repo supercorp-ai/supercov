@@ -854,11 +854,11 @@ impl Shared {
             return Some(true);
         }
         let mut arguments = vec!["compose".to_owned(), "-p".into(), project.to_owned()];
-        for file in config_files.iter().flat_map(|files| files.split(',')) {
-            if !file.is_empty() {
-                arguments.extend(["-f".into(), file.to_owned()]);
-            }
-        }
+        config_files
+            .iter()
+            .flat_map(|files| files.split(','))
+            .filter(|file| !file.is_empty())
+            .for_each(|file| arguments.extend(["-f".into(), file.to_owned()]));
         if let Some(directory) = &working_dir {
             arguments.extend(["--project-directory".into(), directory.clone()]);
         }
