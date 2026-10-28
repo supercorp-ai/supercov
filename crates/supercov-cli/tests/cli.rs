@@ -18083,3 +18083,33 @@ fn a_check_names_each_missing_condition_by_its_place() {
     assert!(!missing.is_empty(), "{checked}");
     assert!(missing.iter().all(|place| place["line"].as_u64().is_some()));
 }
+
+/// A condition a decision's tests saw both ways but never alone deciding it
+/// is said to be that, and one never seen true is said to be that.
+#[test]
+fn a_decision_names_a_condition_seen_both_ways_that_never_decided_alone() {
+    let project = Project::empty("masked-condition");
+    project.write(
+        "package.json",
+        r#"{ "name": "masked", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/a.js",
+        "export function f(a, b) {\n  if (a && b) return 1;\n  return 2;\n}\n",
+    );
+    project.write(
+        "test/a.test.js",
+        "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { f } from '../src/a.js';\ntest('tf', () => assert.equal(f(true, false), 2));\ntest('ff', () => assert.equal(f(false, false), 2));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "decision", "src/a.js:2"])
+            .succeeds(),
+        &[
+            "C1 MISSING: a (seen both ways, never deciding alone)",
+            "C2 MISSING: b (never true)",
+        ],
+    );
+}
