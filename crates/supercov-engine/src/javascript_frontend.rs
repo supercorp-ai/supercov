@@ -1205,9 +1205,10 @@ fn bootstrap_runtime(
     }) else {
         return;
     };
-    let Some(export_start) = runtime_source.rfind("\nexport {") else {
-        return;
-    };
+    // Supercov's own runtime ends by listing what it exports.
+    let export_start = runtime_source
+        .rfind("\nexport {")
+        .expect("the runtime lists its exports");
     let offset = output.code[..found]
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
@@ -1973,8 +1974,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1674",
-            "javascript-source-path#javascript_frontend.rs:1792",
+            "javascript-source-path#javascript_frontend.rs:1675",
+            "javascript-source-path#javascript_frontend.rs:1793",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
