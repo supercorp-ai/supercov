@@ -743,6 +743,12 @@ mod tests {
             ("view", "fs.remove_file@1"),
             ("view", "fs.create_dir@5"),
             ("view", "fs.symlink@1"),
+            // What a tool did, brought back alone: a file linked in, one in
+            // a directory it made, a link it made.
+            ("reconcile", "fs.metadata@1"),
+            ("reconcile", "fs.metadata@2"),
+            ("reconcile", "fs.metadata@3"),
+            ("reconcile", "fs.symlink@1"),
             // Laid out over one an earlier run left.
             ("again", "fs.remove_file@1"),
             ("again", "fs.symlink_metadata@7"),
@@ -781,8 +787,19 @@ mod tests {
                 "applied" => applied_changes(&root, &workspace),
                 _ => {}
             }
+            let laid_out = (scenario == "reconcile").then(|| {
+                let state = refresh(&workspace, &view, &dependencies).unwrap();
+                std::fs::create_dir_all(view.join("reports/deep")).unwrap();
+                std::fs::write(view.join("reports/deep/out.json"), "[]").unwrap();
+                std::fs::write(view.join("new.txt"), "new").unwrap();
+                std::os::unix::fs::symlink("new.txt", view.join("new.link")).unwrap();
+                state
+            });
             let result = crate::fault::during(fault, || -> std::io::Result<()> {
                 match scenario {
+                    "reconcile" => {
+                        reconcile(&workspace, &view, laid_out.as_ref().unwrap()).map(drop)
+                    }
                     "view" => {
                         let state = refresh(&workspace, &view, &dependencies)?;
                         // What a tool does in the view, written past the fault.
@@ -922,7 +939,10 @@ mod tests {
     #[test]
     fn a_view_holds_each_file_as_its_author_wrote_it() {
         let (workspace, view, dependencies) = workspace();
+        // An empty directory is an empty directory in the view.
+        fs::create_dir(workspace.join("empty")).unwrap();
         let state = refresh(&workspace, &view, &dependencies).unwrap();
+        assert!(view.join("empty").is_dir());
         assert_eq!(
             fs::read_to_string(view.join("src/a.js")).unwrap(),
             "const a = 1;\n"
@@ -995,6 +1015,26 @@ mod tests {
         fs::remove_file(view.join("README.md")).unwrap();
         reconcile(&workspace, &view, &state).unwrap();
         assert!(!workspace.join("README.md").exists());
+
+        // A source the tool deleted keeps what was instrumented, and nothing
+        // is kept beside it; a deleted file that cannot be removed from the
+        // workspace fails the reconciling.
+        let state = refresh(&workspace, &view, &dependencies).unwrap();
+        fs::remove_file(view.join("src/a.js")).unwrap();
+        assert_eq!(reconcile(&workspace, &view, &state).unwrap(), 0);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/a.js")).unwrap(),
+            "probe(); const a = 1;\n"
+        );
+        fs::write(workspace.join("NOTES.md"), "notes\n").unwrap();
+        let state = refresh(&workspace, &view, &dependencies).unwrap();
+        fs::remove_file(view.join("NOTES.md")).unwrap();
+        assert!(
+            crate::fault::during("fs.remove_file", || reconcile(&workspace, &view, &state))
+                .is_err()
+        );
+        // A view of nothing linked and nothing authored changes nothing.
+        assert_eq!(reconcile(&workspace, &view, &View::default()).unwrap(), 0);
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
