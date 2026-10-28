@@ -283,6 +283,17 @@ mod tests {
         assert_eq!(seen, [PhaseKind::Build, PhaseKind::Test]);
         assert_eq!(fs::read_to_string(order).unwrap(), "build-test");
         assert_eq!(result.phases.len(), 2);
+        // A plan run where the user's signals cannot be forwarded runs
+        // nothing.
+        let refused = crate::fault::during("signal-install", || {
+            execute_plan(
+                &plan,
+                SupervisionOptions::default(),
+                &mut Vec::new(),
+                |_, _| Ok(()),
+            )
+        });
+        assert!(refused.is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
