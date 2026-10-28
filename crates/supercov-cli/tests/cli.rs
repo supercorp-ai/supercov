@@ -11412,6 +11412,22 @@ fn a_run_left_out_of_a_merge_or_read_stale_says_what_moved() {
         "{said}"
     );
 
+    // Only a test file changed, its manifest unreadable.
+    let project_t = Project::cart("merge-test-only-unread");
+    let run_t = project_t.measure(&[]);
+    project_t.edit("test/cart.test.js", "import test", "// note\nimport test");
+    let said_t = project_t
+        .supercov_with(
+            &["merge"],
+            &[("SUPERCOV_TEST_FAULT", "manifest-unreadable")],
+        )
+        .exits(2);
+    assert!(
+        said_t.contains(&format!(
+            "left out {run_t} (node --test): the tests have changed, and its record of its files cannot be read"
+        )),
+        "{said_t}"
+    );
     // A measured file removed whose name reads as configuration.
     let project = Project::cart("merge-config-named");
     project.write("src/app.config.js", "export const rate = 1;\n");
@@ -13615,7 +13631,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2442 => main.rs:2442",
+            "fs.canonicalize#main.rs:2447 => main.rs:2447",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:1664 => javascript_frontend.rs:1664",
         ],

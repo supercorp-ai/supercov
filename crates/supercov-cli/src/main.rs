@@ -914,8 +914,13 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                 return false;
             }
             // Only test-side files differ: each is judged by what the
-            // run's tests did with it.
+            // run's tests did with it, from the run's record of its files.
             let Some(files) = files else {
+                outdated.push((
+                    *run,
+                    "the tests have changed, and its record of its files cannot be read".to_owned(),
+                    true,
+                ));
                 return false;
             };
             let recorded_files = &files.manifest.files;
