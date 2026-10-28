@@ -749,6 +749,30 @@ mod tests {
         path
     }
 
+    /// No sources make no entries, and an archive of none has no manifest.
+    #[test]
+    fn no_sources_are_refused_for_the_manifest_they_lack() {
+        assert!(matches!(
+            collect_sources(&[]),
+            Err(EvidenceArchiveError::MissingManifest)
+        ));
+    }
+
+    /// An entry the reader does not keep is read past whatever its size, an
+    /// empty one included.
+    #[test]
+    fn an_empty_entry_left_unread_is_read_past() {
+        let root = temporary_directory("archive-empty-skipped");
+        let mut entries = identity_entries();
+        entries.push(entry("results/empty.json", b""));
+        entries.push(entry("results/kept.json", b"[1]"));
+        let path = root.join("archive.gz");
+        write_archive(entries, &path).unwrap();
+        let kept = read_archive_selected(&path, |name| name == "results/kept.json").unwrap();
+        assert_eq!(kept, [entry("results/kept.json", b"[1]")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn round_trips_binary_evidence_in_canonical_unicode_order() {
         let root = temporary_directory("archive-roundtrip");

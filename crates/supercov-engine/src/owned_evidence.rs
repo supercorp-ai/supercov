@@ -1401,7 +1401,8 @@ mod tests {
             widths: vec![2],
             decision_vectors: vec![vec![0b01, 0b11]],
         };
-        let merged = merge_evidence(vec![left, right]);
+        // A package whose process recorded nothing adds nothing.
+        let merged = merge_evidence(vec![left, right, OwnedEvidence::default()]);
         // Run-wide totals are a union: a probe any package reached is reached.
         assert_eq!(merged.global, [0b11, 0b10]);
         // Tests accumulate, because each belongs to exactly one binary.

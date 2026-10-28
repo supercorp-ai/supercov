@@ -1164,7 +1164,8 @@ fn filter_digest(filter: &crate::coverage_report::TestFilter) -> [u8; 32] {
         "supercov-test-filter",
         QUERY_INDEX_SCHEMA_VERSION,
     ));
-    for part in &mut parts {
+    // Three parts, whatever the filter names.
+    parts.iter_mut().for_each(|part| {
         part.sort();
         part.dedup();
         for value in part.iter() {
@@ -1172,7 +1173,7 @@ fn filter_digest(filter: &crate::coverage_report::TestFilter) -> [u8; 32] {
             hash.update([0]);
         }
         hash.update([1]);
-    }
+    });
     hash.finalize().into()
 }
 

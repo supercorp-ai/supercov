@@ -215,14 +215,14 @@ fn announce(site: &str, place: Option<Place>) {
     };
     let closing: &[u8] = if place.is_some() { b")\n" } else { b"\n" };
     #[cfg(unix)]
-    for part in [b"[supercov] test fault at ".as_slice(), site.as_bytes()]
+    [b"[supercov] test fault at ".as_slice(), site.as_bytes()]
         .into_iter()
         .chain(placed)
         .chain([closing])
-    {
-        // SAFETY: a write of a live buffer to standard error.
-        unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
-    }
+        .for_each(|part| {
+            // SAFETY: a write of a live buffer to standard error.
+            unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
+        });
     #[cfg(not(unix))]
     eprint!(
         "[supercov] test fault at {site}{}",

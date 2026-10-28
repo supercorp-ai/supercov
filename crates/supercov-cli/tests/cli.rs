@@ -13051,8 +13051,9 @@ fn a_rust_run_that_cannot_put_its_wrangler_in_place_says_so() {
                 && !said.contains("panicked at"),
             "{fault}: {said}"
         );
+        // And as `cargo test` alone: a command of no arguments past it.
         project
-            .supercov_with(&["--", "cargo", "test", "-q"], &[("PATH", &path)])
+            .supercov_with(&["--", "cargo", "test"], &[("PATH", &path)])
             .succeeds();
     }
 }
