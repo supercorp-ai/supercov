@@ -1201,7 +1201,9 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     }
 
     let result = (|| -> Result<supercov_engine::run_view::Outcome, String> {
-        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
+        let root = std::env::current_dir().map_err(|error| error.to_string())?;
+        let view =
+            load_run_view_filtered(&root, selector, (!filter.is_empty()).then_some(&filter))?;
         let outcome = supercov_engine::run_view::check(&view, &floors, per_file);
         if json {
             print!(
@@ -1543,7 +1545,8 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
 
     let result = (|| -> Result<u8, String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
+        let view =
+            load_run_view_filtered(&root, selector, (!filter.is_empty()).then_some(&filter))?;
         // Mapping a patch onto coverage recorded from different source would
         // annotate the wrong lines, which is worse than refusing. A failed
         // suite is different: its evidence still matches the source, so the
@@ -1799,9 +1802,10 @@ pub(crate) fn open_query_index_for(
     }
 }
 
-/// Resolve a run and build the shared view every workflow command reads, for
-/// only the tests `filter` picks.
+/// Resolve a run of the project at `root` and build the shared view every
+/// workflow command reads, for only the tests `filter` picks.
 pub(crate) fn load_run_view_filtered(
+    root: &Path,
     selector: Option<&str>,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
@@ -1811,10 +1815,9 @@ pub(crate) fn load_run_view_filtered(
             filter.describe()
         );
     }
-    let root = std::env::current_dir().map_err(|error| error.to_string())?;
-    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    run_view_of(&root, run, filter)
+    run_view_of(root, run, filter)
 }
 
 /// The view of `run` in the checkout at `root`, for only the tests `filter`
@@ -1848,13 +1851,15 @@ fn run_view_of(
     .map_err(|error| format!("{error:?}"))
 }
 
-/// The view of the run `selector` picks and, for a security assessment,
+/// The view of the run `selector` picks in the project at `root` and, for a
+/// security assessment,
 /// the lines its assessed assertions cover and the tests that ran each
 /// covered point: the run read once. Lines are `None` when the run was not
 /// assessed, which is not an error and is not the same as nothing asserted:
 /// no test was asked.
 #[allow(clippy::type_complexity)]
 pub(crate) fn load_run_coverage(
+    root: &Path,
     selector: Option<&str>,
     security: bool,
 ) -> Result<
@@ -1865,10 +1870,9 @@ pub(crate) fn load_run_coverage(
     ),
     String,
 > {
-    let root = std::env::current_dir().map_err(|error| error.to_string())?;
-    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    let view = run_view_of(&root, run, None)?;
+    let view = run_view_of(root, run, None)?;
     if !security {
         return Ok((view, None, Vec::new()));
     }
@@ -1999,7 +2003,9 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     };
 
     let result = (|| -> Result<(), String> {
-        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
+        let root = std::env::current_dir().map_err(|error| error.to_string())?;
+        let view =
+            load_run_view_filtered(&root, selector, (!filter.is_empty()).then_some(&filter))?;
         // A report from a failed or stale run is still worth reading, so this
         // writes it and says so on stderr rather than refusing. Only a gate
         // must never go green over one.
@@ -2024,7 +2030,6 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     ),
                 )
             } else {
-                let root = std::env::current_dir().map_err(|error| error.to_string())?;
                 let sources = view
                     .files
                     .iter()

@@ -1076,9 +1076,7 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
         let output = match &options.output {
             None => root.join(REPORT_DIRECTORY).join(DEFAULT_REPORT_NAME),
             Some(path) if path.is_absolute() => path.clone(),
-            Some(path) => std::env::current_dir()
-                .map_err(|error| format!("could not read the working directory: {error}"))?
-                .join(path),
+            Some(path) => root.join(path),
         };
         // A directory gets the report under its default name, as
         // `runs report --output <dir>` does; renaming onto it failed with

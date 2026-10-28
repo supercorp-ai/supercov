@@ -3972,9 +3972,9 @@ struct RunCoverage {
 /// it: a change review already says what appeared and where tests do not go.
 /// A run whose assertions were not assessed has no third shelf: no test was
 /// asked, which is not a judgment that the tests catch nothing.
-fn load_run_coverage(selector: &str, security: bool) -> Result<RunCoverage, String> {
+fn load_run_coverage(root: &Path, selector: &str, security: bool) -> Result<RunCoverage, String> {
     let selector = (selector != "latest").then_some(selector);
-    let (view, asserted, points) = crate::load_run_coverage(selector, security)?;
+    let (view, asserted, points) = crate::load_run_coverage(root, selector, security)?;
     Ok(RunCoverage {
         view,
         asserted,
@@ -4219,6 +4219,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
                 let run = match options.run.as_deref().filter(|_| !options.dry_run) {
                     Some(selector) => Some(load_run_coverage(
+                        &root,
                         selector,
                         instrument == Instrument::Security,
                     )?),
@@ -4277,7 +4278,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 }
                 let range = range.unwrap_or_else(|| changes::automatic(&root));
                 let run = match run.as_deref() {
-                    Some(selector) => Some(load_run_coverage(selector, false)?),
+                    Some(selector) => Some(load_run_coverage(&root, selector, false)?),
                     None => None,
                 };
                 let (mut report, failed) = run_patch(

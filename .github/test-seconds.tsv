@@ -22,6 +22,7 @@ a_command_started_in_a_removed_directory_says_so	1.3	0.9
 a_command_supercov_cannot_measure_is_refused_with_the_reason	0.1	0.1
 a_command_that_cannot_start_exits_as_a_shell_would	0.4	0.4
 a_command_whose_directory_is_gone_says_so	0.1	0.1
+a_command_whose_directory_was_removed_is_refused	0.5	0.5
 a_comparison_of_runs_that_measure_different_code_says_why_the_percentages_moved	1.7	1.4
 a_comparison_says_when_both_runs_measured_the_same_source	17.2	6.2
 a_comparison_says_which_files_the_difference_is_in	1.7	1.5

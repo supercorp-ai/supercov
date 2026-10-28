@@ -14297,6 +14297,39 @@ fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     }
 }
 
+/// A command started in a directory removed since cannot say where it is:
+/// each refuses, saying so, rather than reading some other project.
+#[cfg(unix)]
+#[test]
+fn a_command_whose_directory_was_removed_is_refused() {
+    let project = Project::empty("removed-directory");
+    for args in [
+        "runs latest report --format lcov",
+        "runs latest check",
+        "runs latest gaps --format jsonl",
+        "runs latest tests affected",
+        "runs latest source src/cart.js",
+        "runs latest assertions",
+    ] {
+        let ran = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "mkdir gone && cd gone && rmdir ../gone && exec '{}' {args}",
+                env!("CARGO_BIN_EXE_supercov")
+            ))
+            .current_dir(&project.root)
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_eq!(ran.status.code(), Some(2), "{args}: {said}");
+        assert!(said.contains("No such file or directory"), "{args}: {said}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
