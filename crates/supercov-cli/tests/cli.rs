@@ -13139,6 +13139,20 @@ fn a_rust_run_that_cannot_put_its_wrangler_in_place_says_so() {
         project
             .supercov_with(&["--", "cargo", "test"], &[("PATH", &path)])
             .succeeds();
+        // With no wrangler installed there is none to stand in for: a test
+        // that looks for one finds none, as it would without Supercov.
+        if fault != "fs.write@6" {
+            continue;
+        }
+        let bare = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .filter(|directory| !directory.join("wrangler").exists())
+            .collect::<Vec<_>>();
+        let bare = std::env::join_paths(bare).unwrap();
+        let ran = project.supercov_with(
+            &["--", "cargo", "test", "-q"],
+            &[("PATH", bare.to_str().unwrap())],
+        );
+        assert_eq!(ran.code(), 0, "{}", ran.stderr());
     }
 }
 

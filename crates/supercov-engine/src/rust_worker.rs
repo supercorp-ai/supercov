@@ -2342,6 +2342,28 @@ mod tests {
                 PathBuf::from("worker/wrangler.toml")
             ]
         );
+        // A directory that cannot be listed, or an entry whose kind cannot
+        // be read, is passed over: here the one Worker below `solo`.
+        write(
+            "solo/w/wrangler.toml",
+            "main = \"m\"\n[build]\ncommand = \"worker-build\"\n",
+        );
+        write("solo/w/Cargo.toml", "");
+        let solo = root.join("solo");
+        assert_eq!(worker_configs(&solo).len(), 1);
+        for fault in ["fs.read_dir", "fs.file_type"] {
+            assert!(
+                crate::fault::during(fault, || worker_configs(&solo)).is_empty(),
+                "{fault}"
+            );
+        }
+        // So is a name that is no text, where the system allows one.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::create_dir(solo.join(std::ffi::OsStr::from_bytes(b"\xff"))).unwrap();
+            assert_eq!(worker_configs(&solo).len(), 1);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
