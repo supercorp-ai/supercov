@@ -3250,6 +3250,18 @@ pub(crate) mod tests {
             read_evidence_directory(&directory, "run-1")
         });
         assert!(read.is_ok(), "{:?}", read.err());
+        // Gone by the time it is opened: harvested by a process that closed.
+        let opened = crate::fault::during("fs.open:2#python_evidence.rs:437", || {
+            read_evidence_directory(&directory, "run-1")
+        });
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        // Opened but no longer readable is refused.
+        assert!(
+            crate::fault::during("fs.open:13#python_evidence.rs:437", || {
+                read_evidence_directory(&directory, "run-1")
+            })
+            .is_err()
+        );
         fs::remove_file(directory.join("layout.json")).unwrap();
         assert!(matches!(
             read_evidence_directory(&directory, "run-1"),
