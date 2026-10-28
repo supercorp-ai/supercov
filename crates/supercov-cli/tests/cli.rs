@@ -17018,3 +17018,90 @@ fn a_server_no_browser_test_reached_publishes_no_run_beside_the_javascript() {
     let runs = project.supercov(&["runs", "--json"]).json();
     assert_eq!(runs["data"]["runs"].as_array().unwrap().len(), 1, "{runs}");
 }
+
+/// A Rust project whose Cargo metadata is no JSON, whose module file is a
+/// link to nothing, or whose library lies outside it is refused before a
+/// test runs, saying what was wrong.
+#[cfg(unix)]
+#[test]
+fn a_rust_project_supercov_cannot_lay_out_is_refused() {
+    let crate_toml =
+        "[package]\nname = \"r\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n";
+    let lib = "pub fn one() -> u8 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {\n        assert_eq!(super::one(), 1);\n    }\n}\n";
+    let refused = |project: &Project, environment: &[(&str, &str)], said: &str| {
+        project.git(&["init", "-q"]);
+        let ran = project.supercov_with(&["--", "cargo", "test"], environment);
+        assert_eq!(ran.code(), 1, "{said}: {}", ran.stderr());
+        assert!(ran.stderr().contains(said), "{said}: {}", ran.stderr());
+    };
+    let project = Project::empty("rust-metadata-garbage");
+    project.write("Cargo.toml", crate_toml);
+    project.write("src/lib.rs", lib);
+    let real = std::env::var("CARGO").unwrap();
+    project.write_script(
+        "bin/cargo",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = metadata ]; then echo not-json; exit 0; fi\nexec '{real}' \"$@\"\n"
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        project.root.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    refused(&project, &[("PATH", &path)], "invalid cargo metadata");
+
+    let project = Project::empty("rust-dangling-module");
+    project.write("Cargo.toml", crate_toml);
+    project.write("src/lib.rs", &format!("mod gone;\n{lib}"));
+    std::os::unix::fs::symlink("nowhere.rs", project.root.join("src/gone.rs")).unwrap();
+    refused(&project, &[], "src/gone.rs: No such file or directory");
+
+    let project = Project::empty("rust-lib-outside");
+    let outside = project.root.with_extension("outside.rs");
+    std::fs::write(&outside, lib).unwrap();
+    project.write(
+        "Cargo.toml",
+        &format!("{crate_toml}\n[lib]\npath = \"{}\"\n", outside.display()),
+    );
+    refused(&project, &[], "unsafe workspace path");
+    std::fs::remove_file(outside).unwrap();
+}
+
+/// A proc-macro crate runs in the compiler, never in a test: its files,
+/// and the macros in them no probe could open, leave the run.
+#[test]
+fn a_proc_macro_crate_and_its_limitations_leave_the_run() {
+    let project = Project::empty("rust-proc-macro-limitation");
+    project.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"pm\", \"app\"]\nresolver = \"2\"\n",
+    );
+    project.write(
+        "pm/Cargo.toml",
+        "[package]\nname = \"pm\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+    );
+    project.write(
+        "pm/src/lib.rs",
+        "use proc_macro::TokenStream;\n\nmacro_rules! same {\n    ($e:expr) => {\n        $e\n    };\n}\n\n#[proc_macro]\npub fn keep(input: TokenStream) -> TokenStream {\n    same!(input)\n}\n",
+    );
+    project.write(
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "app/src/lib.rs",
+        "pub fn one() -> u8 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {\n        assert_eq!(super::one(), 1);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    let file = project
+        .supercov(&["runs", "latest", "file", "pm/src/lib.rs"])
+        .succeeds();
+    // One limitation, the crate's own; `same!` no longer counts.
+    assert!(
+        file.contains("Statements not executed         0")
+            && file.contains("Measurement limitations         1"),
+        "{file}"
+    );
+}

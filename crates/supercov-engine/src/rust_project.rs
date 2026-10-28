@@ -522,7 +522,10 @@ fn token_tree_modules(node: &ra_ap_syntax::SyntaxNode) -> Vec<String> {
         .filter_map(|element| element.into_token())
         .filter(|token| !token.kind().is_trivia())
         .peekable();
-    while let Some(token) = tokens.next() {
+    loop {
+        let Some(token) = tokens.next() else {
+            break;
+        };
         if token.text() != "mod" {
             continue;
         }
@@ -563,27 +566,20 @@ fn string_literal(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
 /// there, so no test process ever executes it and the owned probes see
 /// nothing. `crate_roots` has already confined every one of them to the
 /// workspace.
-fn proc_macro_crate_roots(
-    packages: &[CargoPackage],
-) -> Result<BTreeSet<PathBuf>, RustProjectError> {
-    packages
-        .iter()
-        .flat_map(|package| &package.targets)
-        .filter(|target| target.kind.iter().any(|kind| kind == "proc-macro"))
-        .map(|target| {
-            fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
-                path: target.src_path.clone(),
-                reason: error.to_string(),
-            })
-        })
-        .collect()
-}
+/// Every crate's root, confined to the workspace, and the proc-macro crates'
+/// among them.
+type CrateRoots = (BTreeSet<PathBuf>, BTreeSet<PathBuf>);
+
+/// What every path under the workspace that a crate's module tree reached,
+/// or a crate root already confined, is.
+const INSIDE: &str = "a path the workspace's crates reach is inside it";
 
 fn crate_roots(
     workspace: &Path,
     packages: &[CargoPackage],
-) -> Result<BTreeSet<PathBuf>, RustProjectError> {
+) -> Result<CrateRoots, RustProjectError> {
     let mut roots = BTreeSet::new();
+    let mut proc_macros = BTreeSet::new();
     packages.iter().try_for_each(|package| {
         let directory = package
             .manifest_path
@@ -606,11 +602,14 @@ fn crate_roots(
                         reason: error.to_string(),
                     })?;
                 confined_relative(workspace, &root)?;
+                if target.kind.iter().any(|kind| kind == "proc-macro") {
+                    proc_macros.insert(root.clone());
+                }
                 roots.insert(root);
                 Ok(())
             })
     })?;
-    Ok(roots)
+    Ok((roots, proc_macros))
 }
 
 /// The library roots of the workspace's Rust Workers, each with the cfg of
@@ -622,7 +621,10 @@ fn worker_library_roots(
     packages
         .iter()
         .filter_map(|package| {
-            let directory = package.manifest_path.parent()?;
+            let directory = package
+                .manifest_path
+                .parent()
+                .expect("Cargo names a manifest by its absolute path");
             let cfg = crate::rust_worker::worker_build_cfg(directory, &package.features)?;
             Some(
                 package
@@ -688,9 +690,9 @@ fn decline_proc_macro_obligations(
     workspace: &Path,
     proc_macro_roots: &BTreeSet<PathBuf>,
     manifest: &mut CoverageManifest,
-) -> Result<(), RustProjectError> {
+) {
     if proc_macro_roots.is_empty() {
-        return Ok(());
+        return;
     }
     let mut reached = BTreeSet::new();
     resolve_module_tree(
@@ -700,12 +702,12 @@ fn decline_proc_macro_obligations(
         &mut reached,
         &mut BTreeSet::new(),
         &mut BTreeMap::new(),
-    )?;
-    // The module tree reaches files inside the workspace alone.
+    )
+    .expect("the proc-macro crates' modules were resolved with every crate's");
     let files = reached
         .iter()
-        .map(|path| confined_relative(workspace, path))
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .map(|path| confined_relative(workspace, path).expect(INSIDE))
+        .collect::<BTreeSet<_>>();
     let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
     unmeasured.extend(
         manifest
@@ -748,7 +750,6 @@ fn decline_proc_macro_obligations(
             "reason": "This crate compiles to a compiler plugin: rustc loads it and runs it while building the crate under test, so no test process executes it"
         })
     }));
-    Ok(())
 }
 
 pub fn manifest_token(manifest: &CoverageManifest) -> String {
@@ -899,9 +900,8 @@ pub fn prepare_rust_project_for(
     }
 
     let started = std::time::Instant::now();
-    let roots = crate_roots(&workspace, &packages)?;
+    let (roots, proc_macro_roots) = crate_roots(&workspace, &packages)?;
     let worker_roots = worker_library_roots(&packages);
-    let proc_macro_roots = proc_macro_crate_roots(&packages)?;
     let mut files = BTreeSet::new();
     let mut tests = BTreeSet::new();
     let mut owners = BTreeMap::new();
@@ -925,8 +925,8 @@ pub fn prepare_rust_project_for(
     // Test code is instrumented for its assertion markers alone.
     let tests = tests
         .iter()
-        .map(|path| confined_relative(&workspace, path))
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .map(|path| confined_relative(&workspace, path).expect(INSIDE))
+        .collect::<BTreeSet<_>>();
     if files.is_empty() {
         return Err(RustProjectError::NoSourceFiles);
     }
@@ -934,7 +934,7 @@ pub fn prepare_rust_project_for(
     let mut sources = files
         .into_iter()
         .map(|path| {
-            let relative = confined_relative(&workspace, &path)?;
+            let relative = confined_relative(&workspace, &path).expect(INSIDE);
             let source = fs::read_to_string(&path).map_err(|error| RustProjectError::Io {
                 path: path.clone(),
                 reason: error.to_string(),
@@ -978,20 +978,17 @@ pub fn prepare_rust_project_for(
         // A file is compiled as each crate that holds it is built: a Worker's
         // library by worker-build, the rest for the command's target. Items
         // are left out only where every one of those builds leaves them out.
-        let builds = owners.get(relative).map(|roots| {
-            roots
-                .iter()
-                .map(|root| worker_roots.get(root).or(cfg))
-                .collect::<Vec<_>>()
-        });
-        let file_cfg = match builds.as_deref() {
-            Some([first, rest @ ..]) => rest
-                .iter()
-                .all(|other| other == first)
-                .then_some(*first)
-                .flatten(),
-            _ => cfg,
-        };
+        // A file the module tree reached has the crate it reached it from.
+        let builds = owners[relative]
+            .iter()
+            .map(|root| worker_roots.get(root).or(cfg))
+            .collect::<Vec<_>>();
+        let (first, rest) = builds.split_first().expect("a file has a crate");
+        let file_cfg = rest
+            .iter()
+            .all(|other| other == first)
+            .then_some(*first)
+            .flatten();
         let transformed = match instrument_rust_file_numbered(
             relative,
             source,
@@ -1023,7 +1020,8 @@ pub fn prepare_rust_project_for(
                 });
             }
         };
-        merge_manifest(&mut manifest, transformed.manifest)?;
+        merge_manifest(&mut manifest, transformed.manifest)
+            .expect("obligation ids carry their file, so files never share one");
         fs::write(workspace.join(relative), transformed.code).map_err(|error| {
             RustProjectError::Io {
                 path: workspace.join(relative),
@@ -1035,7 +1033,7 @@ pub fn prepare_rust_project_for(
 
     preparation.instrument_ms = elapsed(started);
     let started = std::time::Instant::now();
-    decline_proc_macro_obligations(&workspace, &proc_macro_roots, &mut manifest)?;
+    decline_proc_macro_obligations(&workspace, &proc_macro_roots, &mut manifest);
 
     let token = manifest_token(&manifest);
     probes.token = token.clone();
@@ -1045,7 +1043,7 @@ pub fn prepare_rust_project_for(
     roots
         .into_iter()
         .try_for_each(|root| -> Result<(), RustProjectError> {
-            let relative = confined_relative(&workspace, &root)?;
+            let relative = confined_relative(&workspace, &root).expect(INSIDE);
             // The crate answers `cfg!` for the gates in the files it compiles.
             let crate_cfgs = probes
                 .cfgs
