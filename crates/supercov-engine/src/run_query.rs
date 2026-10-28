@@ -9,7 +9,7 @@ use crate::{
     coverage_index::{CoverageIndex, CoverageViewId},
     coverage_query::CoverageQueryFilters,
     run_store::{
-        RawEvidenceMetadata, RunIndexError, RunIntegrity, RunInventory, RunTimings, StoredRun,
+        RawEvidenceMetadata, RunIntegrity, RunInventory, RunTimings, StoredRun,
         compare_with_checkout, open_or_rebuild_query_index,
     },
 };
@@ -58,13 +58,14 @@ pub fn run_list_query(
     view: CoverageViewId,
     offset: usize,
     limit: usize,
-) -> Result<(RunListData, AgentPagination), RunIndexError> {
+) -> (RunListData, AgentPagination) {
     let runs = inventory
         .runs
         .iter()
         .skip(offset)
         .take(limit)
-        .map(|run| -> Result<RunListEntry, RunIndexError> {
+        .map(|run| {
+            // A run whose index cannot be read is listed with the error.
             let summary = open_or_rebuild_query_index(run).and_then(|container| {
                 let index = CoverageIndex::new(&container)?;
                 Ok((
@@ -84,7 +85,7 @@ pub fn run_list_query(
             };
             let comparison =
                 compare_with_checkout(&run.metadata.integrity, current_integrity(run).as_ref());
-            Ok(RunListEntry {
+            RunListEntry {
                 id: run.id.clone(),
                 generated_at: run.metadata.started_at.clone(),
                 lines,
@@ -104,11 +105,11 @@ pub fn run_list_query(
                 raw_evidence: run.metadata.raw_evidence.clone(),
                 stale: Some(comparison.stale),
                 reasons: comparison.reasons,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     let page = agent_json::pagination(offset, limit, runs.len(), inventory.runs.len());
-    Ok((
+    (
         RunListData {
             filters: CoverageQueryFilters {
                 outcome: view.name().into(),
@@ -118,7 +119,7 @@ pub fn run_list_query(
             runs,
         },
         page,
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -166,8 +167,7 @@ mod tests {
         let root = temporary_directory();
         let inventory = create_indexable_run(&root);
         let run = &inventory.runs[0];
-        let (listing, page) =
-            run_list_query(&inventory, &|_| None, CoverageViewId::All, 0, 20).unwrap();
+        let (listing, page) = run_list_query(&inventory, &|_| None, CoverageViewId::All, 0, 20);
         assert_eq!(page.total, 1);
         assert_eq!(listing.runs[0].lines, Some(100.0));
         assert_eq!(listing.runs[0].branches, Some(100.0));
@@ -176,8 +176,7 @@ mod tests {
         assert!(run.query_index_path.exists());
         assert!(agent_json::success("runs", &listing, Some(&page)).is_ok());
 
-        let (_, empty_page) =
-            run_list_query(&inventory, &|_| None, CoverageViewId::All, 20, 20).unwrap();
+        let (_, empty_page) = run_list_query(&inventory, &|_| None, CoverageViewId::All, 20, 20);
         assert_eq!(empty_page.returned, 0);
         assert!(!empty_page.has_more);
         fs::remove_dir_all(root).unwrap();
@@ -200,8 +199,7 @@ mod tests {
             CoverageViewId::All,
             0,
             20,
-        )
-        .unwrap();
+        );
         assert_eq!(listing.runs[0].lines, Some(100.0));
         assert_eq!(
             listing.runs[0].reasons,

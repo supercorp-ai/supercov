@@ -3013,10 +3013,7 @@ fn execute_public_query(
                 view,
                 *offset,
                 *limit,
-            )
-            .map_err(|error| {
-                internal_agent_error(format!("Failed to prepare run summaries: {error}"))
-            })?;
+            );
             Ok(PublicQueryOutput::Runs {
                 data,
                 pagination: page,
