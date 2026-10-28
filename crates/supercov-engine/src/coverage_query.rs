@@ -3302,18 +3302,22 @@ pub fn coverage_summary_query(
             mcdc_conditions: 0,
         };
         let mut uncovered_everywhere = covered_elsewhere.clone();
-        for gap in index.file_gaps(options.view, Some("e2e"), None)? {
-            covered_elsewhere.lines += gap.covered_by_other_tests.lines;
-            covered_elsewhere.statements += gap.covered_by_other_tests.statements;
-            covered_elsewhere.functions += gap.covered_by_other_tests.functions;
-            covered_elsewhere.branches += gap.covered_by_other_tests.branches;
-            covered_elsewhere.mcdc_conditions += gap.covered_by_other_tests.mcdc_conditions;
-            uncovered_everywhere.lines += gap.uncovered_everywhere.lines;
-            uncovered_everywhere.statements += gap.uncovered_everywhere.statements;
-            uncovered_everywhere.functions += gap.uncovered_everywhere.functions;
-            uncovered_everywhere.branches += gap.uncovered_everywhere.branches;
-            uncovered_everywhere.mcdc_conditions += gap.uncovered_everywhere.mcdc_conditions;
-        }
+        // A file the end-to-end tests ran whole has no gap to add.
+        index
+            .file_gaps(options.view, Some("e2e"), None)?
+            .iter()
+            .for_each(|gap| {
+                covered_elsewhere.lines += gap.covered_by_other_tests.lines;
+                covered_elsewhere.statements += gap.covered_by_other_tests.statements;
+                covered_elsewhere.functions += gap.covered_by_other_tests.functions;
+                covered_elsewhere.branches += gap.covered_by_other_tests.branches;
+                covered_elsewhere.mcdc_conditions += gap.covered_by_other_tests.mcdc_conditions;
+                uncovered_everywhere.lines += gap.uncovered_everywhere.lines;
+                uncovered_everywhere.statements += gap.uncovered_everywhere.statements;
+                uncovered_everywhere.functions += gap.uncovered_everywhere.functions;
+                uncovered_everywhere.branches += gap.uncovered_everywhere.branches;
+                uncovered_everywhere.mcdc_conditions += gap.uncovered_everywhere.mcdc_conditions;
+            });
         Some(CoverageKindGapContext {
             kind: "e2e".into(),
             other_kinds: other_e2e_kinds,

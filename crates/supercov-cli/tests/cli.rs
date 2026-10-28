@@ -12412,12 +12412,12 @@ fn a_query_whose_own_index_read_fails_is_refused() {
         ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3808",
+            "coverage_query.rs:3812",
         ),
         // The dimensions read again, by runner.
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3808@2",
+            "coverage_query.rs:3812@2",
         ),
         (
             vec![
@@ -12430,7 +12430,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3951",
+            "coverage_query.rs:3955",
         ),
         (
             vec![
@@ -12443,15 +12443,15 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:4001",
+            "coverage_query.rs:4005",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3549",
+            "coverage_query.rs:3553",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3557",
+            "coverage_query.rs:3561",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -17675,12 +17675,12 @@ fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
         &["runs", "latest"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#coverage_query.rs:3396",
+            "coverage-index-read#coverage_query.rs:3400",
         )],
     );
     let said = format!("{}{}", refused.stdout(), refused.stderr());
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "coverage_query.rs:3396"), "{said}");
+    assert!(fired_at(&said, "coverage_query.rs:3400"), "{said}");
 }
 
 /// A record the run's evidence holds that is no JSON -- a process that tore
