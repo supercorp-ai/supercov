@@ -544,6 +544,28 @@ mod tests {
             );
         }
         assert!(refused(&[("NEXTEST_STRESS_TOTAL", "2")], true).contains("stress"));
+        // A total of attempts that is no count; an identity that is no text.
+        assert!(
+            refused(&[("NEXTEST_TOTAL_ATTEMPTS", "0")], true)
+                .contains("NEXTEST_TOTAL_ATTEMPTS must be a positive integer")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let mut odd = environment(&nextest_base());
+            odd.retain(|(key, _)| key != "NEXTEST_RUN_ID");
+            odd.push((
+                OsString::from("NEXTEST_RUN_ID"),
+                OsString::from_vec(vec![0xff]),
+            ));
+            let error = classify_rust_runner_environment_from(odd)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("NEXTEST_RUN_ID contains non-UTF-8"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
