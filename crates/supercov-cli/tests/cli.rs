@@ -14696,104 +14696,108 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         (
             "fs.read_dir entry#7",
             "injected fault at fs",
-            "workspace.rs:704",
+            "workspace.rs:706",
         ),
         (
             "fs.read_dir entry#10",
             "injected fault at fs",
-            "workspace.rs:1051",
+            "workspace.rs:1053",
         ),
         (
             "fs.read_dir entry#11",
             "injected fault at fs",
-            "workspace.rs:988",
+            "workspace.rs:990",
         ),
         (
             "fs.read_dir entry#12",
             "injected fault at fs",
-            "workspace.rs:935",
+            "workspace.rs:937",
         ),
         (
             "fs.read_dir entry#16",
             "injected fault at fs",
-            "workspace.rs:1354",
+            "workspace.rs:1356",
         ),
-        ("fs.read_dir@57", "injected fault at fs", "workspace.rs:704"),
+        ("fs.read_dir@57", "injected fault at fs", "workspace.rs:706"),
         (
             "fs.read_dir@66",
             "/node_modules: injected",
-            "workspace.rs:1051",
+            "workspace.rs:1053",
         ),
         (
             "fs.read_dir@67",
             "node_modules/.bin: injected",
-            "workspace.rs:988",
+            "workspace.rs:990",
         ),
         (
             "fs.read_dir@68",
             "node_modules/@scope: injected",
-            "workspace.rs:935",
+            "workspace.rs:937",
         ),
-        ("fs.create_dir_all@4", "staging", "workspace.rs:703"),
+        ("fs.create_dir_all@4", "staging", "workspace.rs:705"),
         (
             "fs.create_dir_all@9",
             "/node_modules: injected",
-            "workspace.rs:1050",
+            "workspace.rs:1052",
         ),
         (
             "fs.create_dir_all@10",
             "node_modules/.bin: injected",
-            "workspace.rs:985",
+            "workspace.rs:987",
         ),
         (
             "fs.create_dir_all@11",
             "node_modules/@scope: injected",
-            "workspace.rs:934",
+            "workspace.rs:936",
         ),
     ];
     let unlinkable = [
         (
             "fs.read_dir entry#9",
             "injected fault at fs",
-            "workspace.rs:767",
+            "workspace.rs:769",
         ),
         (
             "fs.read_dir@62",
             "packages/web/node_modules: injected",
-            "workspace.rs:767",
+            "workspace.rs:769",
         ),
         (
             "fs.read_dir@63",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:988",
+            "workspace.rs:990",
         ),
         (
             "fs.create_dir_all@7",
             "packages/web/node_modules: injected",
-            "workspace.rs:766",
+            "workspace.rs:768",
         ),
         (
             "fs.create_dir_all@8",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:985",
+            "workspace.rs:987",
         ),
         (
             "fs.symlink@1",
             "packages/web/node_modules/.bin/webtool",
-            "workspace.rs:568",
+            "workspace.rs:1009",
         ),
         (
             "fs.symlink@2",
             "packages/web/node_modules/dep",
-            "workspace.rs:568",
+            "workspace.rs:780",
         ),
-        ("fs.symlink@3", "node_modules/.bin/tool", "workspace.rs:568"),
+        (
+            "fs.symlink@3",
+            "node_modules/.bin/tool",
+            "workspace.rs:1009",
+        ),
         (
             "fs.symlink@4",
             "node_modules/@scope/pkg",
-            "workspace.rs:568",
+            "workspace.rs:972",
         ),
-        ("fs.symlink@5", "node_modules/plain", "workspace.rs:568"),
+        ("fs.symlink@5", "node_modules/plain", "workspace.rs:972"),
     ];
     // A directory is never cloned, so every system links the same way:
     // hard links where it can, one link per package where it cannot.
@@ -14847,12 +14851,12 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
 #[test]
 fn a_run_that_cannot_reuse_the_last_copy_says_so() {
     for entry in [
-        "fs.canonicalize@10 => workspace.rs:1282",
-        "fs.create_dir_all@6 => workspace.rs:1297",
+        "fs.canonicalize@10 => workspace.rs:1284",
+        "fs.create_dir_all@6 => workspace.rs:1299",
         "fs.copy@1 => workspace.rs:551",
         "fs.rename@1 => workspace.rs:562",
-        "fs.rename@3 => workspace.rs:1316",
-        "fs.create_dir_all@10 => workspace.rs:1316",
+        "fs.rename@3 => workspace.rs:1318",
+        "fs.create_dir_all@10 => workspace.rs:1318",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::cart("reuse-copy");
@@ -15319,7 +15323,7 @@ fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
             "fs.read#javascript_frontend.rs:364",
             "javascript_frontend.rs:364",
         ),
-        ("fs.symlink_metadata#workspace.rs:1280", "workspace.rs:1280"),
+        ("fs.symlink_metadata#workspace.rs:1282", "workspace.rs:1282"),
     ] {
         let project = Project::cart("frontend-cache-unread");
         project.supercov(&["--", "node", "--test"]).succeeds();

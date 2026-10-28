@@ -564,11 +564,13 @@ impl WorkspaceOperations for SystemWorkspaceOperations {
 }
 
 #[cfg(unix)]
+#[track_caller]
 pub(crate) fn create_link(target: &Path, destination: &Path, _directory: bool) -> io::Result<()> {
     fs::symlink(target, destination)
 }
 
 #[cfg(windows)]
+#[track_caller]
 pub(crate) fn create_link(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
     if directory {
         // Junctions work on ordinary NTFS installations without requiring
@@ -1541,9 +1543,7 @@ impl<'a> CargoTargets<'a> {
 
     fn hold(&mut self, relative: &Path) -> bool {
         let mut directory = PathBuf::new();
-        let Some(parent) = relative.parent() else {
-            return false;
-        };
+        let parent = relative.parent().expect("a file's path has a parent");
         for component in parent.components() {
             directory.push(component);
             let workspace = self.workspace;
@@ -1675,9 +1675,6 @@ pub fn console_names(root: &Path, workspace: &Path) -> crate::process_supervisio
 /// `text` with each spelling of the copy's directory replaced by the
 /// project's, when it holds one.
 pub(crate) fn project_named(text: &str, places: &[(String, String)]) -> Option<String> {
-    if !places.iter().any(|(copy, _)| text.contains(copy.as_str())) {
-        return None;
-    }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     // The next place the copy is named, the longest spelling where two start
@@ -2113,7 +2110,7 @@ pub fn hide_rewritten_files(workspace: &Path, files: &[String]) {
         return;
     }
     let run = |arguments: &[&str], input: &str| {
-        let mut child = crate::fault::io("git", io::ErrorKind::NotFound, || {
+        let output = crate::fault::io("git", io::ErrorKind::NotFound, || {
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(workspace)
@@ -2122,10 +2119,15 @@ pub fn hide_rewritten_files(workspace: &Path, files: &[String]) {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .launch()
+                .and_then(|mut child| {
+                    // Written and closed before the wait; a git that stopped
+                    // reading is still waited for.
+                    let stdin = child.stdin.take().expect("stdin is piped");
+                    let written = { stdin }.write_all(input.as_bytes());
+                    written.and(child.wait_with_output())
+                })
         })
         .ok()?;
-        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
-        let output = child.wait_with_output().ok()?;
         output
             .status
             .success()
@@ -2171,9 +2173,7 @@ fn unaccompanied_install_manifest(root: &Path, workspace: &Path, relative: &Path
                     | "bun.lockb"
             )
         });
-    let Some(directory) = relative.parent() else {
-        return false;
-    };
+    let directory = relative.parent().expect("a file's path has a parent");
     manifest
         && workspace.join(directory).join("node_modules").is_dir()
         && !root.join(directory).join("node_modules").exists()
@@ -4829,5 +4829,322 @@ mod tests {
                 "unsupported workspace platform: no links",
             ]
         );
+    }
+
+    /// A venv search that cannot list a directory, or look at an entry,
+    /// finds no environment there.
+    #[cfg(unix)]
+    #[test]
+    fn a_virtual_environment_search_that_cannot_look_finds_none() {
+        let base = project();
+        let venv = base.join("venv");
+        fs::create_dir_all(&venv).unwrap();
+        fs::write(venv.join("pyvenv.cfg"), "home = /usr\n").unwrap();
+        let workspace = base.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        std::os::unix::fs::symlink(&venv, workspace.join(".venv")).unwrap();
+        assert!(links_a_virtual_environment(&workspace));
+        for fault in [
+            "fs.read_dir#workspace.rs:46",
+            "fs.symlink_metadata#workspace.rs:52",
+        ] {
+            assert!(
+                !crate::fault::during(fault, || links_a_virtual_environment(&workspace)),
+                "{fault}"
+            );
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A level of the repository that cannot be listed gets nothing linked
+    /// beside its copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_level_that_cannot_be_listed_is_not_linked_around() {
+        let repository = project();
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::write(repository.join("tsconfig.base.json"), "{}").unwrap();
+        let root = repository.join("packages/web");
+        fs::create_dir_all(&root).unwrap();
+        let elsewhere = project();
+        let workspace = elsewhere.join("repository/packages/web");
+        fs::create_dir_all(&workspace).unwrap();
+        crate::fault::during(
+            "fs.read_dir#workspace.rs:286@1,fs.read_dir#workspace.rs:286@2",
+            || {
+                link_repository_around(&root, &workspace);
+            },
+        );
+        assert!(!elsewhere.join("repository/tsconfig.base.json").exists());
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
+    }
+
+    /// In a package of a repository, a `.cargo` above the copy is Supercov's
+    /// only when it leads out of the repository: one of the repository's
+    /// own applies to the checkout too.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_configuration_in_a_repository_is_one_that_leads_out_of_it() {
+        let repository = project();
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        let root = repository.join("packages/crate");
+        let copies = root.join(".supercov/workspaces");
+        let workspace = copies.join("x/repository/packages/crate");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(copies.join(".cargo")).unwrap();
+        assert_eq!(planted_cargo_configuration(&root, &workspace), None);
+        let outside = project();
+        std::os::unix::fs::symlink(&outside, copies.join("x/.cargo")).unwrap();
+        assert_eq!(
+            planted_cargo_configuration(&root, &workspace),
+            Some(copies.join("x/.cargo"))
+        );
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    /// A nested node_modules whose listing fails part way through its hard
+    /// links, or that cannot be made at all, is linked package by package
+    /// -- an empty one as an empty directory; one whose own tools cannot
+    /// get their launchers stops the copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_dependency_tree_falls_back_or_stops_by_what_failed() {
+        let prepare = |fault: &str, tools: bool| {
+            let root = project();
+            let nested = root.join("packages/a/node_modules");
+            fs::create_dir_all(&nested).unwrap();
+            if tools {
+                fs::create_dir_all(nested.join("left-pad")).unwrap();
+                fs::create_dir_all(nested.join(".bin")).unwrap();
+                fs::write(nested.join(".bin/biome"), "#!/bin/sh\n").unwrap();
+            }
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let faults = format!("directory-clone,{fault}");
+            let prepared =
+                crate::fault::during(&faults, || prepare_isolated_workspace(&root, "run", &lock));
+            lock.release().unwrap();
+            (root, prepared)
+        };
+        let (root, prepared) = prepare("fs.read_dir entry#workspace.rs:661", true);
+        let copied = prepared.unwrap().join("packages/a/node_modules");
+        assert_eq!(
+            fs::read_link(copied.join("left-pad")).unwrap(),
+            root.join("packages/a/node_modules/left-pad")
+        );
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, prepared) = prepare("fs.create_dir#workspace.rs:660", false);
+        let copied = prepared.unwrap().join("packages/a/node_modules");
+        assert_eq!(fs::read_dir(copied).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+
+        for fault in [
+            "fs.read_dir entry#source_tools.rs:187",
+            "fs.create_dir#workspace.rs:660,fs.write#workspace.rs:1001",
+        ] {
+            let (root, prepared) = prepare(fault, true);
+            assert!(
+                matches!(&prepared, Err(WorkspaceError::Io { path, .. }) if path.starts_with(&root)),
+                "{fault}: {prepared:?}"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// A link that climbs above the file system's root leads nowhere a path
+    /// can name, and is left out of the copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_above_the_file_system_root_is_omitted() {
+        let root = project();
+        std::os::unix::fs::symlink("../".repeat(64), root.join("src/up")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert!(fs::symlink_metadata(workspace.join("src/up")).is_err());
+        assert!(workspace.join("src/index.js").is_file());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The root's dependencies linked package by package: an empty scope is
+    /// an empty directory, and a workspace package whose link to its copy
+    /// cannot be made stops the copy.
+    #[cfg(unix)]
+    #[test]
+    fn root_dependencies_link_an_empty_scope_and_stop_on_a_failed_link() {
+        let root = project();
+        fs::create_dir_all(root.join("node_modules/@empty")).unwrap();
+        fs::create_dir_all(root.join("packages/app/src")).unwrap();
+        fs::write(root.join("packages/app/src/index.js"), "").unwrap();
+        std::os::unix::fs::symlink("../packages/app", root.join("node_modules/app")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert_eq!(
+            fs::read_dir(workspace.join("node_modules/@empty"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(
+            fs::read_link(workspace.join("node_modules/app"))
+                .unwrap()
+                .is_relative()
+        );
+        let failed = crate::fault::during("fs.symlink#workspace.rs:968", || {
+            prepare_isolated_workspace(&root, "run", &lock)
+        });
+        assert!(
+            matches!(&failed, Err(WorkspaceError::Io { path, .. }) if path.ends_with("node_modules/app")),
+            "{failed:?}"
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A recovery whose listing of the copies fails part way stops.
+    #[test]
+    fn a_recovery_that_cannot_list_the_copies_stops() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let recovered = crate::fault::during("fs.read_dir entry#workspace.rs:1156", || {
+            recover_cached_workspace(&root, &lock)
+        });
+        assert!(
+            matches!(recovered, Err(WorkspaceError::Io { .. })),
+            "{recovered:?}"
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A reused artifact that cannot be copied into the new copy, a file or
+    /// a directory of them, stops the preparation; and a staging copy that
+    /// cannot be cleared away after that stops it with that error.
+    #[test]
+    fn a_reused_artifact_that_cannot_be_copied_stops_the_preparation() {
+        for (reused, clear) in [
+            ("out.js", ""),
+            ("build", ""),
+            ("out.js", "fs.create_dir_all#workspace.rs:1324"),
+        ] {
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let first = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            fs::create_dir_all(first.join("build")).unwrap();
+            fs::write(first.join("build/output.js"), "instrumented").unwrap();
+            fs::write(first.join("out.js"), "instrumented").unwrap();
+            let reuse = [PathBuf::from(reused)];
+            let mut counting = FaultOperations {
+                copy_count: 0,
+                fail_copy_at: None,
+                rename_count: 0,
+                fail_rename_at: None,
+            };
+            prepare_cached_workspace_with_operations(&root, &lock, &reuse, &mut counting).unwrap();
+            let mut failing = FaultOperations {
+                copy_count: 0,
+                fail_copy_at: Some(counting.copy_count),
+                rename_count: 0,
+                fail_rename_at: None,
+            };
+            let failed = crate::fault::during(clear, || {
+                prepare_cached_workspace_with_operations(&root, &lock, &reuse, &mut failing)
+            });
+            match failed {
+                Err(WorkspaceError::Io { source, .. }) if clear.is_empty() => {
+                    assert_eq!(source.kind(), io::ErrorKind::StorageFull, "{reused}");
+                }
+                Err(WorkspaceError::Lifecycle(_)) if !clear.is_empty() => {}
+                other => panic!("{reused} {clear}: {other:?}"),
+            }
+            lock.release().unwrap();
+            crate::lifecycle::sweep_trash(&root).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Writing back stops at a file it cannot look at or read, whichever
+    /// language's command wrote it; a file that is no UTF-8 text is copied
+    /// as it is.
+    #[test]
+    fn writeback_stops_at_a_file_it_cannot_read() {
+        for (kind, fault) in [
+            (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1378"),
+            (CommandOutputs::Go, "fs.metadata#workspace.rs:1643"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1647"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1749"),
+            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2197"),
+        ] {
+            let (root, workspace) = writeback_fixture("unreadable");
+            let baseline = workspace_output_baseline(&workspace).unwrap();
+            fs::write(workspace.join("report.txt"), "written").unwrap();
+            let synced = crate::fault::during(fault, || {
+                sync_outputs_of(kind, &root, &workspace, &baseline, &BTreeSet::new())
+            });
+            assert!(
+                matches!(&synced, Err(WorkspaceError::Io { path, .. }) if path.ends_with("report.txt")),
+                "{fault}: {synced:?}"
+            );
+            fs::remove_dir_all(root.parent().unwrap()).unwrap();
+        }
+        let (root, workspace) = writeback_fixture("not-utf8");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::write(workspace.join("latin1.txt"), b"caf\xe9").unwrap();
+        sync_outputs_of(
+            CommandOutputs::Go,
+            &root,
+            &workspace,
+            &baseline,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join("latin1.txt")).unwrap(), b"caf\xe9");
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// Text that names no copy is not renamed.
+    #[test]
+    fn text_naming_no_copy_is_not_renamed() {
+        let places = [("/tmp/copy".to_owned(), "/home/project".to_owned())];
+        assert_eq!(project_named("nothing here", &places), None);
+        assert_eq!(project_named("/tmp/copy-old", &places), None);
+    }
+
+    /// The workspace repository is best effort: a git that cannot start
+    /// hides nothing, and an old repository that cannot be cleared away is
+    /// an error.
+    #[test]
+    fn a_workspace_repository_git_cannot_reach_is_left_as_it_is() {
+        let (root, workspace) = writeback_fixture("git-unreachable");
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        crate::fault::during("git", || {
+            hide_rewritten_files(&workspace, &["src/app.ts".to_owned()]);
+        });
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2049", || {
+            mirror_git_repository(&root, &workspace)
+        });
+        assert!(mirrored.is_err());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// Pruning stops at an entry of the copy it cannot read.
+    #[test]
+    fn pruning_stops_at_an_entry_it_cannot_read() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2220", || {
+            prune_cached_workspace_sources(&root, &lock)
+        });
+        assert!(
+            matches!(pruned, Err(WorkspaceError::Io { .. })),
+            "{pruned:?}"
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }
