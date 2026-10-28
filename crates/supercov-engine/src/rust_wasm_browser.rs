@@ -18,7 +18,7 @@
 use crate::fault_process::Launch;
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -162,12 +162,14 @@ impl BrowserReader {
         token: &str,
         patience: Duration,
     ) -> Result<Self, String> {
-        let port = free_port()?;
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        let port = crate::rust_worker::free_port()?;
+        let listener = crate::rust_worker::local_listener()?;
+        let address = listener
+            .local_addr()
+            .expect("a bound listener has its address");
         listener
             .set_nonblocking(true)
-            .map_err(|error| error.to_string())?;
+            .expect("a listener can be made not to block");
         let mut driver = Command::new(chromedriver)
             .args(arguments)
             .arg(format!("--port={port}"))
@@ -183,14 +185,18 @@ impl BrowserReader {
         };
         let upstream = SocketAddr::from(([127, 0, 0, 1], port));
         let started = Instant::now();
-        while TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).is_err() {
+        // A driver just started listens only after a moment.
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+            if TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).is_ok() {
+                break;
+            }
             if started.elapsed() > patience {
                 return Err(stop_driver(format!(
                     "{} never listened",
                     chromedriver.display()
                 )));
             }
-            std::thread::sleep(Duration::from_millis(50));
         }
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -198,7 +204,8 @@ impl BrowserReader {
         let spawned = std::thread::Builder::new()
             .name("supercov-browser-proxy".into())
             .spawn(move || {
-                while !flag.load(Ordering::Acquire) {
+                // Stopped only once the reader that started it is dropped.
+                loop {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             // An accepted socket keeps the listener's
@@ -211,9 +218,12 @@ impl BrowserReader {
                         }
                         Err(_) => std::thread::sleep(Duration::from_millis(10)),
                     }
+                    if flag.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
             });
-        spawned.map_err(|error| stop_driver(error.to_string()))?;
+        spawned.expect("a thread can be started");
         Ok(Self {
             address,
             driver,
@@ -239,14 +249,6 @@ impl Drop for BrowserReader {
         let _ = self.driver.kill();
         let _ = self.driver.wait();
     }
-}
-
-fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-    listener
-        .local_addr()
-        .map(|address| address.port())
-        .map_err(|error| error.to_string())
 }
 
 struct Request {
@@ -389,7 +391,7 @@ fn read_response(reader: &mut impl BufRead) -> Option<(u16, Vec<u8>)> {
 static REGIONS: AtomicU64 = AtomicU64::new(0);
 
 fn relay(stream: TcpStream, upstream: SocketAddr, token: &str) -> Option<()> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut reader = BufReader::new(stream.try_clone().expect("a socket can be cloned"));
     let request = read_request(&mut reader)?;
     // `/e/<hex evidence directory>/<WebDriver path>`.
     let rest = request.path.strip_prefix("/e/")?;
@@ -854,12 +856,49 @@ mod tests {
         assert!(raw("/status").is_none());
         assert!(raw("/e/ff/status").is_none());
         assert!(raw("/e/616/status").is_some());
+        // A client that hangs up before asking anything, and a driver that
+        // no longer listens, are passed nothing.
+        {
+            let client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+            client.shutdown(std::net::Shutdown::Both).unwrap();
+            let (stream, _) = proxy.accept().unwrap();
+            assert!(relay(stream, address, token).is_none());
+        }
+        let gone = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+        write!(
+            client,
+            "GET /e/{hex}/status HTTP/1.1\r\nContent-Length: 0\r\n\r\n"
+        )
+        .unwrap();
+        let (stream, _) = proxy.accept().unwrap();
+        assert!(relay(stream, gone, token).is_none());
         let written = std::fs::read_dir(&evidence)
             .unwrap()
             .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(written, [ours]);
         std::fs::remove_dir_all(evidence).unwrap();
+    }
+
+    /// A reader with no port for its driver, or none of its own to listen
+    /// on, starts nothing.
+    #[test]
+    fn a_reader_without_its_ports_starts_nothing() {
+        for fault in ["local-listener", "local-listener@2"] {
+            let started = crate::fault::during(fault, || {
+                BrowserReader::start_within(
+                    Path::new("/nonexistent/chromedriver"),
+                    &[],
+                    "0123456789ab",
+                    Duration::from_millis(100),
+                )
+            });
+            assert!(started.unwrap_err().contains("injected fault"), "{fault}");
+        }
     }
 
     /// A driver that never listens is stopped, not left running past the

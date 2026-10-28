@@ -343,13 +343,17 @@ fn point_at_entry(config: &WorkerConfig, port: Option<u16>) -> Result<(), String
     rewrite_config(config, ENTRY_FILE, port)
 }
 
-/// A port nothing listens on now.
-fn free_port() -> Result<u16, String> {
-    let listener = crate::fault::io("free-port", std::io::ErrorKind::AddrInUse, || {
+/// A listener on a loopback port of its own.
+pub(crate) fn local_listener() -> Result<TcpListener, String> {
+    crate::fault::io("local-listener", std::io::ErrorKind::AddrInUse, || {
         TcpListener::bind("127.0.0.1:0")
     })
-    .map_err(|error| error.to_string())?;
-    Ok(listener
+    .map_err(|error| error.to_string())
+}
+
+/// A port nothing listens on now.
+pub(crate) fn free_port() -> Result<u16, String> {
+    Ok(local_listener()?
         .local_addr()
         .expect("a bound listener has its address")
         .port())
@@ -3343,18 +3347,18 @@ mod tests {
             "[build]\ncommand = \"worker-build\"\n",
         )
         .unwrap();
-        let rustc = "spawn#rust_worker.rs:366";
+        let rustc = "spawn#rust_worker.rs:370";
         assert!(crate::fault::during(rustc, || wasm_target_cfg(&package)).is_none());
         assert!(
             crate::fault::during(rustc, || worker_build_cfg(&package, &BTreeMap::new())).is_none()
         );
         assert_eq!(
-            crate::fault::during("spawn#rust_worker.rs:1823", || cargo_workspace_root(
+            crate::fault::during("spawn#rust_worker.rs:1827", || cargo_workspace_root(
                 &package
             )),
             None
         );
-        assert!(crate::fault::during("free-port", free_port).is_err());
+        assert!(crate::fault::during("local-listener", free_port).is_err());
         let stop = AtomicBool::new(true);
         assert!(watch_other_workers(&package, &|n| package.join(format!("{n}")), &stop).is_empty());
         assert!(read_windows(&package).unwrap().is_empty());
