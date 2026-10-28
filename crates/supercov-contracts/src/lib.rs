@@ -736,15 +736,15 @@ pub fn validate_frontend_run_declaration(
         }
     }
     let mut runners = BTreeSet::new();
-    for runner in &declaration.runners {
+    // There is a runner at least: none was refused above.
+    declaration.runners.iter().try_for_each(|runner| {
         if !runners.insert(runner.runner.clone()) {
             return Err(FrontendDeclarationError::DuplicateRunner(
                 runner.runner.clone(),
             ));
         }
-        validate_frontend_runner(runner, &mut limitation_ids)?;
-    }
-    Ok(())
+        validate_frontend_runner(runner, &mut limitation_ids)
+    })
 }
 
 #[cfg(test)]
