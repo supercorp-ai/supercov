@@ -1464,9 +1464,10 @@ fn write_playwright_config(
     let path = generated.join("playwright.config.mjs");
     let original = relocated_project_file(workspace, project, project.playwright_config.as_ref());
     let original_import = if let Some(original) = &original {
+        // Relocated into the workspace by `relocated_project_file`.
         let relative = original
             .strip_prefix(workspace)
-            .map_err(|_| JavascriptFrontendError::UnsafeSourcePath(original.display().to_string()))?
+            .expect("a relocated file is in the workspace")
             .to_string_lossy()
             .replace('\\', "/");
         let specifier =
@@ -1972,8 +1973,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1673",
-            "javascript-source-path#javascript_frontend.rs:1791",
+            "javascript-source-path#javascript_frontend.rs:1674",
+            "javascript-source-path#javascript_frontend.rs:1792",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2504,6 +2505,11 @@ mod tests {
     fn a_file_that_cannot_be_restored_or_written_leaves_no_temporary_behind() {
         let root = temporary("unwritable");
         assert!(restore_cached_file(&root.join(too_long()), b"cached\n").is_err());
+        // A cache naming the root names nowhere a file can go.
+        assert!(matches!(
+            restore_cached_file(Path::new("/"), b"cached\n"),
+            Err(JavascriptFrontendError::UnsafeSourcePath(path)) if path == "/"
+        ));
         assert!(atomic_write(&root.join(too_long()).join("a.js"), b"x").is_err());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         // A directory that is not there yet is made.
