@@ -13194,9 +13194,60 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.read_dir@5",
             "fs.symlink_metadata@11",
             "fs.open@3",
+            // The lock and recovery, the inputs digested and captured, the
+            // archive's directory, the trash.
+            "fs.create_dir_all@1",
+            "fs.create_dir_all@2",
+            "fs.open@1",
+            "fs.read@7",
+            "fs.create_dir_all@6",
+            "fs.create_dir_all@14",
             "spawn",
         ],
     );
+}
+
+/// A Ruby run asked to keep its work copies it for diagnosis: each step of
+/// that copy failing ends the run saying so, and a run with nothing failing
+/// keeps the copy.
+#[cfg(unix)]
+#[test]
+fn a_ruby_run_that_cannot_keep_its_work_says_so() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
+    for fault in [
+        "fs.create_dir_all@5",
+        "fs.read_dir@5",
+        "fs.read_dir@6",
+        "fs.file_type@7",
+        "fs.create_dir_all@6",
+        "fs.copy@1",
+    ] {
+        let project = Project::empty("ruby-keep-work");
+        ruby_project(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran = project.supercov_with(
+            &command,
+            &[("SUPERCOV_KEEP_WORK", "1"), ("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(
+            stderr.contains("injected fault at fs") && !stderr.contains("panicked at"),
+            "{fault}: {stderr}"
+        );
+    }
+    let project = Project::empty("ruby-kept-work");
+    ruby_project(&project);
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov_with(&command, &[("SUPERCOV_KEEP_WORK", "1")])
+        .succeeds();
+    assert!(project.root.join(".supercov/ruby-debug").is_dir());
 }
 
 /// Each query refuses, with exit code 2 and the reason, when a read it makes

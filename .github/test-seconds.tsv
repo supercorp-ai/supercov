@@ -139,6 +139,7 @@ a_report_the_command_writes_names_the_project_and_not_the_copy	2.0	1.0
 a_report_to_an_absolute_path_leaves_out_runs_without_the_tests_asked_for	1.9	1.4
 a_repository_the_workspace_cannot_mirror_is_named_under_debug	2.6	1.0
 a_round_sends_forty_requests_and_the_next_one_the_rest	11.5	9.3
+a_ruby_run_that_cannot_keep_its_work_says_so	4.0	5.0
 a_ruby_run_whose_own_step_fails_says_so	20.0	30.0
 a_ruby_source_that_does_not_parse_is_named	1.1	0.3
 a_ruby_test_whose_process_ends_during_it_is_failed_and_credited	0.8	0.4
