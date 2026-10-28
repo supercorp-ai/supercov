@@ -949,7 +949,12 @@ mod tests {
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(deep.join("package.json"), "{}").unwrap();
         std::fs::write(root.join("packages/b/c/package.json"), "{}").unwrap();
+        // Nor through directories that hold none.
+        let bare = root.join("one/two/three/four/five/six/seven");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(bare.join("package.json"), "{}").unwrap();
         let found = package_roots(&root);
+        assert!(!found.contains(&bare), "{found:?}");
         assert!(found.contains(&root.join("packages/b/c")), "{found:?}");
         assert!(!found.contains(&deep), "{found:?}");
         std::fs::remove_dir_all(root).unwrap();
@@ -997,6 +1002,9 @@ mod tests {
             "a name inside another word"
         );
         assert_eq!(vendored("public/js/app.js"), None);
+        // A directory named as a script opens, and reads as nothing.
+        std::fs::create_dir(root.join("public/js/folder.js")).unwrap();
+        assert_eq!(vendored("public/js/folder.js"), None);
         assert_eq!(vendored("public/js/blob.js"), Some("minified code"));
         assert_eq!(
             vendored("src/jquery.min.js"),
