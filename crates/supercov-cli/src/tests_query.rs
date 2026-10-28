@@ -556,13 +556,12 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
         match agent_json::success("runs.tests.affected", &data, None) {
             Ok(output) => return Ok(output),
             Err(size) => {
-                let mut notes = Vec::new();
-                match step {
+                let note = match step {
                     0 => {
                         let count = data["unaffected"].as_array().map_or(0, Vec::len);
                         data["unaffected"] = json!([]);
                         data["unaffectedCount"] = json!(count);
-                        notes.push("unaffected tests are counted, not listed");
+                        "unaffected tests are counted, not listed"
                     }
                     1 => {
                         for bucket in ["affected", "undetermined"] {
@@ -573,7 +572,7 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
                                     .truncate(3);
                             }
                         }
-                        notes.push("each test keeps its first three reasons");
+                        "each test keeps its first three reasons"
                     }
                     _ => {
                         // A change to hundreds of files no test ran affects
@@ -610,15 +609,13 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
                         let Some(note) = shortened else {
                             return Err(size);
                         };
-                        notes.push(note);
+                        note
                     }
-                }
+                };
                 step += 1;
                 let mut all = data["truncated"].as_array().cloned().unwrap_or_default();
-                for note in notes {
-                    if !all.iter().any(|n| n == note) {
-                        all.push(json!(note));
-                    }
+                if !all.iter().any(|n| n == note) {
+                    all.push(json!(note));
                 }
                 data["truncated"] = json!(all);
             }
