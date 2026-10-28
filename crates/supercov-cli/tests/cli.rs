@@ -15428,8 +15428,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1054", "go_run.rs:1054"),
-        ("fs.create_dir_all#go_run.rs:1068", "go_run.rs:1068"),
+        ("fs.write#go_run.rs:1059", "go_run.rs:1059"),
+        ("fs.create_dir_all#go_run.rs:1073", "go_run.rs:1073"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");

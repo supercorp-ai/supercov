@@ -818,25 +818,30 @@ pub fn run_direct_go(
         let mut parts = Vec::new();
         let mut outcomes = Vec::new();
         let mut silent = Vec::new();
-        for package in &instrumented.packages {
-            let Ok(bytes) = fs::read(&package.evidence) else {
-                silent.push(package.directory.clone());
-                continue;
-            };
-            let evidence = read_evidence(&bytes)
-                .map_err(|error| format!("{}: {error}", package.evidence.display()))?;
-            for test in &evidence.tests {
-                outcomes.push(OwnedTestOutcome {
-                    name: test.name.clone(),
-                    runner: test.runner.clone(),
-                    package: package.directory.clone(),
-                    file: package.declared_in.get(&test.name).cloned(),
-                    status: test.status.clone(),
-                    attributed: !test.unattributed,
-                });
-            }
-            parts.push(evidence);
-        }
+        // There are test packages: a run with none was refused above.
+        instrumented
+            .packages
+            .iter()
+            .try_for_each(|package| -> Result<(), String> {
+                let Ok(bytes) = fs::read(&package.evidence) else {
+                    silent.push(package.directory.clone());
+                    return Ok(());
+                };
+                let evidence = read_evidence(&bytes)
+                    .map_err(|error| format!("{}: {error}", package.evidence.display()))?;
+                for test in &evidence.tests {
+                    outcomes.push(OwnedTestOutcome {
+                        name: test.name.clone(),
+                        runner: test.runner.clone(),
+                        package: package.directory.clone(),
+                        file: package.declared_in.get(&test.name).cloned(),
+                        status: test.status.clone(),
+                        attributed: !test.unattributed,
+                    });
+                }
+                parts.push(evidence);
+                Ok(())
+            })?;
         if !silent.is_empty() {
             let _ = writeln!(
                 diagnostics,
