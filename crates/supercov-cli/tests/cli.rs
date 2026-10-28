@@ -14594,6 +14594,38 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     }
 }
 
+/// A browser suite beside a Java server prepares the server in the copy:
+/// its instrumented sources, their directories, its evidence directory.
+/// Each step failing ends the run, and says where.
+#[test]
+fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
+    for (fault, place) in [
+        ("fs.create_dir_all#9", "jvm_run.rs:2000"),
+        ("fs.create_dir_all#10", "jvm_run.rs:2016"),
+        ("fs.create_dir_all#11", "jvm_run.rs:2026"),
+        ("fs.write#4", "jvm_run.rs:2000"),
+        ("fs.write#5", "jvm_run.rs:2016"),
+    ] {
+        let project = Project::cart("browser-java");
+        project.write(".gitignore", "out/\nnode_modules/\n");
+        project.write("playwright.config.js", "export default {};\n");
+        project.write(
+            "pom.xml",
+            "<project><modelVersion>4.0.0</modelVersion><groupId>e</groupId><artifactId>w</artifactId><version>1</version></project>\n",
+        );
+        project.write(
+            "src/main/java/w/W.java",
+            "package w;\npublic class W { public static int one() { return 1; } }\n",
+        );
+        project.commit("java");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
