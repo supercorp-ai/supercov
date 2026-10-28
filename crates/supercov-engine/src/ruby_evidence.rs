@@ -2969,11 +2969,36 @@ pub(crate) mod tests {
             &[served],
         )
         .unwrap();
-        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
         assert_eq!(
             attribution(&run),
             crate::coverage_report::ATTRIBUTION_PARTIAL
         );
+        // A server that left no interpreter's evidence, or evidence that is
+        // no directory, makes no run.
+        let server_run = |directory: &Path| {
+            build_ruby_server_run(
+                &obligations.manifest,
+                directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+                &[],
+            )
+        };
+        fs::create_dir_all(&directory).unwrap();
+        assert!(matches!(
+            server_run(&directory),
+            Err(RubyEvidenceError::NoInterpreter)
+        ));
+        fs::remove_dir_all(&directory).unwrap();
+        fs::write(&directory, b"x").unwrap();
+        assert!(matches!(
+            server_run(&directory),
+            Err(RubyEvidenceError::Io(_))
+        ));
+        fs::remove_file(directory).unwrap();
     }
 
     #[test]
