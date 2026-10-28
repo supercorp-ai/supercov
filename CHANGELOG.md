@@ -28,6 +28,7 @@
 - `merge` left out a run whose test files had changed and whose record of its files could not be read without saying so; it names the run and why, as for every other run it leaves out.
 - `SUPERCOV_SOURCE_ROOTS` naming several roots that do not exist said "a, b does not exist"; it says "do not exist".
 - `SUPERCOV_SOURCE_ROOTS` naming a directory outside the project was refused as "not a regular file or directory"; it is refused as outside the project.
+- `merge` refused a run that holds no record of its files, where the latest run holds one and nothing else differs, with an empty list ("differing domains: "); it names the record ("differing domains: recorded files").
 - `import` said a file of the project that is not UTF-8 text was "no such file in the project"; it says the file is not a text file.
 - A browser suite whose `SUPERCOV_SOURCE_ROOTS` named only its JavaScript was refused when the project also held Go, Java or Kotlin source outside those roots (`SUPERCOV_SOURCE_ROOTS=src left no Go source to measure`). Such a server is left unmeasured, as a Python or Ruby one already was.
 

@@ -225,16 +225,21 @@ fn judged_against_latest(
         .iter()
         .map(|archive| recorded_files(archive))
         .collect::<Vec<_>>();
-    // Without a record of the files, the domains are all there is to say.
+    // Without a record of the files, the domains are all there is to say;
+    // where another run holds one, the record itself is one of them.
     let unrecorded = |run: &StoredRun| {
         let other = inputs
             .iter()
             .find(|other| other.id != run.id)
             .expect("at least two runs");
+        let mut dimensions = incompatible_dimensions(other, run);
+        if files.iter().any(Option::is_some) {
+            dimensions.push("recorded files");
+        }
         format!(
             "Cannot merge incompatible run {}: differing domains: {}",
             run.id,
-            incompatible_dimensions(other, run).join(", ")
+            dimensions.join(", ")
         )
     };
     let Some((_, into)) = &files[latest] else {
@@ -1343,6 +1348,11 @@ mod tests {
                     );
                 }),
                 "Cannot merge run run-a with run run-b: mocks/a.js; mocks/b.js changed, and 1 of its tests reached them through a server that served them and were not measured again: t9.".into(),
+            ),
+            (
+                "grown, the earlier run without a record of its files",
+                Box::new(|root| record_files(root, "run-b", &[])),
+                "Cannot merge incompatible run run-a: differing domains: recorded files".into(),
             ),
             (
                 "grown, the later run's denominator another",
