@@ -30,9 +30,13 @@ pub struct GoTestFile {
     pub edits: Vec<GoEdit>,
 }
 
-fn function_name(node: Node, source: &str) -> Option<String> {
-    node.child_by_field_name("name")
-        .map(|name| source[name.byte_range()].to_owned())
+/// A function declaration's name: a tree with no error gives every one its
+/// name.
+fn function_name(node: Node, source: &str) -> String {
+    let name = node
+        .child_by_field_name("name")
+        .expect("a function declaration has its name");
+    source[name.byte_range()].to_owned()
 }
 
 /// Go's own rule for what the toolchain will run as a test, from
@@ -73,7 +77,9 @@ fn is_checkpoint_only_function(name: &str, node: Node, source: &str) -> bool {
 }
 
 fn first_parameter<'t>(node: Node<'t>) -> Option<Node<'t>> {
-    let parameters = node.child_by_field_name("parameters")?;
+    let parameters = node
+        .child_by_field_name("parameters")
+        .expect("a function declaration has its parameter list");
     let mut cursor = parameters.walk();
     parameters
         .children(&mut cursor)
@@ -81,7 +87,9 @@ fn first_parameter<'t>(node: Node<'t>) -> Option<Node<'t>> {
 }
 
 fn parameter_type(node: Node, source: &str) -> Option<String> {
-    let kind = first_parameter(node)?.child_by_field_name("type")?;
+    let kind = first_parameter(node)?
+        .child_by_field_name("type")
+        .expect("a parameter declaration has its type");
     Some(source[kind.byte_range()].trim().to_owned())
 }
 
@@ -128,9 +136,7 @@ pub fn instrument_test_file(
         if child.kind() != "function_declaration" {
             continue;
         }
-        let Some(name) = function_name(child, source) else {
-            continue;
-        };
+        let name = function_name(child, source);
         let Some(body) = child.child_by_field_name("body") else {
             continue;
         };
@@ -325,7 +331,9 @@ fn callee<'s>(node: Node, source: &'s str) -> Option<&'s str> {
     if node.kind() != "call_expression" {
         return None;
     }
-    let function = node.child_by_field_name("function")?;
+    let function = node
+        .child_by_field_name("function")
+        .expect("a call has its function");
     Some(source[function.byte_range()].trim_end())
 }
 
@@ -805,7 +813,7 @@ mod tests {
         // of examples, and reported between 74% and 95% of one unchanged suite
         // depending on which test finished last.
         let (file, out) = instrumented(
-            "package p\n\nimport \"testing\"\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n\nfunc FuzzWork(f *testing.F) {\n\tdoWork()\n}\n\nfunc Examples(t *testing.T) {\n\tdoWork()\n}\n\nfunc ExampleHelper(x int) {\n\tdoWork()\n}\n",
+            "package p\n\nimport \"testing\"\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n\nfunc FuzzWork(f *testing.F) {\n\tdoWork()\n}\n\nfunc Examples(t *testing.T) {\n\tdoWork()\n}\n\nfunc ExampleHelper(x int) {\n\tdoWork()\n}\n\nfunc FuzzNothing() {\n\tdoWork()\n}\n",
         );
         // Both are swept before they return, and both are named for having
         // run. The Example sweeps inline because it has no receiver to read an
@@ -841,6 +849,8 @@ mod tests {
         assert!(file.tests.is_empty(), "{file:?}");
         assert!(!out.contains("\"Examples\""), "{out}");
         assert!(!out.contains("\"ExampleHelper\""), "{out}");
+        // Nor is a Fuzz function that takes no *testing.F.
+        assert!(!out.contains("\"FuzzNothing\""), "{out}");
     }
 
     #[test]

@@ -983,11 +983,13 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
             out.push(node);
         }
         "parenthesized_expression" => {
+            // A tree with no error holds an expression in parentheses.
             let mut cursor = node.walk();
-            match node.children(&mut cursor).find(|child| child.is_named()) {
-                Some(inner) => condition_nodes(inner, source, out),
-                None => out.push(node),
-            }
+            let inner = node
+                .children(&mut cursor)
+                .find(|child| child.is_named())
+                .expect("parentheses hold an expression");
+            condition_nodes(inner, source, out);
         }
         _ => out.push(node),
     }
@@ -1127,7 +1129,8 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
 /// rejects an unused import, so this is only added to a file that gained at
 /// least one probe.
 pub fn import_edit(source: &str, alias: &str, path: &str) -> Option<GoEdit> {
-    let tree = parse(source).ok()?;
+    // The source was read to instrument it, so it parses.
+    let tree = parse(source).expect("an instrumented file parses");
     let mut cursor = tree.root_node().walk();
     let package = tree
         .root_node()
@@ -1720,6 +1723,23 @@ func classify(a int, b bool) string {
                 .iter()
                 .any(|p| p.source.starts_with("import"))
         );
+    }
+
+    /// A function declared without a body, its code written in assembly
+    /// beside it, has nowhere to be observed and is no obligation.
+    #[test]
+    fn a_function_without_a_body_is_no_obligation() {
+        let go = obligations(
+            "package fast\n\nfunc add(a, b int) int\n\nfunc twice(a int) int {\n\treturn add(a, a)\n}\n",
+        );
+        let functions = go
+            .manifest
+            .points
+            .iter()
+            .filter(|p| p.kind == PointKind::Function)
+            .filter_map(|p| p.label.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(functions, ["twice"]);
     }
 
     #[test]
