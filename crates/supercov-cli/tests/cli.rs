@@ -6669,6 +6669,27 @@ fn a_floor_on_what_a_run_has_none_of_cannot_pass() {
             "branches has nothing eligible in this run, which is not the same as complete",
         ],
     );
+    // So for functions, in a run of none, and the flag to drop is named.
+    let flat = Project::empty("no-functions");
+    flat.write(
+        "package.json",
+        r#"{ "name": "flat", "private": true, "type": "module" }"#,
+    );
+    flat.write("src/total.js", "export const total = 1 + 2;\n");
+    flat.write(
+        "test/total.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { total } from \"../src/total.js\";\ntest(\"total\", () => assert.equal(total, 3));\n",
+    );
+    flat.git(&["init", "-q"]);
+    flat.measure(&[]);
+    let refused = flat
+        .supercov(&["runs", "check", "--min-functions", "50"])
+        .exits(2);
+    assert!(
+        refused.contains("functions has nothing eligible in this run")
+            && refused.contains("remove --min-functions"),
+        "{refused}"
+    );
 
     // Per file, a file with none is passed over and the rest are judged.
     project.write(

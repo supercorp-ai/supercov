@@ -161,15 +161,17 @@ fn diagnostic_lines(diagnostic: &CoverageDiagnostic, list: Option<&str>) -> Vec<
     vec![format!("  {}", diagnostic.message)]
 }
 
-fn metric_name(metric: MinimizeMetric) -> &'static str {
-    match metric {
-        MinimizeMetric::All => "all",
+/// The metric a minimization was asked for by name; none for all of them,
+/// which is what it means unasked.
+fn metric_name(metric: MinimizeMetric) -> Option<&'static str> {
+    Some(match metric {
+        MinimizeMetric::All => return None,
         MinimizeMetric::Lines => "lines",
         MinimizeMetric::Statements => "statements",
         MinimizeMetric::Functions => "functions",
         MinimizeMetric::Branches => "branches",
         MinimizeMetric::Mcdc => "mcdc",
-    }
+    })
 }
 
 fn shell_quote(value: &str) -> String {
@@ -222,8 +224,8 @@ fn coverage_command(run: &str, request: &IndexedQueryRequest, child: &str) -> St
         values.push(format!("--runner {}", shell_quote(runner)));
     }
     values.extend(test_filter_flags(request));
-    if request.metric != MinimizeMetric::All {
-        values.push(format!("--metric {}", metric_name(request.metric)));
+    if let Some(name) = metric_name(request.metric) {
+        values.push(format!("--metric {name}"));
     }
     values.join(" ")
 }
@@ -1992,11 +1994,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
         }
         IndexedQueryData::Minimize(data) => {
             let page = page.expect("minimize is paginated");
-            let target_label = if data.metric == MinimizeMetric::All {
-                "coverage across all measured metrics"
-            } else {
-                metric_name(data.metric)
-            };
+            let target_label =
+                metric_name(data.metric).unwrap_or("coverage across all measured metrics");
             let goal = match data.target {
                 Some(target) => format!("for {}% {target_label}", number(target)),
                 None if data.metric == MinimizeMetric::All => format!(
