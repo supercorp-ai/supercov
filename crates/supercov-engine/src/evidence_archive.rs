@@ -947,6 +947,26 @@ mod tests {
             assert!(left.is_empty(), "{limit}: {left:?}");
         }
         assert!(written.is_some());
+        // The stream's last bytes, a byte at a time: the disk filling as the
+        // compressor finishes, or as the buffer under it is flushed.
+        let size = write_archive(entries.clone(), &destination)
+            .unwrap()
+            .compressed_bytes;
+        fs::remove_file(&destination).unwrap();
+        for limit in size.saturating_sub(64)..size {
+            assert!(
+                matches!(
+                    write_archive_with_fault(
+                        entries.clone(),
+                        &destination,
+                        EvidenceArchiveWriteFault::NoSpaceAfterBytes(limit),
+                    ),
+                    Err(EvidenceArchiveError::Io(ref error)) if error.kind() == io::ErrorKind::StorageFull
+                ),
+                "{limit}"
+            );
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0, "{limit}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
