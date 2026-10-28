@@ -169,7 +169,7 @@ fn recorded_files(
         .find(|entry| entry.path == crate::source_capture::ARCHIVE_PATH)?;
     Some((
         entry.contents.as_slice(),
-        serde_json::from_slice(&entry.contents).ok()?,
+        serde_json::from_slice(&entry.contents).expect("a run's captured sources are JSON"),
     ))
 }
 
@@ -431,7 +431,10 @@ fn settle_unrun_workers(manifests: &[Option<&[u8]>]) -> (Vec<Option<Vec<u8>>>, B
 /// The language a run measured, from its frontend declaration.
 fn measured_language(run: &StoredRun) -> Option<String> {
     let entries = read_archive(&run.evidence_path).ok()?;
-    let entry = entries.iter().find(|entry| entry.path == "frontend.json")?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == "frontend.json")
+        .expect("a stored run's archive holds its frontend declaration");
     serde_json::from_slice::<FrontendRunDeclaration>(&entry.contents)
         .ok()
         .map(|declaration| declaration.language)
@@ -583,31 +586,34 @@ pub fn merge_coverage_runs(
             })
             .collect::<Vec<_>>(),
     );
-    let manifests = manifests.iter().map(Option::as_deref).collect::<Vec<_>>();
-    let Some(mut manifest) = manifests[0] else {
-        return Err("Cannot merge runs with different coverage denominators".into());
-    };
+    // Every archive Supercov writes holds its manifest, model and frontend.
+    const HELD: &str = "a stored run's archive holds its manifest and coverage model";
+    let manifests = manifests
+        .iter()
+        .map(|manifest| manifest.as_deref().expect(HELD))
+        .collect::<Vec<_>>();
+    let mut manifest = manifests[0];
     if let Some(Grown { latest, .. }) = grown {
         // A test file added since is one more entry in the scope's list of
         // what is not source. What is measured has to be the same.
-        let measured = |manifest: Option<&[u8]>| {
-            let mut value = serde_json::from_slice::<Value>(manifest?).ok()?;
-            value.as_object_mut()?.remove("scope");
-            Some(value)
+        let measured = |manifest: &[u8]| {
+            let mut value =
+                serde_json::from_slice::<Value>(manifest).expect("a stored manifest is JSON");
+            value
+                .as_object_mut()
+                .expect("a stored manifest is an object")
+                .remove("scope");
+            value
         };
         let first = measured(manifests[0]);
-        if first.is_none()
-            || manifests
-                .iter()
-                .any(|candidate| measured(*candidate) != first)
+        if manifests
+            .iter()
+            .any(|candidate| measured(candidate) != first)
         {
             return Err("Cannot merge runs with different coverage denominators".into());
         }
-        manifest = manifests[latest].expect("measured above");
-    } else if manifests
-        .iter()
-        .any(|candidate| *candidate != Some(manifest))
-    {
+        manifest = manifests[latest];
+    } else if manifests.iter().any(|candidate| *candidate != manifest) {
         return Err("Cannot merge runs with different coverage denominators".into());
     }
     let models = archives
@@ -619,9 +625,7 @@ pub fn merge_coverage_runs(
                 .map(|entry| entry.contents.as_slice())
         })
         .collect::<Vec<_>>();
-    let Some(model) = models[0] else {
-        return Err("Cannot merge runs without a coverage model".into());
-    };
+    let model = models[0].expect(HELD);
     if models.iter().any(|candidate| *candidate != Some(model)) {
         return Err("Cannot merge runs with different coverage models".into());
     }
@@ -1311,14 +1315,6 @@ mod tests {
                     );
                 }),
                 "Cannot merge run run-a with run run-b: mocks/a.js; mocks/b.js changed, and 1 of its tests reached them through a server that served them and were not measured again: t9.".into(),
-            ),
-            (
-                "grown, the first run's denominator unreadable",
-                Box::new(|root| {
-                    grown_from_a_recorded_file(root);
-                    rewrite_entry(root, "run-a", "manifest.json", Some(b"[]".to_vec()));
-                }),
-                "Cannot merge runs with different coverage denominators".into(),
             ),
             (
                 "grown, the later run's denominator another",
