@@ -447,10 +447,12 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
             }
             out.push(node);
         }
-        "parenthesized_expression" => match first_named_child(node) {
-            Some(inner) => condition_nodes(inner, source, out),
-            None => out.push(node),
-        },
+        // A tree with no error holds an expression in parentheses.
+        "parenthesized_expression" => condition_nodes(
+            first_named_child(node).expect("parentheses hold an expression"),
+            source,
+            out,
+        ),
         _ => out.push(node),
     }
 }
@@ -478,7 +480,7 @@ fn opening_contract<'tree>(
     if first.kind() != "call_expression" {
         return None;
     }
-    let callee = first.child(0)?;
+    let callee = first.child(0).expect("a call has its callee");
     (source[callee.byte_range()].trim() == "contract").then_some(first)
 }
 
@@ -589,12 +591,15 @@ fn arms<'t>(node: Node<'t>, language: JvmLanguage) -> (Option<Node<'t>>, Option<
 
 /// The expression inside `if (...)`. Java's grammar makes its condition a
 /// parenthesized expression; Kotlin's holds the expression itself.
-fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
-    let condition = node.child_by_field_name("condition")?;
+fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Node<'t> {
+    // A tree with no error gives every `if` a condition.
+    let condition = node
+        .child_by_field_name("condition")
+        .expect("an if has its condition");
     if language == JvmLanguage::Java {
-        return first_named_child(condition);
+        return first_named_child(condition).expect("parentheses hold an expression");
     }
-    Some(condition)
+    condition
 }
 
 /// The first named child that is not a comment: tree-sitter names comments
@@ -827,7 +832,7 @@ fn walk(collector: &mut Collector, node: Node) {
 /// The grammar gives every `if` a condition.
 fn if_node(collector: &mut Collector, node: Node) -> Option<()> {
     let language = collector.language;
-    let condition = condition_of(node, language)?;
+    let condition = condition_of(node, language);
     let probes = collector.add_branch(node, "if", &["true", "false"]);
     // An arm written without braces has nowhere to record itself.
     let (consequence, alternative) = arms(node, language);
@@ -899,78 +904,72 @@ fn is_logical_operand_parent(parent: Node, source: &str) -> bool {
 /// Whether `node` sits in the condition of an `if` or a loop, which is
 /// measured there, before any lambda or class that starts code of its own.
 fn in_measured_condition(node: Node) -> bool {
-    let mut child = node;
-    while let Some(parent) = child.parent() {
-        if matches!(
-            parent.kind(),
-            "lambda_expression"
-                | "class_body"
-                | "method_declaration"
-                | "constructor_declaration"
-                | "lambda_literal"
-                | "anonymous_function"
-                | "function_declaration"
-        ) {
-            return false;
-        }
-        if matches!(
-            parent.kind(),
-            "if_statement"
-                | "while_statement"
-                | "for_statement"
-                | "do_statement"
-                | "if_expression"
-                | "do_while_statement"
-        ) && parent
-            .child_by_field_name("condition")
-            .is_some_and(|condition| condition.byte_range().contains(&node.start_byte()))
-        {
-            return true;
-        }
-        child = parent;
-    }
-    false
+    // A node of a file is never its root: it has a parent.
+    std::iter::successors(node.parent(), |parent| parent.parent())
+        .find_map(|parent| {
+            if matches!(
+                parent.kind(),
+                "lambda_expression"
+                    | "class_body"
+                    | "method_declaration"
+                    | "constructor_declaration"
+                    | "lambda_literal"
+                    | "anonymous_function"
+                    | "function_declaration"
+            ) {
+                return Some(false);
+            }
+            (matches!(
+                parent.kind(),
+                "if_statement"
+                    | "while_statement"
+                    | "for_statement"
+                    | "do_statement"
+                    | "if_expression"
+                    | "do_while_statement"
+            ) && parent
+                .child_by_field_name("condition")
+                .is_some_and(|condition| condition.byte_range().contains(&node.start_byte())))
+            .then_some(true)
+        })
+        .unwrap_or(false)
 }
 
 /// Whether `node`'s value must stay a compile-time constant: in an annotation,
 /// or initializing a `final` field another constant expression may read.
 fn in_constant_context(node: Node, source: &str) -> bool {
-    let mut current = node;
-    while let Some(parent) = current.parent() {
-        match parent.kind() {
+    std::iter::successors(node.parent(), |parent| parent.parent())
+        .find_map(|parent| match parent.kind() {
             "annotation"
             | "marker_annotation"
             | "element_value_pair"
-            | "annotation_argument_list" => {
-                return true;
-            }
-            "field_declaration" => {
-                return parent
+            | "annotation_argument_list" => Some(true),
+            "field_declaration" => Some(
+                parent
                     .children(&mut parent.walk())
                     .find(|child| child.kind() == "modifiers")
-                    .is_some_and(|modifiers| source[modifiers.byte_range()].contains("final"));
-            }
+                    .is_some_and(|modifiers| source[modifiers.byte_range()].contains("final")),
+            ),
             // Kotlin's `const val`.
-            "property_declaration" => {
-                return parent
+            "property_declaration" => Some(
+                parent
                     .children(&mut parent.walk())
                     .find(|child| child.kind() == "modifiers")
                     .is_some_and(|modifiers| {
                         source[modifiers.byte_range()]
                             .split_whitespace()
                             .any(|word| word == "const")
-                    });
-            }
+                    }),
+            ),
             "method_declaration"
             | "constructor_declaration"
             | "lambda_expression"
             | "function_declaration"
             | "lambda_literal"
-            | "anonymous_function" => return false,
-            _ => current = parent,
-        }
-    }
-    false
+            | "anonymous_function" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// A for-each loop's outcomes are whether it ran at all, as every other
@@ -992,10 +991,13 @@ fn record_loop_ran(collector: &mut Collector, node: Node, language: JvmLanguage)
     // Where the flag is set: just inside the body's brace, or before its one
     // statement, which `ensure_block` then braces.
     let (set_at, set_rank) = if java {
-        match node.child_by_field_name("body") {
-            Some(body) if body.kind() == "block" => (body.start_byte() + 1, 100),
-            Some(body) => (body.start_byte(), 80),
-            None => return false,
+        let body = node
+            .child_by_field_name("body")
+            .expect("a Java loop has its body");
+        if body.kind() == "block" {
+            (body.start_byte() + 1, 100)
+        } else {
+            (body.start_byte(), 80)
         }
     } else {
         // A label (`outer@ for`) and an annotated variable are both inside
