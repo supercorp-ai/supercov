@@ -1619,7 +1619,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 }
                 CoverageDecisionData::Detail(data) => {
                     let mut decisions = Vec::new();
-                    for decision in &data.decisions {
+                    // A detail is of one decision: never none.
+                    data.decisions.iter().for_each(|decision| {
                         let mut lines = vec![
                             format!(
                                 "{}  {}:{}:{}",
@@ -1665,7 +1666,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             }));
                         }
                         decisions.push(lines.join("\n"));
-                    }
+                    });
                     let mut output = decisions.join("\n\n");
                     output.push_str(&format!(
                         "\n{} conditions/vectors/tests per decision",
@@ -2182,7 +2183,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 } else {
                     format!("in {} files, most lost first:", data.files)
                 });
-                for file in data.by_file.iter().take(SHOWN) {
+                // More than one file, so never none: `files` counts `by_file`.
+                data.by_file.iter().take(SHOWN).for_each(|file| {
                     let sides = [
                         ("lost", counted(&file.lost)),
                         ("gained", counted(&file.gained)),
@@ -2193,7 +2195,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     .collect::<Vec<_>>()
                     .join("; ");
                     lines.push(format!("  {}: {sides}", file.file));
-                }
+                });
                 if data.files > SHOWN {
                     lines.push(format!("  ... and {} more files", data.files - SHOWN));
                 }
