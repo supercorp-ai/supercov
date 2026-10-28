@@ -1345,14 +1345,8 @@ fn apply_transport(
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
                 if let Some(before) = before_assertion.remove(&ctx) {
-                    let identity =
-                        contexts
-                            .get(&ctx)
-                            .ok_or(PythonEvidenceError::UnknownContext {
-                                file: name.into(),
-                                line: line_number,
-                                context: ctx,
-                            })?;
+                    // A call phase's context is known from its phase record.
+                    let identity = &contexts[&ctx];
                     let asserted = evidence
                         .per_identity
                         .entry(Identity {
@@ -3152,6 +3146,99 @@ pub(crate) mod tests {
             ));
         }
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A hit or decisions in a context no phase opened, and an obligation the
+    /// manifest does not hold in any kind of phase -- one reported, one left
+    /// without its outcome, one of a test that reported nothing, the
+    /// background -- refuse the run.
+    #[test]
+    fn an_unknown_context_or_obligation_in_any_phase_refuses_the_run() {
+        let obligations = build_python_obligations("m.py", "x = 1\n").unwrap();
+        let process = json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]});
+        let phase = |ctx: u64, test: &str, phase: &str| json!({"t":"phase","ctx":ctx,"at":5,"worker":"main","test":test,"retry":0,"phase":phase});
+        let outcome = |phase: &str| json!({"t":"outcome","worker":"main","test":"t::a","retry":0,"phase":phase,"outcome":"passed","xfail":false});
+        let unknown = |ctx: u64| json!({"t":"hit","ctx":ctx,"id":"py:unknown"});
+        let exit = json!({"t":"exit","at":9});
+        for (label, records, said) in [
+            (
+                "hit",
+                vec![process.clone(), unknown(3), exit.clone()],
+                "context 3",
+            ),
+            (
+                "decisions",
+                vec![
+                    process.clone(),
+                    json!({"t":"decs","ctx":3,"v":[["d", "21", 0]]}),
+                    exit.clone(),
+                ],
+                "context 3",
+            ),
+            (
+                "reported",
+                vec![
+                    process.clone(),
+                    phase(1, "t::a", "call"),
+                    unknown(1),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+            (
+                "unreported phase",
+                vec![
+                    process.clone(),
+                    phase(1, "t::a", "setup"),
+                    outcome("setup"),
+                    phase(2, "t::a", "call"),
+                    unknown(2),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+            (
+                "no outcome",
+                vec![
+                    process.clone(),
+                    phase(1, "t::a", "call"),
+                    outcome("call"),
+                    phase(2, "t::b", "call"),
+                    unknown(2),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+            (
+                "background",
+                vec![
+                    process.clone(),
+                    unknown(0),
+                    phase(1, "t::a", "call"),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+        ] {
+            let directory = temporary("unknown-context");
+            write_transport(&directory.join("main.1.mmap"), &records, 0);
+            let built = build_python_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            );
+            let got = built
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            assert!(got.contains(said), "{label}: {got}");
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     /// A slot gone between the listing and the look at it is read as gone;
