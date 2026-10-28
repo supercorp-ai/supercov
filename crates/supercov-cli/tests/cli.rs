@@ -14231,6 +14231,9 @@ fn an_import_whose_step_fails_says_so() {
         "fs.rename@2",
         "fs.rename@3",
         "fs.rename@4",
+        // The store of runs listed, and the lock released after importing.
+        "fs.read_dir#run_store.rs:636",
+        "copy-release",
     ] {
         let project = Project::cart("import-steps");
         project.supercov(&["--", "node", "--test"]).succeeds();
