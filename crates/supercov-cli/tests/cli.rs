@@ -15989,9 +15989,20 @@ fn a_run_that_cannot_release_its_copy_says_so() {
 
 /// A run whose standard error stops being read after its first line --
 /// `supercov -- npm test 2>&1 | head -1` -- goes on without it and never
-/// panics.
+/// panics. The command's own tools write there too, and may fail for it as
+/// they would without Supercov: Cargo's 101 is then the command's, and the
+/// run is still published, which a run that panicked is not.
 fn close_diagnostics_after_one_line(project: &Project, command: &[&str]) {
     use std::io::BufRead;
+    let runs = || {
+        let listed = project.supercov(&["runs", "--json"]);
+        if listed.code() == 0 {
+            listed.json()["data"]["runs"].as_array().map_or(0, Vec::len)
+        } else {
+            0
+        }
+    };
+    let before = runs();
     let mut child = project
         .supercov_command(command)
         .stdout(std::process::Stdio::null())
@@ -16003,7 +16014,10 @@ fn close_diagnostics_after_one_line(project: &Project, command: &[&str]) {
     assert!(reader.read_line(&mut line).unwrap() > 0);
     drop(reader);
     let status = child.wait().unwrap();
-    assert_ne!(status.code(), Some(101), "panicked after {line}");
+    assert!(
+        status.code() != Some(101) || runs() > before,
+        "panicked after {line}"
+    );
 }
 
 #[test]
