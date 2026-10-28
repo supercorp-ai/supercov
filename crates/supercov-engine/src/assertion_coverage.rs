@@ -581,7 +581,9 @@ pub fn population_from(
             // from the result types. (Writing the JVM's `null` out the same
             // way measured no better on commons-cli and moved the share away
             // from the truth, so the JVM keeps its description.)
-            Language::Go if valued => go::rewrite(source, line, change),
+            Language::Go if valued => {
+                go::rewrite(source, line, matches!(change, Change::ReturnUndefined))
+            }
             _ => None,
         };
         // A replacement that writes the statement out as it already is --
@@ -2953,7 +2955,7 @@ mod tests {
         assert!(!super::same_code("return 0, nil", "return n, nil"));
         let source = "package p\n\nfunc f(n int) (int, error) {\n\tif n > 0 {\n\t\treturn n, nil\n\t}\n\treturn 0, nil\n}\n";
         assert_eq!(
-            super::go::rewrite(source, 7, Change::ReturnUndefined).as_deref(),
+            super::go::rewrite(source, 7, true).as_deref(),
             Some("return 0, nil")
         );
     }
