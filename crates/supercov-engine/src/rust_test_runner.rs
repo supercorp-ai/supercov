@@ -926,10 +926,9 @@ fn build_owned_arguments(arguments: Vec<String>) -> Result<Vec<String>, RustTest
 
 fn build_test_artifacts(
     project: &PreparedRustProject,
-    command: &[String],
+    lint_invocation: &CargoTestInvocation,
 ) -> Result<Vec<TestArtifact>, RustTestRunnerError> {
-    let mut invocation = cargo_invocation(&project.workspace_root, command)?;
-    let lint_invocation = invocation.clone();
+    let mut invocation = lint_invocation.clone();
     invocation.arguments = build_owned_arguments(invocation.arguments)?;
     invocation
         .arguments
@@ -944,7 +943,7 @@ fn build_test_artifacts(
         .args(invocation.arguments)
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
-        .env("RUSTFLAGS", capped_rustflags(project, &lint_invocation))
+        .env("RUSTFLAGS", capped_rustflags(project, lint_invocation))
         .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
@@ -1938,22 +1937,23 @@ fn decline_uncompiled_sources(
         .and_then(|scope| scope.get_mut("entries"))
         .and_then(serde_json::Value::as_array_mut)
     {
-        for entry in entries
+        // Never empty: the declined files are sources the scope lists.
+        entries
             .iter_mut()
             .filter_map(serde_json::Value::as_object_mut)
-        {
-            let named = entry
-                .get("file")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|file| declined.contains(file));
-            if named {
-                entry.insert("status".into(), "excluded".into());
-                entry.insert(
-                    "reason".into(),
-                    crate::rust_project::RUST_NOT_COMPILED.into(),
-                );
-            }
-        }
+            .for_each(|entry| {
+                let named = entry
+                    .get("file")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|file| declined.contains(file));
+                if named {
+                    entry.insert("status".into(), "excluded".into());
+                    entry.insert(
+                        "reason".into(),
+                        crate::rust_project::RUST_NOT_COMPILED.into(),
+                    );
+                }
+            });
     }
     (manifest, declined)
 }
@@ -2219,7 +2219,7 @@ pub fn run_prepared_rust_tests(
     // nextest builds for itself; Cargo builds the libtest artifacts here.
     let artifacts = if selection.run_libtests && invocation.kind == RustCargoCommandKind::CargoTest
     {
-        build_test_artifacts(project, command)?
+        build_test_artifacts(project, &invocation)?
     } else {
         Vec::new()
     };
@@ -2460,7 +2460,7 @@ pub fn run_prepared_rust_tests(
     });
     let mut outcomes = outcomes
         .into_inner()
-        .map_err(|_| RustTestRunnerError::Io("Rust test result lock poisoned".into()))?
+        .expect("Rust test result lock poisoned")
         .into_iter()
         .map(|result| result.map_err(RustTestRunnerError::Launch))
         .collect::<Result<Vec<_>, _>>()?;
@@ -3594,7 +3594,11 @@ mod tests {
             .unwrap();
             build_test_artifacts(
                 &project,
-                &[root.join("cargo").display().to_string(), "test".into()],
+                &cargo_invocation(
+                    &root,
+                    &[root.join("cargo").display().to_string(), "test".into()],
+                )
+                .unwrap(),
             )
             .map(|artifacts| artifacts.len())
             .map_err(|error| error.to_string())
@@ -3616,6 +3620,46 @@ mod tests {
             built(&outside, false)
                 .unwrap_err()
                 .contains("Cargo emitted no libtest artifacts")
+        );
+        let read = |messages: &str| {
+            fs::write(root.join("messages"), messages).unwrap();
+            build_test_artifacts(
+                &project,
+                &cargo_invocation(
+                    &root,
+                    &[root.join("cargo").display().to_string(), "test".into()],
+                )
+                .unwrap(),
+            )
+            .map(|artifacts| artifacts.len())
+            .map_err(|error| error.to_string())
+        };
+        // A line that is no JSON is no message of Cargo's.
+        assert!(read("not json\n").unwrap_err().contains("expected"));
+        // A test target with no executable built nothing to run.
+        let unbuilt = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": {"name": "fixture", "kind": ["lib"], "src_path": root.join("src/lib.rs")},
+            "profile": {"test": true},
+        });
+        assert!(
+            read(&format!("{unbuilt}\n"))
+                .unwrap_err()
+                .contains("Cargo emitted no libtest artifacts")
+        );
+        // A test binary built from a source outside the workspace is refused.
+        let binary = root.join("target/debug/deps/fixture");
+        fs::write(&binary, "").unwrap();
+        let foreign = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": {"name": "fixture", "kind": ["test"], "src_path": "/bin/sh"},
+            "profile": {"test": true},
+            "executable": binary,
+        });
+        assert!(
+            read(&format!("{foreign}\n"))
+                .unwrap_err()
+                .contains(&outside.display().to_string())
         );
         fs::remove_dir_all(root).unwrap();
     }

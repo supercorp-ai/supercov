@@ -13547,10 +13547,10 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // build, rustc's libdir and sysroot, a test binary's listing,
             // the test processes and the doctests'.
             "spawn#rust_project.rs:183 => rust_project.rs:183",
-            "spawn#rust_test_runner.rs:948 => rust_test_runner.rs:948",
-            "spawn#rust_test_runner.rs:1549 => rust_test_runner.rs:1549",
-            "spawn#rust_test_runner.rs:1549@2 => rust_test_runner.rs:1549",
-            "spawn#rust_test_runner.rs:1267 => rust_test_runner.rs:1267",
+            "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
+            "spawn#rust_test_runner.rs:1548 => rust_test_runner.rs:1548",
+            "spawn#rust_test_runner.rs:1548@2 => rust_test_runner.rs:1548",
+            "spawn#rust_test_runner.rs:1266 => rust_test_runner.rs:1266",
             "spawn#child_signal_guard.rs:232 => child_signal_guard.rs:232",
             "spawn#child_signal_guard.rs:232@2 => child_signal_guard.rs:232",
             "spawn",
@@ -16914,4 +16914,81 @@ fn a_patch_of_a_failed_or_stale_run_says_what_it_can() {
         "{}",
         faulted.stderr()
     );
+}
+
+/// After its build a Rust run says which files the build did not compile,
+/// starts each test in its own process and reads back what its builds
+/// settled of each `#[cfg]` gate: any of these failing ends the run, by
+/// `cargo test` or by nextest.
+#[test]
+fn a_rust_run_whose_step_after_the_build_fails_says_so() {
+    for (command, fault, place) in [
+        (
+            &["cargo", "test"][..],
+            "spawn#child_signal_guard.rs:232",
+            "child_signal_guard.rs:232",
+        ),
+        (&["cargo", "test"][..], "diagnostics@3", "diagnostics"),
+        (
+            &["cargo", "test"][..],
+            "fs.read_dir#rust_runtime.rs:409",
+            "rust_runtime.rs:409",
+        ),
+        (
+            &["cargo", "nextest", "run"][..],
+            "fs.read_dir#rust_runtime.rs:409",
+            "rust_runtime.rs:409",
+        ),
+    ] {
+        let project = Project::empty("rust-settlement");
+        project.write(
+            "Cargo.toml",
+            "[package]\nname = \"s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n\n[workspace]\n",
+        );
+        project.write(
+            "src/lib.rs",
+            "#[cfg(feature = \"extra\")]\nmod gated;\n\npub fn double(n: u32) -> u32 {\n    n * 2\n}\n\n#[cfg(feature = \"extra\")]\npub fn extra() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+        );
+        project.write("src/gated.rs", "pub fn gated() -> u32 {\n    2\n}\n");
+        project.write(".gitignore", "target/\n");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let mut arguments = vec!["--"];
+        arguments.extend(command);
+        let ran = project.supercov_with(&arguments, &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{command:?} {fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{command:?} {fault}: {stderr}");
+    }
+}
+
+/// A test binary of the project's own harness answers `--list` as it likes:
+/// one that fails to list, or lists a name no test can have, ends the run.
+#[test]
+fn a_rust_test_binary_that_cannot_list_its_tests_ends_the_run() {
+    for (main, said) in [
+        (
+            "fn main() {\n    std::process::exit(3);\n}\n",
+            "when asked to --list",
+        ),
+        (
+            "fn main() {\n    println!(\"bad\\0name: test\");\n}\n",
+            "test name",
+        ),
+    ] {
+        let project = Project::empty("rust-own-harness");
+        project.write(
+            "Cargo.toml",
+            "[package]\nname = \"h\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[test]]\nname = \"own\"\nharness = false\n\n[workspace]\n",
+        );
+        project.write("src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n");
+        project.write("tests/own.rs", main);
+        project.write(".gitignore", "target/\n");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran = project.supercov(&["--", "cargo", "test"]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{stderr}");
+        assert!(stderr.contains(said), "{said}: {stderr}");
+    }
 }
