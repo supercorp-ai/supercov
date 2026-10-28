@@ -879,6 +879,77 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Each step of writing an archive failing -- its directory, its
+    /// temporary file, the bytes wherever the disk fills, the sync, the size,
+    /// the rename -- or a destination with no name, leaves nothing behind.
+    #[test]
+    fn each_step_of_writing_an_archive_failing_leaves_nothing() {
+        let root = temporary_directory("archive-steps");
+        let destination = root.join("evidence.raw.gz");
+        for fault in [
+            "fs.create_dir_all",
+            "fs.open_with",
+            "fs.sync_all",
+            "fs.file_metadata",
+            "fs.rename",
+        ] {
+            assert!(
+                crate::fault::during(fault, || write_archive(identity_entries(), &destination))
+                    .is_err(),
+                "{fault}"
+            );
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0, "{fault}");
+        }
+        for nameless in [Path::new(""), &root.join("..")] {
+            assert!(
+                matches!(
+                    write_archive(identity_entries(), nameless),
+                    Err(EvidenceArchiveError::InvalidPath(_))
+                ),
+                "{}",
+                nameless.display()
+            );
+        }
+        // Bytes that do not compress, so the disk can fill at any point of
+        // the stream: while it is written, as it is finished, as it is
+        // flushed.
+        let mut noise = Vec::with_capacity(96 * 1024);
+        let mut state = 0x2545_f491_u32;
+        for _ in 0..noise.capacity() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            noise.push(state as u8);
+        }
+        let mut entries = identity_entries();
+        entries.push(entry("noise.bin", &noise));
+        let mut written = None;
+        for limit in (0..110_000).step_by(1_009) {
+            match write_archive_with_fault(
+                entries.clone(),
+                &destination,
+                EvidenceArchiveWriteFault::NoSpaceAfterBytes(limit),
+            ) {
+                Ok(metadata) => {
+                    written = Some(limit);
+                    assert!(metadata.compressed_bytes <= limit);
+                    fs::remove_file(&destination).unwrap();
+                }
+                Err(EvidenceArchiveError::Io(error)) => {
+                    assert_eq!(error.kind(), io::ErrorKind::StorageFull, "{limit}");
+                }
+                Err(other) => panic!("{limit}: {other}"),
+            }
+            let left = fs::read_dir(&root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert!(left.is_empty(), "{limit}: {left:?}");
+        }
+        assert!(written.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rejects_every_noncanonical_framing_boundary() {
         let root = temporary_directory("archive-invalid");
@@ -979,16 +1050,24 @@ mod tests {
     fn rejects_unsafe_duplicate_and_missing_manifest_entries_without_debris() {
         let root = temporary_directory("archive-safety");
         let destination = root.join("evidence.raw.gz");
+        // Beside the identity an archive needs, so the path is what is refused.
         for invalid in ["", "/absolute", "../escape", "a/../escape", "a\\b"] {
-            assert!(write_archive(vec![entry(invalid, b"")], &destination).is_err());
+            let mut entries = identity_entries();
+            entries.push(entry(invalid, b""));
+            assert!(
+                matches!(
+                    write_archive(entries, &destination),
+                    Err(EvidenceArchiveError::InvalidPath(path)) if path == invalid
+                ),
+                "{invalid}"
+            );
         }
-        assert!(
-            write_archive(
-                vec![entry("manifest.json", b"{}"), entry("manifest.json", b"{}")],
-                &destination,
-            )
-            .is_err(),
-        );
+        let mut doubled = identity_entries();
+        doubled.push(entry("manifest.json", b"{}"));
+        assert!(matches!(
+            write_archive(doubled, &destination),
+            Err(EvidenceArchiveError::DuplicatePath(path)) if path == "manifest.json"
+        ));
         assert!(write_archive(vec![entry("result.json", b"{}")], &destination).is_err());
         assert!(!destination.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
@@ -1147,6 +1226,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["manifest.json", "server/worker/result.jsonl"],
         );
+        // Each read failing fails the collection: the directory listed, an
+        // entry of it, a child's kind, one below it, a file in it, and the
+        // named file's kind and bytes.
+        let sources = [
+            EvidenceArchiveSource::Directory {
+                directory: root.join("evidence"),
+                prefix: Some("server".to_owned()),
+            },
+            EvidenceArchiveSource::File {
+                file: root.join("manifest.json"),
+                path: "manifest.json".to_owned(),
+            },
+        ];
+        for fault in [
+            "fs.read_dir",
+            "fs.read_dir entry",
+            "fs.symlink_metadata@2",
+            "fs.symlink_metadata@3",
+            "fs.read",
+            "fs.symlink_metadata@4",
+            "fs.read@2",
+        ] {
+            assert!(
+                crate::fault::during(fault, || collect_sources(&sources)).is_err(),
+                "{fault}"
+            );
+        }
+        // A prefix or a file's path the archive cannot carry is refused.
+        for (prefix, path) in [
+            ("../server", "manifest.json"),
+            ("server", "../manifest.json"),
+        ] {
+            let refused = collect_sources(&[
+                EvidenceArchiveSource::Directory {
+                    directory: root.join("evidence"),
+                    prefix: Some(prefix.to_owned()),
+                },
+                EvidenceArchiveSource::File {
+                    file: root.join("manifest.json"),
+                    path: path.to_owned(),
+                },
+            ]);
+            assert!(
+                matches!(refused, Err(EvidenceArchiveError::InvalidPath(_))),
+                "{prefix} {path}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
