@@ -733,6 +733,7 @@ fn listed_names(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[track_caller]
 fn next_sequence(directory: &Path, prefix: &str) -> Result<usize, RustTestRunnerError> {
     fs::create_dir_all(directory).map_err(io_error)?;
     (0_usize..)
@@ -1132,6 +1133,16 @@ pub fn doctest_runtool(arguments: Vec<String>) -> i32 {
     }
 }
 
+/// A runtool invocation's record, written where it is asked for.
+#[track_caller]
+fn write_record(path: &Path, record: &Invocation) -> Result<(), RustTestRunnerError> {
+    fs::write(
+        path,
+        serde_json::to_vec(record).expect("plain data serializes"),
+    )
+    .map_err(io_error)
+}
+
 fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerError> {
     let [package_dir, mode, binary, ..] = arguments else {
         return Err(RustTestRunnerError::UnsupportedCommand(
@@ -1146,13 +1157,6 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     let record_path = package_dir
         .join("invocations")
         .join(format!("{index:08}.json"));
-    let write_record = |record: &Invocation| -> Result<(), RustTestRunnerError> {
-        fs::write(
-            &record_path,
-            serde_json::to_vec(record).expect("plain data serializes"),
-        )
-        .map_err(io_error)
-    };
 
     match mode.as_str() {
         "list" => {
@@ -1169,7 +1173,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                 fs::write(listed.join(format!("{index:08}.txt")), text.as_bytes())
                     .map_err(io_error)?;
             }
-            write_record(&Invocation::Listed)?;
+            write_record(&record_path, &Invocation::Listed)?;
             relay(&output);
             Ok(output.status.code().unwrap_or(1))
         }
@@ -1237,7 +1241,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                     "merged doctest child {index} ran for a case the harness did not report"
                 )));
             }
-            write_record(&Invocation::Merged { cases })?;
+            write_record(&record_path, &Invocation::Merged { cases })?;
             relay(&output);
             Ok(output.status.code().unwrap_or(1))
         }
@@ -1254,18 +1258,21 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             // A merged harness that the per-name filter matched nothing in
             // announces itself; anything else is the named doctest.
             if text.contains("running 0 tests") {
-                write_record(&Invocation::EmptyHarness)?;
+                write_record(&record_path, &Invocation::EmptyHarness)?;
             } else {
                 let name = std::env::var(NAME_ENV).map_err(|_| {
                     RustTestRunnerError::Context(
                         "a per-name doctest pass did not name its doctest".into(),
                     )
                 })?;
-                write_record(&Invocation::Standalone {
-                    name,
-                    exit_code: exit,
-                    evidence,
-                })?;
+                write_record(
+                    &record_path,
+                    &Invocation::Standalone {
+                        name,
+                        exit_code: exit,
+                        evidence,
+                    },
+                )?;
             }
             relay(&output);
             Ok(exit)
