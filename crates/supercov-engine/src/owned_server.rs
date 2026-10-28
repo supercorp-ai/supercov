@@ -235,23 +235,23 @@ pub fn publish(
             coverage_model: server.coverage_model,
         })
         .map_err(|error| error.to_string())?;
-        for (raw, (index, test)) in run
-            .request
+        // Never none: there are tests, and a result for each.
+        run.request
             .raw_results
             .iter_mut()
             .zip(served.iter().enumerate())
-        {
-            raw.title = Some(test.title.clone());
-            raw.expected_status = Some(test.expected_status.clone());
-            raw.status = Some(test.status.clone());
-            raw.provenance = crate::coverage_report::TestProvenance {
-                source: raw.provenance.source.clone(),
-                ..test.provenance.clone()
-            };
-            if credited.contains(&index) {
-                raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
-            }
-        }
+            .for_each(|(raw, (index, test))| {
+                raw.title = Some(test.title.clone());
+                raw.expected_status = Some(test.expected_status.clone());
+                raw.status = Some(test.status.clone());
+                raw.provenance = crate::coverage_report::TestProvenance {
+                    source: raw.provenance.source.clone(),
+                    ..test.provenance.clone()
+                };
+                if credited.contains(&index) {
+                    raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
+                }
+            });
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let work = root.join(".supercov/work").join(&metadata.id);
@@ -464,6 +464,133 @@ mod tests {
             assert_eq!(published, Ok(None));
             assert!(!directory.exists());
             assert!(!root.join(".supercov/runs/run_server").exists());
+        }
+    }
+
+    /// Writes its first `lines` lines, then fails.
+    struct Lines(usize);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::Error::other("closed"));
+            }
+            self.0 -= 1;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A browser test the server's window ran under makes a run of the
+    /// server's own; each step of publishing it failing -- the windows read,
+    /// the work directory, the archive, the run already there, a line said
+    /// -- keeps the evidence and says so.
+    #[test]
+    fn a_server_window_a_test_ran_under_is_published_and_each_failure_kept() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-owned-server-published-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let probes = BTreeMap::new();
+        let inputs = crate::source_manifest::Inputs {
+            language: "go".into(),
+            files: BTreeMap::new(),
+        };
+        let browser = |name: &str, window: (i64, i64)| {
+            let mut test = served(name, "passed", window);
+            test.provenance.runner = "playwright".into();
+            test.provenance.kind = "browser".into();
+            test
+        };
+        let one = [browser("one", (100, 200))];
+        // Two tests at once: the window is the run's and neither's.
+        let both = [browser("one", (100, 200)), browser("two", (100, 200))];
+        let publishing = |id: &str, tests: &[ServedTest], fault: &str, said: &mut dyn Write| {
+            let directory = root.join(format!(".supercov/work/{id}/go"));
+            fs::create_dir_all(directory.join("evidence")).unwrap();
+            fs::write(
+                directory.join("evidence/1.windows"),
+                "{\"start\":100,\"end\":150,\"probes\":[],\"vectors\":[]}\n",
+            )
+            .unwrap();
+            let metadata = crate::lifecycle::test_run_metadata(id, 0);
+            crate::fault::during(fault, || {
+                publish(
+                    &root,
+                    OwnedServer {
+                        language: "Go",
+                        declaration: crate::owned_evidence::go_declaration(),
+                        environment: "go",
+                        coverage_model: crate::owned_evidence::go_coverage_model(),
+                        manifest: &manifest,
+                        probes: &probes,
+                        widths: &[],
+                        integrity: &metadata.integrity,
+                        source_inputs: &inputs,
+                        source_roots: None,
+                        directory: &directory,
+                        source_files: 0,
+                    },
+                    metadata.clone(),
+                    tests,
+                    said,
+                )
+            })
+        };
+        let mut said = Vec::new();
+        assert!(
+            publishing("run_one", &one, "", &mut said)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            String::from_utf8_lossy(&said).contains("Go server coverage: 1 test(s)"),
+            "{}",
+            String::from_utf8_lossy(&said)
+        );
+        let again = publishing("run_one", &one, "", &mut Vec::new()).unwrap_err();
+        assert!(again.contains("coverage run already exists"), "{again}");
+        for (id, tests, fault, lines) in [
+            (
+                "run_read",
+                &one[..],
+                "fs.read_to_string#owned_server.rs:79",
+                9,
+            ),
+            (
+                "run_work",
+                &one[..],
+                "fs.create_dir_all#owned_server.rs:258",
+                9,
+            ),
+            (
+                "run_archive",
+                &one[..],
+                "fs.rename#evidence_archive.rs:471",
+                9,
+            ),
+            ("run_said", &one[..], "", 0),
+            ("run_overlap", &both[..], "", 1),
+        ] {
+            let failed = publishing(id, tests, fault, &mut Lines(lines)).unwrap_err();
+            assert!(failed.contains("their evidence is kept"), "{id}: {failed}");
         }
     }
 }

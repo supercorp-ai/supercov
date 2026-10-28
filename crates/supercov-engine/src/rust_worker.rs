@@ -3369,8 +3369,12 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let written = inspect_with(Arc::clone(&stop), TAKE_PATIENCE, |socket, stop, _| {
             assert_eq!(receive(socket)["method"], "Runtime.enable");
-            socket.send(tungstenite::Message::Text("not json".into())).unwrap();
-            socket.send(tungstenite::Message::Binary(vec![1, 2].into())).unwrap();
+            socket
+                .send(tungstenite::Message::Text("not json".into()))
+                .unwrap();
+            socket
+                .send(tungstenite::Message::Binary(vec![1, 2].into()))
+                .unwrap();
             answer(
                 socket,
                 json!({"method": "Runtime.executionContextsCleared"}),
