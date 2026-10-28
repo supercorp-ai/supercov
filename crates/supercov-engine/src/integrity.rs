@@ -281,7 +281,8 @@ fn behavioural_manifest(kind: ManifestKind, raw: &[u8]) -> Option<Vec<u8>> {
         }
         ManifestKind::CargoToml | ManifestKind::PyprojectToml => {
             let text = std::str::from_utf8(raw).ok()?;
-            serde_json::to_value(toml::from_str::<toml::Value>(text).ok()?).ok()?
+            serde_json::to_value(toml::from_str::<toml::Value>(text).ok()?)
+                .expect("a TOML value is JSON")
         }
     };
     match kind {
@@ -1182,6 +1183,22 @@ mod tests {
             first,
             digest_manifests(&root, [root.join("package.json")]).unwrap()
         );
+        // A `package` that is no table has no release metadata to drop.
+        assert!(behavioural_manifest(ManifestKind::CargoToml, b"package = \"x\"\n").is_some());
+        // A manifest that opens but cannot be read for its meaning is hashed
+        // by its bytes; a path outside the root is refused.
+        write(&root, "Cargo.toml", "[package]\nname = \"x\"\n");
+        let cargo = [root.join("Cargo.toml")];
+        let meant = digest_manifests(&root, cargo.clone()).unwrap();
+        let bytes = crate::fault::during("fs.read", || digest_manifests(&root, cargo.clone()));
+        assert_ne!(bytes.unwrap(), meant);
+        assert!(digest_files(&root, [std::env::temp_dir().join("elsewhere")]).is_err());
+        // A name that is no text is no manifest, where the system allows one.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(manifest_kind(Path::new(std::ffi::OsStr::from_bytes(b"\xff"))).is_none());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1554,6 +1571,21 @@ mod tests {
             instrumenter.fingerprint.combined,
             first.fingerprint.combined
         );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
+    }
+
+    /// A directory the test-file walk cannot list, or an entry of it, fails
+    /// the walk.
+    #[test]
+    fn a_walk_that_cannot_list_a_directory_fails() {
+        let (root, shim) = fixture();
+        for fault in ["fs.read_dir", "fs.read_dir entry"] {
+            assert!(
+                crate::fault::during(fault, || test_files(&root)).is_err(),
+                "{fault}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();
     }
