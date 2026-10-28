@@ -178,7 +178,7 @@ fn file_details(
             .expect("`file` takes the options `gaps` took");
     let inventory = super::public_run_inventory(root).map_err(|error| error.to_string())?;
     let stored = supercov_engine::run_store::select_run(&inventory, Some(&request.run_id))
-        .map_err(|error| error.to_string())?;
+        .expect("the gaps query read this run");
     let container = super::open_query_index_for(stored, request.test_filter().as_ref())
         .map_err(|error| error.to_string())?;
     let index = supercov_engine::coverage_index::CoverageIndex::new(&container)
