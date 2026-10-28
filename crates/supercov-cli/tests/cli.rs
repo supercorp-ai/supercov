@@ -15135,7 +15135,12 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
     project.commit("ignore");
     project.supercov(&["--", "node", "--test"]).succeeds();
     project.supercov(&["runs", "latest", "--json"]).succeeds();
-    for fault in ["coverage-index@4", "coverage-index-read#3"] {
+    for fault in [
+        "coverage-index@4",
+        "coverage-index-read#3",
+        // The runs listed again for the details.
+        "fs.read_dir#run_store.rs:636@2",
+    ] {
         let refused = project
             .supercov_with(
                 &["runs", "latest", "gaps", "--format", "jsonl"],

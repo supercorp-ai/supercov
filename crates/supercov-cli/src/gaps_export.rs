@@ -111,8 +111,12 @@ pub fn command(arguments: &[String]) -> ExitCode {
     let mut lines = String::new();
     let mut written = 0usize;
     for (file, detail) in files.iter().zip(&details) {
-        for gap_line in &detail.gap_lines {
-            for obligation in &gap_line.obligations {
+        // A file the gaps name has a gap line, and a gap line an obligation.
+        detail
+            .gap_lines
+            .iter()
+            .flat_map(|gap_line| gap_line.obligations.iter().map(move |o| (gap_line, o)))
+            .for_each(|(gap_line, obligation)| {
                 let row = Row {
                     file,
                     obligation,
@@ -123,8 +127,7 @@ pub fn command(arguments: &[String]) -> ExitCode {
                 );
                 lines.push('\n');
                 written += 1;
-            }
-        }
+            });
     }
     match output {
         Some(path) => {
@@ -170,10 +173,12 @@ fn file_details(
     let mut arguments = vec![run.to_owned(), "file".into(), first.clone()];
     arguments.extend(shared.iter().cloned());
     arguments.extend(["--json", "--limit", ALL].map(str::to_owned));
+    // The gaps query took these options already.
     let super::PublicQueryInvocation::Coverage { request, .. } =
-        super::parse_public_query("runs", &arguments).map_err(|error| error.error.message)?
+        super::parse_public_query("runs", &arguments)
+            .expect("`file` takes the options `gaps` took")
     else {
-        return Err("not a coverage query".into());
+        unreachable!("`runs <run> file` is a coverage query")
     };
     let inventory = super::public_run_inventory(root).map_err(|error| error.to_string())?;
     let stored = supercov_engine::run_store::select_run(&inventory, Some(&request.run_id))
@@ -182,7 +187,7 @@ fn file_details(
         .map_err(|error| error.to_string())?;
     let index = supercov_engine::coverage_index::CoverageIndex::new(&container)
         .map_err(|error| error.to_string())?;
-    let view = request.view().map_err(|error| format!("{error:?}"))?;
+    let view = request.view().expect("the gaps query read this view");
     let read = supercov_engine::coverage_query::FileDetailSource::read(&index, view)
         .map_err(|error| format!("{error:?}"))?;
     files
