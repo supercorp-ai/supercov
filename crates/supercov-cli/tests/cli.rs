@@ -15847,8 +15847,9 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
 }
 
 /// A query recomputes a run's inputs to judge whether it is current: the
-/// project's root resolved, its tree walked. Either failing, for a Rust, Go,
-/// Ruby or Java run, reads the run as stale rather than failing the query;
+/// project's root resolved, its tree walked, its files digested. Each
+/// failing, for a Rust, Go, Ruby or Java run, reads the run as stale rather
+/// than failing the query;
 /// so do source roots the run was measured under that resolve to nothing.
 #[test]
 fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
@@ -15875,6 +15876,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         &[
             ("fs.canonicalize#rust_run.rs:245", "rust_run.rs:245"),
             ("fs.read_dir#rust_run.rs:85", "rust_run.rs:85"),
+            ("fs.open#integrity.rs:426", "integrity.rs:426"),
         ],
     );
     if let Some(go) = go() {
@@ -15884,6 +15886,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &[
                 ("fs.canonicalize#go_run.rs:609", "go_run.rs:609"),
                 ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+                ("fs.open#integrity.rs:426", "integrity.rs:426"),
             ],
         );
     }
@@ -15902,6 +15905,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &[
                 ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
                 ("fs.read_dir#ruby_project.rs:100", "ruby_project.rs:100"),
+                ("fs.open#integrity.rs:426", "integrity.rs:426"),
             ],
         );
         std::fs::rename(project.root.join("lib"), project.root.join("moved")).unwrap();
@@ -15924,6 +15928,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &[
                 ("fs.canonicalize#jvm_run.rs:1505", "jvm_run.rs:1505"),
                 ("fs.read_dir#jvm_project.rs:173", "jvm_project.rs:173"),
+                ("fs.open#integrity.rs:426", "integrity.rs:426"),
             ],
         );
     }
