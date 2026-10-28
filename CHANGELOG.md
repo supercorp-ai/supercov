@@ -4,7 +4,7 @@
 
 **Changed**
 
-- A Rust `for` loop over a non-empty array literal, a constant of the file that is one, a range between integer literals or constants of the file that are one, or a `split` (`for x in [a, b]`, `for k in KINDS`, `for i in 0..8`, `for copy in 1..=MOST`, `for part in text.split(',')`, through `iter`, `enumerate`, `map` and the like) counts only its entry, not a zero-iterations outcome it can never take, as a JavaScript loop over an array literal already does.
+- A Rust `for` loop over a non-empty array literal, a constant of the file that is one, a range between integer literals or constants of the file that are one, a `split`, `iter::once`, or a `chain` with one of these on either side (`for x in [a, b]`, `for k in KINDS`, `for i in 0..8`, `for copy in 1..=MOST`, `for part in text.split(',')`, `for phase in steps.iter().chain(once(&last))`, through `iter`, `enumerate`, `map` and the like) counts only its entry, not a zero-iterations outcome it can never take, as a JavaScript loop over an array literal already does.
 - A Rust run of other tests than the run before it (`cargo test -- other_test`) reuses that run's instrumented build; anything after the command's `--` used to make Supercov instrument and build the project again.
 
 **Fixed**

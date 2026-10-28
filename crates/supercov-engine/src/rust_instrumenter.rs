@@ -304,9 +304,10 @@ fn in_global_allocator_impl(node: &ra_ap_syntax::SyntaxNode) -> bool {
 
 /// Whether a `for` loop over `iterable` runs its body at least once, by its
 /// text alone: a non-empty array literal, a constant of the file that is
-/// one, a range between integer literals that holds a value, or a `split`,
-/// which yields a piece even of nothing, read through references,
-/// parentheses and the adapters that keep every item. Such a loop has no
+/// one, a range between integer literals that holds a value, a `split`,
+/// which yields a piece even of nothing, `iter::once`, or a `chain` with
+/// any of these on either side, read through references, parentheses and
+/// the adapters that keep every item. Such a loop has no
 /// zero-iterations outcome to observe, as a match's last arm has no skipped
 /// one; the JavaScript instrumenter reads array literals the same way.
 fn never_empty(iterable: &ast::Expr) -> bool {
@@ -404,6 +405,24 @@ fn never_empty_naming(iterable: &ast::Expr, constants: bool) -> bool {
         {
             true
         }
+        // A chain yields what either side does.
+        ast::Expr::MethodCallExpr(call)
+            if call.name_ref().is_some_and(|name| name.text() == "chain") =>
+        {
+            call.receiver()
+                .is_some_and(|receiver| never_empty_naming(&receiver, constants))
+                || ast::HasArgList::arg_list(call)
+                    .and_then(|arguments| arguments.args().next())
+                    .is_some_and(|other| never_empty_naming(&other, constants))
+        }
+        // `std::iter::once(x)`, `iter::once(x)` or `once(x)`: one item.
+        ast::Expr::CallExpr(call) => match call.expr() {
+            Some(ast::Expr::PathExpr(path)) => path.path().is_some_and(|path| {
+                let words = path.syntax().text().to_string();
+                matches!(words.as_str(), "once" | "iter::once" | "std::iter::once")
+            }),
+            _ => false,
+        },
         // `splitn(0, ..)` yields nothing; any other count, its first piece.
         ast::Expr::MethodCallExpr(call)
             if call
@@ -4963,6 +4982,15 @@ fn main() {
             ("self::KINDS", false),
             // A constant's own value is read without following another.
             ("RANGE", false),
+            ("std::iter::once(1)", true),
+            ("iter::once(1)", true),
+            ("once(1)", true),
+            ("values.iter().chain(std::iter::once(&1))", true),
+            ("[1].iter().chain(values)", true),
+            ("values.iter().chain(values)", false),
+            ("other::once(1)", false),
+            ("make()(1)", false),
+            ("repeat_n(1, n)", false),
         ] {
             let source = format!(
                 "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nconst RANGE: std::ops::Range<usize> = 0..COUNT;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
