@@ -17805,3 +17805,27 @@ fn a_failing_run_that_cannot_be_read_back_names_no_failed_tests() {
     );
     assert!(!ran.stderr().contains("test(s) failed"), "{}", ran.stderr());
 }
+
+/// Several lines asked at once: a line that holds only the anchors of its
+/// statement's other lines is answered beside one that ran.
+#[test]
+fn several_lines_answer_a_line_of_anchors_beside_a_line_that_ran() {
+    let project = Project::cart("several-anchors");
+    project.measure(&[]);
+    let answer = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:5",
+            "src/cart.js:14",
+            "--json",
+        ])
+        .json();
+    let lines = answer["data"]["lines"].as_array().unwrap();
+    let asked = lines
+        .iter()
+        .map(|line| line["location"]["line"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(asked, [5, 14], "{answer}");
+}
