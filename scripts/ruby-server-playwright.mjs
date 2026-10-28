@@ -259,6 +259,21 @@ test('a test that reaches no server', async () => {
     assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
     assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);
   }
+  // Each step of a server's own publication that fails -- its work
+  // directory, its archive, its run moved into place -- is said, and never
+  // panics; the first server's failing ends the run.
+  for (const [fault, place] of [
+    ['fs.create_dir_all#python_run.rs:787', 'python_run.rs:787'],
+    ['fs.create_dir_all#ruby_run.rs:629', 'ruby_run.rs:629'],
+    ['fs.rename#evidence_archive.rs:471', 'evidence_archive.rs:471'],
+    ['fs.rename#evidence_archive.rs:471@2', 'evidence_archive.rs:471'],
+    ['fs.rename#lifecycle.rs:1109', 'lifecycle.rs:1109'],
+    ['fs.rename#lifecycle.rs:1109@2', 'lifecycle.rs:1109'],
+  ]) {
+    const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
+    assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);
+    assert.ok(!failed.stderr.includes('panicked'), `${fault}: ${failed.stderr}`);
+  }
   // A failing test still publishes what it reached, and the run says it failed.
   const failing = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given']);
   assert.equal(failing.status, 1, failing.stdout + failing.stderr);
