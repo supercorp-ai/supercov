@@ -12066,16 +12066,20 @@ fn an_index_that_cannot_be_read_mid_command_is_named() {
         "{unopened}"
     );
 
-    let project = Project::cart("index-failed-run");
-    project.edit("test/cart.test.js", "20);", "21);");
-    let failed = project.supercov_with(
-        &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "coverage-index@2")],
-    );
-    let stderr = failed.stderr();
-    assert_eq!(failed.code(), 1, "{stderr}");
-    assert!(fired_at(&stderr, "coverage-index"), "{stderr}");
-    assert!(!stderr.contains("test(s) failed"), "{stderr}");
+    // Nor whose published run cannot be found again to read.
+    for (fault, place) in [
+        ("coverage-index@2", "coverage-index"),
+        ("fs.symlink_metadata#run_store.rs:582", "run_store.rs:582"),
+    ] {
+        let project = Project::cart("index-failed-run");
+        project.edit("test/cart.test.js", "20);", "21);");
+        let failed =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = failed.stderr();
+        assert_eq!(failed.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault}: {stderr}");
+        assert!(!stderr.contains("test(s) failed"), "{fault}: {stderr}");
+    }
 }
 
 /// A script standing in for rustdoc while Supercov stands in for it during
