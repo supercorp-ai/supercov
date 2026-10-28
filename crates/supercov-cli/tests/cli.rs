@@ -15405,10 +15405,10 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
+        ("fs.create_dir_all#python_run.rs:670", "python_run.rs:670"),
         ("fs.create_dir_all#python_run.rs:671", "python_run.rs:671"),
-        ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
+        ("fs.create_dir_all#ruby_run.rs:507", "ruby_run.rs:507"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
-        ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
         ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
         ("fs.create_dir_all#go_run.rs:309", "go_run.rs:309"),
         ("fs.create_dir_all#go_run.rs:361", "go_run.rs:361"),
@@ -15596,8 +15596,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:678@1",
-            "python_run.rs:678",
+            "fs.write#python_run.rs:677@1",
+            "python_run.rs:677",
             "plan.json",
         ),
     ] {
@@ -15641,7 +15641,7 @@ fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
             "ruby_run.rs:93",
             "supercov_runtime.rb",
         ),
-        ("fs.write#ruby_run.rs:513@1", "ruby_run.rs:513", "plan.rb"),
+        ("fs.write#ruby_run.rs:512@1", "ruby_run.rs:512", "plan.rb"),
     ] {
         let project = Project::cart("browser-ruby");
         project.write(".gitignore", "out/\nnode_modules/\n");

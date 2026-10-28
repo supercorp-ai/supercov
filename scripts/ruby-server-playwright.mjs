@@ -263,8 +263,8 @@ test('a test that reaches no server', async () => {
   // directory, its archive, its run moved into place -- is said, and never
   // panics; the first server's failing ends the run.
   for (const [fault, place] of [
-    ['fs.create_dir_all#python_run.rs:787', 'python_run.rs:787'],
-    ['fs.create_dir_all#ruby_run.rs:626', 'ruby_run.rs:626'],
+    ['fs.create_dir_all#python_run.rs:786', 'python_run.rs:786'],
+    ['fs.create_dir_all#ruby_run.rs:625', 'ruby_run.rs:625'],
     ['fs.rename#evidence_archive.rs:471', 'evidence_archive.rs:471'],
     ['fs.rename#evidence_archive.rs:471@2', 'evidence_archive.rs:471'],
     ['fs.rename#lifecycle.rs:1114', 'lifecycle.rs:1114'],

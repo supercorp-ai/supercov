@@ -474,12 +474,11 @@ impl RubyServer {
         command: &[String],
     ) -> Result<Option<Self>, String> {
         let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
-        // Roots named for the JavaScript source may hold no Ruby at all.
-        let Ok(roots) =
-            crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
-        else {
-            return Ok(None);
-        };
+        // Roots named for the JavaScript source may hold no Ruby at all. They
+        // resolve: the suite's own discovery read them first and refused any
+        // that did not.
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
+            .expect("roots the suite's discovery accepted resolve");
         let Some(project) = crate::ruby_project::prepare_ruby_server_project(root, roots.as_ref())?
         else {
             return Ok(None);
