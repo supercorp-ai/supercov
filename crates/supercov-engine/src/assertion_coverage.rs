@@ -1704,20 +1704,15 @@ impl Population {
     /// supergateway they were a sixth of what was sent and changed 4 verdicts
     /// in 101, two each way.
     pub fn helpers(&self, test: usize, questions: usize) -> BTreeMap<String, String> {
-        if self.language.asks_within_the_function() {
-            return BTreeMap::new();
-        }
         let cap = HELPER_CHARS.min(1500 + 400 * questions);
         let t = &self.tests[test];
-        let text = self.read(&t.file).unwrap_or_default();
-        let mut out = BTreeMap::new();
-        let mut size = 0;
+        let text = || self.read(&t.file).unwrap_or_default();
         let files = match self.language {
-            Language::JavaScript | Language::Python => Vec::new(),
-            Language::Ruby => ruby::helpers(&self.root, &t.file, &text),
-            Language::Go => go::helpers(&self.root, &t.file, &text),
-            Language::Rust => rust_source::helpers(&self.root, &t.file, &text),
-            Language::Jvm => jvm::imports(&text)
+            Language::JavaScript | Language::Python => return BTreeMap::new(),
+            Language::Ruby => ruby::helpers(&self.root, &t.file, &text()),
+            Language::Go => go::helpers(&self.root, &t.file, &text()),
+            Language::Rust => rust_source::helpers(&self.root, &t.file, &text()),
+            Language::Jvm => jvm::imports(&text())
                 .iter()
                 .filter_map(|import| {
                     jvm::class_paths(&import.replace('/', "."))
@@ -1729,6 +1724,8 @@ impl Population {
                 })
                 .collect(),
         };
+        let mut out = BTreeMap::new();
+        let mut size = 0;
         for file in files {
             if out.contains_key(&file) {
                 continue;
@@ -1755,7 +1752,7 @@ impl Population {
         }
         if self.language == Language::Ruby {
             let mut used = 0;
-            for file in ruby::support_files(&self.root, &text) {
+            for file in ruby::support_files(&self.root, &text()) {
                 if out.contains_key(&file) || used >= FIXTURE_CHARS {
                     continue;
                 }
@@ -1853,26 +1850,29 @@ impl Population {
                         .collect()
                 });
                 let mut kept = Vec::new();
-                for statement in asked.iter().map(|&a| &self.statements[a]) {
-                    if statement.file != f {
-                        continue;
-                    }
-                    kept.push(function(statement.line).unwrap_or(around(statement.line)));
-                    // A statement its question names by all its lines also
-                    // keeps what lies near each line it goes on to, as the
-                    // requests this was measured with did.
-                    for l in (statement.line + 1)
-                        ..statement.line + whole_statement(statement).unwrap_or(1)
-                    {
-                        kept.push(
-                            begins
-                                .contains(&l)
-                                .then(|| function(l))
-                                .flatten()
-                                .unwrap_or(around(l)),
-                        );
-                    }
-                }
+                // Never none: within a function only the asked statements'
+                // files are shown.
+                asked
+                    .iter()
+                    .map(|&a| &self.statements[a])
+                    .filter(|statement| statement.file == f)
+                    .for_each(|statement| {
+                        kept.push(function(statement.line).unwrap_or(around(statement.line)));
+                        // A statement its question names by all its lines also
+                        // keeps what lies near each line it goes on to, as the
+                        // requests this was measured with did.
+                        for l in (statement.line + 1)
+                            ..statement.line + whole_statement(statement).unwrap_or(1)
+                        {
+                            kept.push(
+                                begins
+                                    .contains(&l)
+                                    .then(|| function(l))
+                                    .flatten()
+                                    .unwrap_or(around(l)),
+                            );
+                        }
+                    });
                 kept
             });
             let mut show = BTreeSet::new();
@@ -1884,7 +1884,7 @@ impl Population {
                 Some(kept) => {
                     // A ran line whose context can reach a kept range: within
                     // CONTEXT_LINES of its code lines, or of its lines.
-                    for &(from, to) in kept {
+                    kept.iter().for_each(|&(from, to)| {
                         let first = view.code.partition_point(|&c| c < from);
                         let last = view.code.partition_point(|&c| c <= to);
                         let lo = view
@@ -1903,7 +1903,7 @@ impl Population {
                         for &l in r.range(lo..=hi) {
                             show.extend(around(l, CONTEXT_LINES));
                         }
-                    }
+                    });
                 }
             }
             for &l in want.get(&f).unwrap_or(&empty) {
@@ -2292,8 +2292,9 @@ pub fn save_snapshot(path: &Path, files: &BTreeMap<String, String>) -> Result<()
     use std::io::Write;
     let bytes = serde_json::to_vec(files).expect("plain data serializes");
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(&bytes).map_err(|e| e.to_string())?;
-    let compressed = encoder.finish().map_err(|e| e.to_string())?;
+    const MEMORY: &str = "compressing into memory cannot fail";
+    encoder.write_all(&bytes).expect(MEMORY);
+    let compressed = encoder.finish().expect(MEMORY);
     let temp = path.with_extension("tmp");
     crate::fault_fs::write(&temp, compressed).map_err(|e| e.to_string())?;
     crate::fault_fs::rename(&temp, path).map_err(|e| e.to_string())
@@ -4560,6 +4561,90 @@ mod tests {
             shown["c.go"].contains("▶    4 \tready := compute(0)"),
             "{shown:?}"
         );
+    }
+
+    /// A declaration whose value starts on the next line is described by
+    /// what the line holds, a TypeScript throw by the bare error it becomes,
+    /// a JavaScript helper file names no definition, and a snapshot that is
+    /// no gzip reads as none.
+    #[test]
+    fn changes_are_described_by_the_line_they_start_on() {
+        let typescript = questions_of(
+            "a.ts",
+            "export function f(v: number) {\n  if (v) {\n    throw new TypeError(\"bad\");\n  }\n  let total\n    = v + 1;\n  return total;\n}\n",
+            &[(3, "throw new TypeError(\"bad\");"), (5, "let total")],
+            Language::JavaScript,
+        );
+        assert!(
+            typescript[0][0].contains("throws `new Error()` instead"),
+            "{typescript:#?}"
+        );
+        assert!(
+            typescript[1][0].contains("`let total`: the declared value becomes undefined"),
+            "{typescript:#?}"
+        );
+        for (file, source, said) in [
+            (
+                "a.rb",
+                "def f(v)\n  total \\\n    = v + 1\n  total\nend\n",
+                "`total \\`: the assigned value becomes nil",
+            ),
+            (
+                "a.py",
+                "def f(v):\n    total \\\n        = v + 1\n    return total\n",
+                "`total \\`: the assigned value becomes None",
+            ),
+        ] {
+            let language = if file.ends_with(".rb") {
+                Language::Ruby
+            } else {
+                Language::Python
+            };
+            let asked = questions_of(file, source, &[(2, "total \\")], language);
+            assert!(asked[0][0].contains(said), "{asked:#?}");
+        }
+        let input = AssessmentInput {
+            tests: vec![input_test(Some("t"), "t", "r")],
+            points: vec![point("src/a.rs", 2, "let total", &[0])],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([(
+            "src/a.rs".to_owned(),
+            "pub fn f(v: u8) -> u8 {\n    let total\n        = v + 1;\n    total\n}\n".to_owned(),
+        )]);
+        let mut rust =
+            population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust).unwrap();
+        rust.statements[0].replacement = None;
+        // A statement in a file that cannot be read is listed with no code.
+        let unread = AssessmentInput {
+            points: vec![
+                point("src/a.rs", 2, "let total", &[0]),
+                point("src/gone.rs", 1, "gone();", &[0]),
+            ],
+            ..input.clone()
+        };
+        let root =
+            std::env::temp_dir().join(format!("supercov-assessment-unread-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), &sources["src/a.rs"]).unwrap();
+        let partial = population_from(&root, &unread, &sources, Language::Rust).unwrap();
+        let shown = partial.code_run(0, &[0]);
+        assert!(
+            shown.contains_key("src/a.rs") && !shown.contains_key("src/gone.rs"),
+            "{shown:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            rust.questions(0),
+            ["src/a.rs:2: `let total`: the assigned value becomes `Default::default()`."]
+        );
+        // JavaScript and Python helpers are not read by name.
+        assert!(definitions(&["function helper() {}"], Language::JavaScript).is_empty());
+        let garbage =
+            std::env::temp_dir().join(format!("supercov-snapshot-garbage-{}", std::process::id()));
+        crate::fault_fs::write(&garbage, "not gzip").unwrap();
+        assert_eq!(load_snapshot(&garbage), None);
+        std::fs::remove_file(garbage).unwrap();
     }
 
     /// Where no value is written out for a change, each language keeps its
