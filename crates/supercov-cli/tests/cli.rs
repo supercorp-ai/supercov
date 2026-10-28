@@ -1002,6 +1002,35 @@ fn diff_and_tests_affected_follow_a_change() {
     assert!(listed.contains("STALE"), "{listed}");
 }
 
+/// A merge whose store of runs or a shard's evidence cannot be read is
+/// refused, naming it; one that cannot release its lock after merging says
+/// so.
+#[test]
+fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
+    let project = Project::cart("merge-steps");
+    let first = project.measure(&["--test-name-pattern=total"]);
+    let second = project.measure(&["--test-name-pattern=shipping"]);
+    for (fault, said) in [
+        (
+            "fs.read_dir#run_store.rs:636",
+            "Cannot read local coverage runs",
+        ),
+        (
+            "fs.read_from#evidence_archive.rs:636",
+            "Cannot merge coverage run",
+        ),
+        ("copy-release", "Could not release merge lock"),
+    ] {
+        let refused = project.supercov_with(
+            &["merge", &first, &second],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let output = format!("{}{}", refused.stdout(), refused.stderr());
+        assert_ne!(refused.code(), 0, "{fault}: {output}");
+        assert!(output.contains(said), "{fault}: {output}");
+    }
+}
+
 #[test]
 fn shards_merge_into_one_run_and_mismatched_ones_do_not() {
     let project = Project::cart("merge");
