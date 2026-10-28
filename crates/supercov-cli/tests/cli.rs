@@ -945,6 +945,14 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
         )
         .exits(2);
     assert!(unlisted.contains("run_store.rs:662"), "{unlisted}");
+    // So is a file's source asked of a store that cannot be listed.
+    let unlisted = project
+        .supercov_with(
+            &["runs", "latest", "source", "src/cart.js"],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:662")],
+        )
+        .exits(2);
+    assert!(unlisted.contains("run_store.rs:662"), "{unlisted}");
     // A run whose entry in the store cannot be read is left out of the list.
     let rejected = project
         .supercov_with(
@@ -1292,6 +1300,7 @@ fn mistakes_are_named_and_end_with_two() {
             vec!["runs", "latest", "line", "src/cart.js"],
             "Expected <source-file>:<line>",
         ),
+        (vec!["runs", "--nonsense"], "Unknown option: --nonsense"),
     ] {
         let output = project.supercov(&args);
         assert_ne!(output.code(), 0, "{args:?}");
