@@ -23,7 +23,7 @@ import { dirname, resolve } from 'node:path';
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const root = resolve(tmpdir(), `supercov-rust-wasm-${process.pid}-${Date.now()}`);
-const run = (cwd, command, args) => spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1' } });
+const run = (cwd, command, args, env = {}) => spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', ...env } });
 const required = process.env.SUPERCOV_REQUIRE_RUST_WASM === '1';
 // Fixtures build with the toolchain they find, outside this repository's pin.
 const targets = run(tmpdir(), 'rustup', ['target', 'list', '--installed']).stdout ?? '';
@@ -51,6 +51,8 @@ const hosts = [
       'tests/grades.rs': 'use wasm_bindgen_test::*;\n\n#[wasm_bindgen_test]\nfn a_curved_score_is_an_a() {\n    assert_eq!(grades::grade(87, true), "A");\n}\n\n#[wasm_bindgen_test]\nfn a_low_score_fails() {\n    assert_eq!(grades::grade(10, false), "fail");\n}\n',
     },
     tests: { curved: 'tests/grades.rs::a_curved_score_is_an_a', low: 'tests/grades.rs::a_low_score_fails' },
+    // Node's hook that cannot be given (SUPERCOV_TEST_FAULT) fails the run.
+    faults: ['fs.create_dir_all#rust_test_runner.rs:1096', 'fs.write#rust_test_runner.rs:1098'],
   },
   {
     host: 'WASI (wasmtime)',
@@ -110,6 +112,13 @@ try {
     const decision = run(cwd, binary, ['runs', 'latest', 'decision', 'src/lib.rs:2']).stdout;
     assert.match(decision, /FF- -> F +tests=1/u, `${entry.host}\n${decision}`);
     assert.match(decision, /FTT -> T +tests=1/u, `${entry.host}\n${decision}`);
+    for (const fault of entry.faults ?? []) {
+      const failed = run(cwd, binary, ['--', 'cargo', 'test', '--target', entry.target], { SUPERCOV_TEST_FAULT: fault });
+      const place = fault.slice(fault.indexOf('#') + 1).replace('.', '\\.');
+      assert.notEqual(failed.status, 0, `${fault}\n${failed.stderr}`);
+      assert.match(failed.stderr, new RegExp(`test fault at fs \\(${place}`, 'u'), `${fault}\n${failed.stderr}`);
+      assert.doesNotMatch(failed.stderr, /panicked/u, `${fault}\n${failed.stderr}`);
+    }
     measured.push(entry.host);
   }
   assert.ok(measured.length > 0 || !required, 'no wasm host could be checked here');
