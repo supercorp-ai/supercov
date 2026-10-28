@@ -17666,3 +17666,47 @@ fn a_merged_run_whose_parents_cannot_be_listed_is_judged_by_its_own_command() {
     );
     assert!(ran.succeeds().contains("src/cart.js"));
 }
+
+/// rustdoc's stand-in starts rustdoc for the list pass and again for the
+/// merged harness, and the run reads back what each package recorded: each
+/// failing ends the run, naming where.
+#[cfg(unix)]
+#[test]
+fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
+    let stand_in = "env:SUPERCOV_DOCTEST_WRAPPER_ROOT/";
+    for (edition, fault, place) in [
+        (
+            "2024",
+            format!("{stand_in}spawn#rust_owned_doctests.rs:820@1"),
+            "rust_owned_doctests.rs:820",
+        ),
+        (
+            "2024",
+            format!("{stand_in}spawn#rust_owned_doctests.rs:820@2"),
+            "rust_owned_doctests.rs:820",
+        ),
+        (
+            "2021",
+            "fs.read#rust_owned_doctests.rs:289".to_owned(),
+            "rust_owned_doctests.rs:289",
+        ),
+    ] {
+        let project = Project::empty("doctest-stand-in-steps");
+        small_crate(&project);
+        project.edit(
+            "Cargo.toml",
+            "edition = \"2021\"",
+            &format!("edition = \"{edition}\""),
+        );
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran = project.supercov_with(
+            &["--", "cargo", "test", "-q"],
+            &[("SUPERCOV_TEST_FAULT", fault.as_str())],
+        );
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_ne!(ran.code(), 0, "{edition} {fault}: {said}");
+        assert!(fired_at(&said, place), "{edition} {fault}: {said}");
+        assert!(!said.contains("panicked at"), "{edition} {fault}: {said}");
+    }
+}
