@@ -281,14 +281,9 @@ fn command_stdout(
     })
 }
 
+/// The rustup beside the Cargo proxy `which` found, an absolute path.
 fn rustup_program(cargo: &Path) -> PathBuf {
-    cargo
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(
-            || PathBuf::from(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
-            |parent| parent.join(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
-        )
+    cargo.with_file_name(format!("rustup{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn selected_cargo_program(
@@ -1022,18 +1017,12 @@ fn resolve_targets(
     let selected_cargo = selected_cargo_program(invocation)?;
     let model = load_cargo_configuration(&root, model_inputs.cargo_home.clone(), &command_config)
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
-    let selected_cargo_path = PathBuf::from(&selected_cargo);
-    let default_rustc = if explicit_toolchain {
-        selected_cargo_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .map(|parent| parent.join(format!("rustc{}", std::env::consts::EXE_SUFFIX)))
-            .filter(|candidate| candidate.is_file())
-            .map(|candidate| runner_program(&root, candidate))
-            .transpose()?
-            .unwrap_or_else(|| RustCargoRunnerProgram::SearchPath {
-                value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
-            })
+    // An explicit toolchain's Cargo is the absolute path rustup named, and
+    // its rustc, when it has one, is beside it.
+    let beside = PathBuf::from(&selected_cargo)
+        .with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+    let default_rustc = if explicit_toolchain && beside.is_file() {
+        runner_program(&root, beside).expect("a rustc file is never the workspace itself")
     } else {
         RustCargoRunnerProgram::SearchPath {
             value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
@@ -2112,6 +2101,27 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// One target names the cfg a run's source is read under; two name none.
+    #[test]
+    fn the_active_cfg_is_one_targets_and_two_targets_have_none() {
+        let root = fixture();
+        assert!(active_target_cfg(&root, &invocation(&["test"])).is_some());
+        assert!(
+            active_target_cfg(
+                &root,
+                &invocation(&[
+                    "test",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                    "--target",
+                    "aarch64-apple-darwin",
+                ]),
+            )
+            .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn targets_come_from_the_command_then_the_environment_then_the_configuration() {
         let root = fixture();
@@ -2276,10 +2286,24 @@ mod tests {
                 &root,
                 &root,
                 &invocation(&["test", "--target", "board.json"]),
+                inputs.clone(),
+            )
+            .unwrap();
+            assert!(plan.targets[0].underlying_runner.is_some(), "{plan:?}");
+            // A spec outside the project is asked for where it is.
+            let outside = root.with_extension("specs");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("board.json"), "{}").unwrap();
+            let spec = outside.join("board.json").display().to_string();
+            let plan = resolve_with_inputs(
+                &root,
+                &root,
+                &invocation(&["test", "--target", &spec]),
                 inputs,
             )
             .unwrap();
             assert!(plan.targets[0].underlying_runner.is_some(), "{plan:?}");
+            fs::remove_dir_all(outside).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -2458,6 +2482,24 @@ mod tests {
         let same = "echo 'cargo 1.95.0 (same)'";
         setup(same, &names, same);
         assert!(select(&bin.join("cargo"), &["+stable", "test"]).is_ok());
+        // A toolchain's Cargo with no rustc beside it compiles with the rustc
+        // the search path finds.
+        let plan = resolve_with_inputs(
+            &root,
+            &root,
+            &CargoTestInvocation {
+                program: bin.join("cargo").display().to_string(),
+                kind: crate::rust_test_runner::RustCargoCommandKind::CargoTest,
+                arguments: vec!["+stable".into(), "test".into()],
+                runner_arguments: Vec::new(),
+            },
+            model_inputs(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &plan.compiler.rustc,
+            RustCargoRunnerProgram::SearchPath { value } if value.starts_with("rustc")
+        ));
         let failing = |faults: &str| {
             crate::fault::during(faults, || select(&bin.join("cargo"), &["+stable", "test"]))
         };
@@ -2491,6 +2533,17 @@ mod tests {
                 .unwrap_err()
                 .contains("verifying the resolved Cargo executable")
         );
+        // A rustup that answers in bytes that are no text, or none beside
+        // the proxy at all.
+        setup(same, "printf '\\377'", same);
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("produced non-UTF-8 output")
+        );
+        fs::remove_file(bin.join("rustup")).unwrap();
+        let missing = select(&bin.join("cargo"), &["+stable", "test"]).unwrap_err();
+        assert!(missing.contains("rustup"), "{missing}");
         fs::remove_dir_all(root).unwrap();
     }
 

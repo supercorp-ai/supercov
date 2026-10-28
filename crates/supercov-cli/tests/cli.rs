@@ -13741,7 +13741,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 // nextest's version, rustc through Cargo's configuration,
                 // the test list, Cargo's metadata, the run.
                 "spawn#rust_owned_nextest.rs:136 => rust_owned_nextest.rs:136",
-                "spawn#rust_cargo_configuration.rs:625@3 => rust_cargo_configuration.rs:625",
+                "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
                 "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
                 "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
                 "spawn#child_signal_guard.rs:305 => child_signal_guard.rs:305",
