@@ -5604,3 +5604,73 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         .exits(2);
     assert!(unknown.contains("run_0000000000000000"), "{unknown}");
 }
+
+/// Asking about what changed: requests that all fail end the assessment
+/// with why, one of several failing is said beside what was asked, and an
+/// option without its value is refused.
+#[test]
+fn a_changed_assessment_whose_requests_fail_says_so() {
+    let project = Project::cart("changed-fails");
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let (down, _) = gateway_with(MODEL, answer_no, |_| Some((500, "{}")));
+    let failed = project.supercov_with(
+        &[
+            "runs",
+            &run,
+            "assertions",
+            "assess",
+            "--changed",
+            "--refresh",
+        ],
+        &through(&down),
+    );
+    let said = format!("{}{}", failed.stdout(), failed.stderr());
+    assert_ne!(failed.code(), 0, "{said}");
+    assert!(
+        said.contains("none of the 1 request(s) was answered"),
+        "{said}"
+    );
+    let option = project.supercov(&["runs", &run, "assertions", "--tag"]);
+    assert_eq!(option.code(), 2);
+    assert!(
+        option.stderr().contains("--tag needs a value"),
+        "{}",
+        option.stderr()
+    );
+    // A change in code two tests ran: one request each, and the first
+    // refused for good.
+    let (refusing, _) = gateway_with(MODEL, answer_no, |n| (n == 0).then_some((413, "{}")));
+    project.edit(
+        "src/cart.js",
+        "return Math.round(sum * 100) / 100;",
+        "return Math.round(sum * 100) / 10;",
+    );
+    let partial = project
+        .supercov_with(
+            &[
+                "runs",
+                &run,
+                "assertions",
+                "assess",
+                "--changed",
+                "--refresh",
+                "--workers",
+                "1",
+            ],
+            &through(&refusing),
+        )
+        .succeeds();
+    assert!(
+        partial.contains("(1 failed: their statements were not asked)"),
+        "{partial}"
+    );
+}

@@ -946,11 +946,16 @@ fn assess_changed(
         let endpoint = quality::endpoint()?;
         let agent = quality::client();
         let results = send_all(&agent, endpoint, &key, &bodies, options.workers);
+        let mut reason = None;
         // Each request of the plan asks of a statement at least.
         plan.iter().zip(results).for_each(|((t, asked), result)| {
-            let Ok(response) = result else {
-                failed += 1;
-                return;
+            let response = match result {
+                Ok(response) => response,
+                Err(error) => {
+                    failed += 1;
+                    reason = Some(error);
+                    return;
+                }
             };
             tokens += response.usage.input_tokens;
             asked.iter().enumerate().for_each(|(i, &s)| {
@@ -967,6 +972,13 @@ fn assess_changed(
             });
         });
         cache.save()?;
+        // Not one answer: nothing for `tests affected` to go on.
+        if failed == plan.len() {
+            return Err(format!(
+                "none of the {failed} request(s) was answered: {}",
+                reason.expect("a failed request says why")
+            ));
+        }
     }
     let statements = changed
         .iter()
@@ -1844,8 +1856,12 @@ fn render(data: &Value) -> String {
                 "asked of the tests that ran them, {IMPACT_TESTS} at most each ({capped} ran under more)"
             )
         };
+        let failed = match s["failedRequests"].as_u64().unwrap_or(0) {
+            0 => String::new(),
+            n => format!(" ({n} failed: their statements were not asked)"),
+        };
         return format!(
-            "Run {}: {} changed statement(s) {asked}: {}, ${:.4}; {} reused.\n`{} runs {} tests affected` now says which affected tests catch the change.\n",
+            "Run {}: {} changed statement(s) {asked}: {}{failed}, ${:.4}; {} reused.\n`{} runs {} tests affected` now says which affected tests catch the change.\n",
             data["run"].as_str().unwrap_or(""),
             s["changed"],
             counted(&s["requests"], "request", "requests"),
