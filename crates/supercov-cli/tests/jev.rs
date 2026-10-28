@@ -5895,6 +5895,32 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         let said = refused(&["assess", "--changed", "--refresh"], fault);
         assert!(said.contains(place), "{fault}: {said}");
     }
+    // An assessment whose sources cannot be kept still stands; asking about
+    // a change later says they were not kept.
+    let project = Project::cart("assess-unkept");
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    let mut env = through(&base).to_vec();
+    env.push(("SUPERCOV_TEST_FAULT", "fs.write#assertion_coverage.rs:2301"));
+    let assessed = project.supercov_with(&["runs", &run, "assertions", "assess"], &env);
+    assert_eq!(assessed.code(), 0, "{}", assessed.stderr());
+    assert!(
+        assessed
+            .stderr()
+            .contains("test fault at fs (assertion_coverage.rs:2301 write)"),
+        "{}",
+        assessed.stderr()
+    );
+    let unkept = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--changed"],
+            &through(&base),
+        )
+        .exits(2);
+    assert!(
+        unkept.contains("this run's sources were not kept"),
+        "{unkept}"
+    );
     let project = Project::cart("assess-no-run");
     let (base, _) = gateway(MODEL, answer_no);
     project.measure(&[]);

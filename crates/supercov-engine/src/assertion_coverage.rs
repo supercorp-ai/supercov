@@ -1525,20 +1525,22 @@ impl Population {
         };
         let indent = lines[start].len() - lines[start].trim_start().len();
         let mut body = Vec::new();
-        for (i, l) in lines
+        // From the test's own line, which there is, to the next test call.
+        let _ = lines
             .iter()
             .copied()
             .enumerate()
             .take(start + BODY_LINES)
             .skip(start)
-        {
-            if i > start && is_test_call(l) && l.len() - l.trim_start().len() <= indent {
-                break;
-            }
-            if !self.language.comment(l) {
-                body.push(fmt(i));
-            }
-        }
+            .try_for_each(|(i, l)| {
+                if i > start && is_test_call(l) && l.len() - l.trim_start().len() <= indent {
+                    return std::ops::ControlFlow::Break(());
+                }
+                if !self.language.comment(l) {
+                    body.push(fmt(i));
+                }
+                std::ops::ControlFlow::Continue(())
+            });
         let mut out = head;
         if start > HEAD_LINES {
             out.push("  ...".into());
@@ -1899,10 +1901,10 @@ impl Population {
                             .copied()
                             .unwrap_or(0)
                             .max(to.saturating_add(CONTEXT_LINES));
-                        // A kept range runs forward, so `lo` is at most `hi`.
-                        for &l in r.range(lo..=hi) {
-                            show.extend(around(l, CONTEXT_LINES));
-                        }
+                        // A kept range runs forward, so `lo` is at most `hi`,
+                        // and holds the ran lines it was kept for.
+                        r.range(lo..=hi)
+                            .for_each(|&l| show.extend(around(l, CONTEXT_LINES)));
                     });
                 }
             }
@@ -4354,6 +4356,18 @@ mod tests {
         );
         assert!(first.contains("assert one() == 1"), "{first}");
         assert!(!first.contains("..."), "{first}");
+        // A test written on the file's last line is that line alone.
+        let last = shown_test_code(
+            "tests/test_last.py",
+            "def test_last(): assert last() == 1\n",
+            "tests/test_last.py::test_last",
+            "pytest",
+            Language::Python,
+        );
+        assert!(
+            last.contains("def test_last(): assert last() == 1"),
+            "{last}"
+        );
         let matrix = format!(
             "{constants}\n\nproduct = (a\n    @ b)\ndef test_after():\n    assert product\n"
         );
