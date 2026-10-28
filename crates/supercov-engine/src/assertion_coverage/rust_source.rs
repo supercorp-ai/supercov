@@ -1952,6 +1952,20 @@ pub fn shapes(p: &Point, n: u32, text: &str) -> Option<u32> {
             replaced += 1;
         }
         assert!(replaced >= 20, "{replaced}");
+        // A value built through `Self(..)` names no function to read a type
+        // from: whatever is offered for it is not the value itself.
+        let tuple = "pub struct Id(u32);\nimpl Id {\n    pub fn of(n: u32) -> Self {\n        let made = Self(n);\n        made\n    }\n}\n";
+        let offered = replacements(
+            "src/lib.rs",
+            tuple,
+            &super::signatures([("src/lib.rs", tuple)].into_iter()),
+        );
+        assert!(
+            offered
+                .get(&4)
+                .is_none_or(|changes| changes.iter().all(|(_, value)| value != "Self(n)")),
+            "{offered:?}"
+        );
     }
 
     /// A source cut off anywhere -- as an agent leaves a file mid-edit --
