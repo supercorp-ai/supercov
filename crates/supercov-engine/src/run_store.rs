@@ -1084,7 +1084,10 @@ fn open_written_query_index(
 }
 
 /// Open an existing valid index without triggering analysis or publication.
-pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, RunIndexError> {
+#[cfg(test)]
+pub(crate) fn open_existing_query_index(
+    run: &StoredRun,
+) -> Result<Option<QueryIndex>, RunIndexError> {
     match fs::symlink_metadata(&run.query_index_path) {
         Ok(_) => {
             open_validated_query_index(&run.query_index_path, &query_index_identity(run)?).map(Some)
@@ -1649,7 +1652,7 @@ mod tests {
         }
         write("filtered-notes.txt", 0);
         // A directory that cannot be listed is pruned of nothing.
-        crate::fault::during("fs.read_dir#run_store.rs:1246", || {
+        crate::fault::during("fs.read_dir#run_store.rs:1249", || {
             prune_filtered_indexes(&kept)
         });
         assert!(root.join("filtered-01.index").exists());

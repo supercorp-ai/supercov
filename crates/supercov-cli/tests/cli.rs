@@ -15279,7 +15279,7 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1295,fs.read_from#evidence_archive.rs:636",
+            "fs.read#run_store.rs:1298,fs.read_from#evidence_archive.rs:636",
         )],
     );
     assert!(
@@ -17486,5 +17486,30 @@ fn a_run_whose_execution_record_cannot_be_written_is_not_published() {
         runs["data"]["runs"].as_array().map(Vec::len),
         Some(0),
         "{runs}"
+    );
+}
+
+/// The index publication writes beside the run is a cache: one that cannot
+/// be written leaves the run published, and a query builds it.
+#[test]
+fn a_run_whose_index_cannot_be_written_is_still_published() {
+    let project = Project::cart("index-unwritten");
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "fs.open#run_store.rs:839")],
+    );
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    assert!(
+        ran.stderr()
+            .contains("test fault at fs (run_store.rs:839 open)"),
+        "{}",
+        ran.stderr()
+    );
+    let run = project.latest();
+    assert!(
+        project
+            .supercov(&["runs", &run, "files"])
+            .succeeds()
+            .contains("src/cart.js")
     );
 }
