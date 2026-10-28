@@ -821,13 +821,19 @@ fn separate_top_level_declarations<'a>(ast: AstBuilder<'a>, program: &mut Progra
     let signature = |statement: &Statement<'a>| matches!(statement, Statement::FunctionDeclaration(function) if function.body.is_none());
     let mut separated = ast.vec_with_capacity(program.body.len());
     let mut after_signature = false;
-    for statement in program.body.take_in(ast.allocator) {
-        if starts_a_range(&statement) && !after_signature {
-            separated.push(ast.statement_empty(span));
-        }
-        after_signature = signature(&statement);
-        separated.push(statement);
-    }
+    // A program with nothing in it was left as it was before this: there
+    // are statements.
+    program
+        .body
+        .take_in(ast.allocator)
+        .into_iter()
+        .for_each(|statement| {
+            if starts_a_range(&statement) && !after_signature {
+                separated.push(ast.statement_empty(span));
+            }
+            after_signature = signature(&statement);
+            separated.push(statement);
+        });
     program.body = separated;
 }
 
