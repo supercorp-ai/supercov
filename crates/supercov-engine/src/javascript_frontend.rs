@@ -192,7 +192,6 @@ pub enum JavascriptFrontendError {
         file: String,
         source: CandidateError,
     },
-    MissingRuntimeMarker,
     Serialize(serde_json::Error),
     UnsafeSourcePath(String),
 }
@@ -204,10 +203,6 @@ impl std::fmt::Display for JavascriptFrontendError {
             Self::Instrument { file, source } => {
                 write!(formatter, "failed to instrument {file}: {source}")
             }
-            Self::MissingRuntimeMarker => write!(
-                formatter,
-                "generated Supercov runtime is missing its instance marker"
-            ),
             Self::Serialize(error) => write!(formatter, "failed to serialize manifest: {error}"),
             Self::UnsafeSourcePath(file) => write!(formatter, "unsafe source path: {file}"),
         }
@@ -715,7 +710,9 @@ fn generated_source_banner(code: &str) -> String {
     format!("#!{line}\n{GENERATED_SOURCE_BANNER}{remainder}")
 }
 
-fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, JavascriptFrontendError> {
+/// `source`, a runtime, with this run's collector in place of its instance
+/// marker; none for text with no marker.
+fn isolate_runtime(source: &str, collector_id: &str) -> Option<String> {
     // Generated runtime files sit inside the lint graph of bundlers that lint
     // whatever they compile (Next.js does), so they must disarm host lint
     // policy the same way the Rust runtime does with #[allow(warnings)].
@@ -729,7 +726,7 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, Javascrip
             index..index + double.len(),
             &format!("runtimeInstanceToken = \"{collector_id}\""),
         );
-        return Ok(isolated);
+        return Some(isolated);
     }
     if let Some(index) = source.find(&single) {
         let mut isolated = source.to_owned();
@@ -737,9 +734,9 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, Javascrip
             index..index + single.len(),
             &format!("runtimeInstanceToken = '{collector_id}'"),
         );
-        return Ok(isolated);
+        return Some(isolated);
     }
-    Err(JavascriptFrontendError::MissingRuntimeMarker)
+    None
 }
 
 /// Inline `map` into `code` as a data-URL source map whose single source is the
@@ -851,7 +848,9 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
             let text = String::from_utf8(bytes).expect("the embedded runtime is UTF-8");
             atomic_write(
                 &destination,
-                isolate_runtime(&text, collector_id)?.as_bytes(),
+                isolate_runtime(&text, collector_id)
+                    .expect("the embedded runtime carries its instance marker")
+                    .as_bytes(),
             )
         } else {
             atomic_write(&destination, &bytes)
@@ -1968,9 +1967,9 @@ mod tests {
             "fs.rename@34",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:468",
-            "javascript-source-path#javascript_frontend.rs:1670",
-            "javascript-source-path#javascript_frontend.rs:1788",
+            "javascript-source-path#javascript_frontend.rs:463",
+            "javascript-source-path#javascript_frontend.rs:1669",
+            "javascript-source-path#javascript_frontend.rs:1787",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2728,7 +2727,7 @@ mod tests {
     }
 
     /// The collector's id replaces the runtime's marker in either quote;
-    /// a runtime with no marker is refused.
+    /// text with no marker has nothing to isolate.
     #[test]
     fn a_runtime_is_isolated_by_its_marker_in_either_quote() {
         let double = format!("let runtimeInstanceToken = \"{RUNTIME_INSTANCE_MARKER}\";\n");
@@ -2741,10 +2740,7 @@ mod tests {
             isolate_runtime(&single, "c2").unwrap(),
             "/* eslint-disable */\nlet runtimeInstanceToken = 'c2';\n"
         );
-        assert!(matches!(
-            isolate_runtime("let x = 1;\n", "c3"),
-            Err(JavascriptFrontendError::MissingRuntimeMarker)
-        ));
+        assert_eq!(isolate_runtime("let x = 1;\n", "c3"), None);
     }
 
     /// Only a last line that is a source-map directive is taken off.
@@ -2975,7 +2971,6 @@ mod tests {
                 file: "src/a.js".into(),
                 source: crate::js_instrumenter::CandidateError::Internal("boom".into()),
             },
-            E::MissingRuntimeMarker,
             E::Serialize(serde_json::from_str::<u8>("x").unwrap_err()),
             E::UnsafeSourcePath("../a.js".into()),
         ]
@@ -2985,7 +2980,6 @@ mod tests {
             [
                 "src/a.js: disk full",
                 "failed to instrument src/a.js: an internal error: boom",
-                "generated Supercov runtime is missing its instance marker",
                 "failed to serialize manifest: expected value at line 1 column 1",
                 "unsafe source path: ../a.js",
             ]
