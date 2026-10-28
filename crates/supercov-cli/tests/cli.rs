@@ -14666,6 +14666,32 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
     }
 }
 
+/// A browser suite beside a Ruby server reads the server's project and writes
+/// its runtime and plan before the suite starts: each failing ends the run,
+/// naming the file.
+#[test]
+fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
+    for (fault, place, file) in [
+        ("fs.read#11@1", "ruby_project.rs:224", "web/app.rb"),
+        ("fs.open#1@4", "integrity.rs:426", "web/app.rb"),
+        ("fs.read#9@5", "source_capture.rs:54", "web/app.rb"),
+        ("fs.write#3@1", "ruby_run.rs:93", "supercov_runtime.rb"),
+        ("fs.write#4@1", "ruby_run.rs:513", "plan.rb"),
+    ] {
+        let project = Project::cart("browser-ruby");
+        project.write(".gitignore", "out/\nnode_modules/\n");
+        project.write("playwright.config.js", "export default {};\n");
+        project.write("web/app.rb", "def hello = 1\n");
+        project.commit("server");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
+        assert!(stderr.contains(file), "{fault}: {stderr}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
