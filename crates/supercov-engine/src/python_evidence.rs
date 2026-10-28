@@ -3154,6 +3154,25 @@ pub(crate) mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A slot gone between the listing and the look at it is read as gone;
+    /// one left with no layout to read it by is refused.
+    #[test]
+    fn a_slot_gone_while_read_is_skipped_and_one_without_a_layout_refused() {
+        let directory = killed_process("py-slot-race", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
+        // Listed: layout.json, the slot, the transport.
+        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:382@2", || {
+            read_evidence_directory(&directory, "run-1")
+        });
+        assert!(read.is_ok(), "{:?}", read.err());
+        fs::remove_file(directory.join("layout.json")).unwrap();
+        assert!(matches!(
+            read_evidence_directory(&directory, "run-1"),
+            Err(PythonEvidenceError::InvalidTransport { reason, .. })
+                if reason.contains("without the run's slot layout")
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn a_slot_needs_its_transport_and_a_partial_layout_is_ignored() {
         let directory = killed_process("py-slot-orphan", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
@@ -4329,6 +4348,32 @@ pub(crate) mod tests {
             Err(PythonEvidenceError::InvalidTransport { .. })
         ));
         assert!(!directory.join("p.1.slot").exists());
+        // Shared memory that cannot be read, and a copy that cannot be
+        // written, are errors of their own.
+        let unreadable = |_: &[u8]| Err(PythonEvidenceError::Io("no shared memory".into()));
+        assert!(matches!(
+            materialize_shared_slot(&directory.join("p.1.shm"), "p.1.slot", &unreadable),
+            Err(PythonEvidenceError::Io(reason)) if reason == "no shared memory"
+        ));
+        let unwritten = crate::fault::during("fs.write", || {
+            materialize_shared_slot(&directory.join("p.1.shm"), "p.1.slot", &shared)
+        });
+        assert!(matches!(unwritten, Err(PythonEvidenceError::Io(_))));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A slot layout that is no JSON is refused as such.
+    #[test]
+    fn a_slot_layout_that_is_no_json_is_refused() {
+        let directory = killed_process(
+            "py-layout-garbage",
+            &slot_bytes(1, Some(SLOT_DIGEST), &[16]),
+        );
+        fs::write(directory.join("layout.json"), b"not json").unwrap();
+        assert!(matches!(
+            read_evidence_directory(&directory, "run-1"),
+            Err(PythonEvidenceError::InvalidTransport { file, .. }) if file == "layout.json"
+        ));
         fs::remove_dir_all(directory).unwrap();
     }
 
