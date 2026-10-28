@@ -459,6 +459,20 @@ mod tests {
             publish_captured_output(&log, "build", true, false, &mut Closed);
             assert!(!log.exists());
         }
+        // Its size, the seek to its end, or the read that cannot be made says
+        // the output could not be read.
+        for fault in ["fs.file_metadata", "fs.seek", "fs.read_to_end_from"] {
+            fs::write(&log, &output).unwrap();
+            let mut writer = Vec::new();
+            crate::fault::during(fault, || {
+                publish_captured_output(&log, "build", true, false, &mut writer);
+            });
+            assert!(
+                String::from_utf8_lossy(&writer).contains("could not read build output"),
+                "{fault}"
+            );
+            assert!(!log.exists(), "{fault}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
