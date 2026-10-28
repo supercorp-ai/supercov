@@ -2534,6 +2534,23 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             "stored diff requires a newer run ID",
         ),
         (query("no-such-run", "summary", None), "stored query failed"),
+        // Several lines with no first, or a first with no line.
+        (
+            serde_json::json!({
+                "root": root,
+                "query": {"runId": run, "filter": "passed", "command": "line", "moreLines": [["src/cart.js", 2]]},
+            })
+            .to_string(),
+            "stored query failed",
+        ),
+        (
+            serde_json::json!({
+                "root": root,
+                "query": {"runId": run, "filter": "passed", "command": "line", "file": "src/cart.js", "moreLines": [["src/cart.js", 2]]},
+            })
+            .to_string(),
+            "stored query failed",
+        ),
         (
             query(&run, "diff", Some("no-such-run")),
             "stored query failed",
