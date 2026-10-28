@@ -17195,3 +17195,65 @@ fn a_quality_snapshot_or_scope_that_cannot_be_read_is_left_out_or_refused() {
     assert_ne!(scope.code(), 0, "{said}");
     assert!(fired_at(&said, "quality.rs:1094"), "{said}");
 }
+
+/// A report names what it cannot show: a run to compare with where there is
+/// none, a run that is not there, runs that cannot be listed. Beside a
+/// quality snapshot with no files, or a file it gave no digest, the report
+/// is made all the same.
+#[test]
+fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
+    let snapshot = |project: &Project, id: &str, files: serde_json::Value| {
+        let directory = format!(".supercov/quality/snapshots/{id}");
+        project.write(
+            &format!("{directory}/manifest.json"),
+            &serde_json::json!({
+                "created_at": format!("2026-01-01T00-00-0{}-000000Z", &id[id.len() - 1..]),
+                "instrument": "catalog",
+                "catalog_version": "v1",
+                "model": "m",
+                "catalog": [],
+            })
+            .to_string(),
+        );
+        project.write(
+            &format!("{directory}/files.json"),
+            &serde_json::json!({ "files": files }).to_string(),
+        );
+    };
+    let empty = Project::empty("report-without-runs");
+    empty.git(&["init", "-q"]);
+    snapshot(&empty, "q_0000000000000001", serde_json::json!([]));
+    let report = ["report", "--output", "r.html", "--no-open"];
+    let compared = empty
+        .supercov(&[&report[..], &["--compare", "run_0000000000000000"]].concat())
+        .exits(2);
+    assert!(compared.contains("no local coverage runs"), "{compared}");
+
+    let project = Project::cart("report-cases");
+    project.write(".gitignore", "r.html\nnode_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let missing = project
+        .supercov(&[
+            "report",
+            "run_0000000000000000",
+            "--output",
+            "r.html",
+            "--no-open",
+        ])
+        .exits(2);
+    assert!(missing.contains("coverage run not found"), "{missing}");
+    let unlisted = project.supercov_with(
+        &report,
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636")],
+    );
+    assert_eq!(unlisted.code(), 2, "{}", unlisted.stderr());
+    assert!(fired_at(&unlisted.stderr(), "run_store.rs:636"));
+    snapshot(&project, "q_0000000000000001", serde_json::json!([]));
+    snapshot(
+        &project,
+        "q_0000000000000002",
+        serde_json::json!([{"path": "src/cart.js", "status": "completed", "health": 5.0}]),
+    );
+    project.supercov(&report).succeeds();
+}
