@@ -13129,7 +13129,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2443 => main.rs:2443",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1658 => javascript_frontend.rs:1658",
+            "fs.read_to_string#javascript_frontend.rs:1662 => javascript_frontend.rs:1662",
         ],
     );
 }
@@ -14913,7 +14913,7 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 /// naming where.
 #[test]
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
-    for place in ["javascript_frontend.rs:357", "javascript_frontend.rs:369"] {
+    for place in ["javascript_frontend.rs:352", "javascript_frontend.rs:364"] {
         let project = Project::cart("frontend-cache-unread");
         project.supercov(&["--", "node", "--test"]).succeeds();
         let ran = project.supercov_with(
@@ -14942,12 +14942,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1790@2",
+            "fs.read_to_string#javascript_frontend.rs:1793@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1790"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1793"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 

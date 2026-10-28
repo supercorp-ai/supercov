@@ -479,21 +479,25 @@ fn write_javascript_frontend_cache(
     let cache_directory = workspace.join(FRONTEND_CACHE_DIRECTORY);
     create_directory_all(&cache_directory)?;
     let mut artifacts = Vec::new();
-    for path in frontend_artifact_paths(workspace, project) {
-        let contents = fs::read(workspace.join(&path))
-            .map_err(|source| io_error(&workspace.join(&path), source))?;
-        let sha256 = format!("{:x}", Sha256::digest(&contents));
-        let cache_file = format!("{FRONTEND_CACHE_DIRECTORY}/{sha256}");
-        let destination = workspace.join(&cache_file);
-        if !destination.is_file() {
-            atomic_write(&destination, &contents)?;
-        }
-        artifacts.push(JavascriptFrontendCacheArtifact {
-            path,
-            cache_file,
-            sha256,
-        });
-    }
+    // Never empty: the frontend's own files are always among them.
+    frontend_artifact_paths(workspace, project)
+        .into_iter()
+        .try_for_each(|path| {
+            let contents = fs::read(workspace.join(&path))
+                .map_err(|source| io_error(&workspace.join(&path), source))?;
+            let sha256 = format!("{:x}", Sha256::digest(&contents));
+            let cache_file = format!("{FRONTEND_CACHE_DIRECTORY}/{sha256}");
+            let destination = workspace.join(&cache_file);
+            if !destination.is_file() {
+                atomic_write(&destination, &contents)?;
+            }
+            artifacts.push(JavascriptFrontendCacheArtifact {
+                path,
+                cache_file,
+                sha256,
+            });
+            Ok(())
+        })?;
     let cache = JavascriptFrontendCache {
         schema_version: FRONTEND_CACHE_SCHEMA_VERSION,
         key: key.to_owned(),
@@ -1968,8 +1972,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1669",
-            "javascript-source-path#javascript_frontend.rs:1787",
+            "javascript-source-path#javascript_frontend.rs:1673",
+            "javascript-source-path#javascript_frontend.rs:1791",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
