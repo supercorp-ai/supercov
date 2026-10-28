@@ -548,21 +548,6 @@ pub fn module_path(root: &Path) -> Option<String> {
         .map(|path| path.trim().to_owned())
 }
 
-/// Package directories that hold at least one test file, which is the unit
-/// `go test` actually runs.
-pub fn test_packages(files: &GoFiles) -> Vec<String> {
-    files
-        .tests
-        .iter()
-        .map(|test| match test.rsplit_once('/') {
-            Some((directory, _)) => directory.to_owned(),
-            None => ".".to_owned(),
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -842,7 +827,6 @@ mod tests {
         );
         assert_eq!(files.configuration_files, [PathBuf::from(".go-version")]);
         assert_eq!(module_path(&root).as_deref(), Some("example.com/app"));
-        assert_eq!(test_packages(&files), ["pkg/api"]);
         fs::remove_dir_all(root).unwrap();
     }
 
