@@ -13366,6 +13366,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "spawn#child_signal_guard.rs:232 => child_signal_guard.rs:232",
             "spawn#child_signal_guard.rs:232@2 => child_signal_guard.rs:232",
             "spawn",
+            // The store of copies made.
+            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
         ],
     );
     if nextest_installed() {
@@ -16177,15 +16179,30 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         project.supercov(command).succeeds();
         project
     };
+    // A run under a root that is a link is refused, naming it.
+    #[cfg(unix)]
+    let refused_under_a_link = |project: &Project, target: &str, command: &[&str]| {
+        std::os::unix::fs::symlink(target, project.root.join("linked")).unwrap();
+        let ran = project.supercov_with(command, &[("SUPERCOV_SOURCE_ROOTS", "linked")]);
+        assert_ne!(ran.code(), 0, "{command:?}: {}", ran.stderr());
+        assert!(
+            ran.stderr().contains("linked"),
+            "{command:?}: {}",
+            ran.stderr()
+        );
+        std::fs::remove_file(project.root.join("linked")).unwrap();
+    };
     let project = measured("stale-rust", small_crate, &["--", "cargo", "test", "-q"]);
     stale_when(
         &project,
         &[
-            ("fs.canonicalize#rust_run.rs:245", "rust_run.rs:245"),
-            ("fs.read_dir#rust_run.rs:85", "rust_run.rs:85"),
+            ("fs.canonicalize#rust_run.rs:244", "rust_run.rs:244"),
+            ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
             ("fs.open#integrity.rs:427", "integrity.rs:427"),
         ],
     );
+    #[cfg(unix)]
+    refused_under_a_link(&project, "src", &["--", "cargo", "test", "-q"]);
     if let Some(go) = go() {
         let project = measured("stale-go", go_project, &["--", go, "test", "./..."]);
         stale_when(
@@ -16196,6 +16213,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
+        #[cfg(unix)]
+        refused_under_a_link(&project, "testdata", &["--", go, "test", "./..."]);
     }
     #[cfg(unix)]
     if let Some(ruby) = ruby() {
@@ -16215,6 +16234,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
+        refused_under_a_link(&project, "lib", &command);
         // The root it was measured under is a link now: no root.
         std::fs::rename(project.root.join("lib"), project.root.join("moved")).unwrap();
         std::os::unix::fs::symlink("moved", project.root.join("lib")).unwrap();
