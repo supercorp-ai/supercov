@@ -322,39 +322,42 @@ impl Imports {
             bases.push(PathBuf::from("src"));
             bases
         };
-        for base in bases {
-            let mut found = Vec::new();
-            let mut package = base.clone();
-            let mut resolved = parts.is_empty();
-            for (index, part) in parts.iter().enumerate() {
-                package = package.join(part);
-                if let Some(init) = exists(&package.join("__init__.py")) {
-                    found.push(init);
-                    resolved = index + 1 == parts.len();
-                } else if index + 1 == parts.len()
-                    && let Some(module) = exists(&package.with_extension("py"))
-                {
-                    found.push(module);
-                    resolved = true;
-                } else {
-                    break;
+        // Never empty: the test's own directory is one.
+        bases
+            .into_iter()
+            .find_map(|base| {
+                let mut found = Vec::new();
+                let mut package = base.clone();
+                let mut resolved = parts.is_empty();
+                for (index, part) in parts.iter().enumerate() {
+                    package = package.join(part);
+                    if let Some(init) = exists(&package.join("__init__.py")) {
+                        found.push(init);
+                        resolved = index + 1 == parts.len();
+                    } else if index + 1 == parts.len()
+                        && let Some(module) = exists(&package.with_extension("py"))
+                    {
+                        found.push(module);
+                        resolved = true;
+                    } else {
+                        break;
+                    }
                 }
-            }
-            if !resolved {
-                continue;
-            }
-            // `from package import name` may name a submodule.
-            for name in names {
-                let submodule = package.join(name);
-                if let Some(file) = exists(&submodule.with_extension("py"))
-                    .or_else(|| exists(&submodule.join("__init__.py")))
-                {
-                    found.push(file);
+                if !resolved {
+                    return None;
                 }
-            }
-            return found;
-        }
-        Vec::new()
+                // `from package import name` may name a submodule.
+                for name in names {
+                    let submodule = package.join(name);
+                    if let Some(file) = exists(&submodule.with_extension("py"))
+                        .or_else(|| exists(&submodule.join("__init__.py")))
+                    {
+                        found.push(file);
+                    }
+                }
+                Some(found)
+            })
+            .unwrap_or_default()
     }
 
     fn specifiers(&self, file: &str) -> Option<Vec<Specifier>> {
