@@ -16797,6 +16797,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         &[
             ("fs.canonicalize#rust_run.rs:244", "rust_run.rs:244"),
             ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
+            ("fs.read_dir entry#rust_run.rs:88", "rust_run.rs:88"),
             ("fs.open#integrity.rs:427", "integrity.rs:427"),
         ],
     );
