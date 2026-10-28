@@ -5175,6 +5175,18 @@ mod tests {
                 .as_bytes()
                 .to_vec(),
             },
+            // A request served for a test whose result never arrived: its
+            // scope joins no result, and it is set aside.
+            EvidenceArchiveEntry {
+                path: "server/orphan.jsonl".into(),
+                contents: concat!(
+                    "{\"type\":\"hit\",\"id\":\"orphan\",\"scope\":{\"version\":1,",
+                    "\"runId\":\"run\",\"workerId\":\"w\",\"testId\":\"gone\",",
+                    "\"testKey\":\"gone\",\"retry\":0,\"attemptId\":\"a\"}}\n",
+                )
+                .as_bytes()
+                .to_vec(),
+            },
             // Files beside the evidence that are not its records are not
             // read as records: these would be three more corrupt ones.
             EvidenceArchiveEntry {
@@ -5340,6 +5352,36 @@ mod tests {
             })
         );
     }
+    /// A server record naming a phase its test does not have counts for no
+    /// phase, as one stamped before every phase does not.
+    #[test]
+    fn a_server_record_of_no_phase_of_its_test_counts_for_none() {
+        let request: CoverageReportRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run",
+            "manifest": { "decisions": [], "points": [], "branches": [] },
+            "rawResults": [{
+                "test": "test",
+                "status": "passed",
+                "phases": [{
+                    "id": "t-0:assertion:1", "kind": "assertion",
+                    "operation": "assert.ok", "startedAtMs": 5
+                }],
+                "browser": [],
+                "server": [
+                    { "type": "hit", "id": "elsewhere", "timestampMs": 6, "phaseId": "z-0:assertion:9" },
+                    { "type": "hit", "id": "early", "timestampMs": 1 }
+                ]
+            }],
+            "generatedAt": "time",
+            "testExitCode": 0
+        }))
+        .unwrap();
+        let report = analyze_coverage_results(&request).unwrap();
+        let phases = &report.view.phases;
+        assert_eq!(phases.len(), 1);
+        assert_eq!(phases[0].server_events, 0, "{phases:?}");
+    }
+
     #[test]
     fn a_phase_leaked_from_another_test_is_untagged_and_an_unknown_one_is_kept() {
         let record = |test: &str, phases: &[&str], events: &[(&str, &str)]| -> RawTestResult {
