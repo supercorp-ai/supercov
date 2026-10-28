@@ -114,8 +114,14 @@ pub(super) fn rewrite(source: &str, line: usize, returning: bool) -> Option<Stri
         let zeros = results.iter().map(|t| zero_of_type(t)).collect::<Vec<_>>();
         Some(format!("return {}", zeros.join(", ")))
     } else {
-        let left = text(node.child_by_field_name("left")?);
-        let right = node.child_by_field_name("right")?;
+        // The file compiled and ran: an assignment has both its sides.
+        let left = text(
+            node.child_by_field_name("left")
+                .expect("an assignment has its left side"),
+        );
+        let right = node
+            .child_by_field_name("right")
+            .expect("an assignment has its right side");
         let operator = if node.kind() == "short_var_declaration" {
             ":="
         } else {
@@ -155,12 +161,15 @@ fn find_statement<'a>(
 
 /// The result types of the function a `return` leaves, one per value.
 fn result_types(node: Node, source: &str) -> Option<Vec<String>> {
-    let function = std::iter::successors(node.parent(), |n| n.parent()).find(|n| {
-        matches!(
-            n.kind(),
-            "function_declaration" | "method_declaration" | "func_literal"
-        )
-    })?;
+    // A `return` that compiled is inside a function.
+    let function = std::iter::successors(node.parent(), |n| n.parent())
+        .find(|n| {
+            matches!(
+                n.kind(),
+                "function_declaration" | "method_declaration" | "func_literal"
+            )
+        })
+        .expect("a return is inside a function");
     let result = function.child_by_field_name("result")?;
     let text = |n: Node| source.get(n.byte_range()).unwrap_or("").to_owned();
     if result.kind() != "parameter_list" {
@@ -169,7 +178,11 @@ fn result_types(node: Node, source: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut cursor = result.walk();
     for declaration in result.named_children(&mut cursor) {
-        let ty = text(declaration.child_by_field_name("type")?);
+        let ty = text(
+            declaration
+                .child_by_field_name("type")
+                .expect("a result declaration has its type"),
+        );
         let mut names = declaration.walk();
         let count = declaration
             .children_by_field_name("name", &mut names)
