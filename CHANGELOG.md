@@ -22,6 +22,7 @@
 - A Kotlin file with a class body on one line (`class C { val x = 1 }`), two members on one line, or a line starting with an identifier that begins with a keyword (`set_value = ...`) was read as not parsing and left unmeasured; Supercov now builds the Kotlin grammar itself with upstream's unreleased fixes for these. A file ending inside an annotation could stop the run for good; it now ends.
 - Kotlin files using context parameters, `when` guards, multi-dollar strings, `suspend { }`, `fun interface`, `actual constructor`, annotated accessors, and two dozen other constructs were read as not parsing and left unmeasured. Supercov now keeps its own copy of the grammar and checks it against every Kotlin file of six real projects (Exposed, kotlinx.coroutines, ktor, moshi, Now in Android, OkHttp): 165 of their 5,429 files were left unmeasured, now 3, two of them templates that are not Kotlin.
 - `assertions assess` and its `--dry-run` estimate took minutes before printing anything on a run whose tests share most of what they run, as a merged or end-to-end run's do: each request and each cache key worked out its test's code and its files' functions again. They are worked out once, and the requests are the same: 400 tests sharing 6,000 statements went from 166 s to 4 s on one core.
+- A measured `wrangler dev` whose wrapped configuration could not be written left the files it had written beside the configuration; they are removed, and the configuration is used as it is.
 
 ## 4.20.3
 
