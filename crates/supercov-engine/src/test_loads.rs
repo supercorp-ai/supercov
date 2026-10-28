@@ -1729,6 +1729,13 @@ mod tests {
         assert_eq!(normal(Path::new("../x")), None);
         assert_eq!(normal(Path::new("")).as_deref(), Some(""));
         assert_eq!(normal(Path::new("a/./b/../c")).as_deref(), Some("a/c"));
+        // A part that is no text names no file of the project.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let unnamed = Path::new(std::ffi::OsStr::from_bytes(b"a/\xff/c"));
+            assert_eq!(normal(unnamed), None);
+        }
     }
 
     /// Each way a Python file names a module, or names one by computation,

@@ -545,6 +545,8 @@ router.get('/x/:id', async (req, res) => {{
                 .imports
                 .is_empty()
         );
+        // A name the parser has no grammar for is not read.
+        assert!(structure(Path::new("a.mjsx"), source).is_err());
     }
 
     #[test]
