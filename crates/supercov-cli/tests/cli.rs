@@ -818,6 +818,51 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
     assert!(fired_at(&said, "evidence_archive.rs:636"), "{said}");
 }
 
+/// A query names its run by position or `--run`; an option missing its value,
+/// a diff missing a run, a run that is not there, and a store of runs that
+/// cannot be listed are refused, each saying why.
+#[test]
+fn query_options_and_runs_are_read_or_refused_by_name() {
+    let project = Project::cart("query-options");
+    project.measure(&[]);
+    let named = project
+        .supercov(&["runs", "latest", "files", "--run", "latest"])
+        .succeeds();
+    assert!(named.contains("src/cart.js"), "{named}");
+    for (args, said) in [
+        (
+            &["runs", "latest", "files", "--run"][..],
+            "--run requires a run ID",
+        ),
+        (
+            &["runs", "latest", "files", "--limit"][..],
+            "--limit must be a number",
+        ),
+        (
+            &["diff"][..],
+            "Usage: supercov diff <older-run> <newer-run>",
+        ),
+        (
+            &["diff", "latest"][..],
+            "Usage: supercov diff <older-run> <newer-run>",
+        ),
+        (
+            &["runs", "nosuch", "tests", "affected"][..],
+            "coverage run not found: nosuch",
+        ),
+    ] {
+        let refused = project.supercov(args).exits(2);
+        assert!(refused.contains(said), "{args:?}: {refused}");
+    }
+    let unlisted = project
+        .supercov_with(
+            &["runs", "latest", "tests", "affected"],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636")],
+        )
+        .exits(2);
+    assert!(unlisted.contains("run_store.rs:636"), "{unlisted}");
+}
+
 /// A test whose file is gone since the run is affected, and says why.
 #[test]
 fn a_test_whose_file_was_removed_is_affected() {
