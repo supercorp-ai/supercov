@@ -622,12 +622,15 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
             let mut tails = branches
                 .into_iter()
                 .flatten()
-                .filter_map(|b| b.stmt_list()?.tail_expr())
+                .filter_map(|b| b.stmt_list().expect(WHOLE).tail_expr())
                 .collect::<Vec<_>>();
             // `else if`: its branches are this one's too.
             let mut chained = i.else_branch();
             while let Some(ast::ElseBranch::IfExpr(next)) = chained {
-                tails.extend(next.then_branch().and_then(|b| b.stmt_list()?.tail_expr()));
+                tails.extend(
+                    next.then_branch()
+                        .and_then(|b| b.stmt_list().expect(WHOLE).tail_expr()),
+                );
                 chained = next.else_branch();
                 if let Some(ast::ElseBranch::Block(b)) = &chained {
                     tails.extend(b.stmt_list().and_then(|l| l.tail_expr()));
