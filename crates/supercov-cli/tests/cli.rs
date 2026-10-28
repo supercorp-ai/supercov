@@ -12957,6 +12957,16 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "fs.read_dir#10",
             "fs.read#9 => rust_owned_doctests.rs:289",
             "fs.read_dir#9@2",
+            // The processes the run starts: Cargo's metadata, the test
+            // build, rustc's libdir and sysroot, a test binary's listing,
+            // the test processes and the doctests'.
+            "spawn#rust_project.rs:183 => rust_project.rs:183",
+            "spawn#rust_test_runner.rs:948 => rust_test_runner.rs:948",
+            "spawn#rust_test_runner.rs:1549 => rust_test_runner.rs:1549",
+            "spawn#rust_test_runner.rs:1549@2 => rust_test_runner.rs:1549",
+            "spawn#rust_test_runner.rs:1267 => rust_test_runner.rs:1267",
+            "spawn#child_signal_guard.rs:232 => child_signal_guard.rs:232",
+            "spawn#child_signal_guard.rs:232@2 => child_signal_guard.rs:232",
             "spawn",
         ],
     );
