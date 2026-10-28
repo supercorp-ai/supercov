@@ -931,7 +931,7 @@ pub fn run_direct_javascript(
         &environment,
         &mut overrides,
         diagnostics,
-    )?;
+    );
     // What bootstrap.cjs installs in a process that runs the workspace without
     // these settings: one started in a container or VM the workspace is
     // mounted into. It moves `root` to where it sees the workspace from.
@@ -1485,10 +1485,8 @@ fn start_docker_relay(
     environment: &BTreeMap<String, String>,
     overrides: &mut BTreeMap<String, String>,
     diagnostics: &mut dyn std::io::Write,
-) -> Result<Option<crate::docker_proxy::DockerProxy>, String> {
-    let Some(upstream) = crate::docker_proxy::upstream_socket(environment) else {
-        return Ok(None);
-    };
+) -> Option<crate::docker_proxy::DockerProxy> {
+    let upstream = crate::docker_proxy::upstream_socket(environment)?;
     let mut names = overrides
         .keys()
         .filter(|name| name.starts_with("SUPERCOV_"))
@@ -1519,14 +1517,14 @@ fn start_docker_relay(
     {
         Ok(proxy) => {
             overrides.extend(proxy.environment(environment));
-            Ok(Some(proxy))
+            Some(proxy)
         }
         Err(error) => {
             let _ = writeln!(
                 diagnostics,
                 "[supercov] containers the tests start are not measured: the Docker relay could not start ({error})"
             );
-            Ok(None)
+            None
         }
     }
 }
