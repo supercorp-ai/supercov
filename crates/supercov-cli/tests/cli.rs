@@ -17322,3 +17322,28 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
     assert!(!said.contains("panicked"), "{said}");
     assert!(fired_at(&said, "source_manifest.rs:784"), "{said}");
 }
+
+/// A JavaScript run beside a wasm library prepares the library in the copy:
+/// its Cargo metadata read and its work directory made. Either failing ends
+/// the run, and says where.
+#[test]
+fn a_javascript_run_whose_wasm_library_cannot_be_prepared_says_so() {
+    for (fault, place) in [
+        ("spawn#rust_project.rs:181", "rust_project.rs:181"),
+        ("fs.create_dir_all#rust_wasm.rs:179", "rust_wasm.rs:179"),
+    ] {
+        let project = Project::cart("wasm-library-unprepared");
+        project.write(".gitignore", "out/\nnode_modules/\ntarget/\n");
+        project.write(
+            "wasm/Cargo.toml",
+            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n\n[dependencies]\nwasm-bindgen = \"0.2\"\n\n[workspace]\n",
+        );
+        project.write("wasm/src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n");
+        project.commit("wasm");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
+    }
+}

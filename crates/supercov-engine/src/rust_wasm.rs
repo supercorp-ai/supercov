@@ -403,6 +403,14 @@ mod tests {
             "node_modules/e/Cargo.toml",
             "[package]\nname = \"e\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\nwasm-bindgen = \"0.2\"\n",
         );
+        // A manifest that is no TOML is no wasm library.
+        write("broken/Cargo.toml", "[package\n");
+        // macOS names no file that is not UTF-8.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::create_dir_all(root.join(std::ffi::OsStr::from_bytes(b"\xff"))).unwrap();
+        }
         let found = wasm_crates(&root)
             .into_iter()
             .map(|path| path.strip_prefix(&root).unwrap().to_owned())
@@ -414,6 +422,16 @@ mod tests {
                 PathBuf::from("targeted/Cargo.toml")
             ]
         );
+        // A directory that cannot be listed, an entry whose kind cannot be
+        // read and a manifest that cannot be read each hold none.
+        for fault in [
+            "fs.read_dir#rust_wasm.rs:55",
+            "fs.file_type",
+            "fs.read_to_string",
+        ] {
+            let found = crate::fault::during(fault, || wasm_crates(&root));
+            assert!(found.is_empty(), "{fault}: {found:?}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
