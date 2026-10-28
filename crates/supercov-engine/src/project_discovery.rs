@@ -926,6 +926,17 @@ mod tests {
     /// A Playwright configuration is a source file named `playwright` then
     /// plain characters then `.config.`, found under the test directories to
     /// four levels, past hidden directories, `node_modules` and links.
+    /// A file named as source the parser has no grammar for parses to
+    /// nothing, and adds no test API.
+    #[test]
+    fn a_source_name_the_parser_does_not_know_parses_to_nothing() {
+        assert!(source_file(Path::new("t.mjsx")));
+        let allocator = Allocator::default();
+        assert!(parse_program(&allocator, Path::new("t.mjsx"), "export const t = 1;\n").is_none());
+        assert!(parse_program(&allocator, Path::new("t.mjs"), "export const t = 1;\n").is_some());
+        assert!(imported_test_apis(Path::new("t.mjsx"), "export const t = 1;\n").is_empty());
+    }
+
     #[test]
     fn nested_playwright_configurations_are_found_by_name_and_depth() {
         for (name, config) in [
