@@ -3011,6 +3011,17 @@ pub(crate) mod tests {
             BTreeSet::from([(vec![Some(false), Some(true)], true)])
         );
         fs::remove_dir_all(directory).unwrap();
+        // A slot whose context no phase of its process declared.
+        let directory = killed_process("py-slot-unknown", &slot_bytes(7, Some(SLOT_DIGEST), &[16]));
+        let unknown = read_evidence_directory(&directory, "run-1").err().unwrap();
+        assert!(
+            matches!(
+                unknown,
+                PythonEvidenceError::UnknownContext { context: 7, .. }
+            ),
+            "{unknown:?}"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
