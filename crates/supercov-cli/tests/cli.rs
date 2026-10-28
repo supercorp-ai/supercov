@@ -16278,6 +16278,14 @@ fn each_language_refuses_a_missing_source_root_and_an_unreadable_timeout_or_inte
             assert!(!said.contains("panicked at"), "{label} {name}: {said}");
             assert_ne!(ran.code(), 0, "{label} {name}: {said}");
         }
+        // A root outside the project beside one in it, which leaves files to
+        // measure.
+        let outside = Project::empty(&format!("{label}-outside"));
+        let roots = format!(".,{}", outside.root.display());
+        let ran = project.supercov_with(&command, &[("SUPERCOV_SOURCE_ROOTS", &roots)]);
+        let said = ran.stderr();
+        assert_ne!(ran.code(), 0, "{label}: {said}");
+        assert!(said.contains("outside the project"), "{label}: {said}");
     }
 }
 
