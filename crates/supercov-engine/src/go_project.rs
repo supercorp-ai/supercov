@@ -144,9 +144,9 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
     sorted.sort_by_key(std::fs::DirEntry::path);
     for entry in sorted {
         let path = entry.path();
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
+        let relative = path
+            .strip_prefix(root)
+            .expect("a walked entry lies under the root it started from");
         let relative = relative.to_string_lossy().replace('\\', "/");
         let name = path
             .file_name()
@@ -617,6 +617,41 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// A listing the walk cannot read fails discovery, naming the
+    /// directory: the project's own, one below it, and the tree the
+    /// toolchain ignores, an entry of it, its kind, and one below that.
+    #[test]
+    fn a_walk_that_cannot_read_a_directory_fails_discovery() {
+        let root = fixture("walk-faults");
+        write(&root, "go.mod", "module example.com/w\n\ngo 1.22\n");
+        write(&root, "main.go", "package main\n\nfunc main() {}\n");
+        write(&root, "pkg/a.go", "package pkg\n");
+        write(&root, "_examples/deep/x.go", "package x\n");
+        fs::create_dir_all(root.join("_examples/empty")).unwrap();
+        let files = discover_go_files(&root).unwrap();
+        assert!(
+            files
+                .excluded
+                .iter()
+                .any(|(file, _)| file == "_examples/deep/x.go")
+        );
+        for fault in [
+            "fs.read_dir",
+            "fs.read_dir entry",
+            "fs.read_dir#go_project.rs:139@2",
+            "fs.read_dir#go_project.rs:279",
+            "fs.read_dir entry#go_project.rs:279",
+            "fs.file_type#go_project.rs:285",
+            "fs.read_dir#go_project.rs:279@2",
+        ] {
+            assert!(
+                crate::fault::during(fault, || discover_go_files(&root)).is_err(),
+                "{fault}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn write(root: &Path, relative: &str, contents: &str) {
