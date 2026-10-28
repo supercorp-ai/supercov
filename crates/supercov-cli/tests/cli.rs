@@ -17639,3 +17639,25 @@ fn a_stale_query_whose_record_cannot_be_read_still_answers() {
     let json = ran.json();
     assert_eq!(json["ok"], true, "{json}");
 }
+
+/// A merged run is judged against the command of the runs it was merged
+/// from; a store that cannot be listed again for them leaves it judged by
+/// its own, and the query still answers.
+#[test]
+fn a_merged_run_whose_parents_cannot_be_listed_is_judged_by_its_own_command() {
+    let project = Project::cart("merged-unlisted");
+    let first = project.measure(&[]);
+    let second = project.measure(&[]);
+    project.supercov(&["merge", &first, &second]).succeeds();
+    let ran = project.supercov_with(
+        &["runs", "latest", "files"],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:662@2")],
+    );
+    assert!(
+        ran.stderr()
+            .contains("test fault at fs (run_store.rs:662 read_dir)"),
+        "{}",
+        ran.stderr()
+    );
+    assert!(ran.succeeds().contains("src/cart.js"));
+}
