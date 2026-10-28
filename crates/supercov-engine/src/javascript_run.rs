@@ -1201,44 +1201,26 @@ pub fn run_direct_javascript(
             recorded_by: None,
             companions: None,
         };
-        let mut published = None;
-        let mut server_runs = Vec::new();
+        // Each server's run is built before any is published, so each can
+        // name the others: the first under the command's run id, which `runs
+        // latest` reads, and the rest under ids that sort after it.
+        let mut built = Vec::new();
         let mut failure = None;
         for server in servers {
-            let id = if published.is_none() {
-                run_id.clone()
-            } else {
-                companion_run_id(&run_id, server_runs.len() + 1)
-            };
             let language = server.language();
-            let published_run = crate::fault::or(
+            let prepared = crate::fault::or(
                 "server-unpublished",
                 || Ok(None),
                 || {
                     crate::fault::or(
                         "server-publish",
                         || Err("injected fault at server-publish".to_owned()),
-                        || {
-                            server.publish(
-                                &root,
-                                &run_id,
-                                RunMetadata {
-                                    id: id.clone(),
-                                    ..metadata.clone()
-                                },
-                                &served,
-                                diagnostics,
-                            )
-                        },
+                        || server.build_run(&root, &run_id, &metadata, &served, diagnostics),
                     )
                 },
             );
-            match published_run {
-                Ok(Some(run)) if published.is_none() => published = Some(run),
-                Ok(Some((directory, _))) => {
-                    finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
-                    server_runs.push((language.to_owned(), directory));
-                }
+            match prepared {
+                Ok(Some(publish)) => built.push((language, publish)),
                 Ok(None) => {}
                 Err(error) => {
                     let _ = writeln!(
@@ -1246,6 +1228,56 @@ pub fn run_direct_javascript(
                         "[supercov] the {language} server's run could not be published: {error}"
                     );
                     failure.get_or_insert(error);
+                }
+            }
+        }
+        let named = built
+            .iter()
+            .enumerate()
+            .map(|(nth, (language, _))| {
+                let id = if nth == 0 {
+                    run_id.clone()
+                } else {
+                    companion_run_id(&run_id, nth)
+                };
+                (id, *language)
+            })
+            .collect::<Vec<_>>();
+        let mut published = None;
+        let mut server_runs = Vec::new();
+        for (nth, (language, publish)) in built.into_iter().enumerate() {
+            let companions = named
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != nth)
+                .map(|(_, (id, language))| crate::run_store::CompanionRun {
+                    id: id.clone(),
+                    language: (*language).into(),
+                    role: "server".into(),
+                })
+                .collect::<Vec<_>>();
+            let id = named[nth].0.clone();
+            let server_metadata = RunMetadata {
+                id: id.clone(),
+                companions: (!companions.is_empty()).then_some(companions),
+                ..metadata.clone()
+            };
+            match publish(server_metadata, diagnostics) {
+                Ok(run) if nth == 0 => published = Some(run),
+                Ok((directory, _)) => {
+                    finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
+                    server_runs.push((language.to_owned(), directory));
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the {language} server's run could not be published: {error}"
+                    );
+                    failure.get_or_insert(error);
+                    // The others would name a run that is not there.
+                    if nth == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -1412,7 +1444,14 @@ pub fn run_direct_javascript(
             }]),
             ..metadata.clone()
         };
-        match server.publish(&root, &run_id, server_metadata, &served, diagnostics) {
+        let published = server
+            .build_run(&root, &run_id, &metadata, &served, diagnostics)
+            .and_then(|prepared| {
+                prepared
+                    .map(|publish| publish(server_metadata, diagnostics))
+                    .transpose()
+            });
+        match published {
             Ok(Some((directory, _))) => {
                 finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                 server_runs.push((language.to_owned(), directory));
@@ -1593,32 +1632,28 @@ impl Server {
         }
     }
 
-    fn publish(
+    /// The server's run, built and waiting for the metadata it is published
+    /// under, when it has one.
+    fn build_run<'a>(
         self,
-        root: &Path,
+        root: &'a Path,
         evidence_run_id: &str,
-        metadata: RunMetadata,
+        run: &RunMetadata,
         served: &[crate::served_tests::ServedTest],
         diagnostics: &mut dyn std::io::Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
         match self {
             Self::Python(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+                server.build_run(root, evidence_run_id, run, served, diagnostics)
             }
-            Self::Ruby(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
-            }
-            Self::Go(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
-            }
-            Self::Jvm(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
-            }
+            Self::Ruby(server) => server.build_run(root, evidence_run_id, run, served, diagnostics),
+            Self::Go(server) => server.build_run(root, evidence_run_id, run, served, diagnostics),
+            Self::Jvm(server) => server.build_run(root, evidence_run_id, run, served, diagnostics),
             Self::RustWorker(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+                server.build_run(root, evidence_run_id, run, served, diagnostics)
             }
             Self::RustWasm(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+                server.build_run(root, evidence_run_id, run, served, diagnostics)
             }
         }
     }
