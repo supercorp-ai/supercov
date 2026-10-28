@@ -1386,6 +1386,69 @@ mod tests {
         create_run_integrity(root, &project, &frontend(shim)).unwrap()
     }
 
+    /// Each input domain's file that cannot be opened fails the fingerprint,
+    /// naming the file: a source, a test, a manifest, the configuration, and
+    /// the frontend's instrumenter and runtime; for a project discovered, and
+    /// for inputs a language names itself.
+    #[test]
+    fn each_input_domain_that_cannot_be_read_names_its_file() {
+        let (root, shim) = fixture();
+        let project = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        for (n, file) in [
+            "src/index.ts",
+            "tests/index.test.ts",
+            "package-lock.json",
+            "vite.config.ts",
+            "instrumenter.js",
+            "runtime.mjs",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fault = format!("fs.open@{}", n + 1);
+            let refused = crate::fault::during(&fault, || {
+                create_run_integrity(&root, &project, &frontend(&shim))
+            });
+            assert!(
+                refused.is_err_and(|error| error.to_string().contains(file)),
+                "{fault} {file}"
+            );
+        }
+        write(
+            &root,
+            "Cargo.toml",
+            "[package]\nname='fixture'\nversion='0.0.0'\n",
+        );
+        let inputs = ExplicitIntegrityInputs {
+            source_files: vec!["src/index.ts".into()],
+            test_files: vec!["tests/index.test.ts".into()],
+            dependency_files: vec!["package-lock.json".into()],
+            configuration_files: vec!["vite.config.ts".into()],
+            execution_configuration: Vec::new(),
+        };
+        for (n, file) in [
+            "tests/index.test.ts",
+            "package-lock.json",
+            "vite.config.ts",
+            "instrumenter.js",
+            "runtime.mjs",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fault = format!("fs.open@{}", n + 2);
+            let refused = crate::fault::during(&fault, || {
+                create_explicit_run_integrity(&root, &inputs, &frontend(&shim))
+            });
+            assert!(
+                refused.is_err_and(|error| error.to_string().contains(file)),
+                "explicit {fault} {file}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
+    }
+
     #[test]
     fn built_assets_the_command_regenerates_do_not_move_the_source_fingerprint() {
         // A theme extension's Vite build lands hashed bundles in `assets/`
