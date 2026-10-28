@@ -1287,18 +1287,30 @@ pub struct CoverageTestQueryOptions<'a> {
     pub limit: usize,
 }
 
-/// A test's hit as the view describes it: every hit a test records is one of
-/// the view's points or branch alternatives.
-fn hit_detail(id: &str, metadata: &IndexedHitMetadata) -> CoverageHitDetail {
-    CoverageHitDetail {
-        id: id.into(),
-        obligation: metadata.obligation.clone(),
-        branch_kind: metadata.branch_kind.clone(),
-        file: Some(metadata.file.clone()),
-        line: Some(metadata.line),
-        column: Some(metadata.column),
-        label: metadata.label.clone(),
-        alternative: metadata.alternative.clone(),
+/// A test's hit as the view describes it. A record may name a hit the
+/// manifest does not hold, and the run keeps it: such a hit is unknown.
+fn hit_detail(id: &str, metadata: Option<&IndexedHitMetadata>) -> CoverageHitDetail {
+    match metadata {
+        Some(metadata) => CoverageHitDetail {
+            id: id.into(),
+            obligation: metadata.obligation.clone(),
+            branch_kind: metadata.branch_kind.clone(),
+            file: Some(metadata.file.clone()),
+            line: Some(metadata.line),
+            column: Some(metadata.column),
+            label: metadata.label.clone(),
+            alternative: metadata.alternative.clone(),
+        },
+        None => CoverageHitDetail {
+            id: id.into(),
+            obligation: "unknown".into(),
+            branch_kind: None,
+            file: None,
+            line: None,
+            column: None,
+            label: None,
+            alternative: None,
+        },
     }
 }
 
@@ -1422,7 +1434,7 @@ pub fn coverage_test_query(
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|id| hit_detail(id, &metadata[id]))
+        .map(|id| hit_detail(id, metadata.get(id)))
         .collect::<Vec<_>>();
     let test_decisions = test
         .decisions
@@ -6060,6 +6072,71 @@ mod tests {
             ),
             Err(QueryError::UnattributedEvidence)
         ));
+    }
+
+    /// A record may name a hit the manifest does not hold, and the run keeps
+    /// it: the test's details read it as unknown.
+    #[test]
+    fn a_hit_the_manifest_does_not_hold_reads_as_unknown() {
+        let mut report = report(vec![result(
+            "admin",
+            McdcVector {
+                values: vec![Some(true), None],
+                outcome: true,
+            },
+        )]);
+        report.view.tests[0].hits.push("unknown-hit".into());
+        let root = crate::test_directory::TestDirectory::adopt({
+            let root = std::env::temp_dir().join(format!(
+                "supercov-unknown-hit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            root
+        });
+        let path = root.join("query-index.v1.bin");
+        let identity = crate::query_index::QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        crate::query_index::write_query_index(
+            &crate::coverage_index::coverage_index_sections(&report).unwrap(),
+            &identity,
+            &path,
+        )
+        .unwrap();
+        let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let (data, _) = coverage_test_query(
+            &index,
+            CoverageTestQueryOptions {
+                run: "r",
+                view: CoverageViewId::All,
+                kind: None,
+                runner: None,
+                selector: "admin",
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        let CoverageTestData::Detail(detail) = data else {
+            panic!("{data:?}");
+        };
+        let unknown = detail.tests[0]
+            .hit_details
+            .iter()
+            .find(|hit| hit.id == "unknown-hit")
+            .expect("the unknown hit is listed");
+        assert_eq!(unknown.obligation, "unknown");
+        assert_eq!(unknown.file, None);
     }
 
     #[test]

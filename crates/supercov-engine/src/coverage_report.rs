@@ -336,11 +336,13 @@ fn credit_by_time(
         .filter(|(_, raw)| raw.role != "background")
         .filter_map(|(index, raw)| {
             let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
+            // Phases there are, as `start` says.
             let end = raw
                 .phases
                 .iter()
                 .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
-                .max()?;
+                .max()
+                .expect("a test with a phase's start has its end");
             let attempt = raw.scope.as_ref().map(|scope| scope.attempt_id.clone());
             Some((index, start, end, attempt))
         })
@@ -5022,6 +5024,63 @@ mod tests {
                 if path == "playwright-worker-1.mcdc.jsonl"
         ));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// An archive whose declaration or model cannot be read is refused,
+    /// naming which.
+    #[test]
+    fn an_archive_whose_declaration_or_model_does_not_read_is_refused() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("known", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let manifest = EvidenceArchiveEntry {
+            path: "manifest.json".into(),
+            contents: serde_json::to_vec(&manifest).unwrap(),
+        };
+        let mut model = serde_json::to_value(
+            PersistedCoverageModel::from_declaration(&javascript_coverage_model()).unwrap(),
+        )
+        .unwrap();
+        model["schemaVersion"] = serde_json::json!(999);
+        let analysed = |entries: Vec<EvidenceArchiveEntry>| {
+            let path = archive(entries);
+            let result = analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: path.clone(),
+                run_id: "run".into(),
+                generated_at: "time".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Missing,
+                test_filter: None,
+            });
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+            result
+        };
+        for (entry, named) in [
+            ("frontend.json", b"not json".to_vec()),
+            ("coverage-model.json", b"not json".to_vec()),
+            ("coverage-model.json", serde_json::to_vec(&model).unwrap()),
+        ]
+        .map(|(path, contents)| {
+            (
+                EvidenceArchiveEntry {
+                    path: path.into(),
+                    contents,
+                },
+                path,
+            )
+        }) {
+            let result = analysed(vec![manifest.clone(), entry]);
+            assert!(
+                matches!(&result, Err(ReportError::InvalidJson { path, .. }) if path == named),
+                "{named}: {result:?}"
+            );
+        }
     }
 
     #[test]
