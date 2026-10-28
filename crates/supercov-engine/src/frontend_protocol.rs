@@ -530,6 +530,21 @@ mod tests {
             validate_frontend_report_request(&declaration(), &cyclic_phase),
             Err(FrontendProtocolError::CyclicPhaseReference(id)) if id == "assertion"
         ));
+        // A manifest limitation with no id; a declaration of another
+        // protocol; and either one refused before any analysis.
+        let mut unnamed = request();
+        unnamed.manifest.limitations.push(serde_json::json!({}));
+        assert!(matches!(
+            validate_frontend_report_request(&declaration(), &unnamed),
+            Err(FrontendProtocolError::InvalidManifestLimitation)
+        ));
+        let mut other_protocol = declaration();
+        other_protocol.protocol_version += 1;
+        assert!(matches!(
+            validate_frontend_report_request(&other_protocol, &request()),
+            Err(FrontendProtocolError::Declaration(_))
+        ));
+        assert!(analyze_frontend_results(&other_protocol, &request()).is_err());
     }
 
     #[test]
