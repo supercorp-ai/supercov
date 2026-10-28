@@ -280,10 +280,12 @@ impl<'a> SourceLocations<'a> {
         }
     }
 
+    #[track_caller]
     fn range(&self, range: TextRange) -> Result<(usize, usize), PythonInstrumenterError> {
         // A test fault stands in for a range the parser gave that the source
-        // cannot hold, so each place that refuses one runs under test.
-        if crate::fault::injected("python-range") {
+        // cannot hold, so each place that refuses one runs under test: the
+        // place that asked, through the helpers that ask for it.
+        if crate::fault::injected_here("python-range", "range") {
             return Err(PythonInstrumenterError::InvalidRange);
         }
         // A `TextRange` never starts after it ends.
@@ -303,6 +305,7 @@ impl<'a> SourceLocations<'a> {
         (line_index + 1, offset - self.line_starts[line_index])
     }
 
+    #[track_caller]
     fn span(&self, range: TextRange) -> Result<PlanSpan, PythonInstrumenterError> {
         let (start, end) = self.range(range)?;
         let (start_line, start_column) = self.line_column(start);
@@ -313,6 +316,7 @@ impl<'a> SourceLocations<'a> {
         })
     }
 
+    #[track_caller]
     fn text(&self, range: TextRange) -> Result<String, PythonInstrumenterError> {
         let (start, end) = self.range(range)?;
         Ok(self.source[start..end].trim().to_owned())
@@ -400,6 +404,7 @@ impl<'a> PythonObligationCollector<'a> {
         None
     }
 
+    #[track_caller]
     fn location_source(&mut self, range: TextRange) -> Option<(usize, usize, String)> {
         let result = self.locations.range(range).map(|(start, _)| {
             let (line, column) = self.locations.line_column(start);
@@ -411,6 +416,7 @@ impl<'a> PythonObligationCollector<'a> {
         }
     }
 
+    #[track_caller]
     fn span(&mut self, range: TextRange) -> Option<PlanSpan> {
         match self.locations.span(range) {
             Ok(span) => Some(span),
@@ -772,10 +778,11 @@ impl<'a> PythonObligationCollector<'a> {
         ) else {
             return;
         };
-        let body_range = match (statement.body.first(), statement.body.last()) {
-            (Some(first), Some(last)) => TextRange::new(first.start(), last.end()),
-            _ => return,
-        };
+        const BODY: &str = "a parsed `try` has a body";
+        let body_range = TextRange::new(
+            statement.body.first().expect(BODY).start(),
+            statement.body.last().expect(BODY).end(),
+        );
         let Some(body) = self.span(body_range) else {
             return;
         };
@@ -1069,9 +1076,9 @@ pub fn build_python_obligations(
     file: &str,
     source: &str,
 ) -> Result<PythonFileObligations, PythonInstrumenterError> {
-    within_text_size(source.len())?;
-    let parsed =
-        parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))?;
+    let parsed = within_text_size(source.len()).and_then(|()| {
+        parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))
+    })?;
     obligations_of(file, source, parsed.suite())
 }
 
@@ -1154,6 +1161,35 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    /// Each place that asks for a range, failing there: a condition's text,
+    /// an operator's bounds, a decision's span, a `try` body's and its
+    /// `finally`'s spans, a handler's branch, a `match` case's span. The
+    /// file is refused at each.
+    #[test]
+    fn each_place_that_asks_for_a_range_refuses_the_file_there() {
+        let decided = "def f(a, b):\n    if a and (b or not a):\n        pass\n";
+        let tried = "try:\n    g()\nexcept ValueError:\n    pass\nfinally:\n    h()\n";
+        let matched = "match a:\n    case 1:\n        pass\n";
+        for (source, place) in [
+            (decided, "577"),
+            (decided, "592"),
+            (decided, "618"),
+            (decided, "831"),
+            (tried, "786"),
+            (tried, "792"),
+            (tried, "733@2"),
+            (matched, "914"),
+        ] {
+            assert!(build_python_obligations("a.py", source).is_ok(), "{place}");
+            let fault = format!("python-range#python_instrumenter.rs:{place}");
+            assert_eq!(
+                crate::fault::during(&fault, || build_python_obligations("a.py", source)),
+                Err(PythonInstrumenterError::InvalidRange),
+                "{fault}"
+            );
+        }
     }
 
     #[test]
