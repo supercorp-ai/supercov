@@ -2468,19 +2468,22 @@ pub fn run_prepared_rust_tests(
     let mut remote = false;
     let mut started = Vec::new();
     if rust_workers.is_some() {
-        for outcome in &outcomes {
-            remote |= crate::rust_worker::started_remote(&outcome.task.directory);
-            started.extend(crate::rust_worker::started_worker_configs(
-                &outcome.task.directory,
-            ));
-            built_crates.extend(
-                crate::rust_worker::materialize_worker_windows(
+        outcomes
+            .iter()
+            .try_for_each(|outcome| -> Result<(), RustTestRunnerError> {
+                remote |= crate::rust_worker::started_remote(&outcome.task.directory);
+                started.extend(crate::rust_worker::started_worker_configs(
                     &outcome.task.directory,
-                    &project.probes.token,
-                )
-                .map_err(RustTestRunnerError::Io)?,
-            );
-        }
+                ));
+                built_crates.extend(
+                    crate::rust_worker::materialize_worker_windows(
+                        &outcome.task.directory,
+                        &project.probes.token,
+                    )
+                    .map_err(RustTestRunnerError::Io)?,
+                );
+                Ok(())
+            })?;
     }
     let mut project = project.clone();
     let unmeasured_workers = note_unrun_workers(&mut project, &built_crates, remote, &started);
