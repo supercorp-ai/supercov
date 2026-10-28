@@ -16653,6 +16653,36 @@ fn each_query_says_so_when_its_index_or_its_reply_fails() {
     assert!(said.contains("test fault at coverage-index"), "{said}");
 }
 
+/// The quality scope reads a manifest's declared files past values that are
+/// no paths, stops descending at its depth, and with roots the engine cannot
+/// resolve keeps them as given and leaves the rest out.
+#[cfg(unix)]
+#[test]
+fn the_quality_scope_reads_past_what_it_cannot_use() {
+    let project = Project::empty("quality-scope-edges");
+    project.git(&["init", "-q"]);
+    project.write(
+        "package.json",
+        r#"{"name":"s","bin":{"x":1,"y":"bin/y.js"},"main":"lib/index.js"}"#,
+    );
+    project.write("lib/index.js", "x\n");
+    project.write("bin/y.js", "x\n");
+    project.write("a/b/c/d/e/f/g/package.json", "{}");
+    let scope = project.supercov(&["quality", "scope"]).succeeds();
+    assert!(scope.contains("Roots: bin, lib"), "{scope}");
+    std::os::unix::fs::symlink("lib", project.root.join("linked")).unwrap();
+    let linked = project
+        .supercov_with(
+            &["quality", "scope"],
+            &[("SUPERCOV_SOURCE_ROOTS", "linked")],
+        )
+        .succeeds();
+    assert!(
+        linked.contains("Roots: linked") && linked.contains("outside explicit source roots"),
+        "{linked}"
+    );
+}
+
 /// The quality scope takes the source roots it is given, and reads roots
 /// that name nothing as none given.
 #[test]
