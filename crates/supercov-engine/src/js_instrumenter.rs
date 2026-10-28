@@ -5770,9 +5770,19 @@ impl<'a> VisitMut<'a> for DefaultTransformer<'a> {
     fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 }
 
-enum ExtendedKind {
-    Try,
-    Loop,
+/// The statement under its labels: a label stays on the construct it names,
+/// so what Supercov wraps around one goes outside its labels.
+fn unlabelled<'a, 'b>(statement: &'b mut Statement<'a>) -> &'b mut Statement<'a> {
+    match statement {
+        Statement::LabeledStatement(node) => unlabelled(&mut node.body),
+        other => other,
+    }
+}
+
+/// What an instrumented `try` or loop is wrapped in, once walked.
+enum Wrap<'a> {
+    Try(Statement<'a>),
+    Loop([Statement<'a>; 2]),
 }
 
 /// A try's success and catch outcomes, and a loop's zero-iteration and
@@ -5819,33 +5829,6 @@ impl<'a> ExtendedTransformer<'a, '_> {
             .expect("extended branch must be inside a program or function")
             .push(name.clone());
         name
-    }
-
-    fn target(statement: &Statement<'a>) -> Option<(ExtendedKind, SpanKey)> {
-        match statement {
-            Statement::TryStatement(node) => Some((ExtendedKind::Try, span_key(node.span))),
-            Statement::ForInStatement(node) => Some((ExtendedKind::Loop, span_key(node.span))),
-            Statement::ForOfStatement(node) => Some((ExtendedKind::Loop, span_key(node.span))),
-            Statement::LabeledStatement(node) => Self::target(&node.body),
-            _ => None,
-        }
-    }
-
-    fn inner_try<'b>(statement: &'b mut Statement<'a>) -> Option<&'b mut TryStatement<'a>> {
-        match statement {
-            Statement::TryStatement(node) => Some(node),
-            Statement::LabeledStatement(node) => Self::inner_try(&mut node.body),
-            _ => None,
-        }
-    }
-
-    fn inner_loop_body<'b>(statement: &'b mut Statement<'a>) -> Option<&'b mut Statement<'a>> {
-        match statement {
-            Statement::ForInStatement(node) => Some(&mut node.body),
-            Statement::ForOfStatement(node) => Some(&mut node.body),
-            Statement::LabeledStatement(node) => Self::inner_loop_body(&mut node.body),
-            _ => None,
-        }
     }
 
     fn prepend(body: &mut Statement<'a>, entry: Statement<'a>, ast: AstBuilder<'a>) {
@@ -5903,16 +5886,20 @@ impl<'a> ExtendedTransformer<'a, '_> {
         )
     }
 
-    fn instrument_try(&mut self, statement: &mut Statement<'a>, first: usize) {
-        // What Supercov adds around the statement takes its span (see
-        // `wrap_bare`), so its braces map to the statement's own ends.
-        let span = statement.span();
+    /// Records a `try`'s outcomes in its catch and finally; the statement
+    /// that resets its flag, for the block around the construct, which takes
+    /// `span`, the construct's with its labels.
+    fn instrument_try(
+        &mut self,
+        node: &mut TryStatement<'a>,
+        span: Span,
+        first: usize,
+    ) -> Statement<'a> {
         let flag = self.scratch("_supercovTryFrame");
         let reset = self.reset(&flag);
         // Recorded the moment the catch starts, not when the construct is
         // left: `process.exit()` in a catch skips the `finally`.
         let caught = self.first_time(&flag, first + 1);
-        let node = Self::inner_try(statement).expect("try target must remain a try statement");
         node.handler
             .as_mut()
             .expect("try coverage requires a catch handler")
@@ -5931,24 +5918,36 @@ impl<'a> ExtendedTransformer<'a, '_> {
                     .alloc_block_statement(Span::new(span.end - 1, span.end), self.ast.vec1(end)),
             );
         }
+        reset
+    }
+
+    /// Records an enumeration loop's entry in its body; the statements that
+    /// reset its flag and record the loop's end, for the block around it.
+    fn instrument_loop(&mut self, body: &mut Statement<'a>, first: usize) -> [Statement<'a>; 2] {
+        let flag = self.scratch("_supercovLoopFrame");
+        let reset = self.reset(&flag);
+        let entered = self.first_time(&flag, first + 1);
+        Self::prepend(body, entered, self.ast);
+        [reset, self.otherwise(&flag, first)]
+    }
+
+    /// The block a `try` is wrapped in: its flag reset, then the construct.
+    fn wrap_try(&self, statement: &mut Statement<'a>, span: Span, reset: Statement<'a>) {
         let original = statement.take_in(self.ast.allocator);
         *statement = self
             .ast
             .statement_block(span, self.ast.vec_from_array([reset, original]));
     }
 
-    fn instrument_loop(&mut self, statement: &mut Statement<'a>, first: usize) {
-        let span = statement.span();
-        let flag = self.scratch("_supercovLoopFrame");
-        let reset = self.reset(&flag);
-        let entered = self.first_time(&flag, first + 1);
-        Self::prepend(
-            Self::inner_loop_body(statement).expect("loop target must remain an enumeration loop"),
-            entered,
-            self.ast,
-        );
+    /// The block a loop is wrapped in: its flag reset, then the loop in a
+    /// `try` whose `finally` records its end.
+    fn wrap_loop(
+        &self,
+        statement: &mut Statement<'a>,
+        span: Span,
+        [reset, end]: [Statement<'a>; 2],
+    ) {
         let original = statement.take_in(self.ast.allocator);
-        let end = self.otherwise(&flag, first);
         // Only the outer block takes the loop's span: the `try` inside it
         // mapped to the same start would take that mapping from the loop.
         let wrapped = self.ast.statement_try(
@@ -6005,27 +6004,32 @@ impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
     fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_statement(&mut self, statement: &mut Statement<'a>) {
-        let Some((kind, key)) = Self::target(statement) else {
-            walk_mut::walk_statement(self, statement);
-            return;
+        // What Supercov adds around the statement takes its span (see
+        // `wrap_bare`), so its braces map to the statement's own ends. The
+        // construct is instrumented as it is found, before the walk below
+        // could find it again under its labels; the probes it gains are
+        // statements of their own the walk passes over.
+        let span = statement.span();
+        let wrap = match unlabelled(statement) {
+            Statement::TryStatement(node) => self
+                .try_targets
+                .remove(&span_key(node.span))
+                .map(|first| Wrap::Try(self.instrument_try(node, span, first))),
+            Statement::ForInStatement(node) => self
+                .loop_targets
+                .remove(&span_key(node.span))
+                .map(|first| Wrap::Loop(self.instrument_loop(&mut node.body, first))),
+            Statement::ForOfStatement(node) => self
+                .loop_targets
+                .remove(&span_key(node.span))
+                .map(|first| Wrap::Loop(self.instrument_loop(&mut node.body, first))),
+            _ => None,
         };
-        match kind {
-            ExtendedKind::Try => {
-                if let Some(target) = self.try_targets.remove(&key) {
-                    walk_mut::walk_statement(self, statement);
-                    self.instrument_try(statement, target);
-                } else {
-                    walk_mut::walk_statement(self, statement);
-                }
-            }
-            ExtendedKind::Loop => {
-                if let Some(target) = self.loop_targets.remove(&key) {
-                    walk_mut::walk_statement(self, statement);
-                    self.instrument_loop(statement, target);
-                } else {
-                    walk_mut::walk_statement(self, statement);
-                }
-            }
+        walk_mut::walk_statement(self, statement);
+        match wrap {
+            Some(Wrap::Try(reset)) => self.wrap_try(statement, span, reset),
+            Some(Wrap::Loop(statements)) => self.wrap_loop(statement, span, statements),
+            None => {}
         }
     }
 }
@@ -6749,22 +6753,6 @@ impl<'a> SwitchTransformer<'a, '_> {
         )
     }
 
-    fn target(statement: &Statement<'a>) -> Option<SpanKey> {
-        match statement {
-            Statement::SwitchStatement(node) => Some(span_key(node.span)),
-            Statement::LabeledStatement(node) => Self::target(&node.body),
-            _ => None,
-        }
-    }
-
-    fn inner_switch<'b>(statement: &'b mut Statement<'a>) -> Option<&'b mut SwitchStatement<'a>> {
-        match statement {
-            Statement::SwitchStatement(node) => Some(node),
-            Statement::LabeledStatement(node) => Self::inner_switch(&mut node.body),
-            _ => None,
-        }
-    }
-
     fn entered_assignment(&self, entered: &str) -> Statement<'a> {
         self.ast.statement_expression(
             Span::default(),
@@ -6782,9 +6770,13 @@ impl<'a> SwitchTransformer<'a, '_> {
     /// without its test matching, and crediting it claimed a test of a value
     /// none had checked. `entered` says the switch has already selected a
     /// case; it also tells a switch with no default that nothing matched.
-    fn instrument(&mut self, statement: &mut Statement<'a>, target: &SwitchTarget) {
+    /// The switch's flag, once its cases record themselves.
+    fn instrument_cases(
+        &mut self,
+        node: &mut SwitchStatement<'a>,
+        target: &SwitchTarget,
+    ) -> String {
         let entered = self.names.allocate("_supercovSwitchEntered");
-        let node = Self::inner_switch(statement).expect("switch target must remain a switch");
         for (index, case) in node.cases.iter_mut().enumerate() {
             let probe = self.probe(
                 target
@@ -6805,6 +6797,12 @@ impl<'a> SwitchTransformer<'a, '_> {
             case.consequent.insert(0, self.entered_assignment(&entered));
             case.consequent.insert(0, selected);
         }
+        entered
+    }
+
+    /// The block a switch is wrapped in, outside its labels: its flag
+    /// declared, the switch, and where nothing matched, that.
+    fn wrap(&mut self, statement: &mut Statement<'a>, entered: &str, target: &SwitchTarget) {
         let declaration =
             Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
                 Span::default(),
@@ -6814,7 +6812,7 @@ impl<'a> SwitchTransformer<'a, '_> {
                     VariableDeclarationKind::Let,
                     self.ast.binding_pattern_binding_identifier(
                         Span::default(),
-                        self.ast.ident(&entered),
+                        self.ast.ident(entered),
                     ),
                     NONE,
                     Some(self.ast.expression_boolean_literal(Span::default(), false)),
@@ -6830,7 +6828,7 @@ impl<'a> SwitchTransformer<'a, '_> {
                 self.ast.expression_unary(
                     Span::default(),
                     UnaryOperator::LogicalNot,
-                    self.identifier(&entered),
+                    self.identifier(entered),
                 ),
                 self.probe(no_match_id),
                 None,
@@ -6866,15 +6864,16 @@ impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
     fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_statement(&mut self, statement: &mut Statement<'a>) {
-        let Some(key) = Self::target(statement) else {
-            walk_mut::walk_statement(self, statement);
-            return;
+        let found = match unlabelled(statement) {
+            Statement::SwitchStatement(node) => self
+                .targets
+                .remove(&span_key(node.span))
+                .map(|target| (self.instrument_cases(node, &target), target)),
+            _ => None,
         };
-        let Some(target) = self.targets.remove(&key) else {
-            walk_mut::walk_statement(self, statement);
-            return;
-        };
-        self.instrument(statement, &target);
+        if let Some((entered, target)) = found {
+            self.wrap(statement, &entered, &target);
+        }
         // The switch now sits in a block of its own; its target is spent, so
         // walking it reaches the switches inside its cases and nothing twice.
         walk_mut::walk_statement(self, statement);
@@ -14010,6 +14009,46 @@ export function shapes(n: number): unknown {
         let source = format!("export const C = () => <A>{{{function}}}</A>;\n");
         let output = instrument_direct_candidate(&source, "app/c.jsx").unwrap();
         assert!(output.code.contains(function), "{}", output.code);
+    }
+
+    /// A labeled loop, `try` or `switch` keeps its label on the construct:
+    /// `continue outer` still names the loop, and `break` still leaves the
+    /// `try` and the `switch`, once each is measured.
+    #[test]
+    fn a_labeled_loop_try_or_switch_keeps_its_label_on_the_construct() {
+        let printed = printed_alike(
+            concat!(
+                "function f(xs) {\n",
+                "  const out = [];\n",
+                "  outer: for (const x of xs) {\n",
+                "    for (const y of [1, 2]) {\n",
+                "      if (y === 2) continue outer;\n",
+                "      out.push(x * y);\n",
+                "    }\n",
+                "  }\n",
+                "  return out;\n",
+                "}\n",
+                "function g() {\n",
+                "  attempt: try {\n",
+                "    break attempt;\n",
+                "  } catch (error) {\n",
+                "    return 'caught';\n",
+                "  }\n",
+                "  return 'left';\n",
+                "}\n",
+                "function h(x) {\n",
+                "  choice: switch (x) {\n",
+                "    case 1:\n",
+                "      break choice;\n",
+                "    default:\n",
+                "      return 'other';\n",
+                "  }\n",
+                "  return 'one';\n",
+                "}\n",
+            ),
+            "print([f([1, 2]).join(','), g(), h(1), h(2)].join(';'));",
+        );
+        assert_eq!(printed, "1,2;left;one;other");
     }
 
     #[test]
