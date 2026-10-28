@@ -691,6 +691,19 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
             ),
             "{terse}"
         );
+        // A result line cut off before its counts gives no word of its own:
+        // the plain one is written.
+        let cut = [CaseOutput {
+            name: "a",
+            exit: 0,
+            stdout: "\nrunning 1 test\ntest a ... ok\n\ntest result: ok",
+            stderr: "",
+        }];
+        assert!(
+            libtest_report(&cut, false).contains("test result: ok. 1 passed;"),
+            "{}",
+            libtest_report(&cut, false)
+        );
     }
 
     #[test]
@@ -769,6 +782,8 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
         ] {
             assert!(counts(refused).is_none(), "{refused}");
         }
+        // A failure's heading with no list of failures after it, cut off.
+        assert_eq!(failure_detail("\nfailures:\n\n---- t stdout ----\n"), None);
     }
 
     /// Reports with no lines and no result still make one report; a quiet
