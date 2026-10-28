@@ -442,10 +442,13 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
     let mut hits = BTreeSet::<String>::new();
     let mut lines_run = 0;
     let mut added_files = Vec::new();
-    let evidence_name = request.evidence.file_name().map_or_else(
-        || request.evidence.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
+    // The evidence was read from it, so it names a file.
+    let evidence_name = request
+        .evidence
+        .file_name()
+        .expect("evidence read from a file names it")
+        .to_string_lossy()
+        .into_owned();
     for (file, recorded) in &by_file {
         if !measured.contains(file)
             && let Some((status, reason)) = scope_status(&manifest, file)
@@ -485,21 +488,26 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                 .filter(|(_, count)| **count > 0)
                 .map(|(line, _)| *line)
                 .collect::<BTreeSet<_>>();
-            for point in manifest.points.iter().filter(|point| point.file == *file) {
-                let credited = match point.kind {
-                    PointKind::Statement => ran.contains(&point.line),
-                    PointKind::Function => entered.contains(&point.line),
-                };
-                if credited {
-                    hits.insert(point.id.clone());
-                }
-            }
+            manifest
+                .points
+                .iter()
+                .filter(|point| point.file == *file)
+                .for_each(|point| {
+                    let credited = match point.kind {
+                        PointKind::Statement => ran.contains(&point.line),
+                        PointKind::Function => entered.contains(&point.line),
+                    };
+                    if credited {
+                        hits.insert(point.id.clone());
+                    }
+                });
             continue;
         }
         // A file the run did not measure: the evidence's own lines are its
-        // statements, and its source joins the run's record of sources.
+        // statements, and its source joins the run's record of sources. One
+        // of the project's files that is no text has neither.
         let Some(text) = text else {
-            skipped.push((file.clone(), "no such file in the project".into()));
+            skipped.push((file.clone(), "not a text file".into()));
             continue;
         };
         let source_lines = text.lines().collect::<Vec<_>>();
@@ -686,20 +694,21 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             contents: serde_json::to_vec(sources).expect("plain data serializes"),
         });
     }
-    for entry in archive {
-        // The records name the run they were made in; they are this run's now.
+    archive.into_iter().for_each(|entry| {
+        // The records name the run they were made in; they are this run's
+        // now. A stored run's records were read whole when it was published.
         let contents = if entry.path == "coverage-model.json" {
             entry.contents
         } else {
             crate::run_merge::rewritten_contents(&entry.contents, request.run_id, None)
-                .map_err(|error| format!("Cannot import into run {}: {error}", parent.id))?
+                .expect("a stored run's records rewrite")
                 .unwrap_or_default()
         };
         entries.push(EvidenceArchiveEntry {
             path: entry.path,
             contents,
         });
-    }
+    });
 
     let mut lock = ProjectLock::acquire(request.root, request.run_id, request.started_at)
         .map_err(|error| format!("Cannot lock coverage store for the import: {error}"))?;

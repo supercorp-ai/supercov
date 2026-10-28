@@ -10912,8 +10912,10 @@ fn filters_pages_imports_and_help_topics_read_as_a_user_reads_them() {
     // An LCOV import names what it left out and keeps a failed outcome.
     project.write(
         "cov.info",
-        "TN:\nSF:src/cart.js\nFN:12,shipping\nFNDA:1,shipping\nDA:13,1\nLF:1\nLH:1\nend_of_record\nSF:lib/elsewhere.js\nDA:1,1\nend_of_record\n",
+        "TN:\nSF:src/cart.js\nFN:12,shipping\nFNDA:1,shipping\nDA:13,1\nLF:1\nLH:1\nend_of_record\nSF:lib/elsewhere.js\nDA:1,1\nend_of_record\nSF:lib/latin.js\nDA:1,1\nend_of_record\n",
     );
+    std::fs::create_dir_all(project.root.join("lib")).unwrap();
+    std::fs::write(project.root.join("lib/latin.js"), b"var caf\xe9 = 1;\n").unwrap();
     assert!(
         project
             .supercov(&[
@@ -10928,7 +10930,7 @@ fn filters_pages_imports_and_help_topics_read_as_a_user_reads_them() {
     assert_eq!(imported.code(), 0, "{}", imported.stderr());
     assert!(
         imported.stderr().contains(
-            "left out 1 file(s) of the evidence: lib/elsewhere.js (no such file in the project)"
+            "left out 2 file(s) of the evidence: lib/elsewhere.js (no such file in the project); lib/latin.js (not a text file)"
         ),
         "{}",
         imported.stderr()
