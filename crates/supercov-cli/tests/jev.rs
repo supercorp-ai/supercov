@@ -290,15 +290,21 @@ fn security_reads_a_coverage_run_beside_its_findings() {
     assert!(!with_run.contains("judged to catch"), "{with_run}");
     // A run whose evidence cannot be read is named before anything is asked
     // of the provider.
-    let mut env = jev.to_vec();
-    env.push((
-        "SUPERCOV_TEST_FAULT",
+    // Read twice: for the run's view, then for what each test ran.
+    for fault in [
         "fs.read_from#evidence_archive.rs:636",
-    ));
-    let refused = project
-        .supercov_with(&["security", "--run", "latest"], &env)
-        .exits(2);
-    assert!(refused.contains("evidence_archive.rs:636"), "{refused}");
+        "fs.read_from#evidence_archive.rs:636@3",
+    ] {
+        let mut env = jev.to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", fault));
+        let refused = project
+            .supercov_with(&["security", "--run", "latest"], &env)
+            .exits(2);
+        assert!(
+            refused.contains("evidence_archive.rs:636"),
+            "{fault}: {refused}"
+        );
+    }
     let scope = project.supercov(&["security", "scope"]).succeeds();
     assert!(scope.contains("Roots: src"), "{scope}");
     let file = project
