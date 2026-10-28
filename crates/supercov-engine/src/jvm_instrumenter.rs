@@ -688,13 +688,11 @@ fn walk(collector: &mut Collector, node: Node) {
                 }));
             } else {
                 let probes = collector.add_branch(node, "value", &["true", "false"]);
-                let decision = collector.add_decision(node, "value");
-                let wrapper = match decision {
-                    Some(index) => {
-                        format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1])
-                    }
-                    None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-                };
+                // `&&` or `||` has two operands, each a condition at least.
+                let index = collector
+                    .add_decision(node, "value")
+                    .expect("a logical value has two conditions");
+                let wrapper = format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]);
                 collector.edit(node.start_byte(), 5, wrapper);
                 collector.edit(node.end_byte(), 5, ")".to_owned());
             }
