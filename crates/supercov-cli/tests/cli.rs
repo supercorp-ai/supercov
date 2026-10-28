@@ -12850,6 +12850,8 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.open@5",
             "fs.read@10",
             "fs.read@6 => source_capture.rs:54",
+            "fs.read_dir entry#1 => python_project.rs:125",
+            "fs.read_dir entry#2 => python_evidence.rs:359",
             "spawn",
         ],
     );
@@ -13151,6 +13153,7 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "fs.file_type@9 => python_run.rs:107",
         "fs.create_dir_all@7 => python_run.rs:111",
         "fs.copy@1 => python_run.rs:114",
+        "fs.read_dir entry#3 => python_run.rs:104",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("python-keep-work");
@@ -13315,6 +13318,8 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.read@7",
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
+            "fs.read_dir entry#1 => ruby_project.rs:100",
+            "fs.read_dir entry#2 => ruby_evidence.rs:329",
             "spawn",
         ],
     );
@@ -13337,6 +13342,7 @@ fn a_ruby_run_that_cannot_keep_its_work_says_so() {
         "fs.file_type@7 => ruby_run.rs:101",
         "fs.create_dir_all@6 => ruby_run.rs:105",
         "fs.copy@1 => ruby_run.rs:108",
+        "fs.read_dir entry#2 => ruby_run.rs:98",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("ruby-keep-work");
@@ -13984,6 +13990,8 @@ fn a_workspace_whose_git_repository_cannot_be_made_runs_without_one() {
     let detached = [
         ("git@4", "git rev-parse HEAD"),
         ("git@5", "git update-ref --no-deref HEAD"),
+        // HEAD set, the next step failing.
+        ("git@6", "git remote remove origin"),
     ];
     for (detach, cases) in [(false, &on_branch[..]), (true, &detached[..])] {
         for (fault, said) in cases {
@@ -14050,6 +14058,33 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
 #[test]
 fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
     let linked = [
+        // A listing's first entry unreadable: the copy's tree, the
+        // project's dependencies, their tools, a scope, the outputs.
+        (
+            "fs.read_dir entry#7",
+            "injected fault at fs",
+            "workspace.rs:704",
+        ),
+        (
+            "fs.read_dir entry#10",
+            "injected fault at fs",
+            "workspace.rs:1051",
+        ),
+        (
+            "fs.read_dir entry#11",
+            "injected fault at fs",
+            "workspace.rs:988",
+        ),
+        (
+            "fs.read_dir entry#12",
+            "injected fault at fs",
+            "workspace.rs:935",
+        ),
+        (
+            "fs.read_dir entry#16",
+            "injected fault at fs",
+            "workspace.rs:1354",
+        ),
         ("fs.read_dir@57", "injected fault at fs", "workspace.rs:704"),
         (
             "fs.read_dir@66",
@@ -14084,6 +14119,11 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         ),
     ];
     let unlinkable = [
+        (
+            "fs.read_dir entry#9",
+            "injected fault at fs",
+            "workspace.rs:767",
+        ),
         (
             "fs.read_dir@62",
             "packages/web/node_modules: injected",
