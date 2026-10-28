@@ -23,20 +23,19 @@ pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
     };
     let tree = match crate::jvm_instrumenter::parse(source, language) {
         Ok(tree) => tree,
-        Err(_) => {
-            let Some(tree) = recovered(source, language) else {
-                return out;
-            };
-            tree
-        }
+        Err(_) => recovered(source, language),
     };
     let starts = line_starts(source);
     walk(tree.root_node(), source, &starts, kotlin(file), &mut out);
     out
 }
 
+/// A `catch`, `when` entry or `finally` block lies in the expression it is
+/// part of.
+const OWNED: &str = "a catch, when entry or finally block has its expression";
+
 /// Whatever tree the grammar recovers from a source that does not parse.
-fn recovered(source: &str, language: JvmLanguage) -> Option<Tree> {
+fn recovered(source: &str, language: JvmLanguage) -> Tree {
     let mut parser = Parser::new();
     let grammar = match language {
         JvmLanguage::Kotlin => crate::kotlin_grammar::LANGUAGE.into(),
@@ -45,7 +44,10 @@ fn recovered(source: &str, language: JvmLanguage) -> Option<Tree> {
     parser
         .set_language(&grammar)
         .expect("the JVM grammars are built for this tree-sitter");
-    parser.parse(source, None)
+    // With no timeout or cancellation set, a parse always gives a tree.
+    parser
+        .parse(source, None)
+        .expect("tree-sitter recovers a tree from any text")
 }
 
 /// What an `if` tests, out of Java's parentheses.
@@ -252,10 +254,7 @@ fn on_final_path(node: Node, source: &str) -> bool {
         node = match block.parent() {
             Some(p) if matches!(p.kind(), "if_expression" | "try_expression") => p,
             Some(p) if matches!(p.kind(), "catch_block" | "when_entry" | "finally_block") => {
-                match p.parent() {
-                    Some(owner) => owner,
-                    None => return false,
-                }
+                p.parent().expect(OWNED)
             }
             _ => return false,
         };
@@ -278,10 +277,7 @@ fn yields_value(node: Node) -> bool {
     }
     let owner = match block.parent() {
         Some(p) if matches!(p.kind(), "if_expression" | "try_expression") => p,
-        Some(p) if matches!(p.kind(), "when_entry" | "catch_block") => match p.parent() {
-            Some(owner) => owner,
-            None => return false,
-        },
+        Some(p) if matches!(p.kind(), "when_entry" | "catch_block") => p.parent().expect(OWNED),
         _ => return false,
     };
     used(owner)
