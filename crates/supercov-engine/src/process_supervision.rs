@@ -1444,7 +1444,7 @@ pub fn watch_parent_process_group() -> io::Result<()> {
         } else {
             Path::new("/dev/fd")
         };
-    let descriptors = fs::read_dir(descriptor_root)?
+    let descriptors = crate::fault_fs::read_dir(descriptor_root)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
         .filter(|descriptor| !matches!(*descriptor, 0 | 3))
