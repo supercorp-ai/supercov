@@ -17347,3 +17347,32 @@ fn a_javascript_run_whose_wasm_library_cannot_be_prepared_says_so() {
         assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
     }
 }
+
+/// A source root outside the project names nothing in the copy a Rust run
+/// measures, and the run says the roots left it no source.
+#[test]
+fn a_rust_run_whose_source_root_lies_outside_the_project_says_so() {
+    let project = Project::empty("roots-outside-rust");
+    let outside = project.root.with_extension("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"r\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn one() -> u8 {\n    1\n}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {\n        assert_eq!(super::one(), 1);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let ran = project.supercov_with(
+        &["--", "cargo", "test"],
+        &[("SUPERCOV_SOURCE_ROOTS", outside.to_str().unwrap())],
+    );
+    std::fs::remove_dir_all(&outside).unwrap();
+    assert_eq!(ran.code(), 1, "{}", ran.stderr());
+    assert!(
+        ran.stderr().contains("left no Rust source to measure"),
+        "{}",
+        ran.stderr()
+    );
+}

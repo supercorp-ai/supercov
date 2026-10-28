@@ -540,6 +540,12 @@ fn local_path(root: &Path, path: &Path) -> Result<String, SourceDiscoveryError> 
         .map(|parts| parts.join("/"))
 }
 
+/// [`local_path`] of a path a walk of `root` found: the walk read each name
+/// it went through as UTF-8, under the root.
+fn walked(root: &Path, path: &Path) -> String {
+    local_path(root, path).expect("a walked path is UTF-8 under its root")
+}
+
 fn generated_directory(name: &str) -> bool {
     GENERATED_DIRECTORIES.contains(&name)
 }
@@ -930,7 +936,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
             {
                 continue;
             }
-            let local = local_path(root, &path)?;
+            let local = walked(root, &path);
             let under_package_parent = local
                 .split('/')
                 .any(|segment| PACKAGE_PARENTS.contains(&segment));
@@ -1377,10 +1383,9 @@ pub fn discover_source_scope(
     let mut included = Vec::new();
     let mut limitations = Vec::new();
     for path in all_files {
-        let file = local_path(&root, &path)?;
+        let file = walked(&root, &path);
         let package_root = nearest_package_root(&path, &packages)
-            .map(|package| local_path(&root, package))
-            .transpose()?
+            .map(|package| walked(&root, package))
             .filter(|package| package != ".");
         let entry = |status, reason: &str| SourceScopeEntry {
             file: file.clone(),
@@ -1443,8 +1448,8 @@ pub fn discover_source_scope(
     promote_loaded(&root, &mut entries, &mut included, &mut limitations);
     let source_files = included
         .iter()
-        .map(|path| local_path(&root, path))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|path| walked(&root, path))
+        .collect::<Vec<_>>();
     let source_roots = existing_roots
         .iter()
         .map(|path| local_path(&root, path))
