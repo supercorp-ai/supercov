@@ -482,6 +482,10 @@ fn a_saved_assessment_edited_by_hand_is_read_or_ignored() {
         .supercov(&["runs", &run, "assertions", "--title", "total", "--all"])
         .succeeds();
     assert!(!narrowed.is_empty());
+    // The report reads it too, leaving out the statement with no file.
+    project
+        .supercov(&["report", "--no-open", "--output", "edited.html"])
+        .succeeds();
     std::fs::write(&saved, "[]").unwrap();
     for narrowing in [&[][..], &["--title", "total"][..]] {
         let unread = project
@@ -4557,12 +4561,12 @@ fn a_security_assessment_alone_is_reported() {
     // A source whose size cannot be read is left out.
     let unsized_source = project.supercov_with(
         &["report", "--no-open", "--output", "unsized.html"],
-        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:653")],
+        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:654")],
     );
     assert!(
         unsized_source
             .stderr()
-            .contains("test fault at fs (html_report.rs:653 metadata)"),
+            .contains("test fault at fs (html_report.rs:654 metadata)"),
         "{}",
         unsized_source.stderr()
     );

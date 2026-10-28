@@ -583,9 +583,10 @@ fn build_assertions(run: &StoredRun) -> Option<serde_json::Value> {
     let empty = Vec::new();
     let statements = result["statements"].as_array().unwrap_or(&empty);
     for statement in statements {
-        let file = statement["file"]
-            .as_str()
-            .expect("each assessed statement names its file");
+        // A saved assessment edited by hand may leave a statement's file out.
+        let Some(file) = statement["file"].as_str() else {
+            continue;
+        };
         let entry = files.entry(file.to_owned()).or_default();
         entry.0 += 1;
         if statement["asserted"] == true {
