@@ -524,6 +524,8 @@ mod tests {
         ] {
             std::fs::write(root.join(file), body).unwrap();
         }
+        // A directory named as a test file has nothing to read.
+        std::fs::create_dir(root.join("pkg/folder_test.go")).unwrap();
         let text = std::fs::read_to_string(root.join("pkg/a_test.go")).unwrap();
         assert_eq!(
             helpers(&root, "pkg/a_test.go", &text),
