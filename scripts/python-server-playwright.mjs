@@ -95,6 +95,10 @@ test('a test that sends nothing', async () => {
   expect(1).toBe(1);
 });
 
+test('a test skipped as it runs', async () => {
+  test.skip(true, 'later');
+});
+
 test('a script the test runs', async () => {
   const graded = spawnSync(${JSON.stringify(python)}, ['-c', 'from app.grades import grade; print(grade(70))'], { encoding: 'utf8' });
   expect(graded.stdout.trim()).toBe('pass');
@@ -122,9 +126,11 @@ try {
     ...specs,
   });
   const measured = measure(plain, []);
-  assert.match(measured.stderr, /Python server coverage: 5 test\(s\) across 3 source file\(s\)/u, measured.stderr);
+  assert.match(measured.stderr, /Python server coverage: 6 test\(s\) across 3 source file\(s\)/u, measured.stderr);
   const [id] = runs(plain);
   const summary = page(plain, id);
+  // A test that skipped itself is in the run, skipped.
+  assert.match(summary, /Skipped\s+1\b/u, summary);
   assert.match(summary, /command: npx playwright test/u, summary);
   assert.match(summary, /Lines {6}96\.55% \(28\/29\)/u, summary);
   assert.match(summary, /Instrumentation {2}Complete/u, summary);
@@ -137,10 +143,11 @@ try {
   // Its module loads there too: both definitions ran under it.
   assert.deepEqual(lines('a script the test runs'), ['app/grades.py:1', 'app/grades.py:2', 'app/grades.py:4', 'app/grades.py:5', 'app/grades.py:9']);
   assert.deepEqual(lines('a test that sends nothing'), []);
-  // A change the server's tests ran reaches those tests, and no other.
+  // A change the server's tests ran reaches those tests, and no other; a
+  // test that skipped ran nothing that could rule it out.
   write(plain, { 'app/grades.py': grades.replace('return "fail"', 'return "failed"') });
   const affected = page(plain, id, 'tests', 'affected', '--names');
-  assert.deepEqual(affected.trim().split('\n').sort(), ['grades.spec.js a high score is an A', 'grades.spec.js a low score fails', 'grades.spec.js a script the test runs', 'grades.spec.js the page asks for the top grade'], affected);
+  assert.deepEqual(affected.trim().split('\n').sort(), ['grades.spec.js a high score is an A', 'grades.spec.js a low score fails', 'grades.spec.js a script the test runs', 'grades.spec.js a test skipped as it runs', 'grades.spec.js the page asks for the top grade'], affected);
   write(plain, { 'app/grades.py': grades });
 
   // A webhook a mock Supercov does not measure sends: the request names no

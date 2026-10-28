@@ -117,6 +117,10 @@ test('a test that sends nothing', async () => {
   expect(1).toBe(1);
 });
 
+test('a test skipped as it runs', async () => {
+  test.skip(true, 'later');
+});
+
 test('a script the test runs', async () => {
   const graded = spawnSync(${JSON.stringify(ruby)}, ['-e', 'require_relative "app/grades"; puts Grades.grade(70)'], { encoding: 'utf8' });
   expect(graded.stdout.trim()).toBe('pass');
@@ -144,7 +148,7 @@ try {
   for (const server of ['puma', 'webrick']) {
     const measured = run(binary, ['--', 'npx', 'playwright', 'test'], { SERVER: server });
     assert.equal(measured.status, 0, `${server}: ${measured.stdout}${measured.stderr}`);
-    assert.match(measured.stderr, /Ruby server coverage: 6 test\(s\) across 3 source file\(s\)/u, measured.stderr);
+    assert.match(measured.stderr, /Ruby server coverage: 7 test\(s\) across 3 source file\(s\)/u, measured.stderr);
     const id = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0].id;
     const page = (...query) => {
       const result = run(binary, ['runs', id, ...query]);
@@ -156,6 +160,8 @@ try {
     assert.deepEqual(lines('a low score fails'), ['app/grades.rb:2', 'app/grades.rb:3', 'app/grades.rb:4', 'app/grades.rb:6'], server);
     assert.deepEqual(lines('the page asks for the top grade'), ['app/grades.rb:2', 'app/grades.rb:3'], server);
     assert.deepEqual(lines('a test that sends nothing'), [], server);
+    // A test that skipped itself is in the run, skipped.
+    assert.match(page(), /Skipped\s+1\b/u, server);
     // A browser runner's test reaches the app over HTTP: whether its file
     // imports measured source is left unsaid.
     const unlinked = page('tests', 'without-evidence');
