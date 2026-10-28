@@ -970,6 +970,12 @@ mod tests {
             "p.go",
             &source("//go:build !go1.17 && linux")
         ));
+        // A term that starts as a version does and is none sets no version.
+        assert!(has_generics(
+            &root,
+            "p.go",
+            &source("//go:build goexperiment.rangefunc")
+        ));
         fs::write(root.join("go.mod"), "module m\n\ngo 1.17\n").unwrap();
         assert!(!has_generics(&root, "p.go", &source("")));
         fs::write(root.join("go.mod"), "module m\n").unwrap();
