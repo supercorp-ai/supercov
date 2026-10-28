@@ -13641,6 +13641,10 @@ fn a_maven_run_whose_own_step_fails_says_so() {
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
+            // The store of copies made, and the copy released after a run
+            // that passed.
+            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
+            "copy-release",
         ],
     );
 }
@@ -16112,6 +16116,17 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
                 ("fs.open#integrity.rs:426", "integrity.rs:426"),
             ],
         );
+        // A run under a root that is a link is refused.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("src", project.root.join("linked")).unwrap();
+            let linked = project.supercov_with(
+                &["--", "mvn", "-q", "test"],
+                &[("SUPERCOV_SOURCE_ROOTS", "linked")],
+            );
+            assert_ne!(linked.code(), 0, "{}", linked.stderr());
+            assert!(linked.stderr().contains("linked"), "{}", linked.stderr());
+        }
     }
     // And a Python run measured under roots that are gone.
     let project = Project::empty("stale-python-roots");
