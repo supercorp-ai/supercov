@@ -12251,6 +12251,32 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     );
 }
 
+/// Listing runs reads each run's index for its summary: an index, its
+/// summary or its test counts that cannot be read leave the run listed with
+/// the error instead of its numbers.
+#[test]
+fn a_run_listed_whose_index_cannot_be_read_carries_the_error() {
+    let project = Project::cart("listed-index");
+    project.measure(&[]);
+    for fault in [
+        "coverage-index",
+        "coverage-index-read#run_query.rs:72",
+        "coverage-index-read#run_query.rs:73",
+    ] {
+        let listed = project
+            .supercov_with(&["runs", "--json"], &[("SUPERCOV_TEST_FAULT", fault)])
+            .json();
+        let run = &listed["data"]["runs"][0];
+        assert!(
+            run["coverageError"]
+                .as_str()
+                .is_some_and(|error| error.contains("invalid coverage index")),
+            "{fault}: {run}"
+        );
+        assert!(run["lines"].is_null(), "{fault}: {run}");
+    }
+}
+
 /// An index whose header or file cannot be read when a query opens it is
 /// built again from the run's evidence, and the query answers.
 #[test]
