@@ -673,29 +673,32 @@ fn apply_directory(
     local: &Path,
     changes: &mut SourceChanges,
 ) -> io::Result<()> {
-    for entry in sorted_entries(&directory.join(local))? {
-        let path = local.join(entry.file_name());
-        if fs::file_type(&entry)?.is_dir() {
-            apply_directory(root, workspace, directory, &path, changes)?;
-            continue;
-        }
-        let text = fs::read(entry.path())?;
-        let started_from = fs::read(authored_path(workspace, &path)).ok();
-        // A tool that writes every file it formats, changed or not.
-        if started_from.as_ref() == Some(&text) {
-            continue;
-        }
-        let project = root.join(&path);
-        if started_from.is_some() && fs::read(&project).ok() == started_from {
-            // Written in place, as a formatter writes it: the file keeps its
-            // mode and whatever links to it.
-            fs::write(&project, text)?;
-            changes.applied.push(path);
-        } else {
-            changes.kept_back.push(path);
-        }
-    }
-    Ok(())
+    // The tree holds the files the tools wrote, so each of its directories
+    // holds one at least.
+    sorted_entries(&directory.join(local))?
+        .into_iter()
+        .try_for_each(|entry| {
+            let path = local.join(entry.file_name());
+            if fs::file_type(&entry)?.is_dir() {
+                return apply_directory(root, workspace, directory, &path, changes);
+            }
+            let text = fs::read(entry.path())?;
+            let started_from = fs::read(authored_path(workspace, &path)).ok();
+            // A tool that writes every file it formats, changed or not.
+            if started_from.as_ref() == Some(&text) {
+                return Ok(());
+            }
+            let project = root.join(&path);
+            if started_from.is_some() && fs::read(&project).ok() == started_from {
+                // Written in place, as a formatter writes it: the file keeps
+                // its mode and whatever links to it.
+                fs::write(&project, text)?;
+                changes.applied.push(path);
+            } else {
+                changes.kept_back.push(path);
+            }
+            Ok(())
+        })
 }
 
 #[cfg(all(test, unix))]

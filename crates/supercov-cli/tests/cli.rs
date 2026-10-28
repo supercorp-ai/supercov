@@ -12042,12 +12042,12 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
         &["--", "npm", "test"],
         &[
             ("EDITED_PROJECT", &root),
-            ("SUPERCOV_TEST_FAULT", "fs.read#source_tools.rs:682"),
+            ("SUPERCOV_TEST_FAULT", "fs.read#source_tools.rs:685"),
         ],
     );
     let said = unread.stderr();
     assert_eq!(unread.code(), 0, "{said}");
-    assert!(fired_at(&said, "source_tools.rs:682"), "{said}");
+    assert!(fired_at(&said, "source_tools.rs:685"), "{said}");
     assert!(
         said.contains("the source changes the command's tools made could not be applied"),
         "{said}"
@@ -12057,7 +12057,7 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
     // or what it wrote stays out of the workspace, and the command passes.
     for (fault, told) in [
         (
-            "fs.read_dir entry#source_tools.rs:676",
+            "fs.read_dir entry#source_tools.rs:678",
             "the source changes the command's tools made could not be applied",
         ),
         (
