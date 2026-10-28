@@ -15049,7 +15049,7 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
-        ("fs.open#integrity.rs:426@4", "integrity.rs:426"),
+        ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
         ("fs.write#go_run.rs:1054", "go_run.rs:1054"),
         ("fs.create_dir_all#go_run.rs:1068", "go_run.rs:1068"),
     ] {
@@ -15084,7 +15084,7 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
-        ("fs.open#integrity.rs:426@4", "integrity.rs:426"),
+        ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
         ("fs.create_dir_all#jvm_run.rs:2003", "jvm_run.rs:2003"),
         ("fs.create_dir_all#jvm_run.rs:2019", "jvm_run.rs:2019"),
         ("fs.create_dir_all#jvm_run.rs:2029", "jvm_run.rs:2029"),
@@ -15190,8 +15190,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.open#integrity.rs:426@4",
-            "integrity.rs:426",
+            "fs.open#integrity.rs:427@4",
+            "integrity.rs:427",
             "server/app.py",
         ),
         (
@@ -15231,8 +15231,8 @@ fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
             "web/app.rb",
         ),
         (
-            "fs.open#integrity.rs:426@4",
-            "integrity.rs:426",
+            "fs.open#integrity.rs:427@4",
+            "integrity.rs:427",
             "web/app.rb",
         ),
         (
@@ -16183,7 +16183,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         &[
             ("fs.canonicalize#rust_run.rs:245", "rust_run.rs:245"),
             ("fs.read_dir#rust_run.rs:85", "rust_run.rs:85"),
-            ("fs.open#integrity.rs:426", "integrity.rs:426"),
+            ("fs.open#integrity.rs:427", "integrity.rs:427"),
         ],
     );
     if let Some(go) = go() {
@@ -16193,7 +16193,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &[
                 ("fs.canonicalize#go_run.rs:609", "go_run.rs:609"),
                 ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
-                ("fs.open#integrity.rs:426", "integrity.rs:426"),
+                ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
     }
@@ -16212,7 +16212,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &[
                 ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
                 ("fs.read_dir#ruby_project.rs:100", "ruby_project.rs:100"),
-                ("fs.open#integrity.rs:426", "integrity.rs:426"),
+                ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
         // The root it was measured under is a link now: no root.
@@ -16237,7 +16237,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &[
                 ("fs.canonicalize#jvm_run.rs:1505", "jvm_run.rs:1505"),
                 ("fs.read_dir#jvm_project.rs:173", "jvm_project.rs:173"),
-                ("fs.open#integrity.rs:426", "integrity.rs:426"),
+                ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
         // A run under a root that is a link is refused.
