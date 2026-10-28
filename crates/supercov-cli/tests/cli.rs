@@ -17752,6 +17752,18 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
             format!("{stand_in}fs.read#rust_owned_doctests.rs:1100@1"),
             "rust_owned_doctests.rs:1100",
         ),
+        // The stand-in's own path, and the merged harness runner's: each
+        // resolves itself first.
+        (
+            "2024",
+            format!("{stand_in}fs.canonicalize@1"),
+            "canonicalize",
+        ),
+        (
+            "2024",
+            "__doctest-runner/fs.canonicalize@1".to_owned(),
+            "canonicalize",
+        ),
     ] {
         let project = Project::empty("doctest-stand-in-steps");
         small_crate(&project);
