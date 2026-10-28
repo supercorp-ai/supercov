@@ -151,6 +151,7 @@ a_run_that_cannot_bring_back_what_its_tests_wrote_says_so	6.0	8.0
 a_run_that_cannot_release_its_copy_says_so	15.0	20.0
 a_run_that_observed_no_test_at_all_is_refused	0.6	0.7
 a_run_under_given_source_roots_is_read_back_under_them	6.0	10.0
+a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so	5.0	7.0
 a_run_whose_output_stops_being_read_goes_on_without_a_panic	40.8	16.9
 a_run_whose_source_is_gone_is_stale_and_never_passes_a_gate	2.1	0.7
 a_run_whose_source_record_cannot_be_read_back_is_refused	6.0	8.0

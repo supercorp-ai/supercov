@@ -13826,6 +13826,82 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     }
 }
 
+/// The copy's dependencies: the project's `node_modules` linked package by
+/// package, a scope's packages each, the tools in `.bin`, and a workspace
+/// package's own `node_modules` -- hard-linked where the system can, linked
+/// one package at a time where it cannot. A step of that failing
+/// ends the run, naming where.
+#[cfg(unix)]
+#[test]
+fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
+    let linked = [
+        ("fs.read_dir@57", "injected fault at fs"),
+        ("fs.read_dir@66", "/node_modules: injected"),
+        ("fs.read_dir@67", "node_modules/.bin: injected"),
+        ("fs.read_dir@68", "node_modules/@scope: injected"),
+        ("fs.create_dir_all@4", "staging"),
+        ("fs.create_dir_all@9", "/node_modules: injected"),
+        ("fs.create_dir_all@10", "node_modules/.bin: injected"),
+        ("fs.create_dir_all@11", "node_modules/@scope: injected"),
+    ];
+    let unlinkable = [
+        ("fs.read_dir@62", "packages/web/node_modules: injected"),
+        ("fs.read_dir@63", "packages/web/node_modules/.bin: injected"),
+        ("fs.create_dir_all@7", "packages/web/node_modules: injected"),
+        (
+            "fs.create_dir_all@8",
+            "packages/web/node_modules/.bin: injected",
+        ),
+        ("fs.symlink@1", "packages/web/node_modules/.bin/webtool"),
+        ("fs.symlink@2", "packages/web/node_modules/dep"),
+        ("fs.symlink@3", "node_modules/.bin/tool"),
+        ("fs.symlink@4", "node_modules/@scope/pkg"),
+        ("fs.symlink@5", "node_modules/plain"),
+    ];
+    // A directory is never cloned, so every system links the same way:
+    // hard links where it can, one link per package where it cannot.
+    for (prefix, cases) in [
+        ("directory-clone,", &linked[..]),
+        ("directory-clone,fs.hard_link,", &unlinkable[..]),
+    ] {
+        for (fault, said) in cases {
+            let project = Project::cart("dependencies-linked");
+            project.write(
+                "node_modules/@scope/pkg/package.json",
+                "{\"name\":\"@scope/pkg\"}\n",
+            );
+            project.write("node_modules/@scope/pkg/index.js", "export default 1;\n");
+            project.write("node_modules/plain/index.js", "module.exports = 1;\n");
+            project.write_script("node_modules/.bin/tool", "#!/bin/sh\necho tool\n");
+            project.write(
+                "packages/web/package.json",
+                "{\"name\":\"web\",\"private\":true}\n",
+            );
+            project.write(
+                "packages/web/node_modules/dep/index.js",
+                "module.exports = 2;\n",
+            );
+            project.write_script(
+                "packages/web/node_modules/.bin/webtool",
+                "#!/bin/sh\necho web\n",
+            );
+            project.write(".gitignore", "out/\nnode_modules/\n");
+            project.commit("dependencies");
+            let faults = format!("{prefix}{fault}");
+            let ran = project.supercov_with(
+                &["--", "node", "--test"],
+                &[("SUPERCOV_TEST_FAULT", &faults)],
+            );
+            let stderr = ran.stderr();
+            assert_eq!(ran.code(), 1, "{faults}: {stderr}");
+            assert!(
+                stderr.contains(said) && stderr.contains("injected fault at fs"),
+                "{faults}: {stderr}"
+            );
+        }
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
