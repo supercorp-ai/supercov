@@ -1214,9 +1214,9 @@ fn touch(path: &Path) {
 
 /// Remove all but the most recently used filtered indexes beside `kept`.
 fn prune_filtered_indexes(kept: &Path) {
-    let Some(directory) = kept.parent() else {
-        return;
-    };
+    let directory = kept
+        .parent()
+        .expect("a filtered index lies in its run's directory");
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };

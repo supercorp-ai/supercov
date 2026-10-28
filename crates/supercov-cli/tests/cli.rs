@@ -945,6 +945,14 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
         )
         .exits(2);
     assert!(unlisted.contains("run_store.rs:636"), "{unlisted}");
+    // A run whose entry in the store cannot be read is left out of the list.
+    let rejected = project
+        .supercov_with(
+            &["runs"],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:636")],
+        )
+        .succeeds();
+    assert!(rejected.contains("showing 0-0 of 0"), "{rejected}");
 }
 
 /// A test whose file is gone since the run is affected, and says why.
