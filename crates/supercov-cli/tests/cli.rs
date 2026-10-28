@@ -6935,6 +6935,27 @@ fn a_floor_on_what_a_run_has_none_of_cannot_pass() {
             && refused.contains("remove --min-functions"),
         "{refused}"
     );
+    // And for statements, in a run whose only source holds none.
+    let bare = Project::empty("no-statements");
+    bare.write(
+        "package.json",
+        r#"{ "name": "bare", "private": true, "type": "module" }"#,
+    );
+    bare.write("src/note.js", "// nothing to run\n");
+    bare.write(
+        "test/t.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\ntest(\"t\", () => assert.equal(1, 1));\n",
+    );
+    bare.git(&["init", "-q"]);
+    bare.measure(&[]);
+    let refused = bare
+        .supercov(&["runs", "check", "--min-statements", "50"])
+        .exits(2);
+    assert!(
+        refused.contains("statements has nothing eligible in this run")
+            && refused.contains("remove --min-statements"),
+        "{refused}"
+    );
 
     // Per file, a file with none is passed over and the rest are judged.
     project.write(
