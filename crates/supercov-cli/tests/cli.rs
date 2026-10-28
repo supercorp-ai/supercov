@@ -223,6 +223,20 @@ fn a_measured_suite_reads_back_through_every_query() {
         ])
         .exits(0);
     assert!(minimized.contains("test"), "{minimized}");
+    // Minimizing reads the run's evidence itself; evidence it cannot read
+    // refuses the question.
+    let unread = project
+        .supercov_with(
+            &[
+                "runs", "latest", "minimize", "--target", "70", "--metric", "lines",
+            ],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "fs.read_from#evidence_archive.rs:636",
+            )],
+        )
+        .exits(2);
+    assert!(unread.contains("invalid coverage archive"), "{unread}");
 }
 
 #[test]
