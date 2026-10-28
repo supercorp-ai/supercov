@@ -1537,6 +1537,58 @@ mod tests {
         root
     }
 
+    /// A run's history that cannot be moved to the trash stops the clean.
+    #[test]
+    fn a_run_history_that_cannot_be_moved_stops_the_clean() {
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/runs").join(id)).unwrap();
+        write_run_state(
+            &root,
+            &state(&root, id, RunStateStatus::Complete, std::process::id()),
+        )
+        .unwrap();
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1427", || {
+            cleanup_storage_locked(
+                &root,
+                CleanupOptions {
+                    keep: 0,
+                    dry_run: false,
+                },
+                false,
+            )
+        });
+        assert!(stopped.is_err(), "{stopped:?}");
+        assert!(root.join(".supercov/runs").join(id).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An empty trash sweeps nothing, and a listing whose entry cannot be
+    /// read -- of the store's directories, of evidence copied -- fails.
+    #[test]
+    fn an_empty_trash_sweeps_nothing_and_an_unreadable_entry_fails() {
+        let root = project();
+        fs::create_dir_all(root.join(TRASH)).unwrap();
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
+        let store = root.join(".supercov/runs");
+        fs::create_dir_all(store.join("run_a")).unwrap();
+        assert!(
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1162", || {
+                child_directories(&store)
+            })
+            .is_err()
+        );
+        let copied = root.join("copied");
+        fs::create_dir_all(&copied).unwrap();
+        assert!(
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1237", || {
+                copy_evidence(&store, &copied, &mut 0)
+            })
+            .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn removing_a_stored_tree_never_follows_a_link_out_of_it() {
