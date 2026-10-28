@@ -11727,6 +11727,23 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
         run.stderr()
     );
     assert!(project.read("src/fee.js").contains("let rate = 5"));
+    // A change the run cannot read back is not applied, and the run says so
+    // without failing the command that passed.
+    project.edit("src/fee.js", "let rate = 5", "var rate = 5");
+    let unread = project.supercov_with(
+        &["--", "npm", "test"],
+        &[
+            ("EDITED_PROJECT", &root),
+            ("SUPERCOV_TEST_FAULT", "fs.read#source_tools.rs:682"),
+        ],
+    );
+    let said = unread.stderr();
+    assert_eq!(unread.code(), 0, "{said}");
+    assert!(fired_at(&said, "source_tools.rs:682"), "{said}");
+    assert!(
+        said.contains("the source changes the command's tools made could not be applied"),
+        "{said}"
+    );
 }
 
 #[test]
