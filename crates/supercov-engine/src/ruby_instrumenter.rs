@@ -1362,7 +1362,8 @@ impl<'a> Collector<'a> {
                 (&proof.true_statements, true),
                 (&proof.false_statements, false),
             ] {
-                for statement in statements {
+                // Not empty: both arms were checked above.
+                statements.iter().for_each(|statement| {
                     self.implied
                         .entry(statement.clone())
                         .or_default()
@@ -1372,7 +1373,7 @@ impl<'a> Collector<'a> {
                             value,
                             outcome: format!("{outcome_id}:{value}"),
                         });
-                }
+                });
             }
         } else {
             let key = self.probe_key(ProbeTarget::Decision {
@@ -2801,11 +2802,14 @@ impl<'a> Collector<'a> {
             self.begin_node(&begin, node.end_keyword_loc().map(|loc| loc.start_offset()));
         }
         if node.equal_loc().is_some() {
-            // An endless method's body is always a statement list.
-            for statement in body_statements.iter().flat_map(|list| list.body().iter()) {
-                self.endless_bodies
-                    .insert(statement.location().start_offset());
-            }
+            // An endless method's body is always a statement list, of one.
+            body_statements
+                .iter()
+                .flat_map(|list| list.body().iter())
+                .for_each(|statement| {
+                    self.endless_bodies
+                        .insert(statement.location().start_offset());
+                });
         }
     }
 
@@ -3037,7 +3041,10 @@ fn body_statements<'n>(body: Option<Node<'n>>) -> Option<StatementsNode<'n>> {
     let body = body?;
     match body.as_statements_node() {
         Some(statements) => Some(statements),
-        None => body.as_begin_node()?.statements(),
+        None => body
+            .as_begin_node()
+            .expect("Prism makes a body a statement list or a `begin`")
+            .statements(),
     }
 }
 
@@ -3127,10 +3134,11 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             // `true ? :yes : :no` became `true ? hit; :yes : :no`, which Ruby
             // refuses, and the whole file lost its branches.
             if node.if_keyword_loc().is_none() {
-                for statements in arm_statements(node) {
+                // A ternary has both its arms.
+                arm_statements(node).into_iter().for_each(|statements| {
                     self.expression_lists
                         .insert(statements.location().start_offset());
-                }
+                });
             }
             if truthy {
                 if let Some(statements) = node.statements() {
