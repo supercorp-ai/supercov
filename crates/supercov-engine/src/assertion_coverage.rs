@@ -1915,13 +1915,16 @@ impl Population {
             // how much of it is not. Every line `around` gives is one of the
             // file's, counted from one.
             // No line before a ran code line reaches further than it does.
+            // Each file here is one the test ran a line of.
             let mut reached = 0;
-            for &l in r.iter().rev() {
+            let _ = r.iter().rev().try_for_each(|&l| {
                 reached = reached.max(reach(l, CONTEXT_LINES));
                 if view.position(l).is_some() {
-                    break;
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
                 }
-            }
+            });
             let end = std::iter::once(reached)
                 .chain(
                     want.get(&f)
@@ -4359,7 +4362,8 @@ mod tests {
         // A test written on the file's last line is that line alone.
         let last = shown_test_code(
             "tests/test_last.py",
-            "def test_last(): assert last() == 1\n",
+            // No newline after it: nothing follows the test's own line.
+            "def test_last(): assert last() == 1",
             "tests/test_last.py::test_last",
             "pytest",
             Language::Python,
