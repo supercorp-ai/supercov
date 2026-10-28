@@ -589,6 +589,29 @@ mod tests {
         );
     }
 
+    /// Run in parallel, a test that pauses itself belongs to no test: it is
+    /// named with its outcome, read from its parameter, or reported passed
+    /// where it names none.
+    #[test]
+    fn a_parallel_test_left_unserialised_is_named_with_no_coverage() {
+        let source = "package p\n\nimport \"testing\"\n\nfunc TestNamed(t *testing.T) {\n\tt.Parallel()\n}\n\nfunc TestUnnamed(*testing.T) {\n\tsuite.Parallel()\n}\n";
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", false).expect("instrument");
+        assert_eq!(file.unattributed, ["TestNamed", "TestUnnamed"]);
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(
+            out.contains(&format!(
+                "defer {HARNESS_UNATTRIBUTED}(t, \"TestNamed\")();"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("__supercov.Ran(\"TestUnnamed\", \"passed\")"),
+            "{out}"
+        );
+    }
+
     #[test]
     fn a_serialised_run_leaves_a_serial_test_where_it_was() {
         // `serialised` only moves the announcement for a test that pauses
