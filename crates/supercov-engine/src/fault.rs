@@ -291,8 +291,8 @@ pub fn io<T>(
     }
 }
 
-/// Standard error, held for a run's diagnostics: each write is a call at the
-/// site `diagnostics`, so `diagnostics@N` fails the run's Nth write there.
+/// Standard error, held for a run's diagnostics: each line written is a call
+/// at the site `diagnostics`, so `diagnostics@N` fails the run's Nth line.
 pub fn diagnostics() -> Writer<io::StderrLock<'static>> {
     Writer {
         site: "diagnostics",
@@ -315,6 +315,13 @@ impl<W: io::Write> io::Write for Writer<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+
+    /// A line as one call: `writeln!` writes its parts one at a time.
+    fn write_fmt(&mut self, arguments: std::fmt::Arguments<'_>) -> io::Result<()> {
+        io(self.site, io::ErrorKind::BrokenPipe, || {
+            self.inner.write_fmt(arguments)
+        })
     }
 }
 

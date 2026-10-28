@@ -14626,6 +14626,21 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     }
 }
 
+/// A JavaScript run whose diagnostics cannot be written once its command is
+/// set up -- the line naming the copy it runs in, the line before the
+/// tests start -- ends the run rather than going on unseen.
+#[test]
+fn a_javascript_run_that_cannot_write_its_diagnostics_says_so() {
+    for fault in ["diagnostics@2", "diagnostics@3"] {
+        let project = Project::cart("js-diagnostics");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, "diagnostics"), "{fault}: {stderr}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.

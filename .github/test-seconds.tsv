@@ -73,6 +73,7 @@ a_handler_run_without_a_guard_is_counted_by_the_tests_that_ran_it	0.5	0.5
 a_javascript_request_shows_the_function_a_statement_is_in_and_no_helper	0.4	0.7
 a_javascript_run_that_cannot_walk_its_inputs_says_so	3.5	4.5
 a_javascript_run_that_cannot_write_its_copy_says_so	14.0	18.0
+a_javascript_run_that_cannot_write_its_diagnostics_says_so	2.0	3.0
 a_javascript_run_whose_own_step_fails_says_so	40.0	60.0
 a_javascript_run_whose_record_step_fails_says_so	15.0	18.0
 a_job_that_promised_a_newer_toolchain_cannot_skip_quietly	0.0	0.0
