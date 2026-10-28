@@ -581,6 +581,15 @@ mod tests {
             index.record(2, 2),
             Err(QueryIndexError::OutOfBounds { .. })
         ));
+        // A section the index does not hold.
+        assert!(matches!(
+            index.record(99, 0),
+            Err(QueryIndexError::MissingSection(99))
+        ));
+        assert!(matches!(
+            index.bytes(99, 0, 1),
+            Err(QueryIndexError::MissingSection(99))
+        ));
         assert!(fs::read_dir(&root).unwrap().all(|entry| {
             !entry
                 .unwrap()
