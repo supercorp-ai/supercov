@@ -1290,6 +1290,34 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A script named by a variable is no script the discovery can name, so
+    /// no build is named for it.
+    #[test]
+    fn a_package_script_named_by_a_variable_names_no_build() {
+        let root = project(
+            "spawned-variable-script",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","start":"node dist/index.js","test":"node --test tests/*.test.ts"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                (
+                    "tests/index.test.ts",
+                    "import { spawn } from 'node:child_process';\nconst script = 'start';\nspawn('npm', ['run', script]);\n",
+                ),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert!(
+            discovered.unrun_build.is_empty(),
+            "{:?}",
+            discovered.unrun_build
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn names_the_build_when_tests_exec_a_compiled_package_script_as_one_string() {
         // `execSync("npm run start")` hands the shell a single string. It is
