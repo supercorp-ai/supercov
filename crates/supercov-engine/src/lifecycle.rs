@@ -105,13 +105,16 @@ fn checked_id(id: &str) -> Result<(), LifecycleError> {
         .ok_or_else(|| LifecycleError::InvalidRunId(id.into()))
 }
 
-fn absolute_root(root: &Path) -> Result<PathBuf, LifecycleError> {
+/// `root` made absolute. Every command passes the project root it resolved,
+/// which is absolute already; a relative one is read against the working
+/// directory.
+fn absolute_root(root: &Path) -> PathBuf {
     if root.is_absolute() {
-        Ok(root.to_owned())
+        root.to_owned()
     } else {
         std::env::current_dir()
-            .map(|cwd| cwd.join(root))
-            .map_err(|source| io_error(root, source))
+            .expect("a relative root is read against a working directory")
+            .join(root)
     }
 }
 
@@ -279,7 +282,7 @@ pub fn remove_stored_tree_deferred(
     project_root: &Path,
     target: &Path,
 ) -> Result<Option<PathBuf>, LifecycleError> {
-    let root = absolute_root(project_root)?;
+    let root = absolute_root(project_root);
     let target = if target.is_absolute() {
         target.to_owned()
     } else {
@@ -354,7 +357,7 @@ pub fn finish_background_sweep(patience: Duration) -> bool {
 
 /// Retryable trash unlinking. Public commands execute this in a child.
 pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
-    let root = absolute_root(project_root)?;
+    let root = absolute_root(project_root);
     let trash = root.join(TRASH);
     reject_linked_ancestors(&root, &trash, true)?;
     let entries = match crate::fault::io("trash-list", io::ErrorKind::PermissionDenied, || {
@@ -1550,7 +1553,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1429", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1432", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1575,7 +1578,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1164", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1167", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1583,7 +1586,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1239", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1242", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()
@@ -2079,7 +2082,7 @@ mod tests {
         assert!(!lexical_descendant(&root, &root.join("a/../b")));
         assert!(lexical_descendant(&root, &root.join("a/b")));
         assert_eq!(
-            absolute_root(Path::new("relative")).unwrap(),
+            absolute_root(Path::new("relative")),
             std::env::current_dir().unwrap().join("relative")
         );
         assert!(process_exists(std::process::id()));

@@ -175,7 +175,7 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
 }
 
 /// Say that the call at `site` failed by request, and where the call was
-/// made when the site knows (`test fault at fs (lifecycle.rs:727
+/// made when the site knows (`test fault at fs (lifecycle.rs:730
 /// create_dir_all)`), so a test can check it failed the call it meant to.
 /// Written to the descriptor itself: a child forked to exec a command may not
 /// allocate or take the lock `eprintln!` takes, so the line is written as
