@@ -174,12 +174,16 @@ impl PythonFrontendImport {
                     .expect("plain data serializes"),
             },
         ];
-        for (index, result) in self.request.raw_results.iter().enumerate() {
-            entries.push(EvidenceArchiveEntry {
-                path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result).expect("plain data serializes"),
-            });
-        }
+        entries.extend(
+            self.request
+                .raw_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| EvidenceArchiveEntry {
+                    path: format!("results/{index:08}/mcdc.json"),
+                    contents: serde_json::to_vec(result).expect("plain data serializes"),
+                }),
+        );
         entries
     }
 }
@@ -988,6 +992,11 @@ mod tests {
             }
         };
         assert_eq!(import(&|_| {}), "accepted");
+        // Bytes that are no JSON are refused before any rule.
+        assert!(matches!(
+            import_python_coverage_json(b"not json", "run", "now", Some(0)),
+            Err(PythonFrontendError::Json(_))
+        ));
         type Edit = Box<dyn Fn(&mut Value)>;
         let cases: Vec<(&str, Edit)> = vec![
             (
