@@ -144,9 +144,9 @@ try {
   assert.match(rspec.stderr, /interpreter process\(es\) on Ruby (3\.[3-9]|[4-9])/);
   assertTotals(query(['runs', 'latest'], environment));
   // A run that cannot be moved into the store is said, and none is published.
-  const unpublished = supercov(['--', 'rspec'], { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1109' });
+  const unpublished = supercov(['--', 'rspec'], { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1111' });
   assert.notEqual(unpublished.status, 0, unpublished.stderr);
-  assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1109/u, unpublished.stderr);
+  assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1111/u, unpublished.stderr);
   assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
 
   // A Ruby script with no test runner is the command's choice, not a

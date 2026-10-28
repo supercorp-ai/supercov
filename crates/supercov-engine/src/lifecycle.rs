@@ -368,11 +368,12 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
         return Ok(0);
     };
     let mut removed = 0;
-    for entry in entries {
+    // The listing holds this sweeper's own lock at least.
+    entries.into_iter().try_for_each(|entry| {
         let entry = entry.map_err(|source| io_error(&trash, source))?;
         let path = entry.path();
         if entry.file_name() == ".deleter.lock" {
-            continue;
+            return Ok(());
         }
         // An entry already gone -- removed by hand, or by a sweeper whose
         // lock was replaced -- is as swept as one removed here.
@@ -381,7 +382,7 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
             fs::symlink_metadata(&path)
         }) {
             Ok(metadata) => metadata,
-            Err(error) if gone(&error) => continue,
+            Err(error) if gone(&error) => return Ok(()),
             Err(source) => return Err(io_error(&path, source)),
         };
         let removal = crate::fault::io("trash-remove", io::ErrorKind::NotFound, || {
@@ -396,7 +397,8 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
             Err(error) if gone(&error) => {}
             Err(source) => return Err(io_error(&path, source)),
         }
-    }
+        Ok(())
+    })?;
     Ok(removed)
 }
 
@@ -1548,7 +1550,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1427", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1429", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1573,7 +1575,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1162", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1164", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1581,7 +1583,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1237", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1239", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()
