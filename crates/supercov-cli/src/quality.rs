@@ -1279,7 +1279,7 @@ fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
 }
 
 /// A validated Noul answer, or `None` when this question set did not ask it.
-fn noul(response: &ApiResponse, id: &str) -> Option<f64> {
+pub(crate) fn noul(response: &ApiResponse, id: &str) -> Option<f64> {
     match response.answers.get(id) {
         Some(Answer::Noul { noul }) => Some(*noul),
         _ => None,

@@ -986,6 +986,17 @@ fn a_busy_gateway_is_waited_for_and_a_broken_one_is_named() {
         stopped.contains("failed requests: 127.0.0.1 HTTP 500"),
         "{stopped}"
     );
+    // The answers kept so far are saved as it stops, and a save that fails
+    // is said instead.
+    let mut env = through(&base).to_vec();
+    env.push((
+        "SUPERCOV_TEST_FAULT",
+        "fs.create_dir_all#assertions_command.rs:403",
+    ));
+    let unsaved = cart
+        .supercov_with(&["runs", &run, "assertions", "assess"], &env)
+        .exits(2);
+    assert!(unsaved.contains("injected fault at fs"), "{unsaved}");
     let (base, _) = gateway_with(MODEL, answer_no, |n| (n == 0).then_some((429, "{}")));
     let assessed = cart
         .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
@@ -3421,7 +3432,8 @@ fn an_assessment_read_for_some_tests_says_what_those_tests_ran_and_were_asked() 
             .succeeds()
             .contains("not assessed for the tests --title total adds picks: the 5 statement(s) they run were asked of other tests, which answered first.")
     );
-    // A later run points back at the last one assessed.
+    // A later run points back at the last one assessed, the latest of
+    // several.
     let later = caught.measure(&[]);
     contains_all(
         &caught.supercov(&["runs", &later, "assertions"]).succeeds(),
@@ -3429,6 +3441,29 @@ fn an_assessment_read_for_some_tests_says_what_those_tests_ran_and_were_asked() 
             "assertions not assessed for this run.",
             &format!("Last assessed: {first}, 100.0% asserted."),
         ],
+    );
+    caught
+        .supercov_with(&["runs", &later, "assertions", "assess"], &through(&yes))
+        .succeeds();
+    let latest = caught.measure(&[]);
+    assert!(
+        caught
+            .supercov(&["runs", &latest, "assertions"])
+            .succeeds()
+            .contains(&format!("Last assessed: {later}, 100.0% asserted.")),
+    );
+
+    // Asking about a change of code only tests the filter does not pick ran
+    // is refused as the whole pass is.
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    assert!(
+        read(&["assess", "--changed", "--title", "noop"])
+            .exits(2)
+            .contains("the tests --title noop picks ran no assessed statement")
     );
 }
 
@@ -5592,6 +5627,54 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
             .supercov_with(&["runs", &run, "assertions", "assess"], &env)
             .exits(2);
         assert!(refused.contains(said), "{fault}: {refused}");
+    }
+    // A run whose assessment input was not kept is analysed from its
+    // evidence, and evidence that cannot be read is said, whether assessing,
+    // reading for some tests or asking about what changed. So are a manifest,
+    // a record of what each test ran and an answer store that cannot be read
+    // or written as a change is asked about.
+    let project = Project::cart("assess-unread");
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    let unread = "fs.open#run_store.rs:1282,fs.read_from#evidence_archive.rs:636";
+    let refused = |args: &[&str], fault: &str| {
+        let mut full = vec!["runs", run.as_str(), "assertions"];
+        full.extend_from_slice(args);
+        let mut env = through(&base).to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", fault));
+        project.supercov_with(&full, &env).exits(2)
+    };
+    let said = refused(&["assess"], unread);
+    assert!(said.contains("evidence_archive.rs:636"), "{said}");
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    // The filter's own index is built once, and the whole assessment read
+    // for it after.
+    project
+        .supercov(&["runs", &run, "assertions", "--title", "total"])
+        .succeeds();
+    let said = refused(&["--title", "total"], unread);
+    assert!(said.contains("evidence_archive.rs:636"), "{said}");
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    for (fault, place) in [
+        (unread, "evidence_archive.rs:636"),
+        ("fs.open#source_manifest.rs:359", "source_manifest.rs:359"),
+        (
+            "fs.read#source_manifest.rs:766",
+            "no per-test execution record",
+        ),
+        (
+            "fs.create_dir_all#assertions_command.rs:403",
+            "assertions_command.rs:403",
+        ),
+    ] {
+        let said = refused(&["assess", "--changed", "--refresh"], fault);
+        assert!(said.contains(place), "{fault}: {said}");
     }
     let project = Project::cart("assess-no-run");
     let (base, _) = gateway(MODEL, answer_no);

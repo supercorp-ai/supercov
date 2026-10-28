@@ -561,8 +561,8 @@ struct Asking {
 }
 
 /// What one request came back with: the answer to each of its questions in
-/// the order asked, where it gave one, and the input tokens it was charged.
-type Reply = Result<(Vec<Option<f64>>, u64), String>;
+/// the order asked and the input tokens it was charged.
+type Reply = Result<(Vec<f64>, u64), String>;
 
 struct Sent {
     requests: usize,
@@ -645,17 +645,13 @@ fn run_pass(
                 };
                 failures = 0;
                 sent.tokens += tokens;
-                asked
-                    .iter()
-                    .zip(answers)
-                    .filter_map(|(&s, p)| Some((s, p?)))
-                    .for_each(|(s, p)| {
-                        pass.answers[s].push((*t, p));
-                        if asking.keep {
-                            let k = pass.key(s, *t);
-                            cache.answers.insert(k, p);
-                        }
-                    });
+                asked.iter().zip(answers).for_each(|(&s, p)| {
+                    pass.answers[s].push((*t, p));
+                    if asking.keep {
+                        let k = pass.key(s, *t);
+                        cache.answers.insert(k, p);
+                    }
+                });
                 Ok(())
             })?;
         if asking.keep {
@@ -677,12 +673,8 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             )
         })?;
         let stored = maps::load_manifest(run)?;
-        let Some(language) = coverage::Language::from_manifest(&stored.manifest.language) else {
-            return Err(format!(
-                "unsupported language: {}",
-                stored.manifest.language
-            ));
-        };
+        let language = coverage::Language::from_manifest(&stored.manifest.language)
+            .expect("a run is in one of the languages Supercov measures");
         let input = narrowed(run, assessment_input(run)?, &options.filter)?;
         let sources = snapshot
             .iter()
@@ -690,7 +682,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             .map(|(f, t)| (f.clone(), t.clone()))
             .collect();
         let population =
-            coverage::population_from(root, &input, &sources, language)?.with_files(snapshot);
+            coverage::population_from(root, &input, &sources, language).with_files(snapshot);
         return assess_changed(root, run, options, &population);
     }
     let input = narrowed(run, assessment_input(run)?, &options.filter)?;
@@ -707,13 +699,9 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         .chain(input.tests.iter().filter_map(|test| test.file.as_deref()))
         .collect::<BTreeSet<_>>();
     let inputs = maps::load_inputs_for(root, run, |file| needed.contains(file))?;
-    let Some(language) = coverage::Language::from_manifest(&inputs.inputs.language) else {
-        return Err(format!(
-            "Assertion coverage supports JavaScript, TypeScript, Python, Ruby, Go, Rust, Java and Kotlin runs; this run is {}",
-            inputs.inputs.language
-        ));
-    };
-    let population = coverage::population_from(root, &input, &inputs.inputs.files, language)?;
+    let language = coverage::Language::from_manifest(&inputs.inputs.language)
+        .expect("a run is in one of the languages Supercov measures");
+    let population = coverage::population_from(root, &input, &inputs.inputs.files, language);
     let n = population.statements.len();
     let mut pass = Pass {
         population: &population,
@@ -766,12 +754,13 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                     .iter()
                     .map(|(t, asked)| {
                         let request = pass.population.request(*t, asked, pass.model);
-                        Ok((vec![Some(0.0); asked.len()], tokens(&request) as u64))
+                        Ok((vec![0.0; asked.len()], tokens(&request) as u64))
                     })
                     .collect())
             },
             |_, _| {},
-        )?;
+        )
+        .expect("an estimate's every request is answered and nothing is kept");
         let most_requests = most.requests.max(plan.len());
         let most_tokens = (most.tokens as usize).max(bytes);
         let cost = |tokens: usize| tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS;
@@ -806,14 +795,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                 .map(|(result, (_, asked))| {
                     let response = result?;
                     let answers = (0..asked.len())
-                        .map(|i| {
-                            (0..2)
-                                .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
-                                    Some(quality::Answer::Noul { noul }) => Some(*noul),
-                                    _ => None,
-                                })
-                                .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))))
-                        })
+                        .map(|i| statement_answer(&response, i))
                         .collect();
                     Ok((answers, response.usage.input_tokens))
                 })
@@ -959,13 +941,7 @@ fn assess_changed(
             };
             tokens += response.usage.input_tokens;
             asked.iter().enumerate().for_each(|(i, &s)| {
-                let p = (0..2)
-                    .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
-                        Some(quality::Answer::Noul { noul }) => Some(*noul),
-                        _ => None,
-                    })
-                    .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))));
-                let Some(p) = p else { return };
+                let p = statement_answer(&response, i);
                 answers.entry(s).or_default().push((*t, p));
                 // Every pair planned was keyed above.
                 cache.answers.insert(keys[&(s, *t)].clone(), p);
@@ -1026,6 +1002,16 @@ fn stored(path: &Path) -> Option<Value> {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .filter(Value::is_object)
+}
+
+/// The answer for the `i`th statement a request asked: the stronger of its
+/// one or two questions. A validated response answers every question it was
+/// asked, each a Noul.
+fn statement_answer(response: &quality::ApiResponse, i: usize) -> f64 {
+    (0..2)
+        .filter_map(|j| quality::noul(response, &format!("q{i}_{j}")))
+        .reduce(f64::max)
+        .expect("a statement is asked one question at least")
 }
 
 fn send_all(

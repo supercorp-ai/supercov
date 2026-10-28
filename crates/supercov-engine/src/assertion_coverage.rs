@@ -459,7 +459,7 @@ pub fn population_from(
     input: &AssessmentInput,
     sources: &BTreeMap<String, String>,
     language: Language,
-) -> Result<Population, String> {
+) -> Population {
     let mut tests = Vec::new();
     // JVM tests are named by class; their file is found by its path.
     let jvm_files = if language == Language::Jvm {
@@ -616,7 +616,7 @@ pub fn population_from(
     let source_files = statements.iter().map(|s| s.file.clone()).collect();
     let test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
     let unnumbered_test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
-    Ok(Population {
+    Population {
         root: root.to_path_buf(),
         language,
         statements,
@@ -629,7 +629,7 @@ pub fn population_from(
         test_codes,
         unnumbered_test_codes,
         views: Default::default(),
-    })
+    }
 }
 
 /// A statement at a module's top level runs once, when the module is first
@@ -2759,8 +2759,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([(file.to_owned(), source.to_owned())]);
-        let population =
-            population_from(Path::new("/nonexistent"), &input, &sources, language).unwrap();
+        let population = population_from(Path::new("/nonexistent"), &input, &sources, language);
         (0..population.statements.len())
             .map(|s| population.questions(s))
             .collect()
@@ -2787,8 +2786,7 @@ mod tests {
             &empty,
             &BTreeMap::new(),
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         assert!(none.statements.is_empty());
         let one = AssessmentInput {
             tests: vec![InputTest {
@@ -2806,8 +2804,7 @@ mod tests {
             &one,
             &BTreeMap::new(),
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         assert!(population.code_run(0, &[]).is_empty());
         assert!(population.files_read().is_empty());
         let request = population.request(0, &[], "m");
@@ -3054,8 +3051,7 @@ mod tests {
             &input,
             &sources,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         let target = population
             .statements
             .iter()
@@ -3278,8 +3274,7 @@ mod tests {
             &input,
             &sources,
             Language::Python,
-        )
-        .unwrap();
+        );
         let question = |population: &Population, line: usize| {
             let at = population
                 .statements
@@ -3331,8 +3326,7 @@ mod tests {
             &js,
             &sources,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         assert_eq!(
             question(&javascript, 3),
             "src/g.js:3: `return;` is deleted (it never runs)."
@@ -3398,9 +3392,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("src/a".to_owned(), "x\n".to_owned())]);
-        population_from(&root, &input, &sources, language)
-            .unwrap()
-            .test_code(0)
+        population_from(&root, &input, &sources, language).test_code(0)
     }
 
     /// A Ruby test's helpers are what it loads that is not measured source,
@@ -3448,7 +3440,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("lib/m.rb".to_owned(), "def m\n  1\nend\n".to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Ruby).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Ruby);
         let helpers = population.helpers(0, 1);
         assert!(
             !helpers.contains_key("lib/m.rb"),
@@ -3532,7 +3524,6 @@ mod tests {
             &sources,
             Language::JavaScript,
         )
-        .unwrap()
         .with_files(sources);
         let code = &population.code_run(0, &[0])["src/limit.js"];
         assert!(
@@ -3622,7 +3613,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("shop.py".to_owned(), "return 0\n".to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Python).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Python);
         let code = population.test_code(0);
         std::fs::remove_dir_all(&root).unwrap();
         let shown = code
@@ -3881,8 +3872,7 @@ mod tests {
             &input,
             &sources,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         let tests_of = |line: usize| {
             let mut tests = population
                 .statements
@@ -4124,7 +4114,7 @@ mod tests {
         };
         let sources =
             BTreeMap::from([("src/main/java/shop/Cart.java".to_owned(), cart.to_owned())]);
-        let jvm = population_from(&root, &input, &sources, Language::Jvm).unwrap();
+        let jvm = population_from(&root, &input, &sources, Language::Jvm);
         assert_eq!(
             jvm.tests
                 .iter()
@@ -4133,7 +4123,7 @@ mod tests {
             ["src/test/java/shop/CartTest.java", "CartTest.java"]
         );
         assert_eq!(jvm.statements[0].tests, [0, 1]);
-        let python = population_from(&root, &input, &sources, Language::Python).unwrap();
+        let python = population_from(&root, &input, &sources, Language::Python);
         assert!(python.tests.is_empty());
         assert!(python.statements.is_empty());
     }
@@ -4165,8 +4155,7 @@ mod tests {
                 "fn helper() -> u8 {\n    let z = 2;\n    z\n}\n".to_owned(),
             ),
         ]);
-        let rust =
-            population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust).unwrap();
+        let rust = population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust);
         assert_eq!(
             rust.statements
                 .iter()
@@ -4190,8 +4179,7 @@ mod tests {
             &input,
             &sources,
             Language::Python,
-        )
-        .unwrap();
+        );
         assert_eq!(
             python
                 .statements
@@ -4262,8 +4250,7 @@ mod tests {
             &input,
             &files,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         for file in ["tests/a.test.js", "tests/b.test.js", "tests/d.test.js"] {
             files.insert(file.into(), quotes.into());
         }
@@ -4418,7 +4405,7 @@ mod tests {
         };
         let sources =
             BTreeMap::from([("src/main/java/shop/Cart.java".to_owned(), cart.to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Jvm).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Jvm);
         let helpers = population.helpers(0, 1);
         assert_eq!(
             helpers.keys().collect::<Vec<_>>(),
@@ -4455,7 +4442,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("lib/m.rb".to_owned(), "def m\n  1\nend\n".to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Ruby).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Ruby);
         let helpers = population.helpers(0, 1);
         assert_eq!(
             helpers.keys().collect::<Vec<_>>(),
@@ -4498,7 +4485,6 @@ mod tests {
                 &sources,
                 Language::JavaScript,
             )
-            .unwrap()
             .with_files(BTreeMap::from([("src/a.js".to_owned(), now.clone())]))
             .code_run(0, &[0])
             .remove("src/a.js")
@@ -4543,7 +4529,6 @@ mod tests {
             decisions: Vec::new(),
         };
         let population = population_from(Path::new("/nonexistent"), &input, &sources, Language::Go)
-            .unwrap()
             .with_files(sources.clone());
         let asked = population
             .statements
@@ -4612,8 +4597,7 @@ mod tests {
             "src/a.rs".to_owned(),
             "pub fn f(v: u8) -> u8 {\n    let total\n        = v + 1;\n    total\n}\n".to_owned(),
         )]);
-        let mut rust =
-            population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust).unwrap();
+        let mut rust = population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust);
         rust.statements[0].replacement = None;
         // A statement in a file that cannot be read is listed with no code.
         let unread = AssessmentInput {
@@ -4627,7 +4611,7 @@ mod tests {
             std::env::temp_dir().join(format!("supercov-assessment-unread-{}", std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.rs"), &sources["src/a.rs"]).unwrap();
-        let partial = population_from(&root, &unread, &sources, Language::Rust).unwrap();
+        let partial = population_from(&root, &unread, &sources, Language::Rust);
         let shown = partial.code_run(0, &[0]);
         assert!(
             shown.contains_key("src/a.rs") && !shown.contains_key("src/gone.rs"),
@@ -4675,7 +4659,7 @@ mod tests {
                 decisions: Vec::new(),
             };
             let sources = BTreeMap::from([(file.to_owned(), source.to_owned())]);
-            population_from(Path::new("/nonexistent"), &input, &sources, language).unwrap()
+            population_from(Path::new("/nonexistent"), &input, &sources, language)
         };
         let java = "class A {\n  int g(int x) {\n    int y = x + 1;\n    return y;\n  }\n}\n";
         let mut jvm = population(
