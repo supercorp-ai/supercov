@@ -1059,7 +1059,8 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                     &configurations,
                 )
             });
-            for (file, what) in &helpers {
+            // There are helpers: the checkout and the run are read for them.
+            helpers.iter().for_each(|(file, what)| {
                 // A file a process that served the run's tests loaded -- a
                 // mock server's -- reached those tests and no others.
                 let served_by = ran.support.as_ref().and_then(|support| {
@@ -1078,7 +1079,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                     if served {
                         reasons.push(format!("{what} (a server that served this test loaded it)"));
                     }
-                    continue;
+                    return;
                 }
                 let loaded = match loads {
                     Some(loads) if loads.open.is_none() => {
@@ -1094,7 +1095,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                         _ => format!("{what} (a file tests may load)"),
                     });
                 }
-            }
+            });
         }
         for (file, names) in &named_by_tests {
             if record.files.contains_key(*file) || *file == record.test.file.as_str() {
