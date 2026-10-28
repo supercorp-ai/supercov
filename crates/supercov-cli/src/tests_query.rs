@@ -902,6 +902,23 @@ fn render(data: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// A changed declaration that is gone now puts every statement of its
+    /// own lines in play, in order; one outside them is not.
+    #[test]
+    fn a_declaration_gone_now_puts_all_its_statements_in_play() {
+        let root = Path::new("/nonexistent");
+        let mut current = CurrentLines::new(root);
+        let code = serde_json::json!({"file": "a.js", "own": [[2, 4]], "now": null});
+        let statements = [5, 3, 2]
+            .map(|line| serde_json::json!({"line": line, "text": "x"}))
+            .to_vec();
+        let lines = in_changed_code(&mut current, &code, statements)
+            .iter()
+            .map(|statement| statement["line"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, [2, 3]);
+    }
+
     /// Statements still standing are the longest run matching the current
     /// lines in order, so a repeated line counts where it is; past the size
     /// a table fits, each statement is looked for anywhere.
