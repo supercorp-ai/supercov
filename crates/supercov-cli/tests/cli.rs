@@ -3541,6 +3541,11 @@ fn the_html_report_says_what_it_could_not_embed() {
         serde_json::json!([]),
         "{assertions}"
     );
+    let summary = whole.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        summary.contains("Assertions   no executed statements to assess"),
+        "{summary}"
+    );
 
     let empty = Project::empty("html-nothing");
     empty.git(&["init", "-q"]);
