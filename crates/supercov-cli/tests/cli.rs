@@ -14750,6 +14750,33 @@ fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     }
 }
 
+/// Supercov forwards the user's signals to the command and waits on it: a
+/// run, and the supervisor alone, that cannot install the forwarding or wait
+/// for the command end, saying which.
+#[test]
+fn a_run_that_cannot_forward_signals_or_wait_for_its_command_says_so() {
+    for (fault, said) in [
+        ("signal-install", "could not install signal forwarding"),
+        ("child-wait", "could not wait for test command"),
+    ] {
+        let project = Project::cart("supervision-steps");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        assert_eq!(ran.code(), 1, "{fault}: {}", ran.stderr());
+        assert!(ran.stderr().contains(said), "{fault}: {}", ran.stderr());
+        let supervised = project.supercov_with(
+            &["__supervise", "--", "sh", "-c", "exit 0"],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        assert_eq!(supervised.code(), 1, "{fault}: {}", supervised.stderr());
+        assert!(
+            supervised.stderr().contains(said),
+            "{fault}: {}",
+            supervised.stderr()
+        );
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.

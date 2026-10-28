@@ -160,6 +160,7 @@ a_run_of_one_test_script_points_at_the_whole_suite_however_it_was_named	8.3	7.0
 a_run_of_two_test_kinds_narrows_pages_and_groups	5.4	1.8
 a_run_that_cannot_be_read_is_named_before_anything_is_asked	0.5	0.5
 a_run_that_cannot_bring_back_what_its_tests_wrote_says_so	6.0	8.0
+a_run_that_cannot_forward_signals_or_wait_for_its_command_says_so	2.0	3.0
 a_run_that_cannot_release_its_copy_says_so	15.0	20.0
 a_run_that_cannot_reuse_the_last_copy_says_so	12.0	15.0
 a_run_that_observed_no_test_at_all_is_refused	0.6	0.7

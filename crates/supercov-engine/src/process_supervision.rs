@@ -799,13 +799,6 @@ pub struct SupervisedResult {
     pub interrupted_signal: Option<ForwardedSignal>,
 }
 
-#[derive(Debug)]
-pub struct SupervisedOutput {
-    pub result: SupervisedResult,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-}
-
 impl SupervisedResult {
     pub fn exit_code(&self) -> i32 {
         if self.timed_out {
@@ -963,6 +956,11 @@ struct SignalFlags {
 #[cfg(unix)]
 impl SignalFlags {
     fn install() -> Result<Self, SupervisionError> {
+        if crate::fault::injected("signal-install") {
+            return Err(SupervisionError::Signal(io::Error::other(
+                "injected fault at signal-install",
+            )));
+        }
         Self::install_for(&[libc::SIGHUP, libc::SIGINT, libc::SIGTERM])
     }
 
@@ -1337,10 +1335,7 @@ fn spawn_contained(
     let read_descriptor = read.as_raw_fd();
     let write_descriptor = write.as_raw_fd();
     let watchdog_program = std::ffi::CString::new(watchdog_program.as_os_str().as_bytes())
-        .map_err(|_| SupervisionError::PlatformOperation {
-            operation: "encode parent-death watchdog executable",
-            source: io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"),
-        })?;
+        .expect("a path the system resolved holds no NUL byte");
     let watchdog_argument =
         std::ffi::CString::new("__watch-process-group").expect("static CString");
     crate::fault::prepare();
@@ -1689,28 +1684,6 @@ fn validate_options(options: SupervisionOptions) -> Result<(), SupervisionError>
     Ok(())
 }
 
-fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn captured_bytes(
-    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-    stream: &'static str,
-) -> Result<Vec<u8>, SupervisionError> {
-    reader
-        .join()
-        .map_err(|_| SupervisionError::PlatformOperation {
-            operation: "join captured process output reader",
-            source: io::Error::other(format!("{stream} reader panicked")),
-        })?
-        .map_err(|source| SupervisionError::PlatformOperation {
-            operation: "read captured process output",
-            source,
-        })
-}
-
 /// Whether a command that ended with `status` or of `signal` was ended by
 /// Ctrl-C at the keyboard `lent` to it: a run interrupted, unless the run was
 /// already interrupted or had timed out.
@@ -1793,58 +1766,6 @@ impl ProcessSupervisor {
         result
     }
 
-    pub fn supervise_captured(
-        &self,
-        spec: &CommandSpec,
-        options: SupervisionOptions,
-        writer: &mut dyn Write,
-    ) -> Result<SupervisedOutput, SupervisionError> {
-        validate_options(options)?;
-        if spec.captured_output.is_some() {
-            return Err(SupervisionError::PlatformOperation {
-                operation: "configure separate captured process output",
-                source: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "merged and separate capture cannot be requested together",
-                ),
-            });
-        }
-        if let Some(signal) = self.signals.received() {
-            return Ok(SupervisedOutput {
-                result: SupervisedResult {
-                    status: None,
-                    signal: Some(signal.raw()),
-                    timed_out: false,
-                    interrupted_signal: Some(signal),
-                },
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            });
-        }
-        let mut command = spec.command()?;
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let (mut child, parent_death_guard) = spawn_contained(
-            &mut command,
-            &spec.program,
-            self.watchdog_program.as_deref(),
-        )?;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let stdout_reader = thread::spawn(move || read_pipe(stdout));
-        let stderr_reader = thread::spawn(move || read_pipe(stderr));
-        let result = self.monitor(&mut child, options, writer);
-        // Closing the liveness writer makes the watchdog kill any descendants
-        // that retained the output pipes after the root command exited.
-        drop(parent_death_guard);
-        let stdout = captured_bytes(stdout_reader, "stdout")?;
-        let stderr = captured_bytes(stderr_reader, "stderr")?;
-        Ok(SupervisedOutput {
-            result: result?,
-            stdout,
-            stderr,
-        })
-    }
-
     fn monitor(
         &self,
         child: &mut Child,
@@ -1861,14 +1782,15 @@ impl ProcessSupervisor {
         let mut keyboard = Keyboard::default();
 
         loop {
-            let status = match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    signal_process_group(child, libc::SIGKILL);
-                    let _ = child.wait();
-                    return Err(SupervisionError::Wait(error));
-                }
-            };
+            let status =
+                match crate::fault::io("child-wait", io::ErrorKind::Other, || child.try_wait()) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        signal_process_group(child, libc::SIGKILL);
+                        let _ = child.wait();
+                        return Err(SupervisionError::Wait(error));
+                    }
+                };
             if let Some(status) = status {
                 let (status, signal) = exit_parts(status);
                 // With the terminal lent, Ctrl-C went to the command alone.
@@ -1995,64 +1917,6 @@ impl ProcessSupervisor {
         result
     }
 
-    pub fn supervise_captured(
-        &self,
-        spec: &CommandSpec,
-        options: SupervisionOptions,
-        writer: &mut dyn Write,
-    ) -> Result<SupervisedOutput, SupervisionError> {
-        validate_options(options)?;
-        if spec.captured_output.is_some() {
-            return Err(SupervisionError::PlatformOperation {
-                operation: "configure separate captured process output",
-                source: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "merged and separate capture cannot be requested together",
-                ),
-            });
-        }
-        if let Some(signal) = self.signals.received() {
-            return Ok(SupervisedOutput {
-                result: SupervisedResult {
-                    status: None,
-                    signal: None,
-                    timed_out: false,
-                    interrupted_signal: Some(signal),
-                },
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            });
-        }
-        let mut command = spec.command()?;
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.launch().map_err(|source| SupervisionError::Spawn {
-            program: spec.program.clone(),
-            source,
-        })?;
-        if let Err(error) = self.job.assign(&child) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        if let Err(error) = resume_suspended_process(child.id()) {
-            self.job.terminate();
-            let _ = child.wait();
-            return Err(error);
-        }
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let stdout_reader = thread::spawn(move || read_pipe(stdout));
-        let stderr_reader = thread::spawn(move || read_pipe(stderr));
-        let result = self.monitor(&mut child, options, writer);
-        let stdout = captured_bytes(stdout_reader, "stdout")?;
-        let stderr = captured_bytes(stderr_reader, "stderr")?;
-        Ok(SupervisedOutput {
-            result: result?,
-            stdout,
-            stderr,
-        })
-    }
-
     fn monitor(
         &self,
         child: &mut Child,
@@ -2069,14 +1933,15 @@ impl ProcessSupervisor {
         let mut escalated = false;
 
         loop {
-            let status = match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    self.job.terminate();
-                    let _ = child.wait();
-                    return Err(SupervisionError::Wait(error));
-                }
-            };
+            let status =
+                match crate::fault::io("child-wait", io::ErrorKind::Other, || child.try_wait()) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        self.job.terminate();
+                        let _ = child.wait();
+                        return Err(SupervisionError::Wait(error));
+                    }
+                };
             if let Some(status) = status {
                 let (status, signal) = exit_parts(status);
                 return Ok(SupervisedResult {
@@ -2149,38 +2014,19 @@ impl ProcessSupervisor {
             "this target has no process-tree containment implementation",
         ))
     }
-
-    pub fn supervise_captured(
-        &self,
-        _spec: &CommandSpec,
-        _options: SupervisionOptions,
-        _writer: &mut dyn Write,
-    ) -> Result<SupervisedOutput, SupervisionError> {
-        Err(SupervisionError::UnsupportedPlatform(
-            "this target has no process-tree containment implementation",
-        ))
-    }
-}
-
-pub fn supervise_command(
-    spec: &CommandSpec,
-    options: SupervisionOptions,
-    writer: &mut dyn Write,
-) -> Result<SupervisedResult, SupervisionError> {
-    ProcessSupervisor::new()?.supervise(spec, options, writer)
-}
-
-pub fn supervise_captured_command(
-    spec: &CommandSpec,
-    options: SupervisionOptions,
-    writer: &mut dyn Write,
-) -> Result<SupervisedOutput, SupervisionError> {
-    ProcessSupervisor::new()?.supervise_captured(spec, options, writer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn supervise_command(
+        spec: &CommandSpec,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedResult, SupervisionError> {
+        ProcessSupervisor::new()?.supervise(spec, options, writer)
+    }
 
     /// Each setting is read, and refused by name where it is no positive
     /// number of milliseconds.
@@ -2560,30 +2406,6 @@ mod tests {
             supervise_command(&spec, SupervisionOptions::default(), &mut diagnostics).unwrap();
         assert_eq!(result.exit_code(), 7);
         assert!(!result.timed_out);
-        assert!(diagnostics.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn captures_stdout_and_stderr_separately_without_losing_status() {
-        let spec = CommandSpec {
-            program: "/bin/sh".into(),
-            arguments: vec![
-                "-c".into(),
-                "printf stdout-value; printf stderr-value >&2; exit 9".into(),
-            ],
-            cwd: std::env::current_dir().unwrap(),
-            environment: None,
-            captured_output: None,
-            console: None,
-        };
-        let mut diagnostics = Vec::new();
-        let output =
-            supervise_captured_command(&spec, SupervisionOptions::default(), &mut diagnostics)
-                .unwrap();
-        assert_eq!(output.result.exit_code(), 9);
-        assert_eq!(output.stdout, b"stdout-value");
-        assert_eq!(output.stderr, b"stderr-value");
         assert!(diagnostics.is_empty());
     }
 
@@ -3195,12 +3017,13 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Separate capture is refused beside merged capture, and a command is
-    /// not started once the run has been told to stop.
+    /// A command is not started once the run has been told to stop, and
+    /// options that cannot be kept, a command that names nothing and one that
+    /// cannot start are refused before anything runs.
     #[cfg(unix)]
     #[test]
-    fn a_captured_command_is_not_started_merged_or_after_a_signal() {
-        let root = scratch_directory("captured");
+    fn a_command_is_not_started_after_a_signal_or_when_it_cannot_be() {
+        let root = scratch_directory("not-started");
         let marker = root.join("ran");
         let spec = CommandSpec {
             program: "/bin/sh".into(),
@@ -3211,26 +3034,11 @@ mod tests {
             console: None,
         };
         let supervisor = ProcessSupervisor::new().unwrap();
-        let merged = CommandSpec {
-            captured_output: Some(root.join("output")),
-            ..spec.clone()
-        };
-        assert!(matches!(
-            supervisor.supervise_captured(&merged, SupervisionOptions::default(), &mut Vec::new()),
-            Err(SupervisionError::PlatformOperation { .. })
-        ));
-        // Options that cannot be kept, a command that names nothing and one
-        // that cannot start are refused before anything runs.
         let never = SupervisionOptions {
             diagnostic_interval: Duration::ZERO,
             ..SupervisionOptions::default()
         };
         assert!(supervisor.supervise(&spec, never, &mut Vec::new()).is_err());
-        assert!(
-            supervisor
-                .supervise_captured(&spec, never, &mut Vec::new())
-                .is_err()
-        );
         let empty = CommandSpec {
             program: "".into(),
             ..spec.clone()
@@ -3242,7 +3050,7 @@ mod tests {
         for refused in [&empty, &absent] {
             assert!(
                 supervisor
-                    .supervise_captured(refused, SupervisionOptions::default(), &mut Vec::new())
+                    .supervise(refused, SupervisionOptions::default(), &mut Vec::new())
                     .is_err()
             );
         }
@@ -3254,17 +3062,13 @@ mod tests {
             ));
         }
         RECEIVED_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
-        let output = supervisor
-            .supervise_captured(&spec, SupervisionOptions::default(), &mut Vec::new())
+        let result = supervisor
+            .supervise(&spec, SupervisionOptions::default(), &mut Vec::new())
             .unwrap();
         drop(supervisor);
-        assert_eq!(
-            output.result.interrupted_signal,
-            Some(ForwardedSignal::Sigterm)
-        );
-        assert_eq!(output.result.exit_code(), 143);
-        assert!(output.stdout.is_empty() && output.stderr.is_empty());
-        assert!(!marker.exists() && !root.join("output").exists());
+        assert_eq!(result.interrupted_signal, Some(ForwardedSignal::Sigterm));
+        assert_eq!(result.exit_code(), 143);
+        assert!(!marker.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
