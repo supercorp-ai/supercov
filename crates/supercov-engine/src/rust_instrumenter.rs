@@ -957,7 +957,7 @@ impl<'a> RustObligationCollector<'a> {
             format!("{id}:outcome"),
             range,
             kind,
-            source,
+            (line, column, source),
             [("true", "true"), ("false", "false")],
         );
     }
@@ -969,10 +969,10 @@ impl<'a> RustObligationCollector<'a> {
         alternatives: [(&str, &str); N],
     ) {
         let id = stable_id(self.file, "branch", range, kind);
-        let Some((_, _, source)) = self.location_source(range) else {
+        let Some(location) = self.location_source(range) else {
             return;
         };
-        self.branch_with_id(id, range, kind, source, alternatives);
+        self.branch_with_id(id, range, kind, location, alternatives);
     }
 
     fn branch_with_id<const N: usize>(
@@ -980,16 +980,13 @@ impl<'a> RustObligationCollector<'a> {
         id: String,
         range: TextRange,
         kind: &str,
-        source: String,
+        (line, column, source): (usize, usize, String),
         alternatives: [(&str, &str); N],
     ) {
         self.obligation_ranges.push((id.clone(), range));
         if !self.branch_ids.insert(id.clone()) {
             return;
         }
-        let Some((line, column, _)) = self.location_source(range) else {
-            return;
-        };
         self.manifest.branches.push(BranchMeta {
             id: id.clone(),
             kind: kind.into(),
@@ -1205,9 +1202,9 @@ impl<'a> RustObligationCollector<'a> {
             }
         }
         for expression in root.descendants().filter_map(ast::MatchExpr::cast) {
-            let Some(list) = expression.match_arm_list() else {
-                continue;
-            };
+            let list = expression
+                .match_arm_list()
+                .expect("a tree parsed without errors has every part its syntax requires");
             let arms = list.arms().collect::<Vec<_>>();
             let last = arms.len().saturating_sub(1);
             for (index, arm) in arms.iter().enumerate() {
@@ -1497,20 +1494,20 @@ fn rewrite_expression_macros(
     let mut text = source.as_bytes().to_vec();
     let mut changed = false;
     for call in tree.syntax().descendants().filter_map(ast::MacroCall::cast) {
-        let Some(name) = call
+        let name = call
             .path()
             .and_then(|path| path.segment())
             .and_then(|segment| segment.name_ref())
             .map(|name| name.text().to_string())
-        else {
-            continue;
-        };
+            .expect("a tree parsed without errors has every part its syntax requires");
         if !EXPRESSION_MACROS.contains(&name.as_str()) {
             continue;
         }
-        let (Some(bang), Some(arguments)) = (call.excl_token(), call.token_tree()) else {
-            continue;
-        };
+        const WHOLE: &str = "a tree parsed without errors has every part its syntax requires";
+        let (bang, arguments) = (
+            call.excl_token().expect(WHOLE),
+            call.token_tree().expect(WHOLE),
+        );
         let parenthesised = arguments.l_paren_token().is_some();
         if !parenthesised && arguments.l_brack_token().is_none() {
             continue;
@@ -1548,10 +1545,9 @@ fn rewrite_expression_macros(
                     String::from_utf8_lossy(&array)
                 );
                 if SourceFile::parse(&array_probe, edition).errors().is_empty() {
+                    // Inside another expression: any attribute is that
+                    // expression's, never the call's.
                     let prefix_start = usize::from(call.syntax().text_range().start());
-                    let prefix_start = call.attrs().last().map_or(prefix_start, |attribute| {
-                        usize::from(attribute.syntax().text_range().end())
-                    });
                     blank(&mut text[prefix_start..start]);
                     // A reference where `vec` was, so whatever the macro
                     // starts -- `vec![x; n].into()`, a comparison -- still
@@ -1610,10 +1606,16 @@ struct ParsedSource {
     edition: Edition,
 }
 
+/// Whether a source of `length` bytes fits the syntax tree's u32 offsets.
+fn fits_offsets(length: usize) -> Result<(), RustInstrumenterError> {
+    u32::try_from(length)
+        .map(|_| ())
+        .map_err(|_| RustInstrumenterError::SourceTooLarge)
+}
+
 fn parse_for_instrumentation(source: &str) -> Result<ParsedSource, RustInstrumenterError> {
-    // The syntax tree counts in u32 offsets.
-    u32::try_from(source.len()).map_err(|_| RustInstrumenterError::SourceTooLarge)?;
-    let (tree, edition) = parse_any_edition(source).map_err(RustInstrumenterError::Parse)?;
+    let (tree, edition) = fits_offsets(source.len())
+        .and_then(|()| parse_any_edition(source).map_err(RustInstrumenterError::Parse))?;
     let view = expression_view(source, edition);
     let parsed_view = SourceFile::parse(&view.text, edition);
     if parsed_view.errors().is_empty() {
@@ -1990,20 +1992,14 @@ fn before_its_line(root: &ra_ap_syntax::SyntaxNode, source: &str, offset: usize)
     if line == 0 || !source[line..offset].chars().all(char::is_whitespace) {
         return offset;
     }
-    let Ok(at) = u32::try_from(offset) else {
-        return offset;
-    };
-    let mut before = root
+    let at = u32::try_from(offset).expect("a parsed source fits u32 offsets");
+    let first = root
         .token_at_offset(ra_ap_syntax::TextSize::from(at))
         .right_biased()
         .and_then(|token| token.prev_token());
-    while let Some(token) = &before {
-        if !token.kind().is_trivia() {
-            return usize::from(token.text_range().end());
-        }
-        before = token.prev_token();
-    }
-    offset
+    std::iter::successors(first, ra_ap_syntax::SyntaxToken::prev_token)
+        .find(|token| !token.kind().is_trivia())
+        .map_or(offset, |token| usize::from(token.text_range().end()))
 }
 
 fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
@@ -2019,13 +2015,9 @@ fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
 
 /// `block_entry_offset`, for a block of a tree that parsed. The parser opens
 /// every block at its `{` but a `try` written without one, which is a parse
-/// error and so never instrumented; were one reached, its probe would have
-/// nowhere to go, and the file is refused rather than probed wrongly.
-/// A test fault (`rust-block-entry`) stands in for such a block, so each
-/// place that would refuse the file runs under test.
-fn block_entry(block: &ast::BlockExpr) -> Result<usize, RustInstrumenterError> {
-    crate::fault::or("rust-block-entry", || None, || block_entry_offset(block))
-        .ok_or(RustInstrumenterError::InvalidRange)
+/// error and so never instrumented.
+fn block_entry(block: &ast::BlockExpr) -> usize {
+    block_entry_offset(block).expect("a block of a tree that parsed opens at its `{`")
 }
 
 /// A node's range without its outer attributes: a wrapper placed here stays
@@ -2155,7 +2147,7 @@ fn instrument_let_chain(
     condition: &ast::Expr,
     host: ChainHost<'_>,
     identifiers: &mut BTreeSet<String>,
-) -> Result<(), RustInstrumenterError> {
+) {
     // The block goes after any outer attributes, so `#[cfg]` keeps governing
     // the frame together with the expression it belongs to.
     let (kind, host_range, body, label) = match &host {
@@ -2172,10 +2164,8 @@ fn instrument_let_chain(
             expression.label(),
         ),
     };
-    let Some(body) = body else {
-        return Ok(());
-    };
-    let body_offset = block_entry(&body)?;
+    let body = body.expect("a tree parsed without errors has every part its syntax requires");
+    let body_offset = block_entry(&body);
     let range = condition.syntax().text_range();
     let id = stable_id(file, "decision", range, kind);
     let mut atoms = Vec::new();
@@ -2220,12 +2210,10 @@ fn instrument_let_chain(
         }
         let branch = stable_id(file, "branch", right.syntax().text_range(), "logical-and");
         let right_range = right.syntax().text_range();
-        let Some(first) = atoms
+        let first = atoms
             .iter()
             .position(|atom| right_range.contains_range(*atom))
-        else {
-            continue;
-        };
+            .expect("every operand holds a condition");
         operators.push(format!(
             "({first}, {}, {})",
             hit_ordinal(&format!("{branch}:short-circuit")),
@@ -2310,7 +2298,7 @@ fn instrument_let_chain(
     if let ChainHost::If(expression) = &host {
         match expression.else_branch() {
             Some(ast::ElseBranch::Block(block)) => {
-                push_direct(insertions, block_entry(&block)?, format!(" {record_false}"));
+                push_direct(insertions, block_entry(&block), format!(" {record_false}"));
             }
             Some(ast::ElseBranch::IfExpr(nested)) => {
                 let nested_range = nested.syntax().text_range();
@@ -2326,7 +2314,6 @@ fn instrument_let_chain(
             None => {}
         }
     }
-    Ok(())
 }
 
 /// Where an item for `node` can go: the entry of the nearest enclosing block.
@@ -2540,27 +2527,26 @@ fn numbered_file(
                             statement: bool,
                             trailing: bool,
                             range: TextRange,
-                            id: String|
-     -> Result<(), RustInstrumenterError> {
+                            id: String| {
         if !has_attrs {
             push_direct(
                 insertions,
                 before_its_line(root, source, usize::from(range.start())),
                 format!("{runtime_path}::hit({});", hit_ordinal(&id)),
             );
-            return Ok(());
+            return;
         }
         let Some(expression) = expression else {
             *skipped = true;
-            return Ok(());
+            return;
         };
         if let ast::Expr::BlockExpr(block) = &expression {
             push_direct(
                 insertions,
-                block_entry(block)?,
+                block_entry(block),
                 format!("{runtime_path}::hit({});", hit_ordinal(&id)),
             );
-            return Ok(());
+            return;
         }
         // A brace-delimited macro call closing a block without a semicolon
         // is a STATEMENT to rustc even though it supplies the block's value
@@ -2586,7 +2572,7 @@ fn numbered_file(
                 })
             }) {
                 *skipped = true;
-                return Ok(());
+                return;
             }
             let range = expression.syntax().text_range();
             push_wrapper(
@@ -2597,7 +2583,7 @@ fn numbered_file(
                 format!("{{ {runtime_path}::hit({}); ", hit_ordinal(&id)),
                 " }".into(),
             );
-            return Ok(());
+            return;
         }
         // An attributed macro STATEMENT keeps its macro in statement
         // position: what a macro expands to may only be legal there.
@@ -2606,11 +2592,7 @@ fn numbered_file(
         // attributed expression (E0658). The probe goes ahead of it inside
         // the block instead, and the attribute still governs both.
         if statement && let ast::Expr::MacroExpr(_) = &expression {
-            let start = expression.attrs().last().map_or_else(
-                || expression.syntax().text_range().start(),
-                |attribute| attribute.syntax().text_range().end(),
-            );
-            let wrapped = TextRange::new(start, expression.syntax().text_range().end());
+            let wrapped = range_after_attributes(&expression);
             push_wrapper(
                 insertions,
                 wrapped,
@@ -2619,7 +2601,7 @@ fn numbered_file(
                 format!(" {{ {runtime_path}::hit({}); ", hit_ordinal(&id)),
                 "; }".into(),
             );
-            return Ok(());
+            return;
         }
         // Any other attributed expression -- or the initializer of an
         // attributed `let` -- moves into a block that carries the probe: the
@@ -2639,7 +2621,6 @@ fn numbered_file(
             format!(" {{ {runtime_path}::hit({}); (", hit_ordinal(&id)),
             ") }".into(),
         );
-        Ok(())
     };
     for list in root.descendants().filter_map(ast::StmtList::cast) {
         for statement in list.statements() {
@@ -2697,7 +2678,7 @@ fn numbered_file(
                 false,
                 range,
                 id,
-            )?;
+            );
         }
         if let Some(tail) = list
             .tail_expr()
@@ -2715,7 +2696,7 @@ fn numbered_file(
                 true,
                 range,
                 id,
-            )?;
+            );
         }
     }
 
@@ -2737,7 +2718,7 @@ fn numbered_file(
         );
         push_direct(
             &mut insertions,
-            block_entry(&body)?,
+            block_entry(&body),
             format!("{runtime_path}::hit({});", hit_ordinal(&id)),
         );
     }
@@ -2753,7 +2734,7 @@ fn numbered_file(
         if let ast::Expr::BlockExpr(block) = &body {
             push_direct(
                 &mut insertions,
-                block_entry(block)?,
+                block_entry(block),
                 format!("{runtime_path}::hit({});", hit_ordinal(&id)),
             );
         } else {
@@ -2786,9 +2767,9 @@ fn numbered_file(
         if arms.is_empty() {
             continue;
         }
-        let Some(table_offset) = enclosing_block_entry(expression.syntax()) else {
-            continue;
-        };
+        // Outside a const context, a match is in a block.
+        let table_offset = enclosing_block_entry(expression.syntax())
+            .expect("a match a probe can reach is inside a block");
         let table = allocate_table_name(file, &expression, &mut identifiers);
         let entries = arms
             .iter()
@@ -2811,28 +2792,25 @@ fn numbered_file(
             format!(" const {table}: &[u32] = &[{entries}];"),
         );
         // Not empty: a match with no arm was passed over above.
-        arms.iter().enumerate().try_for_each(
-            |(index, arm)| -> Result<(), RustInstrumenterError> {
-                let body = arm
-                    .expr()
-                    .expect("a tree parsed without errors has every part its syntax requires");
-                let call = format!("{runtime_path}::arms({table}, {index});");
-                match &body {
-                    ast::Expr::BlockExpr(block) if plain_block(block) => {
-                        push_direct(&mut insertions, block_entry(block)?, format!(" {call}"));
-                    }
-                    _ => push_wrapper(
-                        &mut insertions,
-                        body.syntax().text_range(),
-                        arm.syntax().text_range(),
-                        0,
-                        format!("{{ {call} ("),
-                        ") }".into(),
-                    ),
+        arms.iter().enumerate().for_each(|(index, arm)| {
+            let body = arm
+                .expr()
+                .expect("a tree parsed without errors has every part its syntax requires");
+            let call = format!("{runtime_path}::arms({table}, {index});");
+            match &body {
+                ast::Expr::BlockExpr(block) if plain_block(block) => {
+                    push_direct(&mut insertions, block_entry(block), format!(" {call}"));
                 }
-                Ok(())
-            },
-        )?;
+                _ => push_wrapper(
+                    &mut insertions,
+                    body.syntax().text_range(),
+                    arm.syntax().text_range(),
+                    0,
+                    format!("{{ {call} ("),
+                    ") }".into(),
+                ),
+            }
+        });
     }
 
     // Logical operators: the left operand alone decides whether the right one
@@ -2921,9 +2899,11 @@ fn numbered_file(
         if cannot_carry_probe(expression.syntax()) {
             continue;
         }
-        let Some(offset) = expression.loop_body().as_ref().and_then(block_entry_offset) else {
-            continue;
-        };
+        let offset = block_entry(
+            &expression
+                .loop_body()
+                .expect("a tree parsed without errors has every part its syntax requires"),
+        );
         let id = stable_id(
             file,
             "branch",
@@ -2998,7 +2978,7 @@ fn numbered_file(
                     &condition,
                     ChainHost::If(&expression),
                     &mut identifiers,
-                )?;
+                );
             }
             continue;
         }
@@ -3025,7 +3005,7 @@ fn numbered_file(
                     &condition,
                     ChainHost::While(&expression),
                     &mut identifiers,
-                )?;
+                );
             }
             continue;
         }
@@ -3278,10 +3258,7 @@ mod tests {
             "    g(y) + h()\n",
             "}\n",
         );
-        let refused = crate::fault::during("rust-block-entry", || {
-            instrument_rust_file("src/lib.rs", source, "crate::rt", false, None)
-        });
-        assert!(refused.is_err());
+        instrument_rust_file("src/lib.rs", source, "crate::rt", false, None).unwrap();
         // A file with nothing to measure is left as it is.
         for empty in ["", "use std::fmt;\n"] {
             let left = instrument_rust_file("src/lib.rs", empty, "crate::rt", false, None).unwrap();
@@ -3294,6 +3271,61 @@ mod tests {
             });
             assert!(refused.is_err(), "{fault}");
         }
+    }
+
+    /// Sources at the edges of what each pass looks at: each is measured
+    /// for what it holds and passed over where it holds nothing to probe.
+    #[test]
+    fn edge_sources_are_probed_for_what_they_hold() {
+        // A source past the tree's u32 offsets is refused before parsing.
+        assert_eq!(fits_offsets(u32::MAX as usize), Ok(()));
+        assert_eq!(
+            fits_offsets(u32::MAX as usize + 1),
+            Err(RustInstrumenterError::SourceTooLarge)
+        );
+        let cfg = TargetCfg::new(&["unix".parse::<cargo_platform::Cfg>().unwrap()]);
+        let instrument = |source: &str| {
+            instrument_rust_file("src/lib.rs", source, "crate::rt", false, Some(&cfg)).unwrap()
+        };
+        let kinds = |instrumented: &RustInstrumentedSource| {
+            instrumented
+                .manifest
+                .branches
+                .iter()
+                .map(|branch| (branch.line, branch.kind.clone(), branch.alternatives.len()))
+                .collect::<Vec<_>>()
+        };
+        // A bound by a path, not a bare name, is not followed to its value.
+        let bounds = instrument(
+            "const N: usize = 3;\nmod m { pub const N: usize = 2; }\nfn f() {\n    for _ in 0..m::N {}\n    for _ in 0..N {}\n}\n",
+        );
+        assert_eq!(
+            kinds(&bounds),
+            [(5, "for-loop".into(), 1), (4, "for-loop".into(), 2)]
+        );
+        // Branches in test code alone leave no point to move.
+        let test_only = instrument("#[cfg(test)]\nconst X: bool = true && false;\n");
+        assert!(test_only.manifest.points.is_empty() && kinds(&test_only).is_empty());
+        // A macro named by no name, and an assertion with no condition.
+        let macros = instrument("fn f() {\n    super!();\n    self::m!();\n    assert!();\n}\n");
+        assert!(macros.code.contains("super!();") && macros.manifest.decisions.is_empty());
+        // An attributed `vec!` statement and tail keep their attributes.
+        let vectors = instrument(
+            "fn f() -> Vec<u8> {\n    #[allow(unused)]\n    vec![1, 2];\n    #[allow(unused)] vec![3]\n}\n",
+        );
+        assert_eq!(vectors.code.matches("#[allow(unused)]").count(), 2);
+        // A let chain whose right operand is a `let` has no condition there.
+        let chains = instrument(
+            "fn f(a: Option<u8>, b: Option<u8>) {\n    #[allow(unused)]\n    if let Some(x) = a && let Some(y) = b {\n        let _ = (x, y);\n    }\n}\n",
+        );
+        assert!(kinds(&chains).contains(&(3, "if".into(), 2)));
+        // A trait's declared method, a match with no arm and a loop in a
+        // `const fn` carry no probe.
+        let bare = instrument(
+            "trait T { fn f(); }\nenum E {}\nfn g(e: E) -> u8 { match e {} }\nconst fn h() { for _ in [1] {} }\n",
+        );
+        assert!(!bare.code.contains("arms("), "{}", bare.code);
+        assert!(!bare.code.contains("fn f() {"), "{}", bare.code);
     }
 
     #[test]
@@ -5892,17 +5924,13 @@ pub fn documented(value: i32) -> i32 {
             .find(|block| block.stmt_list().is_none())
             .unwrap();
         assert_eq!(block_entry_offset(&block), None);
-        assert_eq!(
-            block_entry(&block),
-            Err(RustInstrumenterError::InvalidRange)
-        );
         let tree = SourceFile::parse("fn f() { #![allow(x)] }", Edition::Edition2021).tree();
         let body = tree
             .syntax()
             .descendants()
             .find_map(ast::BlockExpr::cast)
             .unwrap();
-        assert_eq!(block_entry(&body), Ok(21));
+        assert_eq!(block_entry(&body), 21);
     }
 
     #[test]
