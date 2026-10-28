@@ -955,7 +955,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
 
     let mut found = BTreeSet::from([root.to_owned()]);
     visit(root, root, 0, &mut found)?;
-    for directory in declared_workspace_packages(root)? {
+    for directory in declared_workspace_packages(root) {
         found.insert(directory);
     }
     Ok(found.into_iter().collect())
@@ -967,7 +967,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
 /// where packages live, and it routinely names directories outside the
 /// conventional parents (a real project keeps its Shopify extensions under
 /// `app_extensions/*`; every file there was an ambiguous blocker).
-fn declared_workspace_packages(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
+fn declared_workspace_packages(root: &Path) -> Vec<PathBuf> {
     let mut patterns = Vec::new();
     let manifest = read_json(&root.join("package.json")).unwrap_or(Value::Null);
     let declared = match manifest.get("workspaces") {
@@ -1040,7 +1040,7 @@ fn declared_workspace_packages(root: &Path) -> Result<Vec<PathBuf>, SourceDiscov
             }
         }
     }
-    Ok(found)
+    found
 }
 
 fn string_targets(value: &Value, depth: usize, output: &mut Vec<String>) {
@@ -1600,7 +1600,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("pnpm-workspace.yaml"), "").unwrap();
         fs::write(root.join("package.json"), r#"{"workspaces": 5}"#).unwrap();
-        assert!(declared_workspace_packages(&root).unwrap().is_empty());
+        assert!(declared_workspace_packages(&root).is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2559,7 +2559,6 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("libs/core"), root.join("apps/linked")).unwrap();
         let mut found = declared_workspace_packages(&root)
-            .unwrap()
             .into_iter()
             .map(|path| {
                 path.strip_prefix(&root)
@@ -2573,7 +2572,7 @@ mod tests {
         // A workspaces list, rather than an object, is read the same way.
         fs::write(root.join("package.json"), r#"{"workspaces":["apps/*"]}"#).unwrap();
         fs::remove_file(root.join("pnpm-workspace.yaml")).unwrap();
-        let listed = declared_workspace_packages(&root).unwrap();
+        let listed = declared_workspace_packages(&root);
         assert_eq!(listed, [root.join("apps/web")]);
         fs::remove_dir_all(root).unwrap();
     }
