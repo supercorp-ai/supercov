@@ -17875,3 +17875,36 @@ fn a_go_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
     assert_eq!(ran.code(), 0, "{stderr}");
     assert!(fired_at(&stderr, "source_discovery.rs:473"), "{stderr}");
 }
+
+/// The source roots named, read again in the copy for a Java server beside
+/// a browser suite: roots the copy cannot answer for leave the server
+/// unmeasured, and the suite is measured all the same.
+#[test]
+fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
+    let project = Project::cart("browser-java-roots");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write(
+        "pom.xml",
+        "<project><modelVersion>4.0.0</modelVersion><groupId>e</groupId><artifactId>w</artifactId><version>1</version></project>\n",
+    );
+    project.write(
+        "src/main/java/w/W.java",
+        "package w;\npublic class W { public static int one() { return 1; } }\n",
+    );
+    project.commit("java");
+    // The suite's own discovery reads the root; the server's, the second.
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            (
+                "SUPERCOV_TEST_FAULT",
+                "fs.symlink_metadata#source_discovery.rs:473@2",
+            ),
+            ("SUPERCOV_SOURCE_ROOTS", "src"),
+        ],
+    );
+    let stderr = ran.stderr();
+    assert_eq!(ran.code(), 0, "{stderr}");
+    assert!(fired_at(&stderr, "source_discovery.rs:473"), "{stderr}");
+}
