@@ -7064,7 +7064,8 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
                 ),
             ));
         }
-        for (exported_name, specifier) in handlers {
+        // There are handlers: none returned above.
+        handlers.into_iter().for_each(|(exported_name, specifier)| {
             let original_name = self
                 .names
                 .allocate(&format!("__supercov{exported_name}CoverageOriginal"));
@@ -7089,7 +7090,7 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
                 ),
             ));
             output.push(self.wrapped_named_export(&exported_name, &original_name));
-        }
+        });
         self.used = true;
     }
 
@@ -11238,7 +11239,9 @@ export function shapes(n: number): unknown {
 
     #[test]
     fn capability_imports_are_rewritten_ahead_of_run_by_rust() {
+        // An import for its effects alone names nothing to wrap.
         let source = concat!(
+            "import './setup.mjs';\n",
             "import { ImageBuilder, ordinaryHelper } from './sdk.mjs';\n",
             "await ImageBuilder.build({ mounts: [{ source: process.cwd(), target: '/workspace' }], snapshotKey: 'base' });\n",
             "ordinaryHelper();\n",
@@ -11257,6 +11260,12 @@ export function shapes(n: number): unknown {
         assert!(output.code.contains("const ImageBuilder"));
         assert!(!output.code.contains("__supercovRawordinaryHelper"));
         assert!(output.code.contains("../.supercov/launchSupervisor.mjs"));
+        assert!(
+            output.code.contains("import './setup.mjs'")
+                || output.code.contains("import \"./setup.mjs\""),
+            "{}",
+            output.code
+        );
     }
 
     #[test]
