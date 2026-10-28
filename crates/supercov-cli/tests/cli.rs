@@ -3513,6 +3513,14 @@ fn the_html_report_says_what_it_could_not_embed() {
 
 /// The data a report page renders from: gzip-compressed JSON, base64-encoded
 /// into its `report-data` script.
+/// Whether a fault announced firing at `place` (`file.rs:line`); any place
+/// when `place` is empty.
+fn fired_at(stderr: &str, place: &str) -> bool {
+    stderr
+        .lines()
+        .any(|line| line.contains("test fault at") && line.contains(place))
+}
+
 fn report_data(html: &str) -> serde_json::Value {
     use base64::Engine;
     use std::io::Read;
@@ -12791,8 +12799,10 @@ fn exact_attribution_runs_the_command_after_it() {
 /// runs again cleanly. Each fault names the operation and which of its calls
 /// in the run it is; each runs on a project of its own, since what a failed
 /// run leaves behind would change which call the next one's fault names.
+/// A fault written `fault => place` must fail the call made there.
 fn each_step_of_a_run_fails(label: &str, write: fn(&Project), command: &[&str], faults: &[&str]) {
-    for (number, fault) in faults.iter().enumerate() {
+    for (number, entry) in faults.iter().enumerate() {
+        let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty(&format!("{label}-{number}"));
         write(&project);
         project.git(&["init", "-q"]);
@@ -12801,6 +12811,7 @@ fn each_step_of_a_run_fails(label: &str, write: fn(&Project), command: &[&str], 
         let said = ran.stderr();
         assert!(!said.contains("panicked at"), "{label} {fault}: {said}");
         assert_ne!(ran.code(), 0, "{label} {fault}: {said}");
+        assert!(fired_at(&said, place), "{label} {fault} at {place}: {said}");
         project.supercov(command).succeeds();
     }
 }
@@ -12838,6 +12849,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.symlink_metadata@15",
             "fs.open@5",
             "fs.read@10",
+            "fs.read@6 => source_capture.rs:54",
             "spawn",
         ],
     );
@@ -12941,7 +12953,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // it recorded listed and read, a doctest's evidence listed.
             "fs.canonicalize#15",
             "fs.read_dir#10",
-            "fs.read#9",
+            "fs.read#9 => rust_owned_doctests.rs:289",
             "fs.read_dir#9@2",
             "spawn",
         ],
@@ -13132,14 +13144,15 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
     let command = [
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
-    for fault in [
-        "fs.create_dir_all@6",
-        "fs.read_dir@6",
-        "fs.read_dir@7",
-        "fs.file_type@9",
-        "fs.create_dir_all@7",
-        "fs.copy@1",
+    for entry in [
+        "fs.create_dir_all@6 => python_run.rs:527",
+        "fs.read_dir@6 => python_run.rs:104",
+        "fs.read_dir@7 => python_run.rs:104",
+        "fs.file_type@9 => python_run.rs:107",
+        "fs.create_dir_all@7 => python_run.rs:111",
+        "fs.copy@1 => python_run.rs:114",
     ] {
+        let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("python-keep-work");
         python_project(&project);
         project.git(&["init", "-q"]);
@@ -13150,6 +13163,7 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         );
         let stderr = ran.stderr();
         assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
         assert!(
             stderr.contains("injected fault at fs") && !stderr.contains("panicked at"),
             "{fault}: {stderr}"
@@ -13316,14 +13330,15 @@ fn a_ruby_run_that_cannot_keep_its_work_says_so() {
         return;
     };
     let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
-    for fault in [
-        "fs.create_dir_all@5",
-        "fs.read_dir@5",
-        "fs.read_dir@6",
-        "fs.file_type@7",
-        "fs.create_dir_all@6",
-        "fs.copy@1",
+    for entry in [
+        "fs.create_dir_all@5 => ruby_run.rs:335",
+        "fs.read_dir@5 => ruby_run.rs:98",
+        "fs.read_dir@6 => ruby_run.rs:98",
+        "fs.file_type@7 => ruby_run.rs:101",
+        "fs.create_dir_all@6 => ruby_run.rs:105",
+        "fs.copy@1 => ruby_run.rs:108",
     ] {
+        let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("ruby-keep-work");
         ruby_project(&project);
         project.git(&["init", "-q"]);
@@ -13334,6 +13349,7 @@ fn a_ruby_run_that_cannot_keep_its_work_says_so() {
         );
         let stderr = ran.stderr();
         assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
         assert!(
             stderr.contains("injected fault at fs") && !stderr.contains("panicked at"),
             "{fault}: {stderr}"
@@ -13819,7 +13835,7 @@ fn rewrite_evidence(
 #[test]
 fn a_run_whose_source_record_cannot_be_read_back_is_refused() {
     type Change = fn(&mut serde_json::Value);
-    let cases: [(Option<Change>, &str); 5] = [
+    let cases: [(Option<Change>, &str); 6] = [
         (None, "This run has no source manifest"),
         (
             Some(|manifest| manifest["schemaVersion"] = 99.into()),
@@ -13838,6 +13854,7 @@ fn a_run_whose_source_record_cannot_be_read_back_is_refused() {
             "Invalid source manifest",
         ),
         (Some(|_| {}), "invalid type"),
+        (Some(|_| {}), "EOF while parsing"),
     ];
     for (number, (change, said)) in cases.into_iter().enumerate() {
         let project = Project::cart("source-record");
@@ -13858,12 +13875,18 @@ fn a_run_whose_source_record_cannot_be_read_back_is_refused() {
                     entries[at].contents = serde_json::to_vec(&manifest).unwrap();
                 }
             }
-            // The last case keeps the record and garbles its exclusions.
-            if number == 4 {
+            // The last two keep the record and garble its exclusions: not a
+            // list, then not JSON at all.
+            let exclusions: Option<&[u8]> = match number {
+                4 => Some(b"{}"),
+                5 => Some(b"{"),
+                _ => None,
+            };
+            if let Some(contents) = exclusions {
                 entries.retain(|entry| entry.path != "statement-exclusions.json");
                 entries.push(supercov_engine::evidence_archive::EvidenceArchiveEntry {
                     path: "statement-exclusions.json".into(),
-                    contents: b"{}".to_vec(),
+                    contents: contents.to_vec(),
                 });
             }
         });
@@ -14027,28 +14050,77 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
 #[test]
 fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
     let linked = [
-        ("fs.read_dir@57", "injected fault at fs"),
-        ("fs.read_dir@66", "/node_modules: injected"),
-        ("fs.read_dir@67", "node_modules/.bin: injected"),
-        ("fs.read_dir@68", "node_modules/@scope: injected"),
-        ("fs.create_dir_all@4", "staging"),
-        ("fs.create_dir_all@9", "/node_modules: injected"),
-        ("fs.create_dir_all@10", "node_modules/.bin: injected"),
-        ("fs.create_dir_all@11", "node_modules/@scope: injected"),
+        ("fs.read_dir@57", "injected fault at fs", "workspace.rs:704"),
+        (
+            "fs.read_dir@66",
+            "/node_modules: injected",
+            "workspace.rs:1051",
+        ),
+        (
+            "fs.read_dir@67",
+            "node_modules/.bin: injected",
+            "workspace.rs:988",
+        ),
+        (
+            "fs.read_dir@68",
+            "node_modules/@scope: injected",
+            "workspace.rs:935",
+        ),
+        ("fs.create_dir_all@4", "staging", "workspace.rs:703"),
+        (
+            "fs.create_dir_all@9",
+            "/node_modules: injected",
+            "workspace.rs:1050",
+        ),
+        (
+            "fs.create_dir_all@10",
+            "node_modules/.bin: injected",
+            "workspace.rs:985",
+        ),
+        (
+            "fs.create_dir_all@11",
+            "node_modules/@scope: injected",
+            "workspace.rs:934",
+        ),
     ];
     let unlinkable = [
-        ("fs.read_dir@62", "packages/web/node_modules: injected"),
-        ("fs.read_dir@63", "packages/web/node_modules/.bin: injected"),
-        ("fs.create_dir_all@7", "packages/web/node_modules: injected"),
+        (
+            "fs.read_dir@62",
+            "packages/web/node_modules: injected",
+            "workspace.rs:767",
+        ),
+        (
+            "fs.read_dir@63",
+            "packages/web/node_modules/.bin: injected",
+            "workspace.rs:988",
+        ),
+        (
+            "fs.create_dir_all@7",
+            "packages/web/node_modules: injected",
+            "workspace.rs:766",
+        ),
         (
             "fs.create_dir_all@8",
             "packages/web/node_modules/.bin: injected",
+            "workspace.rs:985",
         ),
-        ("fs.symlink@1", "packages/web/node_modules/.bin/webtool"),
-        ("fs.symlink@2", "packages/web/node_modules/dep"),
-        ("fs.symlink@3", "node_modules/.bin/tool"),
-        ("fs.symlink@4", "node_modules/@scope/pkg"),
-        ("fs.symlink@5", "node_modules/plain"),
+        (
+            "fs.symlink@1",
+            "packages/web/node_modules/.bin/webtool",
+            "workspace.rs:568",
+        ),
+        (
+            "fs.symlink@2",
+            "packages/web/node_modules/dep",
+            "workspace.rs:568",
+        ),
+        ("fs.symlink@3", "node_modules/.bin/tool", "workspace.rs:568"),
+        (
+            "fs.symlink@4",
+            "node_modules/@scope/pkg",
+            "workspace.rs:568",
+        ),
+        ("fs.symlink@5", "node_modules/plain", "workspace.rs:568"),
     ];
     // A directory is never cloned, so every system links the same way:
     // hard links where it can, one link per package where it cannot.
@@ -14056,7 +14128,7 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         ("directory-clone,", &linked[..]),
         ("directory-clone,fs.hard_link,", &unlinkable[..]),
     ] {
-        for (fault, said) in cases {
+        for (fault, said, place) in cases {
             let project = Project::cart("dependencies-linked");
             project.write(
                 "node_modules/@scope/pkg/package.json",
@@ -14090,6 +14162,7 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
                 stderr.contains(said) && stderr.contains("injected fault at fs"),
                 "{faults}: {stderr}"
             );
+            assert!(fired_at(&stderr, place), "{faults} at {place}: {stderr}");
         }
     }
 }
@@ -14100,14 +14173,15 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
 /// run, and the next run is a clean one.
 #[test]
 fn a_run_that_cannot_reuse_the_last_copy_says_so() {
-    for fault in [
-        "fs.canonicalize@10",
-        "fs.create_dir_all@6",
-        "fs.copy@1",
-        "fs.rename@1",
-        "fs.rename@3",
-        "fs.create_dir_all@10",
+    for entry in [
+        "fs.canonicalize@10 => workspace.rs:1282",
+        "fs.create_dir_all@6 => workspace.rs:1297",
+        "fs.copy@1 => workspace.rs:551",
+        "fs.rename@1 => workspace.rs:562",
+        "fs.rename@3 => workspace.rs:1316",
+        "fs.create_dir_all@10 => workspace.rs:1316",
     ] {
+        let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::cart("reuse-copy");
         project.supercov(&["--", "node", "--test"]).succeeds();
         project.supercov(&["runs", "latest", "--json"]).succeeds();
@@ -14116,6 +14190,7 @@ fn a_run_that_cannot_reuse_the_last_copy_says_so() {
             project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
         let stderr = ran.stderr();
         assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
         assert!(stderr.contains("injected fault at fs"), "{fault}: {stderr}");
         project.supercov(&["--", "node", "--test"]).succeeds();
     }
@@ -14348,6 +14423,13 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
             )
             .exits(2);
         assert!(refused.contains("[supercov]"), "{fault}: {refused}");
+        // The index read the file details make first.
+        if fault.starts_with("coverage-index-read") {
+            assert!(
+                refused.contains("coverage_query.rs:2285"),
+                "{fault}: {refused}"
+            );
+        }
     }
 }
 
@@ -14362,16 +14444,20 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
     project.commit("ignore");
     project.supercov(&["--", "node", "--test"]).succeeds();
     project.supercov(&["runs", "latest", "--json"]).succeeds();
-    for (fault, output) in [
-        ("fs.canonicalize@2", "unresolved.html"),
-        ("fs.read_to_string@6", "unread.html"),
+    for (fault, output, place) in [
+        ("fs.canonicalize@2", "unresolved.html", "html_report.rs:320"),
+        ("fs.read_to_string@6", "unread.html", "html_report.rs:355"),
     ] {
-        project
-            .supercov_with(
-                &["report", "--output", output],
-                &[("SUPERCOV_TEST_FAULT", fault)],
-            )
-            .succeeds();
+        let ran = project.supercov_with(
+            &["report", "--output", output],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        assert!(
+            fired_at(&ran.stderr(), place),
+            "{fault} at {place}: {}",
+            ran.stderr()
+        );
+        ran.succeeds();
         let data = report_data(&project.read(output)).to_string();
         assert!(
             data.contains(r#""omittedSources":["src/cart.js"]"#),

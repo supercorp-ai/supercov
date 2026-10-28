@@ -148,7 +148,7 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
             .with(|during| take(&during.borrow(), site, place))
             .or_else(|| take(&FAULTS, site, place))
             .flatten()
-            .inspect(|_| announce(site))
+            .inspect(|_| announce(site, place))
     }
     #[cfg(not(any(test, debug_assertions)))]
     {
@@ -157,22 +157,64 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
     }
 }
 
-/// Say that the call at `site` failed by request. Written to the descriptor
-/// itself: a child forked to exec a command may not allocate or take the
-/// lock `eprintln!` takes.
+/// Say that the call at `site` failed by request, and where the call was
+/// made when the site knows (`test fault at fs (lifecycle.rs:725
+/// create_dir_all)`), so a test can check it failed the call it meant to.
+/// Written to the descriptor itself: a child forked to exec a command may not
+/// allocate or take the lock `eprintln!` takes, so the line is written as
+/// digits from the stack.
 #[cfg(any(test, debug_assertions))]
-fn announce(site: &str) {
+fn announce(site: &str, place: Option<Place>) {
+    let mut digits = [0_u8; 10];
+    let mut first = digits.len();
+    let (file, operation) = match place {
+        Some((location, operation)) => {
+            let mut line = location.line();
+            // A line has a digit at least.
+            loop {
+                first -= 1;
+                digits[first] = b'0' + (line % 10) as u8;
+                line /= 10;
+                if line == 0 {
+                    break;
+                }
+            }
+            let file = location.file();
+            (file.rsplit(['/', '\\']).next().unwrap_or(file), operation)
+        }
+        None => ("", ""),
+    };
+    let placed: [&[u8]; 6] = if place.is_some() {
+        [
+            b" (",
+            file.as_bytes(),
+            b":",
+            &digits[first..],
+            b" ",
+            operation.as_bytes(),
+        ]
+    } else {
+        [b""; 6]
+    };
+    let closing: &[u8] = if place.is_some() { b")\n" } else { b"\n" };
     #[cfg(unix)]
-    for part in [
-        b"[supercov] test fault at ".as_slice(),
-        site.as_bytes(),
-        b"\n",
-    ] {
+    for part in [b"[supercov] test fault at ".as_slice(), site.as_bytes()]
+        .into_iter()
+        .chain(placed)
+        .chain([closing])
+    {
         // SAFETY: a write of a live buffer to standard error.
         unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
     }
     #[cfg(not(unix))]
-    eprintln!("[supercov] test fault at {site}");
+    eprint!(
+        "[supercov] test fault at {site}{}",
+        placed
+            .iter()
+            .chain([&closing])
+            .map(|part| String::from_utf8_lossy(part))
+            .collect::<String>()
+    );
 }
 
 /// Of the faults `faults`, whether the one at `site` fails this time, and
