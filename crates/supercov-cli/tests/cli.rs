@@ -17783,3 +17783,25 @@ fn a_line_read_from_the_working_tree_is_stale_only_by_the_runs_record() {
         "working-tree-current"
     );
 }
+
+/// A failing command whose run cannot be read back keeps its exit code,
+/// with no failed tests named.
+#[test]
+fn a_failing_run_that_cannot_be_read_back_names_no_failed_tests() {
+    let project = Project::cart("failed-unread");
+    project.write(
+        "test/wrong.test.js",
+        "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('wrong', () => assert.equal(1, 2));\n",
+    );
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "coverage-index=50")],
+    );
+    assert_eq!(ran.code(), 1, "{}", ran.stderr());
+    assert!(
+        fired_at(&ran.stderr(), "coverage-index"),
+        "{}",
+        ran.stderr()
+    );
+    assert!(!ran.stderr().contains("test(s) failed"), "{}", ran.stderr());
+}
