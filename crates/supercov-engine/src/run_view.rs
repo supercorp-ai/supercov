@@ -500,7 +500,7 @@ pub fn parse_percentage(value: &str) -> Result<u64, String> {
     } else {
         format!("{fraction:0<4}")
             .parse()
-            .map_err(|_| format!("{value:?} is not a percentage"))?
+            .expect("at most four digits, checked above, are a number")
     };
     let ppm = whole
         .checked_mul(10_000)
