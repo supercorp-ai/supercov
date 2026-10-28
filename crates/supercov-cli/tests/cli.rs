@@ -15038,20 +15038,29 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 }
 
 /// A second run reuses the first's instrumented frontend from its cache: a
-/// cached file or the cached manifest that cannot be read ends the run,
+/// cached file or the cached manifest that cannot be read, or a cached
+/// path that cannot be looked at as the copy takes it over, ends the run,
 /// naming where.
 #[test]
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
-    for place in ["javascript_frontend.rs:352", "javascript_frontend.rs:364"] {
+    for (fault, place) in [
+        (
+            "fs.read#javascript_frontend.rs:352",
+            "javascript_frontend.rs:352",
+        ),
+        (
+            "fs.read#javascript_frontend.rs:364",
+            "javascript_frontend.rs:364",
+        ),
+        ("fs.symlink_metadata#workspace.rs:1280", "workspace.rs:1280"),
+    ] {
         let project = Project::cart("frontend-cache-unread");
         project.supercov(&["--", "node", "--test"]).succeeds();
-        let ran = project.supercov_with(
-            &["--", "node", "--test"],
-            &[("SUPERCOV_TEST_FAULT", &format!("fs.read#{place}"))],
-        );
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
         let stderr = ran.stderr();
-        assert_ne!(ran.code(), 0, "{place}: {stderr}");
-        assert!(fired_at(&stderr, place), "{place}: {stderr}");
+        assert_ne!(ran.code(), 0, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault}: {stderr}");
         project.supercov(&["--", "node", "--test"]).succeeds();
     }
 }
