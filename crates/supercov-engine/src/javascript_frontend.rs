@@ -992,25 +992,30 @@ fn bootstrap_loader(output: &mut crate::js_instrumenter::CandidateOutput, relati
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
     let line = output.code[..offset].matches('\n').count();
-    let mappings = mappings(&mut output.map);
-    let mut lines: Vec<&str> = mappings.split(';').collect();
-    if line <= lines.len() {
-        lines.insert(line, "");
-        *mappings = lines.join(";");
-    }
+    edit_mappings(&mut output.map, |mappings| {
+        let mut lines: Vec<&str> = mappings.split(';').collect();
+        if line <= lines.len() {
+            lines.insert(line, "");
+        }
+        Some(lines.join(";"))
+    });
     output.code.insert_str(offset, &loader);
 }
 
-/// The `mappings` of an instrumented file's map. The instrumenter maps every
-/// file it writes, and nothing before these steps takes the map away.
-fn mappings(map: &mut Option<serde_json::Value>) -> &mut String {
-    map.as_mut()
+/// Rewrite the `mappings` of an instrumented file's map with what `edit`
+/// makes of them; `edit` giving none drops the map. The instrumenter maps
+/// every file it writes, as text, and nothing before these steps takes the
+/// map away.
+fn edit_mappings(map: &mut Option<serde_json::Value>, edit: impl FnOnce(&str) -> Option<String>) {
+    const MAPPED: &str = "the instrumenter maps every file it writes";
+    let mappings = map
+        .as_mut()
         .and_then(|map| map.get_mut("mappings"))
-        .and_then(|mappings| match mappings {
-            serde_json::Value::String(mappings) => Some(mappings),
-            _ => None,
-        })
-        .expect("the instrumenter maps every file it writes")
+        .expect(MAPPED);
+    match edit(mappings.as_str().expect(MAPPED)) {
+        Some(edited) => *mappings = serde_json::Value::String(edited),
+        None => *map = None,
+    }
 }
 
 /// Sprockets reads a file's `//= require` and `//= link` directives only from
@@ -1070,14 +1075,14 @@ fn keep_directives_first(source: &str, output: &mut crate::js_instrumenter::Cand
     // Segments are encoded relative to the one before, so a line that carries
     // any cannot move without re-encoding the map. A directive is a comment
     // and carries none; a map where one does is dropped, not left wrong.
-    let mappings = mappings(&mut output.map);
-    let mut segments = mappings.split(';').collect::<Vec<_>>();
-    segments.resize(segments.len().max(lines.len()), "");
-    if moved.iter().all(|index| segments[*index].is_empty()) {
-        *mappings = reorder(segments).join(";");
-    } else {
-        output.map = None;
-    }
+    edit_mappings(&mut output.map, |mappings| {
+        let mut segments = mappings.split(';').collect::<Vec<_>>();
+        segments.resize(segments.len().max(lines.len()), "");
+        moved
+            .iter()
+            .all(|index| segments[*index].is_empty())
+            .then(|| reorder(segments).join(";"))
+    });
     output.code = reorder(lines).join("\n");
 }
 
@@ -1209,12 +1214,13 @@ fn bootstrap_runtime(
     );
     let line = output.code[..offset].matches('\n').count();
     let added = prelude.matches('\n').count();
-    let mappings = mappings(&mut output.map);
-    let mut lines: Vec<&str> = mappings.split(';').collect();
-    if line <= lines.len() {
-        lines.splice(line..line, std::iter::repeat_n("", added));
-        *mappings = lines.join(";");
-    }
+    edit_mappings(&mut output.map, |mappings| {
+        let mut lines: Vec<&str> = mappings.split(';').collect();
+        if line <= lines.len() {
+            lines.splice(line..line, std::iter::repeat_n("", added));
+        }
+        Some(lines.join(";"))
+    });
     output.code.insert_str(offset, &prelude);
 }
 
@@ -1963,8 +1969,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:468",
-            "javascript-source-path#javascript_frontend.rs:1664",
-            "javascript-source-path#javascript_frontend.rs:1782",
+            "javascript-source-path#javascript_frontend.rs:1670",
+            "javascript-source-path#javascript_frontend.rs:1788",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
