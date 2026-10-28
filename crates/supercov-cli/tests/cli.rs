@@ -13737,6 +13737,14 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
         ],
     );
+    // A binary none of whose tests were asked for is listed again for how
+    // many it has.
+    each_step_of_a_run_fails(
+        "own-step-rs-unasked",
+        small_crate,
+        &["--", "cargo", "test", "-q", "--lib", "--", "none"],
+        &["spawn#rust_test_runner.rs:1266@2 => rust_test_runner.rs:1266"],
+    );
     if nextest_installed() {
         // Nextest's runner fails the attempt, and nextest exits 100.
         each_step_of_a_run_fails(
