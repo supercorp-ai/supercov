@@ -7883,6 +7883,20 @@ fn a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query() {
             );
         }
     }
+    // A file's decisions read for such a filter, too.
+    let decisions = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--kind",
+            "e2e",
+        ])
+        .exits(2);
+    assert!(decisions.contains("No tests match kind=e2e"), "{decisions}");
     contains_all(
         &project
             .supercov(&["runs", "latest", "summary", "--runner", "node:test"])
@@ -12318,6 +12332,11 @@ fn a_query_whose_own_index_read_fails_is_refused() {
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
             "coverage_query.rs:3794",
+        ),
+        // The dimensions read again, by runner.
+        (
+            vec!["runs", "latest", "summary", "--kind", "unit"],
+            "coverage_query.rs:3794@2",
         ),
         (
             vec![
