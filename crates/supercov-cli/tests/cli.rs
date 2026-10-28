@@ -17968,3 +17968,23 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
     assert_eq!(ran.code(), 0, "{stderr}");
     assert!(fired_at(&stderr, "source_discovery.rs:473"), "{stderr}");
 }
+
+/// A directory discovery cannot list, or whose listing breaks off, while
+/// looking for a nested Playwright configuration holds none: the run goes on.
+#[test]
+fn a_directory_discovery_cannot_list_holds_no_configuration() {
+    for fault in [
+        "fs.read_dir#project_discovery.rs:330",
+        "fs.read_dir entry#project_discovery.rs:330",
+    ] {
+        let project = Project::cart("discovery-unlisted");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 0, "{fault}: {said}");
+        assert!(
+            fired_at(&said, "project_discovery.rs:330"),
+            "{fault}: {said}"
+        );
+    }
+}
