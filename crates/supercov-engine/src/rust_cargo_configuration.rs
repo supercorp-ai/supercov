@@ -1217,6 +1217,86 @@ mod tests {
         }
     }
 
+    /// Each place a tool can be named refuses the workspace itself: `RUSTC`,
+    /// `CARGO_BUILD_RUSTC`, either wrapper, a target's runner. So is a
+    /// compiler that is no string, rustflags of the wrong kind, a compiler
+    /// that cannot start when cfg values are needed, an execution root that
+    /// is not there, and a toolchain whose Cargo proxy cannot be found.
+    #[test]
+    fn each_place_a_tool_is_named_refuses_what_is_no_tool() {
+        let root = fixture();
+        let itself = root.to_string_lossy().into_owned();
+        fs::write(root.join(".cargo/config.toml"), "").unwrap();
+        let empty = load_cargo_configuration(&root, None, &[]).unwrap();
+        let default = || RustCargoRunnerProgram::SearchPath {
+            value: "rustc".into(),
+        };
+        for key in [
+            "RUSTC",
+            "CARGO_BUILD_RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+        ] {
+            let inputs = model_inputs_with([(OsString::from(key), OsString::from(&itself))]);
+            assert!(
+                compiler_command_plan(&root, &empty, default(), &inputs).is_err(),
+                "{key}"
+            );
+            assert!(
+                resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs).is_err(),
+                "{key}"
+            );
+        }
+        let untyped = load_cargo_configuration(&root, None, &["build.rustc=1".into()]).unwrap();
+        assert!(compiler_command_plan(&root, &untyped, default(), &model_inputs()).is_err());
+        let resolve = |config: &str, inputs: CargoModelInputs| {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs)
+        };
+        let canonical = fs::canonicalize(&root).unwrap();
+        let runner = format!(
+            "[target.aarch64-apple-darwin]\nrunner = {:?}\n",
+            canonical.to_string_lossy()
+        );
+        assert!(resolve(&runner, model_inputs()).is_err());
+        assert!(
+            resolve(
+                "[target.aarch64-apple-darwin]\nrustflags = 1\n",
+                model_inputs()
+            )
+            .is_err()
+        );
+        let gone = root.join("no-such-rustc").to_string_lossy().into_owned();
+        assert!(
+            resolve(
+                "[target.'cfg(unix)']\nrustflags = [\"-Dwarnings\"]\n",
+                model_inputs_with([(OsString::from("RUSTC"), OsString::from(&gone))]),
+            )
+            .is_err()
+        );
+        fs::write(root.join(".cargo/config.toml"), "").unwrap();
+        assert!(
+            resolve_with_inputs(
+                &root,
+                &root.join("missing"),
+                &invocation(&["test"]),
+                model_inputs()
+            )
+            .is_err()
+        );
+        let mut proxy = invocation(&["+nightly", "test"]);
+        proxy.program = "supercov-no-such-cargo".into();
+        assert!(resolve_with_inputs(&root, &root, &proxy, model_inputs()).is_err());
+        // A bare runner name that is no text, where the system allows one.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let name = PathBuf::from(OsString::from_vec(b"\xff".to_vec()));
+            assert!(runner_program(&root, name).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn model_inputs() -> CargoModelInputs {
         model_inputs_with([])
     }
