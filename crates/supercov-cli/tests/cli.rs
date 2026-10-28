@@ -11746,6 +11746,57 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
     );
 }
 
+/// A run whose Docker daemon is a local socket gives the tests a relay to
+/// it in its place; a relay that cannot start leaves the tests the daemon as
+/// it was, and the run says the containers they start are not measured.
+#[cfg(unix)]
+#[test]
+fn a_docker_relay_that_cannot_start_leaves_the_daemon_as_it_was() {
+    let project = Project::cart("docker-relay");
+    project.write(
+        "test/docker.test.js",
+        "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('daemon', () => {\n  const relayed = process.env.DOCKER_HOST !== process.env.DAEMON;\n  assert.equal(relayed, process.env.RELAYED === '1');\n});\n",
+    );
+    project.commit("docker");
+    let daemon = format!("unix://{}/daemon.sock", project.root.display());
+    let relayed = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            ("DOCKER_HOST", &daemon),
+            ("DAEMON", &daemon),
+            ("RELAYED", "1"),
+        ],
+    );
+    assert_eq!(
+        relayed.code(),
+        0,
+        "{}{}",
+        relayed.stdout(),
+        relayed.stderr()
+    );
+    let unrelayed = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            ("DOCKER_HOST", &daemon),
+            ("DAEMON", &daemon),
+            ("RELAYED", "0"),
+            (
+                "SUPERCOV_TEST_FAULT",
+                "fs.create_dir_all#docker_proxy.rs:188",
+            ),
+        ],
+    );
+    let said = unrelayed.stderr();
+    assert_eq!(unrelayed.code(), 0, "{}{said}", unrelayed.stdout());
+    assert!(fired_at(&said, "docker_proxy.rs:188"), "{said}");
+    assert!(
+        said.contains(
+            "containers the tests start are not measured: the Docker relay could not start"
+        ),
+        "{said}"
+    );
+}
+
 #[test]
 fn a_repository_the_workspace_cannot_mirror_is_named_under_debug() {
     let project = Project::empty("unmirrored");
