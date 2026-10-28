@@ -117,6 +117,7 @@ a_patch_on_a_failing_run_shows_its_coverage_and_still_cannot_pass	1.0	0.7
 a_patch_review_needs_a_repository	0.0	0.0
 a_patch_review_reads_a_large_change_as_its_diff_and_names_what_it_cannot_read	0.5	0.5
 a_patch_review_reads_only_changed_source_and_says_what_it_skipped	0.2	0.2
+a_patch_whose_git_cannot_run_is_refused	2.0	3.0
 a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_named	1.0	1.2
 a_per_file_floor_names_where_a_file_falls_short	0.8	0.6
 a_per_name_doctest_pass_must_run_its_doctest_alone_and_once	0.5	0.2
@@ -227,6 +228,7 @@ an_assessment_sends_no_more_than_its_estimate_says_it_can	0.5	0.6
 an_assessment_where_nothing_fires_reads_as_such_in_every_view	0.1	0.1
 an_assessment_whose_store_cannot_be_written_reports_and_says_what_was_not_saved	0.0	0.0
 an_assessment_with_nothing_to_ask_reads_as_such	0.5	0.5
+an_html_export_leaves_out_a_source_it_cannot_read	2.0	3.0
 an_import_whose_step_fails_says_so	60.0	80.0
 an_import_reads_what_the_run_stored	12.0	16.0
 an_internal_error_instrumenting_a_file_leaves_it_unmeasured_and_said	2.1	1.6

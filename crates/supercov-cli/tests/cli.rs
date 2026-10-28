@@ -439,6 +439,35 @@ fn patch_judges_only_the_lines_a_change_touches() {
     assert!(stale.contains("cannot map a patch"), "{stale}");
 }
 
+/// A patch is read from git: where the branch left its base, the
+/// repository's top, the changed lines, the files not yet tracked. Git that
+/// cannot run for any of them refuses the patch, saying so.
+#[test]
+fn a_patch_whose_git_cannot_run_is_refused() {
+    let project = Project::cart("patch-git");
+    project.edit(
+        "src/cart.js",
+        "  return items.map((item) => item.name).join(\", \");",
+        "  const names = items.map((item) => item.name);\n  return names.join(\", \");",
+    );
+    project.measure(&[]);
+    for fault in ["git@2", "git@3", "git@4"] {
+        let refused = project
+            .supercov_with(
+                &["runs", "patch", "--base", "HEAD"],
+                &[("SUPERCOV_TEST_FAULT", fault)],
+            )
+            .exits(2);
+        assert!(
+            refused.contains("could not run git: injected fault at git"),
+            "{fault}: {refused}"
+        );
+    }
+    project
+        .supercov(&["runs", "patch", "--base", "HEAD"])
+        .succeeds();
+}
+
 #[test]
 fn patch_reads_a_project_kept_below_the_top_of_its_repository() {
     // Git names a file from the top (`web/src/cart.js`), the run from where
@@ -14119,6 +14148,47 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         );
         project.supercov(&["--", "node", "--test"]).succeeds();
     }
+}
+
+/// An HTML export shows each file's source beside its coverage, read from
+/// the checkout: a file that cannot be read is shown without it, and the
+/// export is still written. A run store that cannot be listed is refused.
+#[test]
+fn an_html_export_leaves_out_a_source_it_cannot_read() {
+    let project = Project::cart("export-unreadable");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.supercov(&["runs", "latest", "--json"]).succeeds();
+    let export = |output: &str, fault: &str| {
+        project
+            .supercov_with(
+                &[
+                    "runs", "latest", "report", "--format", "html", "--output", output,
+                ],
+                &[("SUPERCOV_TEST_FAULT", fault)],
+            )
+            .succeeds();
+        project.read(output)
+    };
+    // `item.name` is a line of src/cart.js.
+    assert!(!export("unread.html", "fs.read_to_string@4").contains("item.name"));
+    assert!(export("read.html", "").contains("item.name"));
+    let refused = project
+        .supercov_with(
+            &[
+                "runs",
+                "latest",
+                "report",
+                "--format",
+                "html",
+                "--output",
+                "none.html",
+            ],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir@1")],
+        )
+        .exits(2);
+    assert!(refused.contains("injected fault at fs"), "{refused}");
 }
 
 /// An import refuses a run whose stored record it cannot read: its manifest,
