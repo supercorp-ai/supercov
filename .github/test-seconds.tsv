@@ -126,6 +126,7 @@ a_pnpm_workspace_finds_the_source_of_each_package_it_lists	1.0	0.6
 a_project_whose_sources_none_parse_is_refused_rather_than_reported_green	0.0	0.0
 a_project_with_links_sockets_and_pipes_is_measured_through_them	1.1	0.6
 a_python_run_that_cannot_digest_its_inputs_names_the_file	3.0	4.0
+a_python_run_that_cannot_keep_its_work_says_so	5.0	6.0
 a_python_run_whose_own_step_fails_says_so	40.0	60.0
 a_python_source_that_does_not_parse_is_named	0.7	0.3
 a_python_test_whose_process_ends_during_it_is_failed_and_credited	0.5	0.3

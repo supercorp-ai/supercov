@@ -13051,6 +13051,48 @@ fn a_javascript_run_that_cannot_walk_its_inputs_says_so() {
     }
 }
 
+/// Asked to keep its work, a Python run copies its work directory beside
+/// the store for diagnosis. Each step of that copy failing -- the directory
+/// made, listed, one below it, an entry's type, a file copied -- ends the run
+/// saying so; and a run with nothing failing keeps the copy.
+#[test]
+fn a_python_run_that_cannot_keep_its_work_says_so() {
+    let command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    for fault in [
+        "fs.create_dir_all@6",
+        "fs.read_dir@6",
+        "fs.read_dir@7",
+        "fs.file_type@9",
+        "fs.create_dir_all@7",
+        "fs.copy@1",
+    ] {
+        let project = Project::empty("python-keep-work");
+        python_project(&project);
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran = project.supercov_with(
+            &command,
+            &[("SUPERCOV_KEEP_WORK", "1"), ("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(
+            stderr.contains("injected fault at fs") && !stderr.contains("panicked at"),
+            "{fault}: {stderr}"
+        );
+    }
+    let project = Project::empty("python-kept-work");
+    python_project(&project);
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov_with(&command, &[("SUPERCOV_KEEP_WORK", "1")])
+        .succeeds();
+    assert!(project.root.join(".supercov/python-debug").is_dir());
+}
+
 #[test]
 fn a_go_run_whose_own_step_fails_says_so() {
     let Some(go) = go() else {
