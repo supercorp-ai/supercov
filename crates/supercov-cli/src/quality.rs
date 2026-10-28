@@ -3293,7 +3293,7 @@ fn run_health(
     let assessed_files = assessed.len();
     let assessed_fingerprint = supercov_engine::integrity::digest_source_files(root, assessed).ok();
 
-    let (id, created_at) = store::identity()?;
+    let (id, created_at) = store::identity();
     let mut manifest = json!({
         "schema_version": 4, "id": id, "created_at": created_at, "parent": Value::Null,
         // Null when a file moved or became unreadable between the assessment and

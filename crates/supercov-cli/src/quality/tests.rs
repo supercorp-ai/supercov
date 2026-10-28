@@ -151,11 +151,59 @@ fn only_a_snapshot_id_names_a_saved_snapshot() {
     let _ = store::write(&temp.0, "quality", "../outside", &json!({}), &json!({}));
 }
 
+/// Each step of saving a snapshot that fails leaves it unsaved, and says so;
+/// a snapshot missing its file record, or a store that cannot be listed,
+/// cannot be read. A file written outside `.supercov` needs no ignore file.
+#[test]
+fn each_step_of_the_snapshot_store_that_fails_says_so() {
+    use supercov_engine::fault::during;
+    let temp = Temp::new();
+    let files = json!({"files": []});
+    for fault in [
+        "fs.create_dir_all",
+        "fs.create_dir",
+        "fs.open_with",
+        "fs.write_all",
+        "fs.sync_all",
+        // The ignore file there by now: the temporary file's open.
+        "fs.open_with@2",
+    ] {
+        let (id, _) = store::identity();
+        let refused = during(fault, || {
+            store::write(&temp.0, "quality", &id, &json!({}), &files)
+        });
+        assert!(
+            refused.is_err_and(|error| error.contains("injected")),
+            "{fault}"
+        );
+    }
+    assert!(store::write_atomic(Path::new(""), b"x").is_err());
+    store::write_atomic(&temp.0.join("plain.txt"), b"x").unwrap();
+    assert!(!temp.0.join(".gitignore").exists());
+    let (id, _) = store::identity();
+    store::write(&temp.0, "quality", &id, &json!({}), &files).unwrap();
+    std::fs::remove_file(
+        store::snapshots(&temp.0, "quality")
+            .join(&id)
+            .join("files.json"),
+    )
+    .unwrap();
+    assert!(store::read(&temp.0, "quality", &id).is_err());
+    for fault in ["fs.read_dir", "fs.read_dir entry"] {
+        assert!(
+            during(fault, || store::list(&temp.0, "quality")).is_err(),
+            "{fault}"
+        );
+    }
+    std::fs::remove_file(store::snapshots(&temp.0, "quality").join("latest")).unwrap();
+    assert!(during("fs.read_dir", || store::resolve(&temp.0, "quality", None)).is_err());
+}
+
 #[test]
 fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
     let temp = Temp::new();
     let files = json!({"files": []});
-    let (first, _) = store::identity().unwrap();
+    let (first, _) = store::identity();
     store::write(
         &temp.0,
         "quality",
@@ -176,7 +224,7 @@ fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
         .unwrap_err()
         .contains("already exists")
     );
-    let (second, _) = store::identity().unwrap();
+    let (second, _) = store::identity();
     assert_ne!(first, second);
     store::write(
         &temp.0,
@@ -2638,7 +2686,7 @@ fn the_security_report_names_what_fired_and_where_tests_never_went() {
 #[test]
 fn security_snapshots_live_in_their_own_lane_and_read_back_as_security() {
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     let manifest = json!({
         "created_at": "2026-09-20T00-00-00-000000Z", "instrument": "security",
         "catalog_version": "security-v3", "model": "jev-1.13.0",
@@ -2667,7 +2715,7 @@ fn a_file_view_reports_what_the_summary_flagged() {
     // confirmed line 322 at 0.64, and the summary flagged it. The file view
     // said `no 0.31`, judged on the file question alone.
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     let manifest = json!({
         "created_at": "2026-10-02T00-00-00-000000Z", "instrument": "security",
         "catalog_version": "security-v3", "model": "jev-1.13.0",
@@ -2702,7 +2750,7 @@ fn an_older_security_snapshot_judges_each_check_at_its_own_cut() {
     // Snapshots from before the assessment recorded what fired keep no
     // `present` list; each check is judged at the security cut it has.
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     let manifest = json!({
         "created_at": "2026-09-01T00-00-00-000000Z", "instrument": "security",
         "catalog_version": "security-v3", "model": "jev-1.13.0",
@@ -2727,7 +2775,7 @@ fn an_assessment_takes_a_run_to_cross_with() {
 #[test]
 fn cleaning_an_assessment_lane_preserves_the_other_lane() {
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     for lane in ["quality", "security"] {
         store::write(
             &temp.0,

@@ -40,10 +40,10 @@ pub fn snapshots(project_root: &Path, lane: &str) -> PathBuf {
 
 /// `q_` and sixteen hex characters, following the shape of a public run id:
 /// short, opaque, and carrying no meaning a reader might rely on.
-pub fn identity() -> Result<(String, String), String> {
+pub fn identity() -> (String, String) {
     let created_at = time::OffsetDateTime::now_utc()
         .format(crate::PUBLIC_TIMESTAMP_FORMAT)
-        .map_err(|error| format!("could not generate the snapshot identity: {error}"))?;
+        .expect("a UTC time has every field the format names");
     let seed = format!(
         "{created_at}\0{}\0{}",
         std::process::id(),
@@ -53,7 +53,7 @@ pub fn identity() -> Result<(String, String), String> {
             .as_nanos()
     );
     let digest = format!("{:x}", Sha256::digest(seed.as_bytes()));
-    Ok((format!("q_{}", &digest[..16]), created_at))
+    (format!("q_{}", &digest[..16]), created_at)
 }
 
 /// Checked before any path is built from a selector, so a snapshot id can
@@ -77,11 +77,7 @@ fn ignore_store(path: &Path) -> Result<(), String> {
         return Ok(());
     };
     let ignore = store.join(".gitignore");
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&ignore)
-    {
+    match fs::open_with(fs::OpenOptions::new().write(true).create_new(true), &ignore) {
         Ok(mut file) => fs::write_all(&mut file, b"*\n").map_err(|e| e.to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(format!("{}: {error}", ignore.display())),
@@ -96,11 +92,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     ignore_store(path)?;
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
     let result = (|| -> std::io::Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temp)?;
+        let mut file = fs::open_with(
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+            &temp,
+        )?;
         fs::write_all(&mut file, bytes)?;
         fs::sync_all(&file)?;
         fs::rename(&temp, path)
