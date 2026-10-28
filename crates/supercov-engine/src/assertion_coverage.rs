@@ -3533,6 +3533,14 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("src/limit.js".to_owned(), source.to_owned())]);
+        // A file the run measured that cannot be read now shows nothing.
+        let unread = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::JavaScript,
+        );
+        assert!(unread.code_run(0, &[0]).is_empty());
         let population = population_from(
             Path::new("/nonexistent"),
             &input,
