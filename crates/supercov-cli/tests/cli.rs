@@ -17868,6 +17868,17 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
             "__doctest-runner/fs.canonicalize@1".to_owned(),
             "canonicalize",
         ),
+        // The merged harness's order, and a child's record, read back.
+        (
+            "2024",
+            "__doctest-runner/fs.read#rust_owned_doctests.rs:1197".to_owned(),
+            "rust_owned_doctests.rs:1197",
+        ),
+        (
+            "2024",
+            "__doctest-runner/fs.read#rust_owned_doctests.rs:1208".to_owned(),
+            "rust_owned_doctests.rs:1208",
+        ),
     ] {
         let project = Project::empty("doctest-stand-in-steps");
         small_crate(&project);
