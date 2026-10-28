@@ -2184,20 +2184,17 @@ fn report_declined(
 /// Says, after the tests' own output, which Worker files the run could not
 /// measure and why: they are out of the totals, and `runs check` refuses to
 /// judge a run that left them unmeasured.
-fn report_unmeasured_workers(
-    unmeasured: &[(String, String)],
-    diagnostics: &mut dyn Write,
-) -> Result<(), RustTestRunnerError> {
+/// A note that cannot be written takes nothing from the run it is about.
+fn report_unmeasured_workers(unmeasured: &[(String, String)], diagnostics: &mut dyn Write) {
     let Some((_, reason)) = unmeasured.first() else {
-        return Ok(());
+        return;
     };
-    writeln!(
+    let _ = writeln!(
         diagnostics,
         "[supercov] not measured: {} Rust Worker file(s), {}. {reason}.",
         unmeasured.len(),
         first_files(unmeasured.iter().map(|(file, _)| file.as_str())),
-    )
-    .map_err(|error| RustTestRunnerError::Io(error.to_string()))
+    );
 }
 
 /// `rust_workers`: the stand-in for `wrangler` the test processes find
@@ -2274,7 +2271,7 @@ pub fn run_prepared_rust_tests(
             manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
             ..project.clone()
         };
-        report_unmeasured_workers(&unmeasured_workers, diagnostics)?;
+        report_unmeasured_workers(&unmeasured_workers, diagnostics);
         return Ok(RustFrontendRun {
             declaration: FrontendRunDeclaration {
                 protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -2327,11 +2324,10 @@ pub fn run_prepared_rust_tests(
         ArtifactLauncher::for_invocation(project, &invocation, &evidence_root.join("hooks"))?
             .with_environment(runner_environment);
     if let Some(browser) = launcher.unmeasured_browser() {
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] wasm tests run in {browser} are not measured: Supercov reads a browser's wasm through Chrome only (`wasm-pack test --chrome`)"
-        )
-        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+        );
     }
     let target_libdir = if artifacts.is_empty() {
         PathBuf::new()
@@ -2656,7 +2652,7 @@ pub fn run_prepared_rust_tests(
         runners.push(rust_runner_declaration("rustdoc"));
     }
     let structural_limitations = structural_limitations(&project.manifest);
-    report_unmeasured_workers(&unmeasured_workers, diagnostics)?;
+    report_unmeasured_workers(&unmeasured_workers, diagnostics);
     Ok(RustFrontendRun {
         declaration: FrontendRunDeclaration {
             protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -3364,10 +3360,7 @@ mod tests {
             Err(RustTestRunnerError::Io(_))
         ));
         let workers = [("a.rs".to_owned(), "no test started it".to_owned())];
-        assert!(matches!(
-            report_unmeasured_workers(&workers, &mut Closed),
-            Err(RustTestRunnerError::Io(_))
-        ));
+        report_unmeasured_workers(&workers, &mut Closed);
     }
 
     #[test]
@@ -3474,7 +3467,7 @@ mod tests {
             [("runners/src/lib.rs".to_owned(), reason.to_owned())]
         );
         let mut said = Vec::new();
-        report_unmeasured_workers(&unmeasured, &mut said).unwrap();
+        report_unmeasured_workers(&unmeasured, &mut said);
         assert_eq!(
             String::from_utf8(said).unwrap(),
             format!(
@@ -3482,7 +3475,7 @@ mod tests {
             )
         );
         let mut said = Vec::new();
-        report_unmeasured_workers(&[], &mut said).unwrap();
+        report_unmeasured_workers(&[], &mut said);
         assert!(said.is_empty());
         // Every Worker ran: nothing changes.
         let mut ran = empty.clone();
