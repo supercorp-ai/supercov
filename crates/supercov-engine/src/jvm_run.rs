@@ -613,8 +613,12 @@ fn xml_children(block: &str) -> Vec<(String, String)> {
 /// Maven's local repository: `settings.xml`'s `localRepository`, else
 /// `~/.m2/repository`.
 fn local_repository() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let m2 = PathBuf::from(home).join(".m2");
+    local_repository_of(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")))
+}
+
+/// [`local_repository`] for the home directory `home`; none without one.
+fn local_repository_of(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let m2 = PathBuf::from(home?).join(".m2");
     let configured = fs::read_to_string(m2.join("settings.xml"))
         .ok()
         .and_then(|text| xml_block(&text, "localRepository"))
@@ -3044,6 +3048,36 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// Maven's local repository: the one `settings.xml` names, else the
+    /// one beside it; none without a home directory.
+    #[test]
+    fn the_local_repository_is_the_one_settings_name_else_beside_them() {
+        let home = std::env::temp_dir().join(format!(
+            "supercov-m2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(home.join(".m2")).unwrap();
+        let home = crate::test_directory::TestDirectory::adopt(home);
+        assert_eq!(local_repository_of(None), None);
+        assert_eq!(
+            local_repository_of(Some(home.as_os_str().to_owned())),
+            Some(home.join(".m2/repository"))
+        );
+        std::fs::write(
+            home.join(".m2/settings.xml"),
+            "<settings><localRepository> /srv/maven </localRepository></settings>",
+        )
+        .unwrap();
+        assert_eq!(
+            local_repository_of(Some(home.as_os_str().to_owned())),
+            Some(PathBuf::from("/srv/maven"))
+        );
+    }
+
     /// A parent missing on disk is read from the local repository, its
     /// properties filling the child's; a repository that lacks it, no
     /// repository at all, or a parent naming no version, ends the chain.
@@ -3195,7 +3229,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1276, 1296, 1385, 1421, 1432] {
+        for line in [1280, 1300, 1389, 1425, 1436] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
