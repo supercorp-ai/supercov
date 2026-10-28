@@ -660,7 +660,9 @@ fn parse(file: &str, source: &str) -> Option<Vec<Specifier>> {
     use oxc_ast::ast::*;
     use oxc_ast_visit::{Visit, walk};
 
-    let source_type = crate::js_instrumenter::project_source_type(Path::new(file)).ok()?;
+    // Read only for the extensions `reads_imports` names, which it knows.
+    let source_type = crate::js_instrumenter::project_source_type(Path::new(file))
+        .expect("a file read for its imports has an extension the parser knows");
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked {
@@ -1492,7 +1494,7 @@ mod tests {
         let root = project(&[
             (
                 "package.json",
-                r##"{"imports":{"#missing":"./gone.js","#fallback":["./gone.js","./lib/real.js"]}}"##,
+                r##"{"imports":{"#missing":"./gone.js","#fallback":["./gone.js","./lib/real.js"],"#lib/*.js":"./lib/*.js","#up":"./../outside.js","#count":5}}"##,
             ),
             (
                 "tsconfig.json",
@@ -1505,6 +1507,11 @@ mod tests {
                 "import { x } from '@/x';\nimport '#fallback';\n",
             ),
             ("b.test.ts", "import '#missing';\n"),
+            // A pattern whose end does not match, a target that climbs out,
+            // and one that is no path.
+            ("c.test.ts", "import '#lib/real.ts';\n"),
+            ("d.test.ts", "import '#up';\n"),
+            ("e.test.ts", "import '#count';\n"),
         ]);
         let imports = Imports::new(&root);
         let loads = imports.loads(["a.test.ts"]);
@@ -1512,6 +1519,9 @@ mod tests {
         assert!(loads.files.contains("src/x.ts"), "{loads:?}");
         assert!(loads.files.contains("lib/real.js"), "{loads:?}");
         assert!(imports.loads(["b.test.ts"]).open.is_some());
+        for file in ["c.test.ts", "d.test.ts", "e.test.ts"] {
+            assert!(imports.loads([file]).open.is_some(), "{file}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
