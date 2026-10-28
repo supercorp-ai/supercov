@@ -17159,3 +17159,34 @@ fn a_proc_macro_crate_and_its_limitations_leave_the_run() {
         "{file}"
     );
 }
+
+/// A report beside quality snapshots leaves out one whose files cannot be
+/// read, and `quality scope` whose project cannot be looked at says so.
+#[test]
+fn a_quality_snapshot_or_scope_that_cannot_be_read_is_left_out_or_refused() {
+    let project = Project::cart("quality-unreadable");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let directory = ".supercov/quality/snapshots/q_0000000000000001";
+    project.write(
+        &format!("{directory}/manifest.json"),
+        &serde_json::json!({
+            "created_at": "2026-01-01T00-00-01-000000Z",
+            "instrument": "catalog",
+            "catalog_version": "v1",
+            "model": "m",
+            "catalog": [],
+        })
+        .to_string(),
+    );
+    project.write(&format!("{directory}/files.json"), "not json");
+    project
+        .supercov(&["report", "--output", "out/report.html", "--no-open"])
+        .succeeds();
+    let scope = project.supercov_with(
+        &["quality", "scope"],
+        &[("SUPERCOV_TEST_FAULT", "fs.symlink_metadata#quality.rs:1094")],
+    );
+    let said = scope.stderr();
+    assert_ne!(scope.code(), 0, "{said}");
+    assert!(fired_at(&said, "quality.rs:1094"), "{said}");
+}

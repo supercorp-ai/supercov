@@ -3792,3 +3792,11 @@ fn a_directory_below_the_root_names_its_changes_as_it_names_them() {
     );
     assert_eq!(found[0].before, "fn a() {}\n");
 }
+
+/// What an assessment was charged is said only where both of its counts
+/// are there.
+#[test]
+fn what_was_spent_is_said_only_with_both_counts() {
+    let report = serde_json::json!({"usage_this_run": {"input_tokens": 3}});
+    assert_eq!(spent_line(&report, Instrument::Catalog), None);
+}
