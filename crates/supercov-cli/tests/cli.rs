@@ -12698,6 +12698,25 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
     );
     assert_eq!(kept.code(), 0, "{}", kept.stderr());
     reached("launcher-path-text", &kept.stderr());
+    // So does a launcher directory, or launcher, that cannot be made.
+    for (fault, place) in [
+        (
+            "fs.create_dir_all#source_tools.rs:233",
+            "source_tools.rs:233",
+        ),
+        ("fs.write#source_tools.rs:241", "source_tools.rs:241"),
+    ] {
+        let kept = project.supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_TEST_FAULT", fault), ("PATH", &path)],
+        );
+        assert_eq!(kept.code(), 0, "{fault}: {}", kept.stderr());
+        assert!(
+            fired_at(&kept.stderr(), place),
+            "{fault}: {}",
+            kept.stderr()
+        );
+    }
 
     // A Go run passes the command's output on itself, so its relay is what
     // the remaining faults reach.
