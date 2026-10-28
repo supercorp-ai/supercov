@@ -245,6 +245,20 @@ test('a test that reaches no server', async () => {
   assert.notEqual(unpublished.status, 0, unpublished.stdout + unpublished.stderr);
   assert.match(unpublished.stderr, /test fault at server-unpublished/u, unpublished.stderr);
   assert.match(unpublished.stderr, /no run was published/u, unpublished.stderr);
+  // Each step after the servers published -- the second server's run
+  // finished, the evidence cleared, the run's state written, the first run
+  // finished -- that fails ends the run, saying where.
+  for (const [fault, place] of [
+    ['fs.symlink_metadata#javascript_run.rs:1235', 'javascript_run.rs:1235'],
+    ['fs.symlink_metadata#javascript_run.rs:1249', 'javascript_run.rs:1249'],
+    ['fs.symlink_metadata#javascript_run.rs:1251', 'javascript_run.rs:1251'],
+    ['fs.read#javascript_run.rs:1277', 'javascript_run.rs:1277'],
+    ['fs.symlink_metadata#javascript_run.rs:1289', 'javascript_run.rs:1289'],
+  ]) {
+    const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
+    assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
+    assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);
+  }
   // A failing test still publishes what it reached, and the run says it failed.
   const failing = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given']);
   assert.equal(failing.status, 1, failing.stdout + failing.stderr);

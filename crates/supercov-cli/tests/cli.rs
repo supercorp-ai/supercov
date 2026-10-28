@@ -16999,3 +16999,22 @@ fn a_rust_test_binary_that_cannot_list_its_tests_ends_the_run() {
         assert!(stderr.contains(said), "{said}: {stderr}");
     }
 }
+
+/// A browser suite's JavaScript run beside a Python server that no browser
+/// test reached: the JavaScript is the run, and the server publishes none.
+#[test]
+fn a_server_no_browser_test_reached_publishes_no_run_beside_the_javascript() {
+    let project = Project::cart("javascript-beside-idle-server");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write("server/app.py", "def hello():\n    return 1\n");
+    project.commit("server");
+    let run = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(
+        !run.stderr().contains("server's coverage is run"),
+        "{}",
+        run.stderr()
+    );
+    let runs = project.supercov(&["runs", "--json"]).json();
+    assert_eq!(runs["data"]["runs"].as_array().unwrap().len(), 1, "{runs}");
+}
