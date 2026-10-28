@@ -11808,6 +11808,24 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
         other["workingTree"]["reasons"],
         serde_json::json!(["test/build configuration changed"])
     );
+    // With no record of the runners the run used, or of its files, the
+    // change cannot be put on other runners: it reaches every test.
+    for fault in [
+        "fs.open#evidence_archive.rs:656=50",
+        "fs.open#source_manifest.rs:359@2",
+    ] {
+        let unjudged = project
+            .supercov_with(
+                &["runs", "latest", "tests", "affected", "--json"],
+                &[("SUPERCOV_TEST_FAULT", fault)],
+            )
+            .json();
+        assert_eq!(
+            unjudged["data"]["workingTree"]["runWide"],
+            serde_json::json!(["test/build configuration changed"]),
+            "{fault}: {unjudged}"
+        );
+    }
     // A TypeScript configuration is read whatever the runner.
     project.write("tsconfig.json", "{}\n");
     let every = affected();
