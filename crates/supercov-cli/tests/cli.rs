@@ -9085,6 +9085,26 @@ fn comparisons_and_their_mistakes_read_as_what_they_are() {
             "left out 1 file(s) of the evidence: /elsewhere/x.js (outside the project)",
         ],
     );
+    // A file of the project the run did not measure and that is not there,
+    // with the project read as named when it cannot be resolved.
+    project.write(
+        "gone.info",
+        "SF:src/cart.js\nDA:20,1\nend_of_record\nSF:src/missing.js\nDA:1,1\nend_of_record\n",
+    );
+    let missing = project.supercov_with(
+        &["import", "gone.info", "--test", "missing"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.canonicalize#outside_evidence.rs:421",
+        )],
+    );
+    let said = format!("{}{}", missing.stdout(), missing.stderr());
+    assert_eq!(missing.code(), 0, "{said}");
+    assert!(fired_at(&said, "outside_evidence.rs:421"), "{said}");
+    assert!(
+        said.contains("src/missing.js (no such file in the project)"),
+        "{said}"
+    );
 }
 
 /// A word or a flag a command does not take is refused by name instead of
