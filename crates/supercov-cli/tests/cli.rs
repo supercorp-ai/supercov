@@ -17116,7 +17116,17 @@ fn a_rust_project_supercov_cannot_lay_out_is_refused() {
     let project = Project::empty("rust-metadata-garbage");
     project.write("Cargo.toml", crate_toml);
     project.write("src/lib.rs", lib);
-    let real = std::env::var("CARGO").unwrap();
+    // Cargo names itself to a test it starts; a test started otherwise
+    // finds it on PATH.
+    let real = std::env::var_os("CARGO")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|directory| directory.join("cargo"))
+                .find(|candidate| candidate.is_file())
+        })
+        .unwrap();
+    let real = real.display();
     project.write_script(
         "bin/cargo",
         &format!(
