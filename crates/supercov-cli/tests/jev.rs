@@ -255,6 +255,14 @@ fn quality_patch_reviews_only_what_a_change_introduced() {
         .succeeds();
     contains_all(&security, &["src/cart.js", "0.90  injection_sink"]);
     assert!(!security.contains("god_class"), "{security}");
+
+    // A clean tree on a branch with no default to compare with reviews the
+    // unstaged changes, of which there are none.
+    project.git(&["branch", "-m", "work"]);
+    let clean = project
+        .supercov_with(&["quality", "patch"], &through(&quiet))
+        .succeeds();
+    assert!(clean.contains("Reviewing unstaged changes."), "{clean}");
 }
 
 #[test]
