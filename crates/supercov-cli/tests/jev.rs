@@ -200,6 +200,37 @@ fn assessing_needs_a_key_and_reading_does_not() {
     );
 }
 
+/// A patch review asks git for what changed: a git that cannot start for
+/// what is needed -- the changed files, the untracked ones, a file's text
+/// before -- refuses the review and says so; one that cannot start for what
+/// only refines it (where the repository's top is) reviews all the same.
+#[test]
+fn each_git_ask_of_a_patch_review_that_cannot_start_is_handled() {
+    let (base, _) = gateway(MODEL, answer_yes);
+    let jev = through(&base);
+    for (nth, refused) in [(2, false), (4, false), (5, true), (6, true), (7, true)] {
+        let project = Project::cart("patch-git");
+        project.edit(
+            "src/cart.js",
+            "return express ? 15 : 5;",
+            "return express ? 20 : 5;",
+        );
+        project.write("src/new.js", "export const x = 1;\n");
+        let fault = format!("spawn#changes.rs:81@{nth}");
+        let mut env = jev.to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", fault.as_str()));
+        let ran = project.supercov_with(&["quality", "patch"], &env);
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert!(said.contains("test fault at spawn"), "{fault}: {said}");
+        if refused {
+            assert_ne!(ran.code(), 0, "{fault}: {said}");
+            assert!(said.contains("cannot run git"), "{fault}: {said}");
+        } else {
+            assert_eq!(ran.code(), 0, "{fault}: {said}");
+        }
+    }
+}
+
 #[test]
 fn quality_patch_reviews_only_what_a_change_introduced() {
     let project = Project::cart("quality-patch");
