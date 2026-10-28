@@ -13501,6 +13501,27 @@ export function shapes(n: number): unknown {
         );
     }
 
+    /// A TypeScript non-null assertion inside an optional chain is a link
+    /// of it: `o?.a!?.b` is two optional links, as `o?.a?.b` is.
+    #[test]
+    fn a_non_null_assertion_is_a_link_of_an_optional_chain() {
+        let output = instrument_direct_candidate(
+            "export function f(o?: { a?: { b: number } }) {\n  return [o?.a!?.b, o!?.a, (o?.a)!.b];\n}\n",
+            "src/a.ts",
+        )
+        .unwrap();
+        assert_eq!(
+            output
+                .branches
+                .iter()
+                .filter(|branch| branch.kind == "optional-chain")
+                .count(),
+            4,
+            "{:?}",
+            output.branches
+        );
+    }
+
     #[test]
     fn an_ambient_class_is_no_statement() {
         let output = instrument_direct_candidate(
