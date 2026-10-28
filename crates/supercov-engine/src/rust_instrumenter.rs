@@ -5558,6 +5558,11 @@ pub fn documented(value: i32) -> i32 {
             build_rust_manifest("src/lib.rs", "fn broken( {\n"),
             Err(RustInstrumenterError::Parse(_))
         ));
+        // Nor is it instrumented.
+        assert!(matches!(
+            instrument_rust_source("src/lib.rs", "fn broken( {\n", "crate::__supercov"),
+            Err(RustInstrumenterError::Parse(_))
+        ));
     }
 
     /// The cfg of an x86_64 Linux target, as `rustc --print cfg` reports it.
