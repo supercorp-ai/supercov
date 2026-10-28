@@ -11972,8 +11972,8 @@ fn a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure() {
 }
 
 /// Each query's own read of the index failing -- a decision looked up by its
-/// place, the older and newer run of a diff, the summary's runners -- refuses
-/// the query, and names where.
+/// place, the older and newer run of a diff, the summary's runners, the
+/// areas' kinds and tested files -- refuses the query, and names where.
 #[test]
 fn a_query_whose_own_index_read_fails_is_refused() {
     let project = Project::cart("index-read-places");
@@ -11990,6 +11990,14 @@ fn a_query_whose_own_index_read_fails_is_refused() {
         (vec!["diff", &older, "latest"], "coverage_query.rs:2938@2"),
         (vec!["diff", &older, "latest"], "coverage_query.rs:2831@2"),
         (vec!["runs", "latest", "summary"], "coverage_query.rs:3262"),
+        (
+            vec!["runs", "latest", "files", "--group", "dir"],
+            "coverage_query.rs:3536",
+        ),
+        (
+            vec!["runs", "latest", "files", "--group", "dir"],
+            "coverage_query.rs:3544",
+        ),
     ] {
         let fault = format!("coverage-index-read#{place}");
         let ran = project.supercov_with(&command, &[("SUPERCOV_TEST_FAULT", &fault)]);
