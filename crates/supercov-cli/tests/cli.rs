@@ -14641,6 +14641,31 @@ fn a_javascript_run_that_cannot_write_its_diagnostics_says_so() {
     }
 }
 
+/// A browser suite beside a Python server reads the server's project before
+/// the suite starts: its sources, digested and captured, and the plan the
+/// server's probes are given. Each failing ends the run, naming the file.
+#[test]
+fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
+    for (fault, place, file) in [
+        ("fs.read#11@1", "python_project.rs:268", "server/app.py"),
+        ("fs.open#1@4", "integrity.rs:426", "server/app.py"),
+        ("fs.read#9@5", "source_capture.rs:54", "server/app.py"),
+        ("fs.write#4@1", "python_run.rs:675", "plan.json"),
+    ] {
+        let project = Project::cart("browser-python");
+        project.write(".gitignore", "out/\nnode_modules/\n");
+        project.write("playwright.config.js", "export default {};\n");
+        project.write("server/app.py", "def hello():\n    return 1\n");
+        project.commit("server");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
+        assert!(stderr.contains(file), "{fault}: {stderr}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
