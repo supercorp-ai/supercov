@@ -800,8 +800,8 @@ impl SlotLayout {
         if contents.len() != self.bytes {
             return Err(invalid("slot size does not match the layout"));
         }
-        let context =
-            transport_u64(contents, 0).ok_or_else(|| invalid("slot context is missing"))?;
+        // Before the tag read above, so there.
+        let context = checked_u64(contents, 0);
         let mut decoded = Decoded::default();
         contents
             .iter()
@@ -1386,8 +1386,9 @@ fn apply_transport(
                         obligation,
                     });
             }
-            // Expanded through the layout before it is applied.
-            Record::Runs { .. } => return Err(invalid("slot runs were not expanded")),
+            // Expanded through the layout as the transport is read, into
+            // records that are never runs.
+            Record::Runs { .. } => unreachable!("slot runs are expanded as they are read"),
             Record::Exit { .. } => {}
         }
         Ok(())
