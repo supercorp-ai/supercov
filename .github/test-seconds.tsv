@@ -58,6 +58,7 @@ a_file_too_large_for_one_request_is_read_in_windows	80.4	64.7
 a_file_under_no_root_is_put_to_the_model_with_the_manifests_and_a_failure_is_said	0.1	0.1
 a_floor_on_what_a_run_has_none_of_cannot_pass	1.5	1.5
 a_function_shipped_as_text_runs_where_no_probe_exists	0.8	0.8
+a_gaps_export_that_cannot_read_file_details_is_refused	1.5	2.0
 a_gateway_serves_both_catalogs_with_the_model_it_names	0.1	0.1
 a_go_run_names_the_tests_it_could_not_claim_and_the_files_it_could_not_read	2.5	1.5
 a_go_run_whose_own_step_fails_says_so	60.0	90.0

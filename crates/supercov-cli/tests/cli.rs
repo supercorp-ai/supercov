@@ -14330,6 +14330,27 @@ fn a_command_whose_directory_was_removed_is_refused() {
     }
 }
 
+/// The gaps export reads every file's detail from one opening of the run's
+/// index, after the gaps themselves: that index failing to open, or a read
+/// of it failing, refuses the export.
+#[test]
+fn a_gaps_export_that_cannot_read_file_details_is_refused() {
+    let project = Project::cart("gaps-export-details");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.supercov(&["runs", "latest", "--json"]).succeeds();
+    for fault in ["coverage-index@4", "coverage-index-read#3"] {
+        let refused = project
+            .supercov_with(
+                &["runs", "latest", "gaps", "--format", "jsonl"],
+                &[("SUPERCOV_TEST_FAULT", fault)],
+            )
+            .exits(2);
+        assert!(refused.contains("[supercov]"), "{fault}: {refused}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
