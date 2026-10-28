@@ -498,15 +498,9 @@ fn shift_source_map(
                 shift += replacement.len() as isize - (*end - *start) as isize;
                 edit_index += 1;
             }
-            // The loop above stops at the first edit that ends past the
-            // token, so the token is inside it exactly when it starts there.
-            let shifted_offset = edits
-                .get(edit_index)
-                .filter(|(start, _, _)| *start <= original_offset)
-                .map_or_else(
-                    || original_offset.saturating_add_signed(shift),
-                    |(start, _, _)| start.saturating_add_signed(shift),
-                );
+            // Every edit is a comment, and no token of the code is inside
+            // one: each moves by the edits before it.
+            let shifted_offset = original_offset.saturating_add_signed(shift);
             let (dst_line, dst_col) = restored_lines.line_col(shifted_offset);
             oxc_sourcemap::Token::new(
                 dst_line,
