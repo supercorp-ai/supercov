@@ -350,7 +350,8 @@ fn rspec(source: &str, ids: &[usize]) -> Option<Located> {
         loops: 0,
     };
     specs.visit(&parsed.node());
-    let mut level = specs.stack.pop()?;
+    // The visit pushes and pops each group: the file's own level is left.
+    let mut level = specs.stack.pop().expect("the file's level is left");
     let mut context = Vec::new();
     let mut found: Option<(usize, usize)> = None;
     for &id in ids {
@@ -514,9 +515,10 @@ pub(super) fn helpers(root: &Path, from: &str, text: &str) -> Vec<String> {
         let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
             continue;
         };
-        let Some(name) = rest[1..].split(q).next() else {
-            continue;
-        };
+        let name = rest[1..]
+            .split(q)
+            .next()
+            .expect("a split yields a part at least");
         let name = name.strip_suffix(".rb").unwrap_or(name);
         let bases: Vec<std::path::PathBuf> = if relative {
             vec![here.to_path_buf()]
@@ -706,6 +708,8 @@ mod tests {
         assert_eq!(at("1:9"), Some((4, 12)));
         assert_eq!(at("2"), None);
         assert!(locate(spec, &lines, "rspec", "no brackets").is_none());
+        // Brackets that number nothing name no example.
+        assert!(locate(spec, &lines, "rspec", "spec/a_spec.rb[]").is_none());
     }
 
     #[test]
@@ -806,6 +810,17 @@ mod tests {
         );
         let last = locate(feature, &lines, "cucumber", "features/cart.feature:8").unwrap();
         assert_eq!((last.start, last.end), (7, lines.len() - 1));
+        // A name with no line, line 0, or a line past the file's end.
+        for name in [
+            "features/cart",
+            "features/cart.feature:0",
+            "features/cart.feature:99",
+        ] {
+            assert!(
+                locate(feature, &lines, "cucumber", name).is_none(),
+                "{name}"
+            );
+        }
         // Rails' `test "adds numbers"`, minitest/spec's numbered `it`, and a
         // method named for a word the description starts with.
         let tests = "class CartTest < ActiveSupport::TestCase\n  test \"adds numbers\" do\n    assert true\n  end\nend\ndescribe Cart do\n  it 'removes items' do\n    assert true\n  end\nend\nclass Plain < Minitest::Test\n  def test_adds_more; assert true; end\n  def test_adds\n    assert true\n  end\nend\n";
