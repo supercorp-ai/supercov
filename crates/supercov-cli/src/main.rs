@@ -1840,15 +1840,14 @@ fn run_view_of(
     } else {
         &report.filters.passed
     };
-    supercov_engine::run_view::build(
+    Ok(supercov_engine::run_view::build(
         &run.id,
         &run.metadata.started_at,
         view,
         passed,
         comparison.stale,
         comparison.reasons,
-    )
-    .map_err(|error| format!("{error:?}"))
+    ))
 }
 
 /// The view of the run `selector` picks in the project at `root` and, for a

@@ -122,10 +122,7 @@ pub fn build(view: &RunView, changed: &ChangedLines) -> PatchView {
                 .iter()
                 .copied()
                 .collect::<BTreeSet<_>>();
-            let eligible = file
-                .metric(Metric::Lines)
-                .map(|metric| metric.eligible)
-                .unwrap_or(0);
+            let eligible = file.metric(Metric::Lines).eligible;
             (file.file.as_str(), (uncovered, eligible))
         })
         .collect::<BTreeMap<_, _>>();

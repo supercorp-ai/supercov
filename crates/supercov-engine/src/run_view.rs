@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::coverage_analysis::CoverageSummary;
-use crate::coverage_report::{CoverageView, ReportError, coverage_summary_for_file};
+use crate::coverage_report::{CoverageView, coverage_summary_for_file};
 
 pub const RUN_VIEW_SCHEMA_VERSION: u32 = 1;
 
@@ -98,6 +98,11 @@ pub struct MetricView {
 }
 
 impl MetricView {
+    /// Covered and eligible, in that order.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.covered, self.eligible)
+    }
+
     /// Exact comparison against a floor in parts per million of a percentage.
     ///
     /// The counts are compared directly, never a formatted percentage: a run
@@ -219,8 +224,11 @@ pub struct FileView {
 }
 
 impl FileView {
-    pub fn metric(&self, metric: Metric) -> Option<&MetricView> {
-        self.metrics.iter().find(|view| view.metric == metric)
+    pub fn metric(&self, metric: Metric) -> &MetricView {
+        self.metrics
+            .iter()
+            .find(|view| view.metric == metric)
+            .expect("a file view counts every metric")
     }
 
     /// Every measured line paired with whether a selected test reached it.
@@ -348,7 +356,7 @@ pub fn build(
     suite_passed: bool,
     stale: bool,
     stale_reasons: Vec<String>,
-) -> Result<RunView, ReportError> {
+) -> RunView {
     let mut files = BTreeMap::<String, FileView>::new();
     for line in &view.lines {
         let file = files
@@ -386,8 +394,8 @@ pub fn build(
         // A view folds every point, declined ones too, into its lines, so
         // the point's file is already here.
         files
-            .entry(point.meta.file.clone())
-            .or_insert_with(|| empty_file(&point.meta.file))
+            .get_mut(&point.meta.file)
+            .expect("a view's lines hold every point's file")
             .functions
             .push(FunctionRecord {
                 line: point.meta.line,
@@ -421,7 +429,10 @@ pub fn build(
     }
     let mut built = Vec::new();
     for (path, mut file) in files {
-        file.metrics = metrics_of(&coverage_summary_for_file(view, &path)?);
+        // The view was summarised whole when it was analysed.
+        file.metrics = metrics_of(
+            &coverage_summary_for_file(view, &path).expect("an analysed view summarises by file"),
+        );
         file.measured_lines.sort_unstable();
         file.measured_lines.dedup();
         file.uncovered_lines.sort_unstable();
@@ -441,7 +452,7 @@ pub fn build(
         .iter()
         .filter_map(|file| neighbourhood(&file.file))
         .collect::<BTreeSet<_>>();
-    Ok(RunView {
+    RunView {
         schema_version: RUN_VIEW_SCHEMA_VERSION,
         run: run.to_owned(),
         generated_at: generated_at.to_owned(),
@@ -457,7 +468,7 @@ pub fn build(
         totals: metrics_of(&view.summary),
         files: built,
         source_neighbourhoods,
-    })
+    }
 }
 
 /// A percentage floor, held in parts per million so a fractional target is
@@ -600,9 +611,7 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
             return;
         }
         for file in &view.files {
-            let Some(counts) = file.metric(floor.metric) else {
-                continue;
-            };
+            let counts = file.metric(floor.metric);
             // A file with nothing eligible for this metric is not a hundred
             // percent and not a violation either; it simply has no obligation.
             if counts.eligible == 0 || counts.meets(floor.ppm) {
@@ -822,7 +831,7 @@ mod tests {
     #[test]
     fn a_declined_line_leaves_the_totals_incomplete() {
         let coverage = small_coverage(Vec::new());
-        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
         let file = built.file("src/a.js").unwrap();
         assert_eq!(file.measured_lines, [1, 2]);
         assert_eq!(file.uncovered_lines, [2]);
@@ -863,7 +872,7 @@ mod tests {
             .iter_mut()
             .for_each(|branch| branch.alternatives.clear());
         coverage.decisions[0].conditions.clear();
-        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
         let file = built.file("src/a.js").unwrap();
         assert!(file.measured_lines.is_empty() && file.branches.is_empty());
         assert!(file.conditions.is_empty() && file.missing_conditions.is_empty());
@@ -872,7 +881,7 @@ mod tests {
         coverage.points.clear();
         coverage.branches.clear();
         coverage.decisions.clear();
-        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
         assert!(built.files.is_empty());
         // Totals that pass, judged per file over no file, find nothing more.
         let floors = [Floor {

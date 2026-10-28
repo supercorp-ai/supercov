@@ -138,10 +138,7 @@ pub fn lcov(view: &RunView) -> String {
             // a made-up frequency here would be displayed as one.
             let _ = writeln!(out, "FNDA:{},{}", u8::from(function.covered), function.name);
         }
-        let (covered_functions, functions) = file
-            .metric(Metric::Functions)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (covered_functions, functions) = file.metric(Metric::Functions).counts();
         let _ = writeln!(out, "FNF:{functions}");
         let _ = writeln!(out, "FNH:{covered_functions}");
         for branch in &file.branches {
@@ -154,10 +151,7 @@ pub fn lcov(view: &RunView) -> String {
                 if branch.taken { "1" } else { "-" }
             );
         }
-        let (covered_branches, branches) = file
-            .metric(Metric::Branches)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (covered_branches, branches) = file.metric(Metric::Branches).counts();
         let _ = writeln!(out, "BRF:{branches}");
         let _ = writeln!(out, "BRH:{covered_branches}");
         let (conditions, shown) = mcdc_records(&file.conditions, &mut out);
@@ -168,10 +162,7 @@ pub fn lcov(view: &RunView) -> String {
         for (line, covered) in file.line_hits() {
             let _ = writeln!(out, "DA:{line},{}", u8::from(covered));
         }
-        let (covered_lines, lines) = file
-            .metric(Metric::Lines)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (covered_lines, lines) = file.metric(Metric::Lines).counts();
         let _ = writeln!(out, "LF:{lines}");
         let _ = writeln!(out, "LH:{covered_lines}");
         let _ = writeln!(out, "end_of_record");
@@ -203,14 +194,8 @@ pub fn cobertura(view: &RunView, timestamp: u64) -> String {
     );
     out.push_str("      <classes>\n");
     for file in &view.files {
-        let (file_covered, file_lines) = file
-            .metric(Metric::Lines)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
-        let (branch_covered, branch_total) = file
-            .metric(Metric::Branches)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (file_covered, file_lines) = file.metric(Metric::Lines).counts();
+        let (branch_covered, branch_total) = file.metric(Metric::Branches).counts();
         let _ = writeln!(
             out,
             "        <class name=\"{}\" filename=\"{}\" line-rate=\"{:.4}\" branch-rate=\"{:.4}\" complexity=\"0\">",
@@ -549,7 +534,11 @@ mod tests {
     fn a_file_with_nothing_measured_exports_an_empty_record() {
         let mut view = fixture();
         let file = &mut view.files[0];
-        file.metrics.clear();
+        // Every metric counted, none with anything eligible.
+        file.metrics = Metric::ALL
+            .into_iter()
+            .map(|each| metric(each, 0, 0))
+            .collect();
         file.measured_lines.clear();
         file.uncovered_lines.clear();
         file.functions.clear();
@@ -573,7 +562,13 @@ mod tests {
         assert_eq!(rate(0, 0), 1.0);
         let mut view = fixture();
         view.files[0].branches.clear();
-        view.files[0].metrics = vec![metric(Metric::Lines, 3, 4), metric(Metric::Branches, 0, 0)];
+        view.files[0].metrics = Metric::ALL
+            .into_iter()
+            .map(|each| match each {
+                Metric::Lines => metric(each, 3, 4),
+                _ => metric(each, 0, 0),
+            })
+            .collect();
         let xml_text = cobertura(&view, 0);
         assert!(xml_text.contains("branch-rate=\"1.0000\""), "{xml_text}");
     }
