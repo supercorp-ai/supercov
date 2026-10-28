@@ -722,6 +722,24 @@ mod tests {
                 "UnknownPhaseReference",
                 Box::new(|_, r| r.raw_results[0].runtime[0].phase_id = Some(" ".into())),
             ),
+            // An event, or a server's record, naming a phase there is not.
+            (
+                "UnknownPhaseReference",
+                Box::new(|_, r| {
+                    r.raw_results[0].runtime[0].events[0].phase_id = Some("missing".into())
+                }),
+            ),
+            (
+                "UnknownPhaseReference",
+                Box::new(|_, r| {
+                    r.raw_results[0].server.push(
+                        serde_json::from_value(
+                            serde_json::json!({"type": "hit", "id": "s1", "phaseId": "missing"}),
+                        )
+                        .unwrap(),
+                    )
+                }),
+            ),
             // An event alone is an observation an unstarted test cannot have.
             (
                 "InvalidUnstartedResult",
