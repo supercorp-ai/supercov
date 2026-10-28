@@ -941,15 +941,15 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "tests", "affected"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:662")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:636"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:662"), "{unlisted}");
     // A run whose entry in the store cannot be read is left out of the list.
     let rejected = project
         .supercov_with(
             &["runs"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:636")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:662")],
         )
         .succeeds();
     assert!(rejected.contains("showing 0-0 of 0"), "{rejected}");
@@ -1175,7 +1175,7 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
     let second = project.measure(&["--test-name-pattern=shipping"]);
     for (fault, said) in [
         (
-            "fs.read_dir#run_store.rs:636",
+            "fs.read_dir#run_store.rs:662",
             "Cannot read local coverage runs",
         ),
         (
@@ -9302,11 +9302,11 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     // a store that cannot be listed cannot answer.
     let unlisted = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636@2")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:662@2")],
     );
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
-    assert!(fired_at(&said, "run_store.rs:636"), "{said}");
+    assert!(fired_at(&said, "run_store.rs:662"), "{said}");
     // A run it was merged from that is no longer stored cannot answer.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
     let gone = project
@@ -12356,7 +12356,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "files", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:662")],
         )
         .exits(2);
     assert!(
@@ -12466,7 +12466,7 @@ fn an_index_that_cannot_be_read_mid_command_is_named() {
     // Nor whose published run cannot be found again to read.
     for (fault, place) in [
         ("coverage-index@2", "coverage-index"),
-        ("fs.symlink_metadata#run_store.rs:582", "run_store.rs:582"),
+        ("fs.symlink_metadata#run_store.rs:608", "run_store.rs:608"),
     ] {
         let project = Project::cart("index-failed-run");
         project.edit("test/cart.test.js", "20);", "21);");
@@ -14539,7 +14539,7 @@ fn an_import_whose_step_fails_says_so() {
         "fs.rename@3",
         "fs.rename@4",
         // The store of runs listed, and the lock released after importing.
-        "fs.read_dir#run_store.rs:636",
+        "fs.read_dir#run_store.rs:662",
         "copy-release",
     ] {
         let project = Project::cart("import-steps");
@@ -15218,7 +15218,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // that cannot be read.
         "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:636",
         // The runs listed again for the details.
-        "fs.read_dir#run_store.rs:636@2",
+        "fs.read_dir#run_store.rs:662@2",
     ] {
         let refused = project
             .supercov_with(
@@ -15279,7 +15279,7 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1269,fs.read_from#evidence_archive.rs:636",
+            "fs.read#run_store.rs:1295,fs.read_from#evidence_archive.rs:636",
         )],
     );
     assert!(
@@ -17360,10 +17360,10 @@ fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
     assert!(missing.contains("coverage run not found"), "{missing}");
     let unlisted = project.supercov_with(
         &report,
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:662")],
     );
     assert_eq!(unlisted.code(), 2, "{}", unlisted.stderr());
-    assert!(fired_at(&unlisted.stderr(), "run_store.rs:636"));
+    assert!(fired_at(&unlisted.stderr(), "run_store.rs:662"));
     snapshot(&project, "q_0000000000000001", serde_json::json!([]));
     snapshot(
         &project,

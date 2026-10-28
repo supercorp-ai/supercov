@@ -173,7 +173,17 @@ pub struct CompanionRun {
 
 #[cfg(test)]
 pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, None)
+    create_analyzable_run(root, id, None, Vec::new())
+}
+
+/// The same run with more entries in its archive.
+#[cfg(test)]
+pub(crate) fn create_analyzable_test_run_with(
+    root: &Path,
+    id: &str,
+    more: Vec<crate::evidence_archive::EvidenceArchiveEntry>,
+) -> PathBuf {
+    create_analyzable_run(root, id, None, more)
 }
 
 /// The same run as a suite that ran its tests at once: the coverage sits in
@@ -182,7 +192,12 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
 /// package whose tests all call `t.Parallel()`.
 #[cfg(test)]
 pub(crate) fn create_run_wide_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE))
+    create_analyzable_run(
+        root,
+        id,
+        Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE),
+        Vec::new(),
+    )
 }
 
 /// The same run as a Ruby suite: the test keeps the coverage it was credited
@@ -190,11 +205,21 @@ pub(crate) fn create_run_wide_test_run(root: &Path, id: &str) -> PathBuf {
 /// ran. What its own record proves, it still proves.
 #[cfg(test)]
 pub(crate) fn create_partial_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_PARTIAL))
+    create_analyzable_run(
+        root,
+        id,
+        Some(crate::coverage_report::ATTRIBUTION_PARTIAL),
+        Vec::new(),
+    )
 }
 
 #[cfg(test)]
-fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> PathBuf {
+fn create_analyzable_run(
+    root: &Path,
+    id: &str,
+    attribution: Option<&str>,
+    more: Vec<crate::evidence_archive::EvidenceArchiveEntry>,
+) -> PathBuf {
     use crate::{
         coverage_analysis::{McdcVector, PointKind},
         coverage_report::{
@@ -394,6 +419,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
             contents: serde_json::to_vec(result).unwrap(),
         });
     }
+    entries.extend(more);
     let archive = write_archive(entries, &directory.join("evidence.raw.gz")).unwrap();
     let digest = |character: char| std::iter::repeat_n(character, 64).collect::<String>();
     let metadata = RunMetadata {
@@ -1623,7 +1649,7 @@ mod tests {
         }
         write("filtered-notes.txt", 0);
         // A directory that cannot be listed is pruned of nothing.
-        crate::fault::during("fs.read_dir#run_store.rs:1220", || {
+        crate::fault::during("fs.read_dir#run_store.rs:1246", || {
             prune_filtered_indexes(&kept)
         });
         assert!(root.join("filtered-01.index").exists());

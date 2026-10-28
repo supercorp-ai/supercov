@@ -694,21 +694,22 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             contents: serde_json::to_vec(sources).expect("plain data serializes"),
         });
     }
-    archive.into_iter().for_each(|entry| {
+    for entry in archive {
         // The records name the run they were made in; they are this run's
-        // now. A stored run's records were read whole when it was published.
+        // now. A server's record torn as it was written is kept in the run,
+        // counted as corrupt, and cannot be rewritten.
         let contents = if entry.path == "coverage-model.json" {
             entry.contents
         } else {
             crate::run_merge::rewritten_contents(&entry.contents, request.run_id, None)
-                .expect("a stored run's records rewrite")
+                .map_err(|error| format!("Cannot import into run {}: {error}", parent.id))?
                 .unwrap_or_default()
         };
         entries.push(EvidenceArchiveEntry {
             path: entry.path,
             contents,
         });
-    });
+    }
 
     let mut lock = ProjectLock::acquire(request.root, request.run_id, request.started_at)
         .map_err(|error| format!("Cannot lock coverage store for the import: {error}"))?;
@@ -1047,6 +1048,23 @@ mod tests {
             import("run-a", Credit::Background, "run-f", &profile)
                 .unwrap_err()
                 .contains("is an LLVM profile")
+        );
+        // A server's record torn as it was written is kept in the run, and
+        // cannot be carried into another: the import says so.
+        crate::run_store::create_analyzable_test_run_with(
+            &root,
+            "run-torn",
+            vec![crate::evidence_archive::EvidenceArchiveEntry {
+                path: "server/background/worker.jsonl".into(),
+                contents: b"{\"type\":\"hit\",\"id\":\"statement\"}\n{\"type\":\"hi".to_vec(),
+            }],
+        );
+        let torn = import("run-torn", Credit::Background, "run-h", &evidence).unwrap_err();
+        assert!(
+            torn.contains(
+                "Cannot import into run run-torn: cannot merge malformed recognized JSON evidence"
+            ),
+            "{torn}"
         );
     }
 

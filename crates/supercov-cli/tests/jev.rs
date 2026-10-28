@@ -371,7 +371,7 @@ fn security_reads_a_coverage_run_beside_its_findings() {
             "fs.read_from#evidence_archive.rs:636@3",
             "evidence_archive.rs:636",
         ),
-        ("fs.read_dir#run_store.rs:636", "run_store.rs:636"),
+        ("fs.read_dir#run_store.rs:662", "run_store.rs:662"),
     ] {
         let mut env = jev.to_vec();
         env.push(("SUPERCOV_TEST_FAULT", fault));
@@ -5855,7 +5855,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let project = Project::cart("assess-unread");
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
-    let unread = "fs.open#run_store.rs:1282,fs.read_from#evidence_archive.rs:636";
+    let unread = "fs.open#run_store.rs:1308,fs.read_from#evidence_archive.rs:636";
     let refused = |args: &[&str], fault: &str| {
         let mut full = vec!["runs", run.as_str(), "assertions"];
         full.extend_from_slice(args);

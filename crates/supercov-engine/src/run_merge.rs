@@ -948,6 +948,34 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A server's record torn as it was written is kept in its run, counted
+    /// as corrupt; a merge cannot carry it, and says so.
+    #[test]
+    fn a_run_holding_a_torn_record_is_not_merged() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        rewrite_entry(
+            &root,
+            "run-b",
+            "server/background/worker.jsonl",
+            Some(b"{\"type\":\"hit\",\"id\":\"statement\"}\n{\"type\":\"hi".to_vec()),
+        );
+        let error = merge_coverage_runs(
+            &root,
+            &["run-a".into(), "run-b".into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot merge malformed recognized JSON evidence"),
+            "{error}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Rewrites one entry of a stored run's evidence (None removes it) and
     /// keeps its metadata in step with the archive.
     fn rewrite_entry(root: &Path, id: &str, path: &str, contents: Option<Vec<u8>>) {
