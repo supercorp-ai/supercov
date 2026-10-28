@@ -12906,6 +12906,12 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "fs.canonicalize@18",
             "fs.create_dir@2",
             "fs.read_dir@26",
+            // The doctest runner: Supercov's own path resolved, the packages
+            // it recorded listed and read, a doctest's evidence listed.
+            "fs.canonicalize@21",
+            "fs.read_dir@27",
+            "fs.read@12",
+            "fs.read_dir@28",
             "spawn",
         ],
     );
@@ -12917,6 +12923,15 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             &["--", "cargo", "nextest", "run"],
             &[
                 "fs.write@5",
+                // The attempts' directory, Supercov's own path, Cargo's
+                // runner configuration resolved, the attempts listed and
+                // read, an attempt's evidence listed.
+                "fs.create_dir_all@9",
+                "fs.canonicalize@14",
+                "fs.canonicalize@17",
+                "fs.read_dir@14",
+                "fs.read@10",
+                "fs.read_dir@15",
                 "__nextest-runner/spawn@1",
                 "__nextest-runner/fs.read@1",
                 "__nextest-runner/fs.create_dir_all@1",
