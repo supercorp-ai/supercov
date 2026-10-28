@@ -277,23 +277,23 @@ pub fn publish(
         };
         let run_directory =
             publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-        writeln!(
+        // The run is published: a line about it that cannot be written takes
+        // nothing from it, as for a Python or Ruby server.
+        let _ = writeln!(
             diagnostics,
             "[supercov] {} server coverage: {} test(s) across {} source file(s), credited by time",
             server.language,
             served.len(),
             server.source_files
-        )
-        .map_err(|error| error.to_string())?;
+        );
         // Parallel workers share one server, and its probes cannot tell
         // their requests apart. Say what it cost, and how to have it all.
         if !overlapped.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} of those test(s) had the server's work only while another test ran too, so it is the run's and none of theirs; with `--workers=1` each test's is its own",
                 overlapped.len()
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         Ok(Some((run_directory, metadata)))
     })();
