@@ -12313,7 +12313,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
         // Every file's details, the scope read last of all.
         (
             vec!["runs", "latest", "gaps", "--format", "jsonl"],
-            "coverage_query.rs:2210",
+            "coverage_query.rs:2210@2",
         ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
