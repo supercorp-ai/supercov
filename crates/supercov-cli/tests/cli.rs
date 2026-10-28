@@ -17541,3 +17541,25 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
             .contains("src/cart.js")
     );
 }
+
+/// A run with source under no root names it in its summary, from the scope's
+/// entries: entries that cannot be read refuse the summary.
+#[test]
+fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
+    let project = Project::cart("summary-unclassified");
+    project.write("misc/tool.js", "export const tool = 1;\n");
+    project.commit("misc");
+    project.measure(&[]);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Unclassified source: misc 1"), "{summary}");
+    let refused = project.supercov_with(
+        &["runs", "latest"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "coverage-index-read#coverage_query.rs:3382",
+        )],
+    );
+    let said = format!("{}{}", refused.stdout(), refused.stderr());
+    assert_eq!(refused.code(), 2, "{said}");
+    assert!(fired_at(&said, "coverage_query.rs:3382"), "{said}");
+}
