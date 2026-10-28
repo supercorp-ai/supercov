@@ -12885,6 +12885,27 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "fs.file_type@9",
             "fs.read@10",
             "fs.read@11",
+            // The lock and recovery, the inputs captured and digested, the
+            // copy recovered, the target directory, the outputs before and
+            // after, the archive, the trash; the runner's target, test
+            // binary and source resolved, a test's evidence directory, the
+            // probe evidence listed.
+            "fs.create_dir_all@1",
+            "fs.create_dir_all@2",
+            "fs.read@5",
+            "fs.open@1",
+            "fs.read_dir@5",
+            "fs.create_dir_all@7",
+            "fs.read_dir@11",
+            "fs.read_dir@29",
+            "fs.create_dir_all@11",
+            "fs.create_dir_all@12",
+            "fs.create_dir_all@20",
+            "fs.canonicalize@16",
+            "fs.canonicalize@17",
+            "fs.canonicalize@18",
+            "fs.create_dir@2",
+            "fs.read_dir@26",
             "spawn",
         ],
     );
