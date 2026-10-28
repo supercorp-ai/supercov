@@ -1350,6 +1350,14 @@ mod tests {
                 "Cannot merge run run-a with run run-b: mocks/a.js; mocks/b.js changed, and 1 of its tests reached them through a server that served them and were not measured again: t9.".into(),
             ),
             (
+                "grown, the recorded file gone since",
+                Box::new(|root| {
+                    grown_from_a_recorded_file(root);
+                    fs::remove_file(root.join("test/data.json")).unwrap();
+                }),
+                "Cannot merge run run-a with run run-b: test/data.json is gone. Measure it again, or pass --allow-changed if the change alters nothing its tests ran.".into(),
+            ),
+            (
                 "grown, the earlier run without a record of its files",
                 Box::new(|root| record_files(root, "run-b", &[])),
                 "Cannot merge incompatible run run-a: differing domains: recorded files".into(),
