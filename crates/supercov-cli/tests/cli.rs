@@ -17617,3 +17617,25 @@ fn a_run_whose_evidence_holds_a_torn_record_is_refused() {
         ran.stderr()
     );
 }
+
+/// A query of a run the checkout has moved past names the files that moved
+/// from the run's record of them; a record that cannot be read names none,
+/// and the query still answers, as stale.
+#[test]
+fn a_stale_query_whose_record_cannot_be_read_still_answers() {
+    let project = Project::cart("stale-unrecorded");
+    project.measure(&[]);
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
+    let ran = project.supercov_with(
+        &["runs", "latest", "files", "--json"],
+        &[("SUPERCOV_TEST_FAULT", "fs.open#source_manifest.rs:359")],
+    );
+    assert!(
+        ran.stderr()
+            .contains("test fault at fs (source_manifest.rs:359 open)"),
+        "{}",
+        ran.stderr()
+    );
+    let json = ran.json();
+    assert_eq!(json["ok"], true, "{json}");
+}
