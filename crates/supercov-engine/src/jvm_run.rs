@@ -3166,6 +3166,64 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// Each file the copy gains or has changed -- a build that no longer
+    /// fails on warnings, a TestNG listener and its service entry, the
+    /// launcher, a module's sequential properties -- that cannot be written
+    /// stops the instrumentation.
+    #[test]
+    fn each_file_the_instrumentation_writes_that_fails_stops_it() {
+        let make = || {
+            let root = temporary_root("gradle-writes");
+            write(
+                &root.join("build.gradle"),
+                "plugins { id 'java' }\noptions.compilerArgs << '-Werror'\n",
+            )
+            .unwrap();
+            let junit4 = "dependencies { testImplementation 'junit:junit:4.13.2' }\n";
+            java_module(&root, "both", true);
+            write(
+                &root.join("both/build.gradle"),
+                &format!(
+                    "{junit4}dependencies {{ testImplementation 'org.testng:testng:7.10.2' }}\n"
+                ),
+            )
+            .unwrap();
+            java_module(&root, "plain", true);
+            write(&root.join("plain/build.gradle"), junit4).unwrap();
+            root
+        };
+        let root = make();
+        instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        fs::remove_dir_all(&root).ok();
+        for line in [1276, 1296, 1385, 1421, 1432] {
+            let root = make();
+            let fault = format!("fs.write#jvm_run.rs:{line}");
+            let failed = crate::fault::during(&fault, || {
+                instrument_workspace(&root, &root.join("evidence"), true, None)
+            });
+            assert!(failed.is_err(), "{fault}");
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// A build of tests alone has no source to rewrite, and its tests are
+    /// still listened to.
+    #[test]
+    fn a_build_of_tests_alone_rewrites_no_source() {
+        let root = temporary_root("tests-only");
+        write(&root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        write(
+            &root.join("app/src/test/java/app/ApiTest.java"),
+            "package app;\nclass ApiTest { void t() {} }\n",
+        )
+        .unwrap();
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert!(instrumented.project.instrumented.is_empty());
+        assert!(instrumented.modules.iter().any(|module| module.has_tests));
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn gradle_moves_only_its_plain_junit_4_modules_onto_the_platform() {
         let root = temporary_root("gradle-junit4");
@@ -3286,8 +3344,12 @@ mod tests {
         }
         java_module(&root, "core", false);
         java_module(&root, "app", true);
+        // A module of the tree with no build file of its own takes the
+        // root's frameworks and has nothing to add the launcher to.
+        java_module(&root, "loose", true);
         let instrumented =
             instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert!(!root.join("loose/pom.xml").exists());
         assert_eq!(instrumented.added_launcher, Some("pom.xml"));
         assert!(
             fs::read_to_string(root.join("app/pom.xml"))
