@@ -1741,6 +1741,14 @@ mod tests {
         })
         .unwrap();
         assert_eq!(fs::read(&state).unwrap(), b"one");
+        // Sixteen names taken in a row, and it gives up.
+        assert!(matches!(
+            during("atomic-write-create=16", || atomic_write(
+                &root, &state, b"two"
+            )),
+            Err(LifecycleError::LockUnavailable)
+        ));
+        assert_eq!(fs::read(&state).unwrap(), b"one");
         assert!(during("atomic-write-sync", || atomic_write(&root, &state, b"two")).is_err());
         assert_eq!(fs::read(&state).unwrap(), b"one");
         let leftovers = fs::read_dir(state.parent().unwrap())
@@ -2540,6 +2548,21 @@ mod tests {
         copies.sort_unstable();
         assert_eq!(copies, (1..=24).collect::<Vec<_>>());
         drop(holds);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every copy taken by a run still going, and one more is refused.
+    #[test]
+    fn a_run_beyond_the_most_copies_is_refused() {
+        let root = project();
+        let held = (0..MOST_COPIES)
+            .map(|each| ProjectLock::acquire(&root, &format!("run-{each}"), "start").unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            ProjectLock::acquire(&root, "one-more", "start").map(|_| ()),
+            Err(LifecycleError::LockUnavailable)
+        ));
+        drop(held);
         fs::remove_dir_all(root).unwrap();
     }
 
