@@ -715,29 +715,41 @@ fn query_filters(
     }
 }
 
+/// The tests a kind or runner selects, or None when neither is given.
+fn tests_selected(
+    tests: &[IndexedTestSummary],
+    kind: Option<&str>,
+    runner: Option<&str>,
+) -> Option<BTreeSet<String>> {
+    if kind.is_none() && runner.is_none() {
+        return None;
+    }
+    Some(
+        tests
+            .iter()
+            .filter(|test| {
+                kind.is_none_or(|kind| test.provenance.kind == kind)
+                    && runner.is_none_or(|runner| test.provenance.runner == runner)
+            })
+            .map(|test| test.id.clone())
+            .collect(),
+    )
+}
+
+/// [`tests_selected`], refusing a kind or runner no test has.
 fn selected_test_ids(
     tests: &[IndexedTestSummary],
     kind: Option<&str>,
     runner: Option<&str>,
 ) -> Result<Option<BTreeSet<String>>, QueryError> {
-    if kind.is_none() && runner.is_none() {
-        return Ok(None);
-    }
-    let selected = tests
-        .iter()
-        .filter(|test| {
-            kind.is_none_or(|kind| test.provenance.kind == kind)
-                && runner.is_none_or(|runner| test.provenance.runner == runner)
-        })
-        .map(|test| test.id.clone())
-        .collect::<BTreeSet<_>>();
-    if selected.is_empty() {
+    let selected = tests_selected(tests, kind, runner);
+    if selected.as_ref().is_some_and(BTreeSet::is_empty) {
         return Err(QueryError::TestFilterEmpty {
             kind: kind.map(str::to_owned),
             runner: runner.map(str::to_owned),
         });
     }
-    Ok(Some(selected))
+    Ok(selected)
 }
 
 /// What the lines of one call share: the run's tests, phases and
@@ -847,7 +859,9 @@ pub fn coverage_covers_query_cached(
     cache.fill(index, &options)?;
     let cache = &*cache;
     let tests = &cache.tests;
-    let selected = selected_test_ids(tests, options.kind, options.runner)?;
+    // The file's detail the cache was filled from refused a kind or runner
+    // no test has.
+    let selected = tests_selected(tests, options.kind, options.runner);
     let selected_includes = |id: &str| selected.as_ref().is_none_or(|ids| ids.contains(id));
     let filters = query_filters(options.view, options.kind, options.runner);
     let location = CoverageLocation {
@@ -3982,11 +3996,12 @@ pub fn coverage_file_decisions_query(
     // filters see them: a count of missing conditions does not say which
     // test to write.
     let selected = if options.kind.is_some() || options.runner.is_some() {
-        selected_test_ids(
+        // A kind or runner no test has made no decision gaps, refused above.
+        tests_selected(
             &index.test_summaries(options.view)?,
             options.kind,
             options.runner,
-        )?
+        )
     } else {
         None
     };

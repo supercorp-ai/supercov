@@ -7907,6 +7907,11 @@ fn a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query() {
             );
         }
     }
+    // A line read for such a filter, too.
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:14", "--kind", "e2e"])
+        .exits(2);
+    assert!(line.contains("No tests match kind=e2e"), "{line}");
     // A file's decisions read for such a filter, too.
     let decisions = project
         .supercov(&[
@@ -12394,25 +12399,25 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     for (command, place) in [
         (
             vec!["runs", "latest", "decision", "src/cart.js:3"],
-            "coverage_query.rs:1666",
+            "coverage_query.rs:1680",
         ),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2843"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2937@2"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2829@2"),
-        (vec!["runs", "latest", "summary"], "coverage_query.rs:3261"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2857"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2951@2"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2843@2"),
+        (vec!["runs", "latest", "summary"], "coverage_query.rs:3275"),
         // Every file's details, the scope read last of all.
         (
             vec!["runs", "latest", "gaps", "--format", "jsonl"],
-            "coverage_query.rs:2210@2",
+            "coverage_query.rs:2224@2",
         ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3794",
+            "coverage_query.rs:3808",
         ),
         // The dimensions read again, by runner.
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3794@2",
+            "coverage_query.rs:3808@2",
         ),
         (
             vec![
@@ -12425,7 +12430,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3937",
+            "coverage_query.rs:3951",
         ),
         (
             vec![
@@ -12438,15 +12443,15 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3986",
+            "coverage_query.rs:4001",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3535",
+            "coverage_query.rs:3549",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3543",
+            "coverage_query.rs:3557",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -15367,7 +15372,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // The index read the file details make first.
         if fault.starts_with("coverage-index-read") {
             assert!(
-                refused.contains("coverage_query.rs:2283"),
+                refused.contains("coverage_query.rs:2297"),
                 "{fault}: {refused}"
             );
         }
@@ -17670,12 +17675,12 @@ fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
         &["runs", "latest"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#coverage_query.rs:3382",
+            "coverage-index-read#coverage_query.rs:3396",
         )],
     );
     let said = format!("{}{}", refused.stdout(), refused.stderr());
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "coverage_query.rs:3382"), "{said}");
+    assert!(fired_at(&said, "coverage_query.rs:3396"), "{said}");
 }
 
 /// A record the run's evidence holds that is no JSON -- a process that tore
