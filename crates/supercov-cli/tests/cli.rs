@@ -13176,6 +13176,21 @@ fn a_maven_run_whose_own_step_fails_says_so() {
             "fs.write@8",
             "fs.read@10",
             "fs.rename@10",
+            // The lock and recovery, the inputs captured and digested, the
+            // copy recovered, an instrumented source's directory, the
+            // evidence directory, the outputs before and after, the archive,
+            // the trash.
+            "fs.create_dir_all@1",
+            "fs.create_dir_all@2",
+            "fs.read@4",
+            "fs.open@1",
+            "fs.read_dir@10",
+            "fs.create_dir_all@14",
+            "fs.create_dir_all@13",
+            "fs.read_dir@28",
+            "fs.create_dir_all@20",
+            "fs.create_dir_all@22",
+            "fs.open@18",
             "spawn",
         ],
     );
