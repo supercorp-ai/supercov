@@ -11441,6 +11441,23 @@ fn a_run_left_out_of_a_merge_or_read_stale_says_what_moved() {
         "{said}"
     );
 
+    // A test file the run measured, gone since: the run is left out by it.
+    let project_g = Project::cart("merge-test-gone");
+    project_g.write(
+        "test/extra.test.js",
+        "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('extra', () => assert.equal(1, 1));\n",
+    );
+    project_g.commit("extra test");
+    let run_g = project_g.measure(&[]);
+    std::fs::remove_file(project_g.root.join("test/extra.test.js")).unwrap();
+    let said_g = project_g.supercov(&["merge"]).exits(2);
+    assert!(
+        said_g.contains(&format!(
+            "left out {run_g} (node --test): test/extra.test.js, a file of its own tests, is gone"
+        )),
+        "{said_g}"
+    );
+
     // Only a test file changed, its manifest unreadable.
     let project_t = Project::cart("merge-test-only-unread");
     let run_t = project_t.measure(&[]);
