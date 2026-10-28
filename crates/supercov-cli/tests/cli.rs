@@ -18026,3 +18026,22 @@ fn a_directory_discovery_cannot_list_holds_no_configuration() {
         );
     }
 }
+
+/// A check reads each condition no test showed deciding its decision, file
+/// by file, where it is.
+#[test]
+fn a_check_names_each_missing_condition_by_its_place() {
+    let project = Project::cart("check-conditions");
+    project.measure(&[]);
+    let checked = project
+        .supercov(&["runs", "check", "--min-mcdc", "100", "--json"])
+        .json();
+    let files = checked["data"]["view"]["files"].as_array().unwrap();
+    let cart = files
+        .iter()
+        .find(|file| file["file"] == "src/cart.js")
+        .unwrap();
+    let missing = cart["missingConditions"].as_array().unwrap();
+    assert!(!missing.is_empty(), "{checked}");
+    assert!(missing.iter().all(|place| place["line"].as_u64().is_some()));
+}
