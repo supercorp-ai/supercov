@@ -189,7 +189,9 @@ impl DockerProxy {
         }
         let _ = fs::remove_file(socket);
         let listener = UnixListener::bind(socket)?;
-        listener.set_nonblocking(true)?;
+        listener
+            .set_nonblocking(true)
+            .expect("a listening socket just bound can be made nonblocking");
         if let Some(parent) = settings.state.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -207,7 +209,8 @@ impl DockerProxy {
             let stop = Arc::clone(&stop);
             std::thread::Builder::new()
                 .name("supercov-docker-relay".into())
-                .spawn(move || accept(&listener, &shared, &stop))?
+                .spawn(move || accept(&listener, &shared, &stop))
+                .expect("a thread for the relay starts")
         };
         Ok(Self {
             socket: socket.to_owned(),
@@ -528,9 +531,10 @@ fn endpoint(head: &Head) -> (&str, &str) {
 
 fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
     let upstream = UnixStream::connect(&shared.upstream)?;
-    let mut client_reader = BufReader::new(client.try_clone()?);
+    // A connected socket's descriptor duplicates.
+    let mut client_reader = BufReader::new(client.try_clone().expect("a socket duplicates"));
     let mut client_writer = client;
-    let mut upstream_reader = BufReader::new(upstream.try_clone()?);
+    let mut upstream_reader = BufReader::new(upstream.try_clone().expect("a socket duplicates"));
     let mut upstream_writer = upstream;
     if relay_messages(
         &mut client_reader,
@@ -2018,6 +2022,39 @@ mod tests {
         drop(stream);
         proxy.finish();
         assert!(notes(Path::new("/")).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The relay's own directories that cannot be made refuse it, and a
+    /// daemon gone after it started leaves a client with no answer.
+    #[test]
+    fn a_relay_whose_directories_cannot_be_made_or_whose_daemon_is_gone_says_so() {
+        let directory = temporary("relay-steps");
+        let daemon = directory.join("d.sock");
+        let _created = fake_daemon(&daemon);
+        assert!(
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:125", || {
+                socket_path(&directory.join("state"))
+            })
+            .is_err()
+        );
+        assert!(
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:196", || {
+                DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
+            })
+            .is_err()
+        );
+        let gone = directory.join("gone.sock");
+        let proxy =
+            DockerProxy::start(&directory.join("q.sock"), &gone, settings(&directory)).unwrap();
+        let mut stream = UnixStream::connect(directory.join("q.sock")).unwrap();
+        stream
+            .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer);
+        assert!(answer.is_empty(), "{}", String::from_utf8_lossy(&answer));
+        proxy.finish();
         fs::remove_dir_all(directory).unwrap();
     }
 
