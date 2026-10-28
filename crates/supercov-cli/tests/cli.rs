@@ -12456,6 +12456,9 @@ fn a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure() {
 #[test]
 fn a_query_whose_own_index_read_fails_is_refused() {
     let project = Project::cart("index-read-places");
+    // A file with no decisions, for a decision query that finds none.
+    project.write("src/plain.js", "export const plain = 1;\n");
+    project.commit("plain");
     project.supercov(&["--", "node", "--test"]).succeeds();
     let runs = project.supercov(&["runs", "--json"]).json();
     let older = runs["data"]["runs"][0]["id"].as_str().unwrap().to_owned();
@@ -12516,6 +12519,25 @@ fn a_query_whose_own_index_read_fails_is_refused() {
         (
             vec!["runs", "latest", "files", "--group", "dir"],
             "coverage_query.rs:3561",
+        ),
+        // A line's anchors; a file with no decisions under a kind, its gaps
+        // read to tell it from a kind no test has.
+        (
+            vec!["runs", "latest", "line", "src/cart.js:14"],
+            "coverage_query.rs:874",
+        ),
+        (
+            vec![
+                "runs",
+                "latest",
+                "file",
+                "src/plain.js",
+                "--group",
+                "decision",
+                "--kind",
+                "unit",
+            ],
+            "coverage_query.rs:3960",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
