@@ -12579,21 +12579,18 @@ fn a_rust_run_that_cannot_publish_says_so_and_clears_its_work() {
         "pub fn half(x: i32) -> i32 { x / 2 }\n#[cfg(test)]\nmod tests { #[test] fn h() { assert_eq!(super::half(4), 2); } }\n",
     );
     project.git(&["init", "-q"]);
-    for fault in [
-        "published-copy-differs",
-        "published-copy-differs,cleanup-copy-path",
-    ] {
-        let failed =
-            project.supercov_with(&["--", "cargo", "test"], &[("SUPERCOV_TEST_FAULT", fault)]);
-        assert_ne!(failed.code(), 0, "{fault}: {}", failed.stderr());
-        assert!(
-            failed
-                .stderr()
-                .contains("evidence changed during publication"),
-            "{fault}: {}",
-            failed.stderr()
-        );
-    }
+    let failed = project.supercov_with(
+        &["--", "cargo", "test"],
+        &[("SUPERCOV_TEST_FAULT", "published-copy-differs")],
+    );
+    assert_ne!(failed.code(), 0, "{}", failed.stderr());
+    assert!(
+        failed
+            .stderr()
+            .contains("evidence changed during publication"),
+        "{}",
+        failed.stderr()
+    );
     let runs = project.supercov(&["runs", "--json"]).json();
     assert_eq!(
         runs["data"]["runs"].as_array().map(Vec::len),

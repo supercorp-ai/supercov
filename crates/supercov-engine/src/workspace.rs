@@ -397,8 +397,8 @@ pub(crate) fn copy_directories(container: &Path, copy: usize) -> [PathBuf; 2] {
 }
 
 /// Where the copy a run holds is.
-pub fn cached_workspace_path(root: &Path, lock: &ProjectLock) -> Result<PathBuf, WorkspaceError> {
-    copy_path(root, lock.copy())
+pub fn cached_workspace_path(root: &Path, lock: &ProjectLock) -> PathBuf {
+    copy_path(root, lock.copy()).expect(NAMED)
 }
 
 /// Where one of the project's copies is, by its number.
@@ -1090,7 +1090,7 @@ fn link_node_modules<Operations: WorkspaceOperations>(
 /// The copy the lock holds, when it is the project's.
 fn require_lock(root: &Path, lock: &ProjectLock) -> Result<PathBuf, WorkspaceError> {
     if lock.protects(root) {
-        Ok(cached_workspace_path(root, lock).expect(NAMED))
+        Ok(cached_workspace_path(root, lock))
     } else {
         Err(WorkspaceError::MissingLock)
     }
@@ -4034,7 +4034,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         ensure_container(&root).unwrap();
-        let workspace = cached_workspace_path(&root, &lock).unwrap();
+        let workspace = cached_workspace_path(&root, &lock);
         let parent = workspace.parent().unwrap();
         fs::create_dir_all(parent).unwrap();
         let previous = parent.join(format!("{}old", transaction_prefix(&root, "previous")));
@@ -4403,7 +4403,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         ensure_container(&root).unwrap();
-        let workspace = cached_workspace_path(&root, &lock).unwrap();
+        let workspace = cached_workspace_path(&root, &lock);
         let parent = workspace.parent().unwrap().to_owned();
         fs::write(&parent, "").unwrap();
         assert!(matches!(
