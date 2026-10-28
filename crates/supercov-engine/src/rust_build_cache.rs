@@ -75,7 +75,7 @@ pub fn rust_build_cache_key(
     integrity: &RunIntegrity,
     execution_configuration: &[u8],
     command: &[String],
-) -> Result<String, serde_json::Error> {
+) -> String {
     let joined = command.join("\0");
     let rest = execution_configuration
         .strip_prefix(joined.as_bytes())
@@ -98,10 +98,10 @@ pub fn rust_build_cache_key(
         platform: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
     };
-    Ok(format!(
+    format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&identity).expect("plain data serializes"))
-    ))
+    )
 }
 
 fn regular_directory(path: &Path) -> bool {
@@ -292,7 +292,7 @@ mod tests {
             let command = command(words);
             let mut configuration = command.join("\0").into_bytes();
             configuration.extend_from_slice(links.as_bytes());
-            rust_build_cache_key(integrity, &configuration, &command).unwrap()
+            rust_build_cache_key(integrity, &configuration, &command)
         };
         let base = key(&integrity, "cargo test -- --exact a", "\0link");
         assert_eq!(base, key(&integrity, "cargo test -- --exact b c", "\0link"));

@@ -342,8 +342,7 @@ fn run_direct_rust_timed(
             &integrity,
             &integrity_inputs.execution_configuration,
             &request.command,
-        )
-        .map_err(|error| error.to_string())?;
+        );
 
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
