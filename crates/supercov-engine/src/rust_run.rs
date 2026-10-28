@@ -75,6 +75,9 @@ fn is_coverage_output(name: &str) -> bool {
     matches!(extension, Some("profraw" | "profdata"))
 }
 
+/// Every path the walk visits was joined onto the root it started from.
+const UNDER_ROOT: &str = "a walked path lies under the root";
+
 fn collect_project_inputs(
     root: &Path,
     directory: &Path,
@@ -111,14 +114,10 @@ fn collect_project_inputs(
             }
             collect_project_inputs(root, &path, false, regular, links)?;
         } else if file_type.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| format!("project input escaped root: {}", path.display()))?;
+            let relative = path.strip_prefix(root).expect(UNDER_ROOT);
             regular.push(relative.to_owned());
         } else if file_type.is_symlink() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| format!("project link escaped root: {}", path.display()))?;
+            let relative = path.strip_prefix(root).expect(UNDER_ROOT);
             let target = fs::read_link(&path).map_err(|error| error.to_string())?;
             links.push(format!(
                 "{}=>{}",
@@ -633,6 +632,19 @@ mod tests {
         std::os::unix::fs::symlink("lib.rs", root.join("src/alias.rs")).unwrap();
         let linked = collect_integrity_inputs(&root, &command).unwrap();
         assert_ne!(format!("{plain:?}"), format!("{linked:?}"));
+        // A listing, an entry, a directory below, or a link that cannot be
+        // read fails the walk.
+        for fault in [
+            "fs.read_dir",
+            "fs.read_dir entry",
+            "fs.read_dir@3",
+            "fs.read_link",
+        ] {
+            assert!(
+                crate::fault::during(fault, || collect_integrity_inputs(&root, &command)).is_err(),
+                "{fault}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
