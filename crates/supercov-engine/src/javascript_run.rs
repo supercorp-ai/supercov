@@ -784,6 +784,11 @@ pub fn run_direct_javascript(
     let evidence_directory = workspace.join(&evidence_relative);
     let server_evidence_root = workspace.join(".supercov/server-evidence");
     let diagnostic_owner = workspace.join(format!(".supercov/diagnostic-owner-{run_id}"));
+    // Where the tests' processes note a file asked for by its path that the
+    // copy did not have (`register.mjs`).
+    let missing_loads = workspace
+        .join(".supercov")
+        .join(format!("missing-loads-{run_id}.jsonl"));
     let mut overrides: BTreeMap<String, String> = BTreeMap::from([
         ("NODE_OPTIONS".into(), node_options(&frontend.preload_path)),
         ("SUPERCOV_CJS_INTERCEPT".into(), "1".into()),
@@ -818,6 +823,10 @@ pub fn run_direct_javascript(
         (
             "SUPERCOV_MANIFEST".into(),
             frontend.manifest_path.display().to_string(),
+        ),
+        (
+            "SUPERCOV_MISSING_LOADS".into(),
+            missing_loads.display().to_string(),
         ),
         (
             "SUPERCOV_PROJECT_ROOT".into(),
@@ -1154,6 +1163,27 @@ pub fn run_direct_javascript(
                 crate::workspace::summarize_paths(&outputs.deleted_in_workspace)
             );
         }
+        // A test that failed on a file the project has and the copy does
+        // not: the copy leaves out build output, and when nothing built it
+        // there the failures read as broken tests. Said, with why.
+        let left_out = left_out_loads(&root, &workspace, &missing_loads);
+        if execution.exit_code != 0 && !left_out.is_empty() {
+            const NAMED: usize = 4;
+            let mut named = left_out
+                .iter()
+                .take(NAMED)
+                .map(|file| file.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if left_out.len() > NAMED {
+                named.push_str(&format!(" and {} more", left_out.len() - NAMED));
+            }
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] warning: the tests could not load {named}, which the project has and its isolated copy does not. The copy leaves out build output (dist/, build/ and the like), and nothing built it there: build in the measured command, as `supercov -- sh -c \"npm run build && npm test\"`"
+            );
+        }
+        let _ = std::fs::remove_file(&missing_loads);
     }
     update_run_state(
         &root,
@@ -1502,6 +1532,31 @@ pub fn run_direct_javascript(
 /// The id of the `nth` run published beside `run_id` from the same command:
 /// a public id `nth` below it when `run_id` is one, since runs that started
 /// together are listed by id, highest first.
+/// The files the tests' processes noted in `notes` as asked for by their
+/// path and missing from the copy at `workspace`, that the project at `root`
+/// has: as paths in the project, each once.
+fn left_out_loads(root: &Path, workspace: &Path, notes: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(notes) else {
+        return Vec::new();
+    };
+    let copies = [
+        workspace.to_owned(),
+        crate::workspace::canonicalize_simplified(workspace).unwrap_or_default(),
+    ];
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|note| note["missing"].as_str().map(PathBuf::from))
+        .filter_map(|file| {
+            copies
+                .iter()
+                .find_map(|copy| file.strip_prefix(copy).ok().map(Path::to_owned))
+        })
+        .filter(|relative| root.join(relative).is_file() && !workspace.join(relative).exists())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn companion_run_id(run_id: &str, nth: usize) -> String {
     match run_id
         .strip_prefix("run_")

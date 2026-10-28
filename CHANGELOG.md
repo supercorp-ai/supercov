@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Added**
+
+- A run whose tests failed loading files the project has and its isolated copy does not, such as `dist/` an earlier build made, names those files and says why: the copy leaves out build output, and nothing built it there. The failures read as broken tests before, with `build=0ms` in the timings the only sign.
+
 **Fixed**
 
 - A browser suite with no JavaScript source whose tests drove servers in two languages, such as Puma beside a Python server, published a run per server that named neither of the others: `runs <id>` said nothing of the run beside it. Each names the other now, as a browser run and its servers' runs already did.
