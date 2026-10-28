@@ -130,17 +130,15 @@ pub(crate) fn browser_from(
         }
     }
     let path = ambient("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        for driver in DRIVERS {
+    // Never empty: even an empty PATH is one directory.
+    std::env::split_paths(&path).find_map(|directory| {
+        DRIVERS.iter().find_map(|driver| {
             let candidate = directory
                 .join(driver)
                 .with_extension(std::env::consts::EXE_EXTENSION);
-            if candidate.exists() {
-                return Some(pick(driver, candidate));
-            }
-        }
-    }
-    None
+            candidate.exists().then(|| pick(driver, candidate))
+        })
+    })
 }
 
 /// The proxy in front of one chromedriver, for the whole run.
