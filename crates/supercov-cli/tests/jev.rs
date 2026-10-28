@@ -4153,6 +4153,16 @@ fn an_assessment_with_nothing_to_ask_reads_as_such() {
         .supercov(&["runs", &run, "file", "src/cart.js"])
         .succeeds();
     assert!(!text.contains("Assertions"), "{text}");
+    // A change since reads the assessment that holds no statement.
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let affected = project
+        .supercov(&["runs", &run, "tests", "affected", "--json"])
+        .json();
+    assert_eq!(affected["data"]["summary"]["unaffected"], 1, "{affected}");
 }
 
 /// After an assessment, a test that failed must run whatever changed, and
