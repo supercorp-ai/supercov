@@ -17735,3 +17735,27 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         assert!(!said.contains("panicked at"), "{edition} {fault}: {said}");
     }
 }
+
+/// A line the index holds no text of is read from the working tree, said
+/// stale when its file changed since the run; with no record of the run's
+/// files to judge by, it is read as current.
+#[test]
+fn a_line_read_from_the_working_tree_is_stale_only_by_the_runs_record() {
+    let project = Project::cart("line-origin");
+    project.measure(&[]);
+    project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
+    let origin = |faults: &str| {
+        project
+            .supercov_with(
+                &["runs", "latest", "line", "src/cart.js:5", "--json"],
+                &[("SUPERCOV_TEST_FAULT", faults)],
+            )
+            .json()["data"]["sourceOrigin"]
+            .clone()
+    };
+    assert_eq!(origin(""), "working-tree-stale");
+    assert_eq!(
+        origin("fs.open#source_manifest.rs:359=10"),
+        "working-tree-current"
+    );
+}
