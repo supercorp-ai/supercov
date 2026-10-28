@@ -782,12 +782,14 @@ pub fn no_source_error(
     root: &Path,
     environment: &BTreeMap<String, String>,
 ) -> ProjectDiscoveryError {
-    match crate::source_discovery::ExplicitSourceRoots::from_environment(root, environment) {
-        Ok(Some(explicit)) => ProjectDiscoveryError::RootsLeftNothing(
+    // Discovery read the same roots first, and refused any it could not.
+    match crate::source_discovery::ExplicitSourceRoots::from_environment(root, environment)
+        .expect("roots discovery accepted resolve")
+    {
+        Some(explicit) => ProjectDiscoveryError::RootsLeftNothing(
             explicit.nothing_left("JavaScript or TypeScript"),
         ),
-        Ok(None) => ProjectDiscoveryError::NoSourceFiles,
-        Err(error) => ProjectDiscoveryError::Source(error),
+        None => ProjectDiscoveryError::NoSourceFiles,
     }
 }
 
@@ -1573,6 +1575,9 @@ mod tests {
         );
         // `npm run` alone names no script.
         assert_eq!(script_command(&root, &command(&["npm", "run"])), None);
+        // Nor does a program with no name, or no program.
+        assert_eq!(script_command(&root, &command(&[".."])), None);
+        assert_eq!(script_command(&root, &[]), None);
         let environment = BTreeMap::from([(
             "SUPERCOV_PLAYWRIGHT_MODULE".to_owned(),
             "./fixtures/playwright.js".to_owned(),
