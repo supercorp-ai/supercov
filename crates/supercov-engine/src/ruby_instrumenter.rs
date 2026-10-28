@@ -4081,6 +4081,18 @@ end
         );
     }
 
+    /// A method whose parameters have no parentheses gets its entry probe
+    /// after them, and the result is still Ruby.
+    #[test]
+    fn a_method_without_parentheses_is_entered_after_its_parameters() {
+        let source = "def f a, b\nend\n";
+        let mut probe = 0;
+        let obligations = build_ruby_obligations("m.rb", source.as_bytes(), &mut probe).unwrap();
+        let instrumented =
+            String::from_utf8(apply_edits(source.as_bytes(), &obligations.plan.edits)).unwrap();
+        assert!(instrumented.starts_with("def f a, b; "), "{instrumented}");
+    }
+
     #[test]
     fn stdlib_keys_shift_with_insertions_on_their_line() {
         let source = "def f(a, b)\n  x = 1 if a && b\nend\n";
