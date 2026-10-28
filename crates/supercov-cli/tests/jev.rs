@@ -1009,10 +1009,21 @@ fn a_busy_gateway_is_waited_for_and_a_broken_one_is_named() {
     let mut env = through(&base).to_vec();
     env.push((
         "SUPERCOV_TEST_FAULT",
-        "fs.create_dir_all#assertions_command.rs:403",
+        "fs.create_dir_all#assertions_command.rs:641",
     ));
     let unsaved = cart
         .supercov_with(&["runs", &run, "assertions", "assess"], &env)
+        .exits(2);
+    assert!(unsaved.contains("injected fault at fs"), "{unsaved}");
+    // So is a round's answers that cannot be saved.
+    let (answering, _) = gateway_with(MODEL, answer_no, |_| None);
+    let mut env = through(&answering).to_vec();
+    env.push((
+        "SUPERCOV_TEST_FAULT",
+        "fs.create_dir_all#assertions_command.rs:659",
+    ));
+    let unsaved = cart
+        .supercov_with(&["runs", &run, "assertions", "assess", "--refresh"], &env)
         .exits(2);
     assert!(unsaved.contains("injected fault at fs"), "{unsaved}");
     let (base, _) = gateway_with(MODEL, answer_no, |n| (n == 0).then_some((429, "{}")));
@@ -5898,8 +5909,8 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
             "no per-test execution record",
         ),
         (
-            "fs.create_dir_all#assertions_command.rs:403",
-            "assertions_command.rs:403",
+            "fs.create_dir_all#assertions_command.rs:951",
+            "assertions_command.rs:951",
         ),
     ] {
         let said = refused(&["assess", "--changed", "--refresh"], fault);

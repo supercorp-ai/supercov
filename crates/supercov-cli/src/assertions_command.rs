@@ -395,6 +395,7 @@ impl Cache {
             .unwrap_or_default();
         Cache { path, answers }
     }
+    #[track_caller]
     fn save(&self) -> Result<(), String> {
         let dir = self
             .path
