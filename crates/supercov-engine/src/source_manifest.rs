@@ -2268,6 +2268,52 @@ mod tests {
         );
     }
 
+    /// JavaScript columns are placed in the run's sources: with none, or
+    /// without the file, there is no record; a probe at no column of its
+    /// line places nothing. A run with no tests records none.
+    #[test]
+    fn a_javascript_record_needs_the_sources_its_columns_are_in() {
+        let project = Project::new("javascript-columns");
+        let run = project.published(
+            "partial",
+            crate::run_store::create_partial_test_run,
+            &["src/app.js", "tests/app.test.js"],
+        );
+        let mut report = coverage(&run).unwrap();
+        let mut manifest = load_manifest(&run).unwrap().manifest;
+        manifest.language = "javascript".into();
+        assert!(executions(&report, &manifest, None).is_none());
+        assert!(executions(&report, &manifest, Some(&Files::new())).is_none());
+        let sources = Files::from([("src/app.js".to_owned(), APP.to_owned())]);
+        let placed = executions(&report, &manifest, Some(&sources)).unwrap();
+        assert!(placed.probed.is_empty(), "{:?}", placed.probed);
+        report.view.tests.clear();
+        let placed = executions(&report, &manifest, Some(&sources)).unwrap();
+        assert!(placed.tests.is_empty());
+    }
+
+    /// A record of no tests affects none; a record that is gone or no JSON
+    /// names no test files.
+    #[test]
+    fn a_record_of_no_tests_or_none_names_nothing() {
+        let project = Project::new("no-record");
+        let run = project.published(
+            "first",
+            crate::run_store::create_analyzable_test_run,
+            &["src/app.js", "tests/app.test.js"],
+        );
+        edit_record(&run, |executions| executions.tests.clear());
+        let report = project.affected(&run);
+        for key in ["affected", "undetermined", "unaffected"] {
+            assert!(bucket(&report, key).is_empty(), "{report}");
+        }
+        assert_eq!(test_files(&run), Some(BTreeSet::new()));
+        fs::write(run.directory.join(EXECUTIONS_FILE), "{").unwrap();
+        assert_eq!(test_files(&run), None);
+        fs::remove_file(run.directory.join(EXECUTIONS_FILE)).unwrap();
+        assert_eq!(test_files(&run), None);
+    }
+
     /// A source file that is now a link out of the project, or a directory,
     /// is no longer the run's file: it was removed.
     #[test]
