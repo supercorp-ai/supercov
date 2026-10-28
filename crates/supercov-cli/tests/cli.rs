@@ -818,6 +818,90 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
     assert!(fired_at(&said, "evidence_archive.rs:636"), "{said}");
 }
 
+/// Quality snapshots are read as far as they hold: a catalog entry or finding
+/// that names no check, a file with no path, health or size, a finding one
+/// snapshot has that the other does not answer, a file not in the snapshot,
+/// a snapshot with no files, and a file record that is no list.
+#[test]
+fn quality_snapshots_are_read_as_far_as_they_hold() {
+    let project = Project::empty("quality-snapshots");
+    project.git(&["init", "-q"]);
+    let gaps = project.supercov(&["quality", "gaps"]).exits(2);
+    assert!(gaps.contains("no quality snapshot here yet"), "{gaps}");
+    let snapshot = |id: &str, files: serde_json::Value| {
+        let directory = format!(".supercov/quality/snapshots/{id}");
+        project.write(
+            &format!("{directory}/manifest.json"),
+            &serde_json::json!({
+                "created_at": format!("2026-01-01T00-00-0{}-000000Z", &id[id.len() - 1..]),
+                "instrument": "catalog",
+                "catalog_version": "v1",
+                "model": "m",
+                "catalog": [{"name": "unnamed"}, {"check": "c1", "name": "one"}],
+            })
+            .to_string(),
+        );
+        project.write(
+            &format!("{directory}/files.json"),
+            &serde_json::json!({ "files": files }).to_string(),
+        );
+    };
+    snapshot(
+        "q_0000000000000001",
+        serde_json::json!([
+            {"path": "a.js", "status": "completed", "health": 5.0, "bytes": 10,
+             "present": [{"value": 0.9}, {"check": "c1", "value": 0.9}],
+             "checks": {"c1": 0.9}},
+            {"path": 7, "status": "completed"},
+            {"path": "b.js", "status": "completed", "health": 4.0},
+        ]),
+    );
+    snapshot(
+        "q_0000000000000002",
+        serde_json::json!([
+            {"path": "a.js", "status": "completed", "health": 6.0, "bytes": 10},
+            {"path": "c.js", "status": "completed", "health": 7.0, "bytes": 5},
+        ]),
+    );
+    snapshot("q_0000000000000003", serde_json::json!([]));
+    let file = project
+        .supercov(&["quality", "file", "a.js", "q_0000000000000001"])
+        .succeeds();
+    assert!(file.contains("a.js"), "{file}");
+    let missing = project
+        .supercov(&["quality", "file", "z.js", "q_0000000000000001"])
+        .exits(2);
+    assert!(missing.contains("z.js is not in snapshot"), "{missing}");
+    let diff = project
+        .supercov(&[
+            "quality",
+            "diff",
+            "q_0000000000000001",
+            "q_0000000000000002",
+        ])
+        .succeeds();
+    assert!(diff.contains("c.js"), "{diff}");
+    project
+        .supercov(&[
+            "quality",
+            "diff",
+            "q_0000000000000001",
+            "q_0000000000000003",
+        ])
+        .succeeds();
+    project.write(
+        ".supercov/quality/snapshots/q_0000000000000003/files.json",
+        r#"{"files": "none"}"#,
+    );
+    let invalid = project
+        .supercov(&["quality", "gaps", "q_0000000000000003"])
+        .exits(2);
+    assert!(
+        invalid.contains("invalid snapshot file record"),
+        "{invalid}"
+    );
+}
+
 /// A query names its run by position or `--run`; an option missing its value,
 /// a diff missing a run, a run that is not there, and a store of runs that
 /// cannot be listed are refused, each saying why.
