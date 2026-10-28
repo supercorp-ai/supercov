@@ -13607,7 +13607,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // The processes the run starts: Cargo's metadata, the test
             // build, rustc's libdir and sysroot, a test binary's listing,
             // the test processes and the doctests'.
-            "spawn#rust_project.rs:183 => rust_project.rs:183",
+            "spawn#rust_project.rs:181 => rust_project.rs:181",
             "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
             "spawn#rust_test_runner.rs:1548 => rust_test_runner.rs:1548",
             "spawn#rust_test_runner.rs:1548@2 => rust_test_runner.rs:1548",
@@ -17017,13 +17017,13 @@ fn a_rust_run_whose_step_after_the_build_fails_says_so() {
         (&["cargo", "test"][..], "diagnostics@3", "diagnostics"),
         (
             &["cargo", "test"][..],
-            "fs.read_dir#rust_runtime.rs:409",
-            "rust_runtime.rs:409",
+            "fs.read_dir#rust_runtime.rs:391",
+            "rust_runtime.rs:391",
         ),
         (
             &["cargo", "nextest", "run"][..],
-            "fs.read_dir#rust_runtime.rs:409",
-            "rust_runtime.rs:409",
+            "fs.read_dir#rust_runtime.rs:391",
+            "rust_runtime.rs:391",
         ),
     ] {
         let project = Project::empty("rust-settlement");

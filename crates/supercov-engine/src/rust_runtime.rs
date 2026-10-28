@@ -116,34 +116,16 @@ pub fn render_rust_region_runtime(
     layout: &crate::rust_instrumenter::RustProbeLayout,
     // The ordinals of the `cfgs` in this crate's own files.
     crate_cfgs: &[usize],
-) -> Result<String, String> {
-    let valid_identifier = !module_name.is_empty()
-        && module_name.bytes().enumerate().all(|(index, byte)| {
-            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
-        });
-    if !valid_identifier {
-        return Err("invalid Rust runtime module name".into());
-    }
-    if token.is_empty() || token.len() > 16 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid Rust region token".into());
-    }
-    if crate_key.is_empty() || !crate_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid Rust runtime crate key".into());
-    }
+) -> String {
+    // Every name here is Supercov's own: the runtime module chosen to clash
+    // with none of the crate's, the instrumentation's hex token and a crate
+    // key of it, and gates the instrumenter read with `cfg!`'s parser.
     let mut table = String::new();
     for ordinal in crate_cfgs {
-        let gate = layout
-            .cfgs
-            .get(*ordinal)
-            .ok_or("a crate names a cfg gate the layout lacks")?;
-        // Re-parsed, so only a predicate `cfg!` accepts reaches the source.
-        let predicate = gate
-            .predicate
-            .parse::<cargo_platform::CfgExpr>()
-            .map_err(|error| format!("invalid cfg predicate {:?}: {error}", gate.predicate))?;
+        let predicate = &layout.cfgs[*ordinal].predicate;
         table.push_str(&format!("({ordinal}, cfg!({predicate})), "));
     }
-    Ok(REGION_TEMPLATE
+    REGION_TEMPLATE
         .replace("__SUPERCOV_MODULE__", module_name)
         .replace("__SUPERCOV_HITS__", &layout.hits.len().to_string())
         .replace(
@@ -164,7 +146,7 @@ pub fn render_rust_region_runtime(
         .replace(
             "__SUPERCOV_CLEAR_EXPORT__",
             &format!("__supercov_clear_{crate_key}"),
-        ))
+        )
 }
 
 struct RegionHeader {
@@ -180,31 +162,31 @@ fn region_header(
     layout: &crate::rust_instrumenter::RustProbeLayout,
 ) -> Result<RegionHeader, RustProbeReadError> {
     const HEADER: usize = 128;
-    let u32_at = |offset: usize| -> Result<u32, RustProbeReadError> {
-        bytes
-            .get(offset..offset + 4)
-            .map(|word| u32::from_le_bytes(word.try_into().unwrap_or([0; 4])))
-            .ok_or(RustProbeReadError::InvalidHeader)
+    let header = bytes
+        .get(..HEADER)
+        .ok_or(RustProbeReadError::InvalidHeader)?;
+    let u32_at = |offset: usize| {
+        u32::from_le_bytes(
+            header[offset..offset + 4]
+                .try_into()
+                .expect("four bytes of the header"),
+        )
     };
-    if bytes.get(..8) != Some(REGION_MAGIC.as_slice())
-        || u32_at(8)? != REGION_VERSION
-        || u32_at(12)? as usize != HEADER
-        || u32_at(16)? as usize != layout.hits.len()
-        || u32_at(20)? as usize != layout.assertions.len()
-        || u32_at(24)? as usize != layout.decisions.len()
-        || u32_at(72)? as usize != layout.cfgs.len()
+    // The token, Supercov's own hex, fits the header's sixteen bytes for it.
+    if header[..8] != *REGION_MAGIC
+        || u32_at(8) != REGION_VERSION
+        || u32_at(12) as usize != HEADER
+        || u32_at(16) as usize != layout.hits.len()
+        || u32_at(20) as usize != layout.assertions.len()
+        || u32_at(24) as usize != layout.decisions.len()
+        || u32_at(72) as usize != layout.cfgs.len()
+        || header[56..56 + token.len()] != *token.as_bytes()
     {
         return Err(RustProbeReadError::InvalidHeader);
     }
-    let stored_token = bytes
-        .get(56..56 + token.len())
-        .ok_or(RustProbeReadError::InvalidHeader)?;
-    if stored_token != token.as_bytes() {
-        return Err(RustProbeReadError::InvalidHeader);
-    }
     Ok(RegionHeader {
-        entries_per_decision: u32_at(28)? as usize,
-        body_at: u32_at(32)? as usize,
+        entries_per_decision: u32_at(28) as usize,
+        body_at: u32_at(32) as usize,
     })
 }
 
@@ -562,7 +544,6 @@ mod tests {
             probes,
             &crate_cfgs,
         )
-        .unwrap()
     }
 
     /// Every region an evidence directory holds, read back as records.
@@ -1597,7 +1578,43 @@ fn main() {
             read_rust_cfg_settlement(&file, TOKEN, &probes),
             Err(RustProbeReadError::Io(_))
         ));
+        // An entry, its type, a directory below or a region that cannot be
+        // read stops the settlement.
+        for fault in [
+            "fs.read_dir entry#rust_runtime.rs:391",
+            "fs.read_dir entry#rust_runtime.rs:391@2",
+            "fs.file_type#rust_runtime.rs:399",
+            "fs.read#rust_runtime.rs:407",
+        ] {
+            let read =
+                crate::fault::during(fault, || read_rust_cfg_settlement(&root, TOKEN, &probes));
+            assert!(
+                matches!(read, Err(RustProbeReadError::Io(_))),
+                "{fault}: {read:?}"
+            );
+        }
+        // A region that is none.
+        fs::write(root.join(format!("{TOKEN}-9.region")), b"not a region").unwrap();
+        assert_eq!(
+            read_rust_cfg_settlement(&root, TOKEN, &probes),
+            Err(RustProbeReadError::InvalidHeader)
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A region cut short after its header, its page still marked touched,
+    /// holds none of the slots past its end.
+    #[test]
+    fn a_region_cut_short_reads_no_slot_past_its_end() {
+        let probes = layout(&["rs:point:a"], &[]);
+        let mut region = empty_region(&probes);
+        region[128] |= 1;
+        let body_at = u32::from_le_bytes(region[32..36].try_into().unwrap()) as usize;
+        region.truncate(body_at + 4);
+        assert_eq!(
+            parse_rust_region(&region, None, TOKEN, &probes),
+            Ok(Vec::new())
+        );
     }
 
     #[test]
@@ -1620,6 +1637,19 @@ fn main() {
             read_rust_region_directory(&directory, TOKEN, &probes),
             Err(RustProbeReadError::Io(_))
         ));
+        // An entry that cannot be read, and a region that is none.
+        assert!(matches!(
+            crate::fault::during("fs.read_dir entry#rust_runtime.rs:429", || {
+                read_rust_region_directory(&directory, TOKEN, &probes)
+            }),
+            Err(RustProbeReadError::Io(_))
+        ));
+        fs::remove_dir(directory.join(format!("{TOKEN}-1.overflow"))).unwrap();
+        fs::write(directory.join(format!("{TOKEN}-1.region")), b"not a region").unwrap();
+        assert_eq!(
+            read_rust_region_directory(&directory, TOKEN, &probes),
+            Err(RustProbeReadError::InvalidHeader)
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1715,35 +1745,6 @@ fn main() {
         let probes = instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1")
             .unwrap()
             .probes;
-        let render = |module: &str, token: &str, key: &str, cfgs: &[usize]| {
-            render_rust_region_runtime(module, token, key, &probes, cfgs).err()
-        };
-        assert_eq!(render("__supercov_runtime_v1", TOKEN, "abcdef", &[]), None);
-        for module in ["", "1runtime", "run-time"] {
-            assert_eq!(
-                render(module, TOKEN, "abcdef", &[]).as_deref(),
-                Some("invalid Rust runtime module name"),
-                "{module:?}"
-            );
-        }
-        for token in ["", "0123456789abcdef0", "xyz"] {
-            assert_eq!(
-                render("rt", token, "abcdef", &[]).as_deref(),
-                Some("invalid Rust region token"),
-                "{token:?}"
-            );
-        }
-        for key in ["", "key"] {
-            assert_eq!(
-                render("rt", TOKEN, key, &[]).as_deref(),
-                Some("invalid Rust runtime crate key"),
-                "{key:?}"
-            );
-        }
-        assert_eq!(
-            render("rt", TOKEN, "abcdef", &[99]).as_deref(),
-            Some("a crate names a cfg gate the layout lacks")
-        );
         // A header as the runtime writes it, then each field wrong in turn.
         let mut header = vec![0u8; 128];
         header[..8].copy_from_slice(REGION_MAGIC);

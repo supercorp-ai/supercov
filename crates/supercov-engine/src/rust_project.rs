@@ -88,7 +88,6 @@ pub enum RustProjectError {
     NoSourceFiles,
     Instrument { file: String, reason: String },
     DuplicateObligation(String),
-    Runtime(String),
     SourceRoots(String),
 }
 
@@ -117,7 +116,6 @@ impl std::fmt::Display for RustProjectError {
             Self::DuplicateObligation(id) => {
                 write!(formatter, "duplicate Rust obligation ID: {id}")
             }
-            Self::Runtime(reason) => write!(formatter, "could not generate Rust runtime: {reason}"),
             Self::SourceRoots(reason) => write!(formatter, "{reason}"),
         }
     }
@@ -1061,8 +1059,7 @@ pub fn prepare_rust_project_for(
                 probes.workers.insert(key.clone());
             }
             let runtime =
-                render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs)
-                    .map_err(RustProjectError::Runtime)?;
+                render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs);
             crate_files.push((
                 key,
                 owners
@@ -1166,7 +1163,6 @@ mod tests {
                 reason: "parse".into(),
             },
             E::DuplicateObligation("o1".into()),
-            E::Runtime("template".into()),
             E::SourceRoots("no roots".into()),
         ]
         .map(|error| error.to_string());
@@ -1182,7 +1178,6 @@ mod tests {
                 "Cargo workspace contains no owned Rust source files",
                 "could not instrument src/lib.rs: parse",
                 "duplicate Rust obligation ID: o1",
-                "could not generate Rust runtime: template",
                 "no roots",
             ]
         );
