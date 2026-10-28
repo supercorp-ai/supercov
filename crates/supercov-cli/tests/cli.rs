@@ -13793,6 +13793,39 @@ fn a_workspace_whose_git_repository_cannot_be_made_runs_without_one() {
     }
 }
 
+/// What a test writes in the copy is brought back to the project: a file
+/// that names the copy written naming the project, others copied, each into
+/// its directory. A step of that failing -- the copy walked, a directory
+/// below it, a written file read, the destination made, written or copied --
+/// ends the run, naming the file.
+#[test]
+fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
+    for (fault, said) in [
+        ("fs.read_dir@55", "workspaces"),
+        ("fs.read_dir@57", "/out"),
+        ("fs.read@65", "workspaces"),
+        ("fs.create_dir_all@17", "/out: injected fault at fs"),
+        ("fs.write@5", "out/note.txt"),
+        ("fs.copy@6", "out/data.bin"),
+    ] {
+        let project = Project::cart("outputs-back");
+        project.write(
+            "test/outputs.test.js",
+            "import test from \"node:test\";\nimport { mkdirSync, writeFileSync } from \"node:fs\";\ntest(\"writes its outputs\", () => {\n  mkdirSync(\"out/deeper\", { recursive: true });\n  writeFileSync(\"out/note.txt\", `ran in ${process.cwd()}\\n`);\n  writeFileSync(\"out/data.bin\", Buffer.from([0, 1, 2]));\n  writeFileSync(\"out/deeper/more.txt\", \"more\\n\");\n});\n",
+        );
+        project.write(".gitignore", "out/\n");
+        project.commit("outputs");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(
+            stderr.contains(said) && stderr.contains("injected fault at fs"),
+            "{fault}: {stderr}"
+        );
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.

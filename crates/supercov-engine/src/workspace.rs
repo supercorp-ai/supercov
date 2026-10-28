@@ -1351,11 +1351,14 @@ fn walk_output_files(
     directory: &Path,
     entries: &mut BTreeMap<PathBuf, (u64, SystemTime)>,
 ) -> Result<(), WorkspaceError> {
-    for entry in fs::read_dir(directory)
+    let mut listed = fs::read_dir(directory)
         .map_err(|error| io_error(directory, error))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| io_error(directory, error))?
-    {
+        .map_err(|error| io_error(directory, error))?;
+    // By name, so a walk meets what it cannot read in the same order on
+    // every platform.
+    listed.sort_by_key(fs::DirEntry::file_name);
+    for entry in listed {
         let path = entry.path();
         let name = entry.file_name();
         let relative = path.strip_prefix(workspace);
@@ -4683,6 +4686,44 @@ mod tests {
         lock.release().unwrap();
         crate::lifecycle::sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Pruning refuses each step that fails: listing the copy, moving an
+    /// entry to the trash, removing a generated script; and an entry whose
+    /// name is not UTF-8. No command sees the refusal -- a run prunes its
+    /// copy on the way out and ends as it would have -- so it is checked here.
+    #[test]
+    fn pruning_refuses_each_step_that_fails() {
+        for fault in ["fs.read_dir@1", "fs.create_dir_all@1", "fs.remove_file@1"] {
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            fs::create_dir_all(workspace.join(".supercov")).unwrap();
+            fs::write(workspace.join(".supercov/vitest.config.mjs"), "").unwrap();
+            assert!(
+                crate::fault::during(fault, || prune_cached_workspace_sources(&root, &lock))
+                    .is_err(),
+                "{fault}"
+            );
+            lock.release().unwrap();
+            crate::lifecycle::sweep_trash(&root).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            fs::write(workspace.join(std::ffi::OsStr::from_bytes(b"bad-\xff")), "").unwrap();
+            assert!(matches!(
+                prune_cached_workspace_sources(&root, &lock),
+                Err(WorkspaceError::UnsafePath(_))
+            ));
+            lock.release().unwrap();
+            crate::lifecycle::sweep_trash(&root).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// Linking the repository around a copy is best effort: where the
