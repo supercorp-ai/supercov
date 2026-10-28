@@ -2837,7 +2837,9 @@ fn create_coverage_view_with_model(
         summary.completeness_blocked = Some(true);
     }
 
-    let dimension_coverage = |field: &str| -> Result<Vec<DimensionCoverage>, ReportError> {
+    // Each dimension summarises the decisions summarised whole above, over
+    // fewer tests: what read whole reads in part.
+    let dimension_coverage = |field: &str| -> Vec<DimensionCoverage> {
         let values = tests
             .iter()
             .map(|test| {
@@ -2875,7 +2877,7 @@ fn create_coverage_view_with_model(
                     .filter(in_dimension)
                     .map(|test| test.id.clone())
                     .collect::<BTreeSet<_>>();
-                Ok(DimensionCoverage {
+                DimensionCoverage {
                     kind: (field == "kind").then(|| value.clone()),
                     runner: (field == "runner").then(|| value.clone()),
                     // Counted whether or not anything could be attributed to
@@ -2898,8 +2900,9 @@ fn create_coverage_view_with_model(
                         &branches,
                         &lines,
                         Some(&selected),
-                    )?,
-                })
+                    )
+                    .expect("summarised whole above"),
+                }
             })
             .collect()
     };
@@ -2919,8 +2922,8 @@ fn create_coverage_view_with_model(
         limitations: manifest.limitations.clone(),
         transport: None,
         summary,
-        coverage_by_kind: dimension_coverage("kind")?,
-        coverage_by_runner: dimension_coverage("runner")?,
+        coverage_by_kind: dimension_coverage("kind"),
+        coverage_by_runner: dimension_coverage("runner"),
         decisions,
         points,
         branches,
@@ -3026,7 +3029,13 @@ pub fn analyze_coverage_results(
             failed.join().unwrap_or_else(crate::threads::rethrow),
         )
     });
-    let (view, passed, failed) = (view?, passed?, failed?);
+    // The passing and failing results are the whole view's, fewer of them:
+    // what built whole builds in part.
+    let view = view?;
+    let (passed, failed) = (
+        passed.expect("built whole above"),
+        failed.expect("built whole above"),
+    );
     let execution = match request.test_exit_code {
         ExitCodeInput::Missing => None,
         ExitCodeInput::Present(test_exit_code) => Some(ExecutionResult {
@@ -3892,7 +3901,9 @@ mod tests {
         // A third that overlaps the second: they ran at once.
         let mut beside = raw("report", 0, "passed", &[]);
         beside.phases = vec![phase(350, 450)];
-        let mut results = vec![first, second, beside];
+        // A test that reported no phase has no time to credit.
+        let unphased = raw("unphased", 0, "passed", &[]);
+        let mut results = vec![first, second, beside, unphased];
         // A second process repeats the work left after every test: it is
         // counted once.
         let left = credit_by_time(
@@ -3911,6 +3922,7 @@ mod tests {
         // Before any test, while two ran at once, and after all: no test's.
         assert_eq!(results[2].server.len(), 0);
         assert_eq!(results[2].attribution, ATTRIBUTION_EXACT);
+        assert!(results[3].server.is_empty());
         let left = left
             .iter()
             .filter_map(|record| record.timestamp_ms)
@@ -4759,6 +4771,32 @@ mod tests {
             Err(ReportError::ScopeMismatch { actual, .. }) if actual == "other"
         ));
         assert!(analyze_coverage_results(&request(vec![raw("a", 0, "passed", &["a"])])).is_ok());
+        // A decision of no condition has nothing to analyse, and no view is
+        // built of it.
+        let empty = CoverageReportRequest {
+            manifest: CoverageManifest {
+                decisions: vec![DecisionMeta {
+                    id: "d".into(),
+                    file: "a".into(),
+                    line: 1,
+                    column: 1,
+                    source: "x".into(),
+                    conditions: Vec::new(),
+                    kind: "if".into(),
+                }],
+                ..manifest.clone()
+            },
+            ..request(vec![raw("a", 0, "passed", &["a"])])
+        };
+        assert!(matches!(
+            analyze_coverage_results(&empty),
+            Err(ReportError::Analysis(_))
+        ));
+        assert!(
+            coverage_views(&empty, &[crate::coverage_index::CoverageViewId::All], None)
+                .unwrap()
+                .all(|view| view.is_err())
+        );
         // A coverage model named by no identifier is refused as one.
         let mut model = javascript_coverage_model();
         model.language = "Not An Identifier".into();
