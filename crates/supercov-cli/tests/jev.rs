@@ -4554,6 +4554,19 @@ fn a_security_assessment_alone_is_reported() {
     project
         .supercov_with(&["security"], &through(&base))
         .succeeds();
+    // A source whose size cannot be read is left out.
+    let unsized_source = project.supercov_with(
+        &["report", "--no-open", "--output", "unsized.html"],
+        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:653")],
+    );
+    assert!(
+        unsized_source
+            .stderr()
+            .contains("test fault at fs (html_report.rs:653 metadata)"),
+        "{}",
+        unsized_source.stderr()
+    );
+    unsized_source.succeeds();
     project
         .supercov(&["report", "--no-open", "--output", "alone.html"])
         .succeeds();

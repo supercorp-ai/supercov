@@ -456,7 +456,7 @@ fn build_run(
                 limit: usize::MAX,
             },
         )
-        .map_err(|error| format!("could not read {} in run {}: {error:?}", file.file, run.id))?;
+        .expect("a file the run measured has its detail");
         file_details.insert(
             file.file.clone(),
             serde_json::to_value(detail).expect("plain data serializes"),
@@ -487,7 +487,7 @@ fn build_run(
             let total_lines = test.lines.len();
             let total_hits = test.hits.len();
             let total_decisions = test.decisions.len();
-            Ok(ReportTest {
+            ReportTest {
                 id: test.summary.id.clone(),
                 name: test.summary.name.clone(),
                 file: test.summary.file.clone(),
@@ -503,9 +503,9 @@ fn build_run(
                 total_lines,
                 total_hits,
                 total_decisions,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let lines = read
         .lines()
         .iter()
@@ -583,9 +583,9 @@ fn build_assertions(run: &StoredRun) -> Option<serde_json::Value> {
     let empty = Vec::new();
     let statements = result["statements"].as_array().unwrap_or(&empty);
     for statement in statements {
-        let Some(file) = statement["file"].as_str() else {
-            continue;
-        };
+        let file = statement["file"]
+            .as_str()
+            .expect("each assessed statement names its file");
         let entry = files.entry(file.to_owned()).or_default();
         entry.0 += 1;
         if statement["asserted"] == true {

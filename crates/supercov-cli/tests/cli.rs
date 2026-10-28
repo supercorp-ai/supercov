@@ -15210,9 +15210,14 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
     for (fault, output, place) in [
         ("fs.canonicalize@2", "unresolved.html", "html_report.rs:320"),
         ("fs.read_to_string@6", "unread.html", "html_report.rs:355"),
+        (
+            "fs.metadata#html_report.rs:342",
+            "unsized.html",
+            "html_report.rs:342",
+        ),
     ] {
         let ran = project.supercov_with(
-            &["report", "--output", output],
+            &["report", "--no-open", "--output", output],
             &[("SUPERCOV_TEST_FAULT", fault)],
         );
         assert!(
@@ -15227,16 +15232,37 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
             "{fault}: {data}"
         );
     }
+    // Spans not kept at publication are read from the evidence, and
+    // evidence that cannot be read leaves them out.
+    let spanless = project.supercov_with(
+        &["report", "--no-open", "--output", "spanless.html"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read#run_store.rs:1269,fs.read_from#evidence_archive.rs:636",
+        )],
+    );
+    assert!(
+        fired_at(&spanless.stderr(), "evidence_archive.rs:636"),
+        "{}",
+        spanless.stderr()
+    );
+    spanless.succeeds();
+    let data = report_data(&project.read("spanless.html"));
+    assert_eq!(
+        data["runs"][0]["statementSpans"],
+        serde_json::json!([]),
+        "{data}"
+    );
     let refused = project
         .supercov_with(
-            &["report", "--output", "unindexed.html"],
+            &["report", "--no-open", "--output", "unindexed.html"],
             &[("SUPERCOV_TEST_FAULT", "coverage-index@2")],
         )
         .exits(2);
     assert!(refused.contains("could not read run"), "{refused}");
     let crowded = project
         .supercov_with(
-            &["report", "--output", "crowded.html"],
+            &["report", "--no-open", "--output", "crowded.html"],
             &[("SUPERCOV_TEST_FAULT", "fs.open_with:17")],
         )
         .exits(2);
