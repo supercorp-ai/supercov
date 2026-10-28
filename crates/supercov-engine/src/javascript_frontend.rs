@@ -2661,6 +2661,8 @@ mod tests {
         unprobed.runtime = None;
         bootstrap_loader(&mut unprobed, Path::new("src/a.ts"));
         assert_eq!(unprobed.code, output.code);
+        bootstrap_runtime(&mut unprobed, "runtime", false, false);
+        assert_eq!(unprobed.code, output.code);
         let mut helperless = output.clone();
         let begin = helperless.runtime.as_ref().unwrap().mcdc_begin.clone();
         helperless.code = helperless.code.replace(&begin, "renamed");
