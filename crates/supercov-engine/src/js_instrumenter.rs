@@ -230,7 +230,9 @@ fn restore_comment_text(
         });
     let mut restored = String::with_capacity(restored_len);
     let mut cursor = 0;
-    for (start, end, replacement) in &edits {
+    // Each comment, kept by the printer or not, is one edit, and there are
+    // comments: a program with none returned above.
+    edits.iter().try_for_each(|(start, end, replacement)| {
         if *start < cursor {
             return Err(CandidateError::CommentPreservation {
                 expected: program.comments.len(),
@@ -243,7 +245,8 @@ fn restore_comment_text(
         restored.push_str(&generated[cursor..*start]);
         restored.push_str(replacement);
         cursor = *end;
-    }
+        Ok(())
+    })?;
     restored.push_str(&generated[cursor..]);
     let map = shift_source_map(map, generated, &restored, &edits);
     Ok((restored, map))
