@@ -3096,6 +3096,11 @@ mod tests {
             captured_output: None,
             console: None,
         };
+        // A supervisor that cannot forward the user's signals is none.
+        assert!(matches!(
+            crate::fault::during("signal-install", ProcessSupervisor::new),
+            Err(SupervisionError::Signal(_))
+        ));
         let supervisor = ProcessSupervisor::new().unwrap();
         let never = SupervisionOptions {
             diagnostic_interval: Duration::ZERO,
