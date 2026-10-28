@@ -36,7 +36,10 @@ fn options(root: &Path, path: &Path, seen: &mut BTreeSet<PathBuf>) -> Option<Map
             if !parent.starts_with('.') {
                 return None;
             }
-            let mut parent = path.parent()?.join(parent);
+            let mut parent = path
+                .parent()
+                .expect("a configuration file has a directory")
+                .join(parent);
             if parent.extension().is_none() {
                 parent.set_extension("json");
             }
@@ -302,6 +305,11 @@ mod tests {
                 false,
             ),
             (r#"{"extends":"./tsconfig.json"}"#, false),
+            // An array of parents, one of them no name; options that are no
+            // object.
+            (r#"{"extends":["./base.json"]}"#, false),
+            (r#"{"extends":["./base.json", 5]}"#, false),
+            (r#"{"compilerOptions":1}"#, false),
         ] {
             fs::write(root.join("tsconfig.json"), config).unwrap();
             assert_eq!(
@@ -311,6 +319,10 @@ mod tests {
             );
         }
         fs::write(root.join("tsconfig.json"), "{}").unwrap();
+        // A configuration that cannot be read keeps imports.
+        assert!(!crate::fault::during("fs.read_to_string", || {
+            elides_type_imports(&root, "src/main.ts", &command)
+        }));
         assert!(!elides_type_imports(
             &root,
             "src/main.ts",
@@ -334,6 +346,12 @@ mod tests {
         )
         .unwrap();
         assert!(!elides_type_imports(&root, "src/main.ts", &build));
+        assert!(config_paths(&root, &["src/main.ts".into()]).contains(&root.join("base.json")));
+        fs::write(
+            root.join("tsconfig.build.json"),
+            r#"{"extends":["./base.json"]}"#,
+        )
+        .unwrap();
         assert!(config_paths(&root, &["src/main.ts".into()]).contains(&root.join("base.json")));
         assert!(!elides_type_imports(
             &root,
