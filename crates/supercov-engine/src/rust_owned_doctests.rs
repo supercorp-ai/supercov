@@ -2022,6 +2022,30 @@ mod tests {
             matches!(results, Err(RustTestRunnerError::Io(_))),
             "{results:?}"
         );
+        // A package's record that is not JSON; a package's error that
+        // cannot be read.
+        let (results, _, _) = doctests_through(
+            &["test", "--doc"],
+            "printf '{' > 00000000.json",
+            "",
+            "",
+            101,
+        );
+        assert!(results.is_err(), "{results:?}");
+        let (results, _, _) =
+            crate::fault::during("fs.read_to_string#rust_owned_doctests.rs:292", || {
+                doctests_through(
+                    &["test", "--doc"],
+                    "printf 'x' > 00000000.error",
+                    "",
+                    "",
+                    101,
+                )
+            });
+        assert!(
+            matches!(results, Err(RustTestRunnerError::Io(_))),
+            "{results:?}"
+        );
     }
 
     #[test]
