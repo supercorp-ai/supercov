@@ -14397,6 +14397,46 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
     );
 }
 
+/// A line asked for under a kind no test has is refused as such; a line
+/// query, and a test looked for under a kind, refuse when the index read
+/// they make fails.
+#[test]
+fn line_and_test_queries_refuse_what_they_cannot_read() {
+    let project = Project::cart("line-test-reads");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.supercov(&["runs", "latest", "--json"]).succeeds();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let empty = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:3",
+            "--kind",
+            "nope",
+            "--json",
+        ])
+        .exits(2);
+    assert!(empty.contains("TEST_FILTER_EMPTY"), "{empty}");
+    for (args, fault) in [
+        (&["line", "src/cart.js:3"][..], "coverage-index-read#14"),
+        (
+            &["test", "nosuch", "--kind", "unit"][..],
+            "coverage-index-read#3",
+        ),
+    ] {
+        let mut asked = vec!["runs", "latest"];
+        asked.extend(args);
+        asked.push("--json");
+        let refused = project
+            .supercov_with(&asked, &[("SUPERCOV_TEST_FAULT", fault)])
+            .exits(2);
+        assert!(refused.contains("\"ok\":false"), "{args:?}: {refused}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.

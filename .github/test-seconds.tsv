@@ -1085,6 +1085,7 @@ lifecycle::tests::the_failure_says_where_the_evidence_was_kept	0.0	0.0
 lifecycle::tests::waiting_for_the_trash_sweep_gives_up_only_past_its_patience	0.1	0.0
 lifecycle::tests::what_a_store_cannot_hold_is_refused	0.0	0.0
 lifecycle::tests::without_file_locks_the_owners_beside_them_decide	0.0	0.0
+line_and_test_queries_refuse_what_they_cannot_read	2.0	3.0
 line_queries_and_commands_at_their_edges	2.8	2.7
 links_inside_the_project_are_carried_and_ones_leaving_it_are_not	1.2	1.1
 many_lines_are_answered_in_one_call_and_every_gap_says_what_is_missing	3.5	3.2
