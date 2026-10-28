@@ -217,7 +217,8 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
     #[cfg(not(windows))]
     let forms: &[&str] = &[""];
     let mut found = false;
-    for name in source_tools() {
+    // Never empty: `SOURCE_TOOLS` names five.
+    source_tools().into_iter().try_for_each(|name| {
         let Some(tool) = std::env::split_paths(&path)
             .flat_map(|directory| {
                 forms
@@ -227,7 +228,7 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
             })
             .find(|candidate| executable(candidate))
         else {
-            continue;
+            return Some(());
         };
         fs::create_dir_all(&directory).ok()?;
         #[cfg(windows)]
@@ -239,7 +240,8 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
         #[cfg(not(windows))]
         write_launcher(&directory.join(&name), &launcher(&binary, &tool)).ok()?;
         found = true;
-    }
+        Some(())
+    })?;
     if !found {
         return None;
     }
