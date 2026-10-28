@@ -358,6 +358,27 @@ mod tests {
             ["debug/bin", "debug/other"]
         );
         assert!(artifacts_match(&target, &fingerprints));
+        // Each step of fingerprinting that fails is refused: the target and
+        // the artifact resolved, the artifact looked at and read; a file
+        // that cannot be read is no digest.
+        for fault in [
+            "fs.canonicalize",
+            "fs.canonicalize@2",
+            "fs.symlink_metadata",
+            "fs.read",
+        ] {
+            assert!(
+                crate::fault::during(fault, || {
+                    fingerprint_artifacts(&target, &[target.join("debug/bin")])
+                })
+                .is_err(),
+                "{fault}"
+            );
+        }
+        assert_eq!(
+            crate::fault::during("fs.read", || digest_files(&root, &["a.rs".into()])),
+            None
+        );
         assert!(fingerprint_artifacts(&target, &[root.join("outside")]).is_err());
         assert!(fingerprint_artifacts(&target, &[target.join("debug")]).is_err());
         // The target directory itself names no artifact inside it.
@@ -439,6 +460,29 @@ mod tests {
         assert!(read_rust_build_cache(&workspace, &target, "key").is_none());
         fs::write(workspace.join("src/lib.rs"), "fn work() {}\n").unwrap();
         assert!(read_rust_build_cache(&workspace, &target, "key").is_some());
+        // A record that cannot be read is no cache, and one whose artifacts
+        // cannot be fingerprinted is not written.
+        assert!(
+            crate::fault::during("fs.read", || read_rust_build_cache(
+                &workspace, &target, "key"
+            ))
+            .is_none()
+        );
+        assert!(
+            crate::fault::during("fs.canonicalize", || {
+                write_rust_build_cache(
+                    &root,
+                    &workspace,
+                    "key",
+                    "time",
+                    &["src/lib.rs".into()],
+                    &manifest,
+                    &crate::rust_instrumenter::RustProbeLayout::default(),
+                    &[target.join("debug/test-bin")],
+                )
+            })
+            .is_err()
+        );
         // A record of another schema, with no sources, no points or its
         // sources out of order is no cache.
         let tampered = |change: &dyn Fn(&mut RustBuildCacheMetadata)| {
