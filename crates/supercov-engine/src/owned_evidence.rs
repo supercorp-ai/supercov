@@ -108,10 +108,9 @@ impl Cursor<'_> {
     }
 
     fn u64(&mut self, part: &'static str) -> Result<u64, OwnedEvidenceError> {
-        let end = self
-            .offset
-            .checked_add(8)
-            .ok_or(OwnedEvidenceError::Truncated(part))?;
+        // The offset never passes the end of the bytes, so eight more is a
+        // position: only a length read from the file can overflow.
+        let end = self.offset + 8;
         let slice = self
             .bytes
             .get(self.offset..end)
@@ -639,8 +638,9 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     let default_runner = declaration
         .runners
         .first()
-        .map(|runner| runner.runner.clone())
-        .ok_or(OwnedEvidenceError::NoTests)?;
+        .expect("every owned frontend declares its runner")
+        .runner
+        .clone();
     let declared = declaration
         .runners
         .iter()
@@ -867,7 +867,12 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     declaration.structural_limitations = manifest
         .limitations
         .iter()
-        .filter_map(|limitation| limitation.get("id")?.as_str().map(str::to_owned))
+        .map(|limitation| {
+            limitation["id"]
+                .as_str()
+                .expect("an owned frontend names each limitation")
+                .to_owned()
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
