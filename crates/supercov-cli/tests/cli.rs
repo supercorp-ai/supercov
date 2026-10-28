@@ -13039,6 +13039,11 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
         ("fs.write@8", "injected fault at fs"),
         ("fs.read_to_string@21", "wrangler.toml"),
         ("fs.write@9", "wrangler.toml"),
+        // The Worker crate's inputs captured and digested, and the crate
+        // prepared for its build.
+        ("fs.canonicalize@12", "injected fault at fs"),
+        ("fs.open@6", "worker/src/lib.rs"),
+        ("fs.canonicalize@20", "injected fault at fs"),
     ] {
         let project = Project::cart("worker-server-steps");
         project.write("playwright.config.js", "export default {};\n");
