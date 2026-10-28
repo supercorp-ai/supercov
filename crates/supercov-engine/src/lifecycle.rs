@@ -730,9 +730,9 @@ impl ProjectLock {
         match crate::fault::io("store-ignore", io::ErrorKind::PermissionDenied, || {
             fs::open_with(OpenOptions::new().write(true).create_new(true), &ignore)
         }) {
-            Ok(mut file) => file
-                .write_all(b"*\n")
-                .map_err(|source| io_error(&ignore, source))?,
+            Ok(mut file) => {
+                fs::write_all(&mut file, b"*\n").map_err(|source| io_error(&ignore, source))?
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => return Err(io_error(&ignore, source)),
         }
@@ -3236,6 +3236,12 @@ mod tests {
             assert!(taken.is_err(), "{fault}");
             fs::remove_dir_all(root).unwrap();
         }
+        // The store's ignore file that cannot be written.
+        let root = project();
+        let taken =
+            crate::fault::during("fs.write_all", || ProjectLock::acquire(&root, "run", "now"));
+        assert!(taken.is_err());
+        fs::remove_dir_all(root).unwrap();
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         assert!(crate::fault::during("fs.remove_file", || lock.release()).is_err());
@@ -3252,6 +3258,14 @@ mod tests {
         assert_eq!(sweep_trash(&root).unwrap(), 0);
         fs::write(trash.join("old"), "x").unwrap();
         assert!(crate::fault::during("fs.write_all", || sweep_trash(&root)).is_err());
+        // An entry that cannot be listed is refused (the lock the failed
+        // write left gone first); a lock a live process holds leaves the
+        // trash to it.
+        let _ = fs::remove_file(trash.join(".deleter.lock"));
+        assert!(crate::fault::during("fs.read_dir entry", || sweep_trash(&root)).is_err());
+        fs::write(trash.join(".deleter.lock"), std::process::id().to_string()).unwrap();
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
+        assert!(trash.join("old").exists());
         // A lock left by a process that is gone is cleared, unless it cannot be.
         fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
         assert!(crate::fault::during("fs.remove_file", || sweep_trash(&root)).is_err());
@@ -3312,6 +3326,19 @@ mod tests {
             assert!(written.is_err(), "write {fault}");
         }
         fs::write(root.join("evidence"), "bytes").unwrap();
+        // A copy whose source cannot be looked at.
+        assert!(
+            crate::fault::during("fs.symlink_metadata", || {
+                copy_regular_file(&root.join("evidence"), &root.join("copied"))
+            })
+            .is_err()
+        );
+        // A trash that is a link is never moved into.
+        fs::create_dir_all(root.join(".supercov/runs/old")).unwrap();
+        fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join(TRASH)).unwrap();
+        assert!(remove_stored_tree_deferred(&root, &root.join(".supercov/runs/old")).is_err());
+        fs::remove_file(root.join(TRASH)).unwrap();
         for fault in ["fs.symlink_metadata", "fs.open", "fs.read_from"] {
             let hashed = crate::fault::during(fault, || file_sha256(&root.join("evidence")));
             assert!(hashed.is_err(), "hash {fault}");
