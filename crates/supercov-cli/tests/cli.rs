@@ -14563,6 +14563,37 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
     }
 }
 
+/// A browser suite beside servers in other languages prepares each before
+/// the suite starts: its runtime and evidence directories, its runtime, its
+/// plan. Each step failing ends the run, and says where.
+#[test]
+fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
+    for (fault, place) in [
+        ("fs.create_dir_all#6", "python_run.rs:668"),
+        ("fs.create_dir_all#7", "python_run.rs:669"),
+        ("fs.create_dir_all#8", "ruby_run.rs:508"),
+        ("fs.create_dir_all#9", "ruby_run.rs:509"),
+        ("fs.create_dir_all#13", "go_run.rs:305"),
+        ("fs.create_dir_all#14", "go_run.rs:309"),
+        ("fs.create_dir_all#15", "go_run.rs:361"),
+        ("fs.create_dir_all#16", "go_run.rs:400"),
+    ] {
+        let project = Project::cart("browser-servers");
+        project.write(".gitignore", "out/\nnode_modules/\n");
+        project.write("playwright.config.js", "export default {};\n");
+        project.write("server/app.py", "def hello():\n    return 1\n");
+        project.write("web/app.rb", "def hello = 1\n");
+        project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+        project.write("main.go", "package w\n\nfunc Hello() int { return 1 }\n");
+        project.commit("servers");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.

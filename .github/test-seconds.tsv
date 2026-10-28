@@ -8,6 +8,7 @@ a_blocking_select_still_blocks	0.2	0.3
 a_branch_lists_its_unrun_outcomes_in_one_order	0.8	0.7
 a_browser_suite_beside_servers_with_nothing_to_measure_measures_its_javascript	1.1	0.8
 a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so	12.0	16.0
+a_browser_suite_whose_servers_cannot_be_prepared_says_so	8.0	10.0
 a_busy_gateway_is_waited_for_and_a_broken_one_is_named	16.2	1.1
 a_cargo_filter_that_matches_no_test_says_so_when_the_run_is_read	2.1	1.9
 a_case_entered_by_fallthrough_is_not_credited_as_selected	0.5	0.7
