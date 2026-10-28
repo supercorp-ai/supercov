@@ -1938,7 +1938,14 @@ fn compiled_out_ranges(root: &ra_ap_syntax::SyntaxNode, cfg: Option<&TargetCfg>)
     };
     root.descendants()
         .filter(|node| cfg.compiles_out(node))
-        .map(|node| node.text_range())
+        // An expression statement's attributes are its expression's, and the
+        // `;` after it goes with it.
+        .map(|node| {
+            node.parent()
+                .filter(|parent| ast::ExprStmt::can_cast(parent.kind()))
+                .unwrap_or(node)
+                .text_range()
+        })
         .collect()
 }
 
@@ -3567,6 +3574,23 @@ fn main() {
         );
         assert_eq!(location(&original), "main.rs:3:9:");
         assert_eq!(location(&instrumented), location(&original));
+    }
+
+    /// An expression statement the target's cfg leaves out is left out
+    /// with its `;`: `#[cfg(windows)] continue;` on Linux is no line to run.
+    #[test]
+    fn an_expression_statement_the_target_compiles_out_is_no_line() {
+        let cfg = TargetCfg::new(&["unix".parse::<cargo_platform::Cfg>().unwrap()]);
+        let source = "pub fn a(v: &[u8]) -> u8 {\n    for x in v {\n        if *x == 0 {\n            #[cfg(windows)]\n            continue;\n            #[cfg(unix)]\n            a(v);\n        }\n    }\n    #[cfg(windows)]\n    a(v);\n    1\n}\n";
+        let instrumented =
+            instrument_rust_file("src/lib.rs", source, "crate::rt", false, Some(&cfg)).unwrap();
+        let lines = instrumented
+            .manifest
+            .points
+            .iter()
+            .map(|point| point.line)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(lines, BTreeSet::from([1, 2, 3, 6, 12]), "{lines:?}");
     }
 
     #[test]
