@@ -11793,15 +11793,23 @@ fn a_browser_suite_beside_servers_with_nothing_to_measure_measures_its_javascrip
     );
 }
 
-/// Source roots named for a browser suite's JavaScript leave the Python and
-/// Ruby beside it no server to measure: the run measures its JavaScript
-/// instead of refusing the roots as a Python or Ruby run of its own would.
+/// Source roots named for a browser suite's JavaScript leave the Python,
+/// Ruby and Java beside it no server to measure: the run measures its
+/// JavaScript instead of refusing the roots as a run of their own would.
 #[test]
 fn source_roots_naming_only_javascript_leave_no_python_or_ruby_server() {
     let project = Project::cart("roots-javascript-only");
     project.write("playwright.config.js", "export default {};\n");
     project.write("server.py", "def handle():\n    return 1\n");
     project.write("app.rb", "def handle\n  1\nend\n");
+    project.write(
+        "pom.xml",
+        "<project><modelVersion>4.0.0</modelVersion><groupId>e</groupId><artifactId>w</artifactId><version>1</version></project>\n",
+    );
+    project.write(
+        "java/w/W.java",
+        "package w;\npublic class W { public static int one() { return 1; } }\n",
+    );
     let run = project.supercov_with(
         &["--", "node", "--test"],
         &[("SUPERCOV_SOURCE_ROOTS", "src")],
@@ -14621,16 +14629,25 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
 }
 
 /// A browser suite beside a Java server prepares the server in the copy:
-/// its instrumented sources, their directories, its evidence directory.
-/// Each step failing ends the run, and says where.
+/// the project found and its sources captured and digested, the copy's
+/// project read, its instrumented sources, their directories, its evidence
+/// directory. Each step failing ends the run, and says where.
 #[test]
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#jvm_run.rs:2000", "jvm_run.rs:2000"),
-        ("fs.create_dir_all#jvm_run.rs:2016", "jvm_run.rs:2016"),
-        ("fs.create_dir_all#jvm_run.rs:2026", "jvm_run.rs:2026"),
-        ("fs.write#jvm_run.rs:2000", "jvm_run.rs:2000"),
-        ("fs.write#jvm_run.rs:2016", "jvm_run.rs:2016"),
+        // The project's tree walked, then the copy's: the seventh listing.
+        ("fs.read_dir#jvm_project.rs:173", "jvm_project.rs:173"),
+        ("fs.read_dir#jvm_project.rs:173@7", "jvm_project.rs:173"),
+        (
+            "fs.canonicalize#source_capture.rs:25@2",
+            "source_capture.rs:25",
+        ),
+        ("fs.open#integrity.rs:426@4", "integrity.rs:426"),
+        ("fs.create_dir_all#jvm_run.rs:1997", "jvm_run.rs:1997"),
+        ("fs.create_dir_all#jvm_run.rs:2013", "jvm_run.rs:2013"),
+        ("fs.create_dir_all#jvm_run.rs:2023", "jvm_run.rs:2023"),
+        ("fs.write#jvm_run.rs:1997", "jvm_run.rs:1997"),
+        ("fs.write#jvm_run.rs:2013", "jvm_run.rs:2013"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
