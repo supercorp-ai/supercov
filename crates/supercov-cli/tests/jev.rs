@@ -5757,3 +5757,55 @@ fn a_changed_assessment_whose_requests_fail_says_so() {
         "{partial}"
     );
 }
+
+/// A change that reaches tests through no assessed statement -- an empty
+/// function's signature, a helper only a test file loads -- asks nothing.
+#[test]
+fn a_change_in_no_assessed_statement_asks_nothing() {
+    let project = Project::cart("changed-unassessed");
+    project.edit(
+        "src/cart.js",
+        "export function describe(items) {",
+        "export function noop() {}\n\nexport function describe(items) {",
+    );
+    project.write("test/helper.js", "export const TEN = 10;\n");
+    project.edit(
+        "test/cart.test.js",
+        "import { total, shipping } from \"../src/cart.js\";",
+        "import { total, shipping, noop } from \"../src/cart.js\";\nimport { TEN } from \"./helper.js\";",
+    );
+    project.edit(
+        "test/cart.test.js",
+        "  assert.equal(total([{ price: 10, quantity: 2 }]), 20);",
+        "  noop();\n  assert.equal(total([{ price: TEN, quantity: 2 }]), 20);",
+    );
+    project.commit("helpers");
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    project.edit(
+        "src/cart.js",
+        "export function noop() {}",
+        "export function noop(_unused) {}",
+    );
+    project.edit("test/helper.js", "TEN = 10;", "TEN = 5 + 5;");
+    let changed = project
+        .supercov_with(
+            &[
+                "runs",
+                &run,
+                "assertions",
+                "assess",
+                "--changed",
+                "--refresh",
+            ],
+            &through(&base),
+        )
+        .succeeds();
+    assert!(
+        changed.contains("no statement the run assessed has changed since it; nothing was asked."),
+        "{changed}"
+    );
+}
