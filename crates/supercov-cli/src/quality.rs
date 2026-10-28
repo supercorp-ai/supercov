@@ -1459,7 +1459,8 @@ fn resolve(
         .filter(|s| !s.trim().is_empty())
         .ok_or("set TYPESAFE_API_KEY for uncached assessments, or use --dry-run")?;
     let started = Instant::now();
-    let response = evaluate(agent, endpoint()?, key, request)?;
+    let endpoint = endpoint().expect("each pass that asks checks the endpoint first");
+    let response = evaluate(agent, endpoint, key, request)?;
     let entry = CacheEntry {
         request_hash: hash.to_owned(),
         response,
@@ -2436,10 +2437,9 @@ fn confirm_paths(
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
     let mut unasked = Vec::new();
+    // Each file with a structure was asked, and so has an answer.
     for (file, (structure, source)) in structures {
-        let Some(answer) = by_path.get(file.as_str()) else {
-            continue;
-        };
+        let answer = by_path[file.as_str()];
         if answer.labels.is_empty() {
             continue;
         }
@@ -2450,9 +2450,7 @@ fn confirm_paths(
             let Some((callee_structure, callee_source)) = structures.get(&target) else {
                 continue;
             };
-            let Some(callee_answer) = by_path.get(target.as_str()) else {
-                continue;
-            };
+            let callee_answer = by_path[target.as_str()];
             // A file with labels has a function for each.
             let callers = structure
                 .functions
@@ -2699,9 +2697,7 @@ fn run_paths(
                 let Some((caller_structure, caller_source)) = structures.get(*caller_file) else {
                     return;
                 };
-                let Some(caller_answer) = by_path.get(caller_file) else {
-                    return;
-                };
+                let caller_answer = by_path[caller_file];
                 for (caller, caller_label) in caller_structure.functions.iter().zip(&caller_answer.labels) {
                     if caller_label.takes_outside < cut
                         || lines.range(caller.start..=caller.end).next().is_none()
@@ -4003,9 +3999,10 @@ fn cross_with_coverage(report: &mut Value, run: &RunCoverage, file_flag: &str, t
     let crossed: Vec<Value> = files
         .into_iter()
         .map(|mut file| {
-            let Some(path) = file["path"].as_str().map(str::to_owned) else {
-                return file;
-            };
+            let path = file["path"]
+                .as_str()
+                .expect("each file a report lists has its path")
+                .to_owned();
             let introduced = file["present"]
                 .as_array()
                 .is_some_and(|present| !present.is_empty());
@@ -4031,9 +4028,10 @@ fn cross_with_coverage(report: &mut Value, run: &RunCoverage, file_flag: &str, t
                             unasserted += 1;
                             file["flagged_and_unasserted"] = json!(true);
                         }
-                        // Per confirmed line: whether a test is judged to catch it.
+                        // Per confirmed line: whether a test is judged to catch
+                        // it. What it introduced is some.
                         let findings = file["present"].as_array_mut().into_iter().flatten();
-                        for finding in findings {
+                        findings.for_each(|finding| {
                             let lines = finding["lines"].as_array_mut().into_iter().flatten();
                             for line in lines {
                                 let number = line["line"].as_u64().unwrap_or(0);
@@ -4041,7 +4039,7 @@ fn cross_with_coverage(report: &mut Value, run: &RunCoverage, file_flag: &str, t
                                     line["asserted"] = json!(true);
                                 }
                             }
-                        }
+                        });
                     }
                 }
                 None => {
@@ -4087,9 +4085,9 @@ fn annotations(report: &Value) -> String {
     };
     let mut out = String::new();
     for file in report["files"].as_array().unwrap_or(&empty) {
-        let Some(path) = file["path"].as_str() else {
-            continue;
-        };
+        let path = file["path"]
+            .as_str()
+            .expect("each file a report lists has its path");
         let line = file["line"].as_u64().unwrap_or(1).max(1);
         for finding in file["present"].as_array().unwrap_or(&empty) {
             let Some(check) = finding["check"].as_str() else {

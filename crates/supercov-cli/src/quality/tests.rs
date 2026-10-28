@@ -3648,11 +3648,13 @@ fn reports_render_whatever_they_hold() {
     for report in [&empty, &bare, &full] {
         human_quality(report);
         human_security(report);
-        annotations(report);
         for limit in [0, 1] {
             human_patch(report, limit);
         }
     }
+    // Annotations are only ever made of the review just run, never a saved one.
+    annotations(&empty);
+    annotations(&full);
     // A review of changed files, some reviewed, one failed, one refused.
     for patch in [
         serde_json::json!({"reviewed_files": 2, "introduced": 1, "files": []}),

@@ -3671,8 +3671,10 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
         "export function formatRow(v) {\n  return String(v);\n}\n",
     );
     project.write("src/handler.js", "import { sinkRun } from \"./db.js\";\nexport function takeHandler(req, db) {\n  return sinkRun(db, req.q);\n}\n");
+    // A function outside the files assessed, which the tests run too.
+    project.write("lib/pad.js", "export function pad(v) {\n  return v;\n}\n");
     let mut tests = String::from(
-        "import test from \"node:test\";\nimport { sinkRun, quietLog } from \"../src/db.js\";\nimport { formatRow } from \"../src/fmt.js\";\nimport { takeHandler } from \"../src/handler.js\";\nimport { limit } from \"../src/consts.js\";\n",
+        "import test from \"node:test\";\nimport { sinkRun, quietLog } from \"../src/db.js\";\nimport { formatRow } from \"../src/fmt.js\";\nimport { takeHandler } from \"../src/handler.js\";\nimport { limit } from \"../src/consts.js\";\nimport { pad } from \"../lib/pad.js\";\n",
     );
     for i in 1..=9 {
         project.write(&format!("src/route{i}.js"), &format!("export function takeRoute{i}(req, deps) {{\n  return deps.sinkRun(deps.db, req.p);\n}}\n"));
@@ -3683,7 +3685,7 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
     tests.push_str("const db = { query: () => 1 };\n");
     for i in 1..=9 {
         tests.push_str(&format!(
-            "test(\"route {i}\", () => {{ formatRow(1); quietLog(db, 1); takeRoute{i}({{ p: 1 }}, {{ db, sinkRun }}); }});\n"
+            "test(\"route {i}\", () => {{ pad(1); formatRow(1); quietLog(db, 1); takeRoute{i}({{ p: 1 }}, {{ db, sinkRun }}); }});\n"
         ));
     }
     tests.push_str("test(\"route 1 again\", () => { takeRoute1({ p: 2 }, { db, sinkRun }); });\n");
@@ -3734,6 +3736,45 @@ fn a_path_seen_in_tests_is_asked_once_three_callers_a_function_and_the_rest_name
         "{}",
         json["paths_not_asked"]
     );
+    let answers = project.root.join(".supercov/security");
+    // A path question that fails confirms nothing.
+    std::fs::remove_dir_all(&answers).unwrap();
+    let (failing, _) = gateway(MODEL, answer_by_name_but_paths);
+    let unconfirmed = project
+        .supercov_with(&["security", "src/", "--run", "latest"], &through(&failing))
+        .succeeds();
+    assert!(
+        !unconfirmed.contains("Cross-file paths confirmed"),
+        "{unconfirmed}"
+    );
+    // A file whose answer failed has no labelled function: as the callee
+    // of an import, and as a caller a test ran, it makes no path.
+    for file in ["src/db.js", "src/route1.js"] {
+        std::fs::remove_dir_all(&answers).unwrap();
+        project
+            .supercov_with(&["security", file], &through(&base))
+            .succeeds();
+        for entry in std::fs::read_dir(answers.join("requests")).unwrap() {
+            std::fs::write(entry.unwrap().path(), "not json").unwrap();
+        }
+        let failed = project
+            .supercov_with(&["security", "src/", "--run", "latest"], &through(&base))
+            .stdout();
+        assert!(
+            failed.contains(&format!("error  {file}")),
+            "{file}: {failed}"
+        );
+        assert!(!failed.contains(&format!("{file}:")), "{file}: {failed}");
+    }
+}
+
+/// Labels as `answer_by_name` gives them, and an answer no path question
+/// accepts.
+fn answer_by_name_but_paths(id: &str, question: &serde_json::Value) -> serde_json::Value {
+    if id == "path" {
+        return serde_json::json!({ "type": "noul", "noul": 2.0 });
+    }
+    answer_by_name(id, question)
 }
 
 #[test]
@@ -4746,6 +4787,29 @@ fn a_file_under_no_root_is_put_to_the_model_with_the_manifests_and_a_failure_is_
             "\n1 source file sits under no recognised source root and was not assessed.",
         ],
     );
+    // A tree too large to put in one question is not asked about: its files
+    // stay out.
+    let large = Project::cart("scope-too-large");
+    for i in 0..200 {
+        large.write(&format!("misc/{i}{}.go", "a".repeat(120)), "package main\n");
+    }
+    large.commit("misc");
+    let (base, seen) = gateway(MODEL, answer_no);
+    let report = large
+        .supercov_with(&["quality"], &through(&base))
+        .succeeds();
+    assert!(
+        report.contains(
+            "\n200 source files sit under no recognised source root and were not assessed."
+        ),
+        "{report}"
+    );
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(_, _, request)| request["state"]["manifests"].is_null()),
+    );
 }
 
 #[test]
@@ -4767,6 +4831,13 @@ fn a_snapshot_that_scored_nothing_reads_as_such_and_diffs_against_one_that_did()
             .supercov(&["quality", "show"])
             .succeeds()
             .starts_with("Quality not scored: no file was assessed.\n")
+    );
+    // Security, too, has no file to ask about line by line.
+    assert!(
+        project
+            .supercov_with(&["security"], &through(&no))
+            .succeeds()
+            .starts_with("Security: 0 of 0 files flagged, 0 clean.")
     );
     project.write("src/real.js", "export const b = (x) => x + 1;\n");
     let second = project
@@ -5401,6 +5472,50 @@ fn a_line_whose_question_does_not_fit_is_said_to_be_unchecked() {
         "{}",
         unclassified.stdout()
     );
+
+    // So are lines whose confirmation was refused.
+    let (refusing, _) = gateway(MODEL, answer_findings_but_confirmations);
+    let unconfirmed = small
+        .supercov_with(
+            &["security", "src/run.js", "--refresh"],
+            &through(&refusing),
+        )
+        .succeeds();
+    assert!(
+        unconfirmed.contains("1 line(s) not checked one by one"),
+        "{unconfirmed}"
+    );
+
+    // A window of a large file may hold no line of code to classify: the
+    // middle of a long string.
+    let text = Project::empty("windowed-string");
+    text.write("package.json", r#"{"name":"text","type":"module"}"#);
+    let mut source = String::from("export function run(a) {\n  const text = `\n");
+    for _ in 0..300 {
+        source.push_str(&"a plain word ".repeat(42));
+        source.push('\n');
+    }
+    source.push_str("`;\n  return eval(a + text);\n}\n");
+    text.write("src/text.js", &source);
+    let report = text
+        .supercov_with(&["security", "src/text.js"], &through(&base))
+        .succeeds();
+    assert!(
+        report.contains("1 of 1 file flagged, 0 clean; 1 confirmed at a line."),
+        "{report}"
+    );
+}
+
+/// Findings as `answer_findings` gives them, and an answer no line
+/// confirmation accepts.
+fn answer_findings_but_confirmations(id: &str, question: &serde_json::Value) -> serde_json::Value {
+    if id
+        .strip_prefix('c')
+        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return serde_json::json!({ "type": "noul", "noul": 2.0 });
+    }
+    common::answer_findings(id, question)
 }
 
 /// A suite whose tests reach no statement: there is nothing to assess, so
