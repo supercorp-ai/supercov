@@ -398,6 +398,9 @@ mod tests {
         let mut unsafe_path = fingerprints.clone();
         unsafe_path[0].path = "../outside".into();
         assert!(!artifacts_match(&target, &unsafe_path));
+        let mut absent = fingerprints.clone();
+        absent[0].path = "absent".into();
+        assert!(!artifacts_match(&target, &absent));
         let mut directory = fingerprints;
         directory[0].path = "debug".into();
         assert!(!artifacts_match(&target, &directory));
