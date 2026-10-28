@@ -198,7 +198,8 @@ exec {cargo} "$@"
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
+    // No PATH searches nowhere, as an empty one does.
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join(name))
         .find(|candidate| fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file()))
 }
@@ -206,6 +207,44 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each step of standing in for Cargo that fails stops the learning and
+    /// says where: no Cargo to stand in for, its directory, its script, its
+    /// permissions, and a scratch directory no PATH can hold.
+    #[cfg(unix)]
+    #[test]
+    fn each_step_of_standing_in_for_cargo_that_fails_is_said() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-wasm-pack-steps-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let command = ["true".to_owned(), "test".to_owned()];
+        let learned = |fault: &str, scratch: &Path| {
+            crate::fault::during(fault, || learn(&root, &command, scratch)).unwrap_err()
+        };
+        let scratch = root.join("scratch");
+        assert!(learned("fs.metadata", &scratch).contains("no `cargo` on PATH"));
+        for fault in [
+            "fs.create_dir_all#rust_wasm_pack.rs:78",
+            "fs.write#rust_wasm_pack.rs:189",
+            "fs.set_permissions#rust_wasm_pack.rs:190",
+        ] {
+            assert!(
+                learned(fault, &scratch).contains("wasm-pack-cargo"),
+                "{fault}"
+            );
+        }
+        let colon = root.join("a:b");
+        assert!(learned("", &colon).contains("separator"));
+        // The stand-in ran nothing: the command stopped before `cargo test`.
+        assert!(learned("", &scratch).contains("stopped before it ran `cargo test`"));
+    }
 
     #[test]
     fn only_wasm_pack_test_is_learned() {
