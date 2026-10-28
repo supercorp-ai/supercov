@@ -1266,7 +1266,8 @@ pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<&RawTestRe
     let accepted = terminal_retries
         .into_iter()
         .filter_map(|(test, retry)| {
-            let (statuses, expected_failure) = attempts.get(&(test.clone(), retry))?;
+            // The retries are read from the attempts' own keys.
+            let (statuses, expected_failure) = &attempts[&(test.clone(), retry)];
             (statuses.contains("passed") && !expected_failure).then_some((test, retry))
         })
         .collect::<BTreeSet<_>>();
@@ -1536,7 +1537,11 @@ fn observation_of<'o>(
     vector: &McdcVector,
 ) -> Option<&'o mut MutableObservation> {
     let index = *vector_indexes.get(id)?.get(&vector_key(vector))?;
-    vectors_by_decision.get_mut(id)?.get_mut(index)
+    // Indexed only where the decision's observations are.
+    vectors_by_decision
+        .get_mut(id)
+        .expect("a decision with an index has its observations")
+        .get_mut(index)
 }
 
 fn hash_slot<'m, V: Default, S: std::hash::BuildHasher>(
@@ -4754,6 +4759,17 @@ mod tests {
             Err(ReportError::ScopeMismatch { actual, .. }) if actual == "other"
         ));
         assert!(analyze_coverage_results(&request(vec![raw("a", 0, "passed", &["a"])])).is_ok());
+        // A coverage model named by no identifier is refused as one.
+        let mut model = javascript_coverage_model();
+        model.language = "Not An Identifier".into();
+        let invalid = CoverageReportRequest {
+            coverage_model: Some(model),
+            ..request(vec![raw("a", 0, "passed", &["a"])])
+        };
+        assert!(matches!(
+            analyze_coverage_results(&invalid),
+            Err(ReportError::InvalidJson { path, .. }) if path == "coverage-model.json"
+        ));
     }
 
     #[test]
