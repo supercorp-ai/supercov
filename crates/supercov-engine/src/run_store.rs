@@ -1083,7 +1083,9 @@ pub fn analyze_stored_run_filtered(
         archive_path: run.evidence_path.clone(),
         run_id: run.id.clone(),
         generated_at: run.metadata.started_at.clone(),
-        integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+        integrity: Some(
+            serde_json::to_value(&run.metadata.integrity).expect("plain data serializes"),
+        ),
         test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
         test_filter: filter.cloned(),
     })?)
@@ -1107,7 +1109,9 @@ fn index_sections(
             archive_path: run.evidence_path.clone(),
             run_id: run.id.clone(),
             generated_at: run.metadata.started_at.clone(),
-            integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+            integrity: Some(
+                serde_json::to_value(&run.metadata.integrity).expect("plain data serializes"),
+            ),
             test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
             test_filter: filter.cloned(),
         })?;
@@ -1283,8 +1287,11 @@ pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -
     let bytes = serde_json::to_vec(&crate::assertion_coverage::assessment_input(report))
         .expect("plain data serializes");
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(&bytes)?;
-    fs::write(run.directory.join(ASSESSMENT_INPUT_FILE), encoder.finish()?)
+    encoder.write_all(&bytes).expect("writing to memory");
+    fs::write(
+        run.directory.join(ASSESSMENT_INPUT_FILE),
+        encoder.finish().expect("writing to memory"),
+    )
 }
 
 pub(crate) fn write_query_index_from(
