@@ -633,7 +633,7 @@ struct Hashing<R> {
 
 impl<R: Read> Read for Hashing<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = self.inner.read(buffer)?;
+        let read = fs::read_from(&mut self.inner, buffer)?;
         sha2::Digest::update(&mut self.hash, &buffer[..read]);
         self.bytes += read as u64;
         Ok(read)
@@ -947,6 +947,42 @@ mod tests {
             assert!(left.is_empty(), "{limit}: {left:?}");
         }
         assert!(written.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Reading an archive fails where its file cannot be opened or read --
+    /// as its stream is decoded, or as the end is checked -- and where the
+    /// reader refuses an entry it is handed.
+    #[test]
+    fn an_archive_that_cannot_be_read_or_whose_entry_is_refused_fails() {
+        let root = temporary_directory("archive-unread");
+        let destination = root.join("evidence.raw.gz");
+        write_archive(identity_entries(), &destination).unwrap();
+        for fault in ["fs.read_from", "fs.read_from@2"] {
+            assert!(
+                matches!(
+                    crate::fault::during(fault, || read_archive_each(
+                        &destination,
+                        |_| false,
+                        |_| Ok(())
+                    )),
+                    Err(EvidenceArchiveError::Io(_))
+                ),
+                "{fault}"
+            );
+        }
+        assert!(matches!(
+            read_archive_each(
+                &destination,
+                |_| true,
+                |_| Err(EvidenceArchiveError::MissingManifest)
+            ),
+            Err(EvidenceArchiveError::MissingManifest)
+        ));
+        assert!(matches!(
+            read_archive_schema_version(&root.join("missing.raw.gz")),
+            Err(EvidenceArchiveError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
