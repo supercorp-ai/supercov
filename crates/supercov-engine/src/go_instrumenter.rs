@@ -99,7 +99,7 @@ fn parse_exactly(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError>
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_go::LANGUAGE.into())
-        .map_err(|error| GoInstrumenterError::Parse(error.to_string()))?;
+        .expect("the Go grammar is built for this tree-sitter");
     let tree = parser
         .parse(source, None)
         .expect("a parser given its language and no time limit returns a tree");

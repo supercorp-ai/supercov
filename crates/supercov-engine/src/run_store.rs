@@ -1266,7 +1266,7 @@ pub fn read_statement_spans(run: &StoredRun) -> Option<Vec<serde_json::Value>> {
 }
 
 pub(crate) fn write_statement_spans(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
-    let bytes = serde_json::to_vec(&statement_spans(report)).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(&statement_spans(report)).expect("plain data serializes");
     fs::write(run.directory.join(STATEMENT_SPANS_FILE), bytes)
 }
 
@@ -1280,7 +1280,7 @@ pub fn read_assessment_input(
 
 pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
     let bytes = serde_json::to_vec(&crate::assertion_coverage::assessment_input(report))
-        .map_err(io::Error::other)?;
+        .expect("plain data serializes");
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(&bytes)?;
     fs::write(run.directory.join(ASSESSMENT_INPUT_FILE), encoder.finish()?)

@@ -54,7 +54,7 @@ pub fn parse(
     };
     parser
         .set_language(&grammar)
-        .map_err(|error| JvmInstrumenterError::Parse(error.to_string()))?;
+        .expect("the JVM grammars are built for this tree-sitter");
     let tree = parser
         .parse(source, None)
         .expect("a parser given its language and no time limit returns a tree");

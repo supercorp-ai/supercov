@@ -42,7 +42,9 @@ fn recovered(source: &str, language: JvmLanguage) -> Option<Tree> {
         JvmLanguage::Kotlin => crate::kotlin_grammar::LANGUAGE.into(),
         JvmLanguage::Java => tree_sitter_java::LANGUAGE.into(),
     };
-    parser.set_language(&grammar).ok()?;
+    parser
+        .set_language(&grammar)
+        .expect("the JVM grammars are built for this tree-sitter");
     parser.parse(source, None)
 }
 

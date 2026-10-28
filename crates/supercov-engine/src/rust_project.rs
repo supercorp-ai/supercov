@@ -1128,10 +1128,7 @@ pub fn prepare_rust_project_for(
             )
         }
     };
-    manifest.scope = Some(
-        serde_json::to_value(scope)
-            .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?,
-    );
+    manifest.scope = Some(serde_json::to_value(scope).expect("plain data serializes"));
     Ok(PreparedRustProject {
         workspace_root: workspace,
         target_directory,

@@ -77,9 +77,9 @@ pub fn command(arguments: &[String]) -> ExitCode {
         match super::execute_public_query(&root, &invocation)
             .map_err(|failure| failure.error.message.clone())?
         {
-            super::PublicQueryOutput::Coverage { output, .. } => serde_json::to_value(&output.data)
-                .map(|data| serde_json::json!({ "data": data }))
-                .map_err(|error| error.to_string()),
+            super::PublicQueryOutput::Coverage { output, .. } => Ok(serde_json::json!({
+                "data": serde_json::to_value(&output.data).expect("plain data serializes")
+            })),
             super::PublicQueryOutput::Runs { .. } => Err("not a coverage query".into()),
         }
     };

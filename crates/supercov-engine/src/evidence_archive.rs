@@ -529,7 +529,7 @@ fn read_framed_entries<R: Read>(
         }
         let header: EntryHeader =
             serde_json::from_slice(&encoded_header[..encoded_header.len() - 1])?;
-        let mut canonical = serde_json::to_vec(&header)?;
+        let mut canonical = serde_json::to_vec(&header).expect("plain data serializes");
         canonical.push(b'\n');
         if encoded_header != canonical {
             return Err(EvidenceArchiveError::InvalidHeader(

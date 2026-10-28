@@ -20,7 +20,9 @@ pub(super) fn statement_starts(source: &str) -> Starts {
 /// The tree of a Go source, a broken one included.
 fn parse(source: &str) -> Option<Tree> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
+    parser
+        .set_language(&tree_sitter_go::LANGUAGE.into())
+        .expect("the Go grammar is built for this tree-sitter");
     parser.parse(source, None)
 }
 

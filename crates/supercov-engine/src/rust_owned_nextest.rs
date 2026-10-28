@@ -618,7 +618,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
     };
     fs::write(
         attempts.join(format!("{sequence:08}.json")),
-        serde_json::to_vec(&record)?,
+        serde_json::to_vec(&record).expect("plain data serializes"),
     )
     .map_err(io_error)?;
     Ok(code)
