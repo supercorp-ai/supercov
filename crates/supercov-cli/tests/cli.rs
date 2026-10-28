@@ -15519,7 +15519,7 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1059", "go_run.rs:1059"),
+        ("fs.write#go_run.rs:1063", "go_run.rs:1063"),
         ("fs.create_dir_all#go_run.rs:1073", "go_run.rs:1073"),
     ] {
         let project = Project::cart("browser-go");
@@ -17841,4 +17841,37 @@ fn several_lines_answer_a_line_of_anchors_beside_a_line_that_ran() {
         .map(|line| line["location"]["line"].as_u64().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(asked, [5, 14], "{answer}");
+}
+
+/// The source roots named, read again in the copy for a Go server beside a
+/// browser suite: roots the copy cannot answer for leave the server
+/// unmeasured, and the suite is measured all the same.
+#[test]
+fn a_go_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
+    if go().is_none() {
+        return;
+    }
+    let project = Project::cart("browser-go-roots");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+    project.write(
+        "main.go",
+        "package main\n\nfunc hello() int { return 1 }\n\nfunc main() { hello() }\n",
+    );
+    project.commit("go");
+    // The suite's own discovery reads both roots; the server's, the third.
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[
+            (
+                "SUPERCOV_TEST_FAULT",
+                "fs.symlink_metadata#source_discovery.rs:473@3",
+            ),
+            ("SUPERCOV_SOURCE_ROOTS", "src,main.go"),
+        ],
+    );
+    let stderr = ran.stderr();
+    assert_eq!(ran.code(), 0, "{stderr}");
+    assert!(fired_at(&stderr, "source_discovery.rs:473"), "{stderr}");
 }

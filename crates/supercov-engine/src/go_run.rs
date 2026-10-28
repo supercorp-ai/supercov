@@ -1050,12 +1050,16 @@ impl GoServer {
             .map(u8::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let mut mains = 0;
-        for (directory, package) in &sources.source_packages {
-            if package != "main" {
-                continue;
-            }
-            mains += 1;
+        let mains = sources
+            .source_packages
+            .iter()
+            .filter(|(_, package)| *package == "main")
+            .collect::<Vec<_>>();
+        // A directory has a package only for a file instrumented in it.
+        if mains.is_empty() {
+            return Ok(None);
+        }
+        mains.into_iter().try_for_each(|(directory, _)| {
             write(
                 &workspace.join(directory).join(SERVER_FILE),
                 &format!(
@@ -1063,12 +1067,8 @@ impl GoServer {
                     sources.import_for(&format!("{directory}/x.go")),
                     sources.probe_count,
                 ),
-            )?;
-        }
-        // A directory has a package only for a file instrumented in it.
-        if mains == 0 {
-            return Ok(None);
-        }
+            )
+        })?;
         let directory = root.join(".supercov/work").join(run_id).join("go");
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         Ok(Some(Self {
