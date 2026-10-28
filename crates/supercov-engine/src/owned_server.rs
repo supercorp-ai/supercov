@@ -586,11 +586,19 @@ mod tests {
                 "fs.rename#evidence_archive.rs:471",
                 9,
             ),
-            ("run_said", &one[..], "", 0),
-            ("run_overlap", &both[..], "", 1),
         ] {
             let failed = publishing(id, tests, fault, &mut Lines(lines)).unwrap_err();
             assert!(failed.contains("their evidence is kept"), "{id}: {failed}");
+        }
+        // A line about a published run that cannot be written takes nothing
+        // from the run.
+        for (id, tests, lines) in [("run_said", &one[..], 0), ("run_overlap", &both[..], 1)] {
+            assert!(
+                publishing(id, tests, "", &mut Lines(lines))
+                    .unwrap()
+                    .is_some(),
+                "{id}"
+            );
         }
     }
 }
