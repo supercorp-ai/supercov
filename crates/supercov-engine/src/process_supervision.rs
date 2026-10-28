@@ -509,10 +509,11 @@ const TERMINAL_SIZE_EVERY: Duration = Duration::from_millis(250);
 fn relay_terminal(mut terminal: Terminal, names: ConsoleNames) -> std::sync::mpsc::Receiver<()> {
     let (ended, wait) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        let Ok(mut to) = terminal.real.try_clone() else {
-            let _ = ended.send(());
-            return;
-        };
+        // The terminal this process holds open duplicates.
+        let mut to = terminal
+            .real
+            .try_clone()
+            .expect("an open terminal duplicates");
         let mut pass = |bytes: &[u8]| -> io::Result<()> {
             match std::str::from_utf8(bytes) {
                 Ok(text) => to.write_all(names.line(text).as_bytes())?,
@@ -547,10 +548,10 @@ fn relay_terminal(mut terminal: Terminal, names: ConsoleNames) -> std::sync::mps
             let read = match crate::fault::io("terminal-read", io::ErrorKind::Interrupted, || {
                 terminal.ours.read(&mut buffer)
             }) {
-                Ok(0) => break,
-                Ok(read) => read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+                // Nothing on macOS, an error on Linux: the same hang-up.
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
             };
             pending.extend_from_slice(&buffer[..read]);
             if let Some(end) = pending.iter().rposition(|byte| *byte == b'\n') {
@@ -593,13 +594,8 @@ impl CommandSpec {
                     operation: "create captured process output",
                     source,
                 })?;
-            let errors =
-                output
-                    .try_clone()
-                    .map_err(|source| SupervisionError::PlatformOperation {
-                        operation: "clone captured process output",
-                        source,
-                    })?;
+            // A file just opened duplicates.
+            let errors = output.try_clone().expect("a file just opened duplicates");
             command
                 .stdout(Stdio::from(output))
                 .stderr(Stdio::from(errors));
