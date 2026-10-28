@@ -572,9 +572,7 @@ fn nested_checkout(path: &Path) -> bool {
 /// receives its Vite build, and every such bundle was an ambiguous blocker.
 fn built_asset(file: &str) -> bool {
     let mut segments = file.rsplit('/');
-    let Some(name) = segments.next() else {
-        return false;
-    };
+    let name = segments.next().expect("a split yields a segment");
     let in_asset_directory =
         segments.any(|segment| matches!(segment, "assets" | "static" | "public"));
     let Some(stem) = name
@@ -1596,6 +1594,21 @@ mod tests {
         fs::write(root.join("pnpm-workspace.yaml"), "").unwrap();
         fs::write(root.join("package.json"), r#"{"workspaces": 5}"#).unwrap();
         assert!(declared_workspace_packages(&root).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A tsconfig that is not there, or no JSON, names no root.
+    #[test]
+    fn a_tsconfig_that_is_no_json_names_no_root() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-tsconfig-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(tsconfig_roots(&root).is_empty());
+        fs::write(root.join("tsconfig.json"), "{").unwrap();
+        assert!(tsconfig_roots(&root).is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
