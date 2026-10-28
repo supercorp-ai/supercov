@@ -9298,6 +9298,15 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     );
     assert_eq!(json["data"]["summary"]["tests"], 3);
     assert_eq!(json["data"]["summary"]["unaffected"], 2);
+    // The runs it was merged from are looked up in the store, listed again;
+    // a store that cannot be listed cannot answer.
+    let unlisted = project.supercov_with(
+        &["runs", "latest", "tests", "affected"],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636@2")],
+    );
+    let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
+    assert_eq!(unlisted.code(), 2, "{said}");
+    assert!(fired_at(&said, "run_store.rs:636"), "{said}");
     // A run it was merged from that is no longer stored cannot answer.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
     let gone = project
@@ -17383,5 +17392,32 @@ fn a_rust_run_whose_source_root_lies_outside_the_project_says_so() {
         ran.stderr().contains("left no Rust source to measure"),
         "{}",
         ran.stderr()
+    );
+}
+
+/// What each test ran is published with the run, in the same step: a record
+/// that cannot be written leaves the run unpublished, and says why.
+#[test]
+fn a_run_whose_execution_record_cannot_be_written_is_not_published() {
+    let project = Project::cart("executions-unwritten");
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.create_dir_all#source_manifest.rs:443",
+        )],
+    );
+    assert_eq!(ran.code(), 1, "{}", ran.stderr());
+    assert!(
+        ran.stderr()
+            .contains("invalid run state: source manifest publication: "),
+        "{}",
+        ran.stderr()
+    );
+    let runs = project.supercov(&["runs", "--json"]).json();
+    assert_eq!(
+        runs["data"]["runs"].as_array().map(Vec::len),
+        Some(0),
+        "{runs}"
     );
 }
