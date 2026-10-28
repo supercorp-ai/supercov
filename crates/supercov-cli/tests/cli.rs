@@ -12006,6 +12006,17 @@ fn a_query_whose_own_index_read_fails_is_refused() {
         let at = place.split('@').next().unwrap();
         assert!(fired_at(&said, at), "{fault}: {said}");
     }
+    // The store of runs that cannot be listed refuses the query too.
+    let unlisted = project
+        .supercov_with(
+            &["runs", "latest", "files", "--json"],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:636")],
+        )
+        .exits(2);
+    assert!(
+        unlisted.contains("Failed to read local coverage runs"),
+        "{unlisted}"
+    );
 }
 
 /// An index that cannot be read partway through a command is named as the
