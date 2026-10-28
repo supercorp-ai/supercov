@@ -14906,6 +14906,25 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     }
 }
 
+/// A second run reuses the first's instrumented frontend from its cache: a
+/// cached file or the cached manifest that cannot be read ends the run,
+/// naming where.
+#[test]
+fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
+    for place in ["javascript_frontend.rs:357", "javascript_frontend.rs:369"] {
+        let project = Project::cart("frontend-cache-unread");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        let ran = project.supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_TEST_FAULT", &format!("fs.read#{place}"))],
+        );
+        let stderr = ran.stderr();
+        assert_ne!(ran.code(), 0, "{place}: {stderr}");
+        assert!(fired_at(&stderr, place), "{place}: {stderr}");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+    }
+}
+
 /// A test file the run cannot read to mark its assertions is run as it is:
 /// the run goes on, and its assertions are not attributed.
 #[test]
