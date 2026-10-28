@@ -1622,6 +1622,11 @@ mod tests {
             write(&format!("filtered-{n:02}.index"), n);
         }
         write("filtered-notes.txt", 0);
+        // A directory that cannot be listed is pruned of nothing.
+        crate::fault::during("fs.read_dir#run_store.rs:1220", || {
+            prune_filtered_indexes(&kept)
+        });
+        assert!(root.join("filtered-01.index").exists());
         prune_filtered_indexes(&kept);
         let mut left = fs::read_dir(&root)
             .unwrap()
@@ -1880,11 +1885,30 @@ mod tests {
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
         metadata["rawEvidence"]["schemaVersion"] = 2.into();
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        // As long as the metadata says, and no archive.
+        let unreadable = create_run(&root, "not-an-archive");
+        let length = fs::metadata(unreadable.join("evidence.raw.gz"))
+            .unwrap()
+            .len();
+        fs::write(
+            unreadable.join("evidence.raw.gz"),
+            vec![0_u8; length as usize],
+        )
+        .unwrap();
 
         let inventory = discover_runs(&root).unwrap();
         assert_eq!(inventory.runs.len(), 1);
         assert_eq!(inventory.runs[0].id, "valid");
-        assert_eq!(inventory.rejected.len(), 3);
+        assert_eq!(inventory.rejected.len(), 4);
+        assert!(
+            inventory
+                .rejected
+                .iter()
+                .any(|run| run.reason.contains("raw evidence archive"))
+        );
+        // A run whose evidence is gone has no index identity.
+        fs::remove_file(inventory.runs[0].evidence_path.clone()).unwrap();
+        assert!(query_index_identity(&inventory.runs[0]).is_err());
         assert!(inventory.rejected[0].reason.contains("metadata ID"));
         assert!(
             inventory
