@@ -1932,46 +1932,56 @@ fn transform_capability_imports<'a>(
                 return;
             }
             let mut declarations = ast.vec();
-            for specifier in declaration.specifiers.iter_mut().flatten() {
-                let local = match specifier {
-                    ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                        if specifier.import_kind == ImportOrExportKind::Type =>
-                    {
-                        continue;
+            // An import for its effects alone has no specifier to wrap.
+            declaration
+                .specifiers
+                .iter_mut()
+                .flatten()
+                .for_each(|specifier| {
+                    let local = match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                            if specifier.import_kind == ImportOrExportKind::Type =>
+                        {
+                            return;
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                            &mut specifier.local
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                            &mut specifier.local
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                            &mut specifier.local
+                        }
+                    };
+                    let original = local.name.to_string();
+                    if !capability_roots.contains(&original) {
+                        return;
                     }
-                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => &mut specifier.local,
-                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                        &mut specifier.local
-                    }
-                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                        &mut specifier.local
-                    }
-                };
-                let original = local.name.to_string();
-                if !capability_roots.contains(&original) {
-                    continue;
-                }
-                let raw = names.allocate(&format!("__supercovRaw{original}"));
-                local.name = ast.ident(&raw);
-                let wrapped_value = ast.expression_call(
-                    Span::default(),
-                    ast.expression_identifier(Span::default(), ast.ident(&wrapper_local)),
-                    NONE,
-                    ast.vec1(Argument::from(
-                        ast.expression_identifier(Span::default(), ast.ident(&raw)),
-                    )),
-                    false,
-                );
-                declarations.push(ast.variable_declarator(
-                    Span::default(),
-                    VariableDeclarationKind::Const,
-                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&original)),
-                    NONE,
-                    Some(wrapped_value),
-                    false,
-                ));
-                wrapped += 1;
-            }
+                    let raw = names.allocate(&format!("__supercovRaw{original}"));
+                    local.name = ast.ident(&raw);
+                    let wrapped_value = ast.expression_call(
+                        Span::default(),
+                        ast.expression_identifier(Span::default(), ast.ident(&wrapper_local)),
+                        NONE,
+                        ast.vec1(Argument::from(
+                            ast.expression_identifier(Span::default(), ast.ident(&raw)),
+                        )),
+                        false,
+                    );
+                    declarations.push(ast.variable_declarator(
+                        Span::default(),
+                        VariableDeclarationKind::Const,
+                        ast.binding_pattern_binding_identifier(
+                            Span::default(),
+                            ast.ident(&original),
+                        ),
+                        NONE,
+                        Some(wrapped_value),
+                        false,
+                    ));
+                    wrapped += 1;
+                });
             output.push(Statement::ImportDeclaration(declaration));
             if !declarations.is_empty() {
                 output.push(Statement::VariableDeclaration(
