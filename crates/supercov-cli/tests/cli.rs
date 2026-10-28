@@ -792,6 +792,26 @@ fn a_diff_counts_a_dependency_change_as_a_change_in_the_code() {
     assert!(!diff.contains(same_source), "{diff}");
 }
 
+/// A test whose file is gone since the run is affected, and says why.
+#[test]
+fn a_test_whose_file_was_removed_is_affected() {
+    let project = Project::cart("test-removed");
+    project.write(
+        "test/more.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\ntest(\"total of nothing\", () => assert.equal(total([]), 0));\n",
+    );
+    project.commit("more");
+    project.measure(&[]);
+    std::fs::remove_file(project.root.join("test/more.test.js")).unwrap();
+    let affected = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &affected,
+        &["test/more.test.js › total of nothing", "test file removed"],
+    );
+}
+
 /// `tests affected` reads only the tests a filter picks, as every query does:
 /// a merged run's names for one runner, or only some of the affected tests.
 #[test]
