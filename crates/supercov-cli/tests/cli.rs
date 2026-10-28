@@ -16510,43 +16510,43 @@ fn a_doctest_runtool_step_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1185",
-            "rust_owned_doctests.rs:1185",
+            "fs.create_dir_all#rust_owned_doctests.rs:1184",
+            "rust_owned_doctests.rs:1184",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1190",
-            "rust_owned_doctests.rs:1190",
+            "spawn#rust_owned_doctests.rs:1189",
+            "rust_owned_doctests.rs:1189",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1198",
-            "rust_owned_doctests.rs:1198",
+            "fs.read#rust_owned_doctests.rs:1197",
+            "rust_owned_doctests.rs:1197",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1209",
-            "rust_owned_doctests.rs:1209",
+            "fs.read#rust_owned_doctests.rs:1208",
+            "rust_owned_doctests.rs:1208",
         ),
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1154",
-            "rust_owned_doctests.rs:1154",
+            "fs.create_dir_all#rust_owned_doctests.rs:1153",
+            "rust_owned_doctests.rs:1153",
         ),
         (
             "2024",
-            "fs.write#rust_owned_doctests.rs:1244",
-            "rust_owned_doctests.rs:1244",
+            "fs.write#rust_owned_doctests.rs:1243",
+            "rust_owned_doctests.rs:1243",
         ),
         (
             "2021",
-            "spawn#rust_owned_doctests.rs:1254",
-            "rust_owned_doctests.rs:1254",
+            "spawn#rust_owned_doctests.rs:1253",
+            "rust_owned_doctests.rs:1253",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1167",
-            "rust_owned_doctests.rs:1167",
+            "spawn#rust_owned_doctests.rs:1166",
+            "rust_owned_doctests.rs:1166",
         ),
     ] {
         let project = Project::empty("doctest-runtool-steps");
@@ -17734,13 +17734,13 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:820@1"),
-            "rust_owned_doctests.rs:820",
+            format!("{stand_in}spawn#rust_owned_doctests.rs:819@1"),
+            "rust_owned_doctests.rs:819",
         ),
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:820@2"),
-            "rust_owned_doctests.rs:820",
+            format!("{stand_in}spawn#rust_owned_doctests.rs:819@2"),
+            "rust_owned_doctests.rs:819",
         ),
         (
             "2021",
@@ -17749,8 +17749,8 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         ),
         (
             "2024",
-            format!("{stand_in}fs.read#rust_owned_doctests.rs:1100@1"),
-            "rust_owned_doctests.rs:1100",
+            format!("{stand_in}fs.read#rust_owned_doctests.rs:1099@1"),
+            "rust_owned_doctests.rs:1099",
         ),
         // The stand-in's own path, and the merged harness runner's: each
         // resolves itself first.

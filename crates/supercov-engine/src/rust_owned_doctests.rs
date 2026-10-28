@@ -355,8 +355,7 @@ pub(crate) fn run_doctests(
             )
             .unwrap_or_else(|_| path_in_package.to_owned());
             if case.status == "failed" && !reported.contains(&case.name) {
-                writeln!(diagnostics, "[supercov] Rust doctest failed: {}", case.name)
-                    .map_err(io_error)?;
+                let _ = writeln!(diagnostics, "[supercov] Rust doctest failed: {}", case.name);
             }
             // A case that never ran has no evidence directory; an empty one
             // yields the empty snapshot the report expects.
@@ -2007,6 +2006,21 @@ mod tests {
         assert!(
             !diagnostics.contains("[supercov] Rust doctest failed: src/lib.rs - seen"),
             "{diagnostics}"
+        );
+        // The empty evidence of a case that never ran, not made.
+        let (results, _, _) =
+            crate::fault::during("fs.create_dir_all#rust_owned_doctests.rs:366", || {
+                doctests_through(
+                    &["test", "--doc"],
+                    &format!("printf '%s' '{record}' > 00000000.json"),
+                    "",
+                    "",
+                    101,
+                )
+            });
+        assert!(
+            matches!(results, Err(RustTestRunnerError::Io(_))),
+            "{results:?}"
         );
     }
 
