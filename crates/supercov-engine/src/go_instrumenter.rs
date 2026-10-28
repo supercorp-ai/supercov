@@ -456,7 +456,11 @@ fn ending_fallthrough(clause: Node) -> Option<Node> {
     let body = clause
         .children(&mut clause.walk())
         .find(|child| child.kind() == "statement_list")?;
-    let last = body.named_child(body.named_child_count().checked_sub(1)?)?;
+    // A clause has a statement list only when it holds a statement: one of
+    // nothing, or of comments, has none.
+    let last = body
+        .named_child(body.named_child_count() - 1)
+        .expect("a statement list holds a statement");
     (last.kind() == "fallthrough_statement").then_some(last)
 }
 
