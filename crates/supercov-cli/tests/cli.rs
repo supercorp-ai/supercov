@@ -12251,6 +12251,31 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     );
 }
 
+/// An index whose header or file cannot be read when a query opens it is
+/// built again from the run's evidence, and the query answers.
+#[test]
+fn an_index_that_cannot_be_opened_is_built_again() {
+    let project = Project::cart("index-reopened");
+    project.measure(&[]);
+    for (fault, place) in [
+        ("fs.open#query_index.rs:315", "query_index.rs:315"),
+        (
+            "fs.read_exact_from#query_index.rs:315",
+            "query_index.rs:315",
+        ),
+        ("fs.open#query_index.rs:332", "query_index.rs:332"),
+    ] {
+        let ran = project.supercov_with(
+            &["runs", "latest", "files"],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_eq!(ran.code(), 0, "{fault}: {said}");
+        assert!(fired_at(&said, place), "{fault}: {said}");
+        assert!(said.contains("src/cart.js"), "{fault}: {said}");
+    }
+}
+
 /// An index that cannot be read partway through a command is named as the
 /// failure: the tests a filter picks, the newer run a diff compares with,
 /// read or opened. A failed run whose index cannot be read still exits as
