@@ -16486,6 +16486,11 @@ fn a_doctest_runtool_step_that_fails_is_named() {
             "spawn#rust_owned_doctests.rs:1254",
             "rust_owned_doctests.rs:1254",
         ),
+        (
+            "2024",
+            "spawn#rust_owned_doctests.rs:1167",
+            "rust_owned_doctests.rs:1167",
+        ),
     ] {
         let project = Project::empty("doctest-runtool-steps");
         small_crate(&project);
