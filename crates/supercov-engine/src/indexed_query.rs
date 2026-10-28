@@ -386,11 +386,6 @@ impl IndexedQueryError {
                     format!("Coverage index query failed: {error}"),
                     None,
                 ),
-                QueryError::InvalidRecordSelection => (
-                    ErrorCode::InternalError,
-                    "Coverage index contains inconsistent references".into(),
-                    None,
-                ),
             },
         };
         agent_json::AgentError {
@@ -1239,7 +1234,6 @@ mod tests {
                 )),
                 C::InternalError,
             ),
-            (query(QueryError::InvalidRecordSelection), C::InternalError),
         ] {
             assert_eq!(error.agent_error().code, code, "{error}");
         }

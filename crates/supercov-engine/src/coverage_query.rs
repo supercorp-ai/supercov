@@ -134,20 +134,21 @@ pub fn coverage_minimize_query(
         .selected
         .iter()
         .map(|id| {
+            // The solver chose among the view's own tests.
             let test = view
                 .tests
                 .iter()
                 .find(|test| test.id == *id)
-                .ok_or(QueryError::InvalidRecordSelection)?;
-            Ok(CoverageMinimizedTest {
+                .expect("a selected test is one of the view's");
+            CoverageMinimizedTest {
                 id: id.clone(),
                 name: test.name.clone(),
                 file: test.file.clone(),
                 runner: test.provenance.runner.clone(),
                 kind: test.provenance.kind.clone(),
-            })
+            }
         })
-        .collect::<Result<Vec<_>, QueryError>>()?;
+        .collect::<Vec<_>>();
     let total = selected_details.len();
     let tests = selected_details
         .iter()
@@ -222,7 +223,6 @@ pub enum QueryError {
         selector: String,
         matches: Vec<String>,
     },
-    InvalidRecordSelection,
     ScopeUnavailable,
 }
 
@@ -1287,28 +1287,18 @@ pub struct CoverageTestQueryOptions<'a> {
     pub limit: usize,
 }
 
-fn hit_detail(id: &str, metadata: Option<&IndexedHitMetadata>) -> CoverageHitDetail {
-    match metadata {
-        Some(metadata) => CoverageHitDetail {
-            id: id.into(),
-            obligation: metadata.obligation.clone(),
-            branch_kind: metadata.branch_kind.clone(),
-            file: Some(metadata.file.clone()),
-            line: Some(metadata.line),
-            column: Some(metadata.column),
-            label: metadata.label.clone(),
-            alternative: metadata.alternative.clone(),
-        },
-        None => CoverageHitDetail {
-            id: id.into(),
-            obligation: "unknown".into(),
-            branch_kind: None,
-            file: None,
-            line: None,
-            column: None,
-            label: None,
-            alternative: None,
-        },
+/// A test's hit as the view describes it: every hit a test records is one of
+/// the view's points or branch alternatives.
+fn hit_detail(id: &str, metadata: &IndexedHitMetadata) -> CoverageHitDetail {
+    CoverageHitDetail {
+        id: id.into(),
+        obligation: metadata.obligation.clone(),
+        branch_kind: metadata.branch_kind.clone(),
+        file: Some(metadata.file.clone()),
+        line: Some(metadata.line),
+        column: Some(metadata.column),
+        label: metadata.label.clone(),
+        alternative: metadata.alternative.clone(),
     }
 }
 
@@ -1432,7 +1422,7 @@ pub fn coverage_test_query(
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|id| hit_detail(id, metadata.get(id)))
+        .map(|id| hit_detail(id, &metadata[id]))
         .collect::<Vec<_>>();
     let test_decisions = test
         .decisions
@@ -4540,7 +4530,8 @@ pub fn minimum_test_set(
         .collect::<BTreeMap<_, _>>();
     if let Some(target) = target {
         let full_expanded = model.expand(&candidate_tests);
-        let full_summary = coverage_summary_for_tests(view, &full_expanded)?;
+        let full_summary = coverage_summary_for_tests(view, &full_expanded)
+            .expect("a view analysed whole summarises for any of its tests");
         if let Some((selected_metric, reachable)) = metrics
             .iter()
             .map(|selected_metric| (selected_metric, percentage(*selected_metric, &full_summary)))
@@ -4566,7 +4557,8 @@ pub fn minimum_test_set(
     };
     search.visit(BTreeSet::new(), BTreeSet::new(), BTreeMap::new())?;
     let expanded = model.expand(&search.best);
-    let summary = coverage_summary_for_tests(view, &expanded)?;
+    let summary = coverage_summary_for_tests(view, &expanded)
+        .expect("a view analysed whole summarises for any of its tests");
     Ok(MinimumTestSetResult {
         optimal: true,
         target,
@@ -6099,6 +6091,14 @@ mod tests {
             minimum_test_set(&report.view, Some(100.0), MinimizeMetric::Mcdc, 1),
             Err(QueryError::ComplexityLimit { .. })
         ));
+        // A target below the whole lets the search skip obligations, and the
+        // bound holds there too.
+        for max_states in 1..=40 {
+            assert!(matches!(
+                minimum_test_set(&report.view, Some(50.0), MinimizeMetric::Mcdc, max_states),
+                Ok(_) | Err(QueryError::ComplexityLimit { .. })
+            ));
+        }
     }
 
     fn summary_of(

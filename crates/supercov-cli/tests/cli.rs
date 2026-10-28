@@ -5170,7 +5170,7 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     );
     project.write(
         "test/static.test.js",
-        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\ntest('two is two', () => equal(1 + 1, 2));\ntest('names are strings', () => equal(typeof 'a', 'string'));\n",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\ntest('two is two', () => equal(1 + 1, 2));\ntest('names are strings', () => equal(typeof 'a', 'string'));\ntest('checks nothing', () => {});\n",
     );
     project.git(&["init", "-q"]);
     project.supercov(&["--", "npm", "test"]).succeeds();
@@ -5198,7 +5198,11 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
             "showing 1-2 of 2",
         ],
     );
-    assert!(!listed.contains("small orders pay"), "{listed}");
+    // A test that asserted nothing made no assertion to list it by.
+    assert!(
+        !listed.contains("small orders pay") && !listed.contains("checks nothing"),
+        "{listed}"
+    );
     let page = project
         .supercov(&[
             "runs",
@@ -12244,15 +12248,20 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     for (command, place) in [
         (
             vec!["runs", "latest", "decision", "src/cart.js:3"],
-            "coverage_query.rs:1664",
+            "coverage_query.rs:1654",
         ),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2841"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2935@2"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2827@2"),
-        (vec!["runs", "latest", "summary"], "coverage_query.rs:3259"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2831"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2925@2"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2817@2"),
+        (vec!["runs", "latest", "summary"], "coverage_query.rs:3249"),
+        // Every file's details, the scope read last of all.
+        (
+            vec!["runs", "latest", "gaps", "--format", "jsonl"],
+            "coverage_query.rs:2198",
+        ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3792",
+            "coverage_query.rs:3782",
         ),
         (
             vec![
@@ -12265,7 +12274,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3935",
+            "coverage_query.rs:3925",
         ),
         (
             vec![
@@ -12278,15 +12287,15 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3984",
+            "coverage_query.rs:3974",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3533",
+            "coverage_query.rs:3523",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3541",
+            "coverage_query.rs:3531",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -15171,7 +15180,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // The index read the file details make first.
         if fault.starts_with("coverage-index-read") {
             assert!(
-                refused.contains("coverage_query.rs:2281"),
+                refused.contains("coverage_query.rs:2271"),
                 "{fault}: {refused}"
             );
         }
