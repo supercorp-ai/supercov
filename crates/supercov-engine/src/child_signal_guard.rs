@@ -357,17 +357,17 @@ pub struct ChildSignalGuard {
 }
 
 impl ChildSignalGuard {
-    pub fn install() -> io::Result<Self> {
+    pub fn install() -> Self {
         #[cfg(unix)]
         {
             let mut previous = Vec::new();
             if GUARDS.fetch_add(1, Ordering::SeqCst) == 0 {
+                // `signal` refuses only a signal that is no signal, or one
+                // no handler may take (SIGKILL, SIGSTOP).
                 previous = install_handlers(&[libc::SIGHUP, libc::SIGINT, libc::SIGTERM])
-                    .inspect_err(|_| {
-                        GUARDS.fetch_sub(1, Ordering::SeqCst);
-                    })?;
+                    .expect("SIGHUP, SIGINT and SIGTERM take a handler");
             }
-            Ok(Self { previous })
+            Self { previous }
         }
         #[cfg(not(unix))]
         {
@@ -375,7 +375,7 @@ impl ChildSignalGuard {
                 #[cfg(windows)]
                 windows_job::create();
             }
-            Ok(Self {})
+            Self {}
         }
     }
 }
@@ -495,8 +495,8 @@ mod tests {
 
     #[test]
     fn only_the_outermost_guard_installs_and_restores_handlers() {
-        let outer = ChildSignalGuard::install().unwrap();
-        let inner = ChildSignalGuard::install().unwrap();
+        let outer = ChildSignalGuard::install();
+        let inner = ChildSignalGuard::install();
         assert!(
             inner.previous.is_empty(),
             "a nested guard replaced handlers"
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn a_registered_child_receives_the_signal_and_a_released_one_does_not() {
-        let _guard = ChildSignalGuard::install().unwrap();
+        let _guard = ChildSignalGuard::install();
         let mut tracked = sleeper();
         let mut released = sleeper();
         let registration = register(&tracked);

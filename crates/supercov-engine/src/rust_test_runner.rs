@@ -2240,8 +2240,7 @@ pub fn run_prepared_rust_tests(
     // A signal that reaches the runner alone must not leave the test
     // processes running: on 2026-09-07 an orphaned tokio test spun on two
     // cores for an hour. The guard covers every child spawned below.
-    let _signal_guard = crate::child_signal_guard::ChildSignalGuard::install()
-        .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
+    let _signal_guard = crate::child_signal_guard::ChildSignalGuard::install();
     let evidence_root = project
         .workspace_root
         .join(".supercov/rust-evidence")
