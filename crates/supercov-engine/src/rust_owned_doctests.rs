@@ -1561,6 +1561,48 @@ mod tests {
         assert!(quiet.filters.is_empty());
     }
 
+    /// The runtool's records are read in order; one that cannot be read, or
+    /// is not a record, fails the reading, and so does a listing that
+    /// cannot be read. None is no record, and an empty listing no name.
+    #[test]
+    fn the_runtool_records_are_read_in_order_or_refused() {
+        let package = std::env::temp_dir().join(format!(
+            "supercov-doctest-records-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(read_invocations(&package).unwrap().is_empty());
+        assert!(read_listed_names(&package).unwrap().is_empty());
+        fs::create_dir_all(package.join("invocations")).unwrap();
+        fs::create_dir_all(package.join("listed")).unwrap();
+        assert!(read_listed_names(&package).unwrap().is_empty());
+        fs::write(
+            package.join("invocations/00000002.json"),
+            r#"{"kind":"empty-harness"}"#,
+        )
+        .unwrap();
+        fs::write(
+            package.join("invocations/00000001.json"),
+            r#"{"kind":"merged","cases":[]}"#,
+        )
+        .unwrap();
+        fs::write(package.join("invocations/notes.txt"), "not a record").unwrap();
+        let read = read_invocations(&package).unwrap();
+        assert_eq!(
+            read.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(crate::fault::during("fs.read", || read_invocations(&package)).is_err());
+        fs::write(package.join("invocations/00000003.json"), "{").unwrap();
+        assert!(read_invocations(&package).is_err());
+        fs::write(package.join("listed/0"), "a.rs - f (line 1): test\n").unwrap();
+        assert!(crate::fault::during("fs.read_to_string", || read_listed_names(&package)).is_err());
+        fs::remove_dir_all(&package).unwrap();
+    }
+
     #[test]
     fn a_quiet_merged_harness_is_named_from_its_children_failures_and_fences() {
         let root = std::env::temp_dir().join(format!(
