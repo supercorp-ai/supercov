@@ -13332,6 +13332,17 @@ fn the_nextest_runner_missing_what_it_needs_says_so() {
         "{}",
         ran.stderr()
     );
+    // An identity that is not nextest's own.
+    let ran = project.supercov_with(
+        &["__nextest-runner", root, "wasm32", missing],
+        &[("NEXTEST", "2")],
+    );
+    assert_eq!(ran.code(), 2);
+    assert!(
+        ran.stderr().contains("NEXTEST must equal 1"),
+        "{}",
+        ran.stderr()
+    );
 }
 
 /// `--exact-attribution` goes before the command, and the run is the
@@ -13579,10 +13590,12 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 // the test list, Cargo's metadata, the run.
                 "spawn#rust_owned_nextest.rs:136 => rust_owned_nextest.rs:136",
                 "spawn#rust_cargo_configuration.rs:625@3 => rust_cargo_configuration.rs:625",
-                "spawn#rust_owned_nextest.rs:192 => rust_owned_nextest.rs:192",
-                "spawn#rust_owned_nextest.rs:206 => rust_owned_nextest.rs:206",
+                "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
+                "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
                 "spawn#child_signal_guard.rs:305 => child_signal_guard.rs:305",
                 "__nextest-runner/spawn@1",
+                // An attempt's own start, the listing having passed.
+                "__nextest-runner/spawn#rust_owned_nextest.rs:603",
                 "__nextest-runner/fs.read@1",
                 "__nextest-runner/fs.create_dir_all@1",
                 "__nextest-runner/fs.create_dir_all@2",
@@ -16916,18 +16929,12 @@ fn a_patch_of_a_failed_or_stale_run_says_what_it_can() {
     );
 }
 
-/// After its build a Rust run says which files the build did not compile,
-/// starts each test in its own process and reads back what its builds
-/// settled of each `#[cfg]` gate: any of these failing ends the run, by
-/// `cargo test` or by nextest.
+/// After its build a Rust run says which files the build did not compile
+/// and reads back what its builds settled of each `#[cfg]` gate: either
+/// failing ends the run, by `cargo test` or by nextest.
 #[test]
 fn a_rust_run_whose_step_after_the_build_fails_says_so() {
     for (command, fault, place) in [
-        (
-            &["cargo", "test"][..],
-            "spawn#child_signal_guard.rs:232",
-            "child_signal_guard.rs:232",
-        ),
         (&["cargo", "test"][..], "diagnostics@3", "diagnostics"),
         (
             &["cargo", "test"][..],
