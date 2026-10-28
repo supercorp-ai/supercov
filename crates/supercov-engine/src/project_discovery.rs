@@ -1315,6 +1315,16 @@ mod tests {
             "{:?}",
             discovered.unrun_build
         );
+        // A directory the walk cannot list, or an entry of it, fails it.
+        for fault in ["fs.read_dir", "fs.read_dir entry"] {
+            assert!(
+                crate::fault::during(fault, || {
+                    discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"]))
+                })
+                .is_err(),
+                "{fault}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
