@@ -62,18 +62,21 @@ pub fn capture(
     Ok(inputs)
 }
 
+/// `entries` with the run's record of its sources added. A run's entries are
+/// built by Supercov, and never hold that record already.
 pub fn append(
     mut entries: Vec<EvidenceArchiveEntry>,
     inputs: &Inputs,
-) -> Result<Vec<EvidenceArchiveEntry>, String> {
-    if entries.iter().any(|e| e.path == ARCHIVE_PATH) {
-        return Err("duplicate source inputs".into());
-    }
+) -> Vec<EvidenceArchiveEntry> {
+    assert!(
+        !entries.iter().any(|e| e.path == ARCHIVE_PATH),
+        "a run's own archive entries never hold its source record"
+    );
     entries.push(EvidenceArchiveEntry {
         path: ARCHIVE_PATH.into(),
         contents: serde_json::to_vec(&inputs.manifest()).expect("plain data serializes"),
     });
-    Ok(entries)
+    entries
 }
 
 /// Read project files only when their exact bytes still match the run manifest.
@@ -185,15 +188,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "never hold its source record")]
     fn source_inputs_are_archived_once() {
         let (_base, root) = project("archived");
         let inputs = capture(&root, "javascript", [PathBuf::from("src/a.js")]).unwrap();
-        let entries = append(Vec::new(), &inputs).unwrap();
+        let entries = append(Vec::new(), &inputs);
         assert_eq!(entries[0].path, ARCHIVE_PATH);
-        assert_eq!(
-            append(entries, &inputs).unwrap_err(),
-            "duplicate source inputs"
-        );
+        append(entries, &inputs);
     }
 
     #[test]

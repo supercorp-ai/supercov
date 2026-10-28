@@ -522,10 +522,7 @@ fn run_direct_rust_timed(
             .join(&request.run_id)
             .join("evidence.raw.gz");
         let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                &source_inputs,
-            )?,
+            crate::source_capture::append(run.archive_entries(), &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;

@@ -149,7 +149,7 @@ pub struct PythonFrontendImport {
 }
 
 impl PythonFrontendImport {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
@@ -180,7 +180,7 @@ impl PythonFrontendImport {
                 contents: serde_json::to_vec(result).expect("plain data serializes"),
             });
         }
-        Ok(entries)
+        entries
     }
 }
 
@@ -1625,7 +1625,7 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let archive = root.join("evidence.raw.gz");
-        write_archive(imported.archive_entries().unwrap(), &archive).unwrap();
+        write_archive(imported.archive_entries(), &archive).unwrap();
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,
             run_id: "python-tier-a-ctrace".into(),
@@ -1648,7 +1648,7 @@ mod tests {
         assert!(!report.view.summary.coverage_complete);
 
         let invalid_archive = root.join("invalid-evidence.raw.gz");
-        let mut invalid_entries = imported.archive_entries().unwrap();
+        let mut invalid_entries = imported.archive_entries();
         let model = invalid_entries
             .iter_mut()
             .find(|entry| entry.path == "coverage-model.json")

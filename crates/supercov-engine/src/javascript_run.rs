@@ -1353,7 +1353,7 @@ pub fn run_direct_javascript(
             recorded_inputs.files.entry(file).or_insert(text);
         });
     }
-    let entries = crate::source_capture::append(entries, &recorded_inputs)?;
+    let entries = crate::source_capture::append(entries, &recorded_inputs);
     let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;

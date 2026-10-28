@@ -1644,7 +1644,7 @@ pub struct PythonFrontendRun {
 }
 
 impl PythonFrontendRun {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -1677,7 +1677,7 @@ impl PythonFrontendRun {
                     contents: serde_json::to_vec(result).expect("plain data serializes"),
                 }),
         );
-        Ok(entries)
+        entries
     }
 }
 
@@ -3331,7 +3331,7 @@ pub(crate) mod tests {
         let run = phased_run("py-archived");
         let directory = temporary("py-archived-archive");
         let archive = directory.join("evidence.raw.gz");
-        crate::evidence_archive::write_archive(run.archive_entries().unwrap(), &archive).unwrap();
+        crate::evidence_archive::write_archive(run.archive_entries(), &archive).unwrap();
         let integrity = json!({"schemaVersion": 2});
         let from_archive = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,

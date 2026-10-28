@@ -308,9 +308,9 @@ fn archive_python_run(
             )
         });
         let archived = (|| {
-            let entries = run.archive_entries().map_err(|error| error.to_string())?;
+            let entries = run.archive_entries();
             let serialized_ms = elapsed_ms(publication_started) - joined_ms;
-            let entries = crate::source_capture::append(entries, source_inputs)?;
+            let entries = crate::source_capture::append(entries, source_inputs);
             let raw = write_archive(entries, archive_path).map_err(|error| error.to_string())?;
             let archive_ms = elapsed_ms(publication_started) - joined_ms - serialized_ms;
             Ok::<_, String>((raw, serialized_ms, archive_ms))

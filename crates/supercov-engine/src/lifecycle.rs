@@ -1643,7 +1643,7 @@ mod tests {
         let inputs =
             crate::source_capture::capture(root, "javascript", [PathBuf::from("src/index.js")])
                 .unwrap();
-        entries = crate::source_capture::append(entries, &inputs).unwrap();
+        entries = crate::source_capture::append(entries, &inputs);
         let path = root.join("evidence.gz");
         let metadata = write_archive(entries, &path).unwrap();
         (path, metadata.compressed_bytes)

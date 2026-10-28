@@ -1572,7 +1572,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_analyzable_test_run(&root, "first");
         let path = directory.join("evidence.raw.gz");
-        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs);
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
@@ -1838,7 +1838,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_run_wide_test_run(&root, "parallel");
         let path = directory.join("evidence.raw.gz");
-        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs);
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
@@ -1940,7 +1940,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_partial_test_run(&root, "partial");
         let path = directory.join("evidence.raw.gz");
-        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs);
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =

@@ -553,7 +553,7 @@ pub struct OwnedFrontendRun {
 impl OwnedFrontendRun {
     /// The archive a run publishes: what the numbers mean, who produced them,
     /// the obligations they are measured against, and one record per test.
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -586,7 +586,7 @@ impl OwnedFrontendRun {
                     contents: serde_json::to_vec(result).expect("plain data serializes"),
                 }),
         );
-        Ok(entries)
+        entries
     }
 }
 

@@ -258,10 +258,7 @@ pub fn publish(
         fs::create_dir_all(&work).map_err(|error| error.to_string())?;
         let archive_path = work.join(format!("{}-evidence.raw.gz", server.environment));
         let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                server.source_inputs,
-            )?,
+            crate::source_capture::append(run.archive_entries(), server.source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;

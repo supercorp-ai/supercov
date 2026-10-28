@@ -370,10 +370,7 @@ pub(crate) fn publish(
     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
     let archive_path = work.join(wasm.archive);
     let raw = write_archive(
-        crate::source_capture::append(
-            run.archive_entries().map_err(|error| error.to_string())?,
-            wasm.source_inputs,
-        )?,
+        crate::source_capture::append(run.archive_entries(), wasm.source_inputs),
         &archive_path,
     )
     .map_err(|error| error.to_string())?;

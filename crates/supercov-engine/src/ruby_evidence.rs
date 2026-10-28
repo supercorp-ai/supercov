@@ -1019,7 +1019,7 @@ pub struct RubyFrontendRun {
 }
 
 impl RubyFrontendRun {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -1052,7 +1052,7 @@ impl RubyFrontendRun {
                     contents: serde_json::to_vec(result).expect("plain data serializes"),
                 }),
         );
-        Ok(entries)
+        entries
     }
 }
 

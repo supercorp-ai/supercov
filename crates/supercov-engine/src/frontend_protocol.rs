@@ -296,6 +296,11 @@ pub fn validate_frontend_report_request(
     declaration: &FrontendRunDeclaration,
     request: &CoverageReportRequest,
 ) -> Result<(), FrontendProtocolError> {
+    // A report Supercov built breaks a rule only through a defect of its
+    // own; the site lets a test take each caller's way out.
+    if crate::fault::injected("report-request") {
+        return Err(FrontendProtocolError::InvalidManifestLimitation);
+    }
     validate_frontend_run_declaration(declaration)?;
     let manifest = manifest_limitation_ids(request)?;
     let declared = declaration

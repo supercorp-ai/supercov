@@ -1843,10 +1843,7 @@ pub fn run_direct_jvm(
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                &source_inputs,
-            )?,
+            crate::source_capture::append(run.archive_entries(), &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;

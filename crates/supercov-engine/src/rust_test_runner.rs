@@ -55,7 +55,7 @@ pub struct RustFrontendRun {
 }
 
 impl RustFrontendRun {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -84,7 +84,7 @@ impl RustFrontendRun {
                 contents: serde_json::to_vec(result).expect("plain data serializes"),
             });
         }
-        Ok(entries)
+        entries
     }
 }
 
@@ -5013,7 +5013,7 @@ mod tests {
         );
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let archive = root.join("evidence.raw.gz");
-        write_archive(run.archive_entries().unwrap(), &archive).unwrap();
+        write_archive(run.archive_entries(), &archive).unwrap();
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,
             run_id: "rust-fixture".into(),

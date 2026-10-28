@@ -375,8 +375,8 @@ fn run_direct_ruby_in(
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
-        let entries = run.archive_entries().map_err(|error| error.to_string())?;
-        let entries = crate::source_capture::append(entries, &source_inputs)?;
+        let entries = run.archive_entries();
+        let entries = crate::source_capture::append(entries, &source_inputs);
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &ruby_directory).map_err(|error| error.to_string())?;
         let evidence_publication_ms = elapsed_ms(publication_started);
@@ -628,8 +628,8 @@ impl RubyServer {
             let work = root.join(".supercov/work").join(&metadata.id);
             fs::create_dir_all(&work).map_err(|error| error.to_string())?;
             let archive_path = work.join("ruby-evidence.raw.gz");
-            let entries = run.archive_entries().map_err(|error| error.to_string())?;
-            let entries = crate::source_capture::append(entries, &self.source_inputs)?;
+            let entries = run.archive_entries();
+            let entries = crate::source_capture::append(entries, &self.source_inputs);
             let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
             let tests = run.tests;
             drop(run);

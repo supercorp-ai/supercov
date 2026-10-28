@@ -12852,6 +12852,8 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.read@6 => source_capture.rs:54",
             "fs.read_dir entry#1 => python_project.rs:125",
             "fs.read_dir entry#2 => python_evidence.rs:359",
+            // The report the run built, refused as one Supercov got wrong.
+            "report-request",
             "spawn",
         ],
     );
@@ -13241,6 +13243,8 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.read_dir@13",
             "fs.create_dir_all@15",
             "fs.create_dir_all@22",
+            // The report the run built, refused as one Supercov got wrong.
+            "report-request",
             "spawn",
         ],
     );
@@ -13297,6 +13301,8 @@ fn a_maven_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@20",
             "fs.create_dir_all@22",
             "fs.open@18",
+            // The report the run built, refused as one Supercov got wrong.
+            "report-request",
             "spawn",
         ],
     );
@@ -13337,6 +13343,8 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@14",
             "fs.read_dir entry#1 => ruby_project.rs:100",
             "fs.read_dir entry#2 => ruby_evidence.rs:329",
+            // The report the run built, refused as one Supercov got wrong.
+            "report-request",
             "spawn",
         ],
     );
