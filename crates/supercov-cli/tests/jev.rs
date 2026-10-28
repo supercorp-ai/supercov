@@ -229,6 +229,23 @@ fn each_git_ask_of_a_patch_review_that_cannot_start_is_handled() {
             assert_eq!(ran.code(), 0, "{fault}: {said}");
         }
     }
+    // Against a base: where the branch left it, and the text it had there.
+    for (nth, said) in [(3, "Could not find where"), (7, "cannot read")] {
+        let project = Project::cart("patch-git-base");
+        project.edit(
+            "src/cart.js",
+            "return express ? 15 : 5;",
+            "return express ? 20 : 5;",
+        );
+        project.commit("express");
+        let fault = format!("spawn#changes.rs:81@{nth}");
+        let mut env = jev.to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", fault.as_str()));
+        let ran = project.supercov_with(&["quality", "patch", "--base", "HEAD~1"], &env);
+        let output = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_ne!(ran.code(), 0, "{fault}: {output}");
+        assert!(output.contains(said), "{fault}: {output}");
+    }
 }
 
 #[test]
