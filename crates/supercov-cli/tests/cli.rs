@@ -13123,6 +13123,18 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.read@4",
             "fs.read_to_string@3",
             "fs.read_to_string@6",
+            // The lock and recovery, the inputs captured and digested, the
+            // copy recovered, its outputs before and after, the archive, the
+            // trash.
+            "fs.create_dir_all@1",
+            "fs.create_dir_all@2",
+            "fs.read@6",
+            "fs.open@1",
+            "fs.read_dir@3",
+            "fs.read_dir@9",
+            "fs.read_dir@13",
+            "fs.create_dir_all@15",
+            "fs.create_dir_all@22",
             "spawn",
         ],
     );
