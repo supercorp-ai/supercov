@@ -182,6 +182,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(captured.files.keys().collect::<Vec<_>>(), ["src/a.js"]);
+        // A file that cannot be resolved is refused.
+        assert!(
+            crate::fault::during("fs.canonicalize#source_capture.rs:45", || {
+                capture(&root, "javascript", [PathBuf::from("src/a.js")])
+            })
+            .is_err()
+        );
         let gone = root.join("gone");
         assert!(capture(&gone, "javascript", [PathBuf::from("src/a.js")]).is_err());
         assert!(current_sources(&gone, &captured.manifest()).is_err());
@@ -214,6 +221,18 @@ mod tests {
             .files
             .insert("../secret.js".into(), fingerprint.clone());
         assert_eq!(read(&climbing), "Invalid source path: ../secret.js");
+        // A file that cannot be resolved or read now is unavailable.
+        for fault in [
+            "fs.canonicalize#source_capture.rs:103",
+            "fs.read_to_string#source_capture.rs:107",
+        ] {
+            assert!(
+                crate::fault::during(fault, || current_sources(&root, &manifest))
+                    .unwrap_err()
+                    .contains("unavailable: src/a.js"),
+                "{fault}"
+            );
+        }
         let unavailable = |file: &str| {
             format!(
                 "Current source differs from the run or is unavailable: {file}; rerun tests for the current checkout"
