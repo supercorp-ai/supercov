@@ -2578,6 +2578,17 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             .exits(1)
             .is_empty()
     );
+    // So does a supervisor that cannot find itself to supervise from.
+    let lost = project.supercov_with(
+        &["__supervise", "--", "true"],
+        &[("SUPERCOV_TEST_FAULT", "supervisor-exe")],
+    );
+    assert_eq!(lost.code(), 1, "{}", lost.stderr());
+    assert!(
+        lost.stderr().contains("injected fault at supervisor-exe"),
+        "{}",
+        lost.stderr()
+    );
     // Output passed on after nobody reads it any more, text or not, is
     // dropped without a panic.
     for script in ["printf 'a\\n'", "printf '\\377\\n'"] {
@@ -13261,6 +13272,19 @@ fn a_sweep_that_outlasts_the_command_empties_the_trash_after_it() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // A sweep that cannot be started leaves the trash for a later one; the
+    // command is measured all the same.
+    std::fs::create_dir_all(&big).unwrap();
+    let measured = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "sweep-exe")],
+    );
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stderr().contains("test fault at sweep-exe"),
+        "{}",
+        measured.stderr()
+    );
 }
 
 #[cfg(unix)]

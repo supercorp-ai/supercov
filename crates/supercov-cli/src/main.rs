@@ -3586,12 +3586,16 @@ fn supervise() -> ExitCode {
         console: None,
     };
     let mut stderr = std::io::stderr().lock();
-    let supervisor = match std::env::current_exe()
-        .map_err(|error| error.to_string())
-        .and_then(|path| {
-            supercov_engine::process_supervision::ProcessSupervisor::new_crash_safe(&path)
-                .map_err(|error| error.to_string())
-        }) {
+    let supervisor = match supercov_engine::fault::io(
+        "supervisor-exe",
+        std::io::ErrorKind::NotFound,
+        std::env::current_exe,
+    )
+    .map_err(|error| error.to_string())
+    .and_then(|path| {
+        supercov_engine::process_supervision::ProcessSupervisor::new_crash_safe(&path)
+            .map_err(|error| error.to_string())
+    }) {
         Ok(supervisor) => supervisor,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -3676,7 +3680,12 @@ fn finish_trash_sweep(root: &Path) {
 /// Starts a sweep and gives it until `patience` runs out; the sweep, if it
 /// is still running then.
 fn sweep_trash_within(root: &Path, patience: Duration) -> Option<std::process::Child> {
-    let executable = std::env::current_exe().ok()?;
+    let executable = supercov_engine::fault::io(
+        "sweep-exe",
+        std::io::ErrorKind::NotFound,
+        std::env::current_exe,
+    )
+    .ok()?;
     let mut command = Command::new(executable);
     command
         .arg("__sweep-trash")
