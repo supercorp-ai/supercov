@@ -11049,6 +11049,24 @@ fn the_wrapped_command_exits_as_it_would_alone_and_a_missing_root_is_named() {
         "{}",
         both.stderr()
     );
+    // A root outside the project is named as such.
+    let outside = project.root.with_extension("outside-root");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("b.js"), "export const b = 1;\n").unwrap();
+    let away = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_SOURCE_ROOTS", outside.to_str().unwrap())],
+    );
+    assert_ne!(away.code(), 0, "{}", away.stderr());
+    assert!(
+        away.stderr().contains(&format!(
+            "source root is outside the project: {}",
+            outside.display()
+        )),
+        "{}",
+        away.stderr()
+    );
+    std::fs::remove_dir_all(&outside).unwrap();
     // One of several missing is a checkout without that directory.
     project
         .supercov_with(

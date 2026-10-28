@@ -26,6 +26,7 @@
 - `runs <run> assertions assess --changed` said nothing of requests Jev did not answer: with every request failing it printed the request count and exited `0`, leaving `tests affected` nothing to go on. It now ends with why when none was answered, and says how many failed, their statements not asked, when some were.
 - A Rust expression statement behind a `#[cfg]` the target leaves out (`#[cfg(windows)] continue;` on Linux) was counted as a line no test runs; it is left out, as a `let` or an item behind one already was.
 - `SUPERCOV_SOURCE_ROOTS` naming several roots that do not exist said "a, b does not exist"; it says "do not exist".
+- `SUPERCOV_SOURCE_ROOTS` naming a directory outside the project was refused as "not a regular file or directory"; it is refused as outside the project.
 - `import` said a file of the project that is not UTF-8 text was "no such file in the project"; it says the file is not a text file.
 - A browser suite whose `SUPERCOV_SOURCE_ROOTS` named only its JavaScript was refused when the project also held Go, Java or Kotlin source outside those roots (`SUPERCOV_SOURCE_ROOTS=src left no Go source to measure`). Such a server is left unmeasured, as a Python or Ruby one already was.
 

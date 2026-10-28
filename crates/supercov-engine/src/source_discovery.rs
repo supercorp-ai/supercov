@@ -207,6 +207,7 @@ pub enum SourceDiscoveryError {
     Io { path: PathBuf, source: io::Error },
     NonUtf8Path(PathBuf),
     InvalidRoot(PathBuf),
+    OutsideRoot(PathBuf),
 }
 
 impl std::fmt::Display for SourceDiscoveryError {
@@ -223,6 +224,11 @@ impl std::fmt::Display for SourceDiscoveryError {
             Self::InvalidRoot(path) => write!(
                 formatter,
                 "source root is not a regular file or directory: {}",
+                path.display()
+            ),
+            Self::OutsideRoot(path) => write!(
+                formatter,
+                "source root is outside the project: {}",
                 path.display()
             ),
         }
@@ -524,7 +530,7 @@ fn resolve(root: &Path, value: impl AsRef<Path>) -> PathBuf {
 fn local_path(root: &Path, path: &Path) -> Result<String, SourceDiscoveryError> {
     let local = path
         .strip_prefix(root)
-        .map_err(|_| SourceDiscoveryError::InvalidRoot(path.to_owned()))?;
+        .map_err(|_| SourceDiscoveryError::OutsideRoot(path.to_owned()))?;
     if local.as_os_str().is_empty() {
         return Ok(".".into());
     }
@@ -2582,6 +2588,7 @@ mod tests {
             },
             E::NonUtf8Path(std::path::PathBuf::from("a")),
             E::InvalidRoot(std::path::PathBuf::from("a")),
+            E::OutsideRoot(std::path::PathBuf::from("/a")),
         ]
         .map(|error| error.to_string());
         assert_eq!(
@@ -2590,6 +2597,7 @@ mod tests {
                 "a: disk full",
                 "source path is not valid UTF-8: a",
                 "source root is not a regular file or directory: a",
+                "source root is outside the project: /a",
             ]
         );
     }
