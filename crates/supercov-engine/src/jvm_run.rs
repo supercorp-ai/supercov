@@ -1972,6 +1972,12 @@ impl JvmServer {
         ) else {
             return Ok(None);
         };
+        if roots
+            .as_ref()
+            .is_some_and(|roots| !files.sources.iter().any(|(file, _)| roots.contains(file)))
+        {
+            return Ok(None);
+        }
         let source_roots = crate::source_discovery::configured_source_roots(&ambient);
         let mut integrity_inputs = jvm_integrity_inputs(&files, command);
         crate::source_discovery::fold_roots_into_configuration(

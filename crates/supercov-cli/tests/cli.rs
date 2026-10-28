@@ -11967,7 +11967,7 @@ fn a_browser_suite_beside_servers_with_nothing_to_measure_measures_its_javascrip
 }
 
 /// Source roots named for a browser suite's JavaScript leave the Python,
-/// Ruby and Java beside it no server to measure: the run measures its
+/// Ruby, Java and Go beside it no server to measure: the run measures its
 /// JavaScript instead of refusing the roots as a run of their own would.
 #[test]
 fn source_roots_naming_only_javascript_leave_no_python_or_ruby_server() {
@@ -11980,9 +11980,11 @@ fn source_roots_naming_only_javascript_leave_no_python_or_ruby_server() {
         "<project><modelVersion>4.0.0</modelVersion><groupId>e</groupId><artifactId>w</artifactId><version>1</version></project>\n",
     );
     project.write(
-        "java/w/W.java",
+        "server/src/main/java/w/W.java",
         "package w;\npublic class W { public static int one() { return 1; } }\n",
     );
+    project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+    project.write("cmd/main.go", "package main\n\nfunc main() {}\n");
     let run = project.supercov_with(
         &["--", "node", "--test"],
         &[("SUPERCOV_SOURCE_ROOTS", "src")],
@@ -14954,6 +14956,42 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     }
 }
 
+/// A browser suite beside a Go server prepares the server in the copy: the
+/// project found and its sources captured and digested, the file that
+/// serves a main package's evidence written, its evidence directory made.
+/// Each step failing ends the run, and says where.
+#[test]
+fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
+    if go().is_none() {
+        return;
+    }
+    for (fault, place) in [
+        ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+        (
+            "fs.canonicalize#source_capture.rs:25@2",
+            "source_capture.rs:25",
+        ),
+        ("fs.open#integrity.rs:426@4", "integrity.rs:426"),
+        ("fs.write#go_run.rs:1054", "go_run.rs:1054"),
+        ("fs.create_dir_all#go_run.rs:1068", "go_run.rs:1068"),
+    ] {
+        let project = Project::cart("browser-go");
+        project.write(".gitignore", "out/\nnode_modules/\n");
+        project.write("playwright.config.js", "export default {};\n");
+        project.write("go.mod", "module example.com/w\n\ngo 1.22\n");
+        project.write(
+            "main.go",
+            "package main\n\nfunc hello() int { return 1 }\n\nfunc main() { hello() }\n",
+        );
+        project.commit("go");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, place), "{fault} at {place}: {stderr}");
+    }
+}
+
 /// A browser suite beside a Java server prepares the server in the copy:
 /// the project found and its sources captured and digested, the copy's
 /// project read, its instrumented sources, their directories, its evidence
@@ -14969,11 +15007,11 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:426@4", "integrity.rs:426"),
-        ("fs.create_dir_all#jvm_run.rs:1997", "jvm_run.rs:1997"),
-        ("fs.create_dir_all#jvm_run.rs:2013", "jvm_run.rs:2013"),
-        ("fs.create_dir_all#jvm_run.rs:2023", "jvm_run.rs:2023"),
-        ("fs.write#jvm_run.rs:1997", "jvm_run.rs:1997"),
-        ("fs.write#jvm_run.rs:2013", "jvm_run.rs:2013"),
+        ("fs.create_dir_all#jvm_run.rs:2003", "jvm_run.rs:2003"),
+        ("fs.create_dir_all#jvm_run.rs:2019", "jvm_run.rs:2019"),
+        ("fs.create_dir_all#jvm_run.rs:2029", "jvm_run.rs:2029"),
+        ("fs.write#jvm_run.rs:2003", "jvm_run.rs:2003"),
+        ("fs.write#jvm_run.rs:2019", "jvm_run.rs:2019"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
