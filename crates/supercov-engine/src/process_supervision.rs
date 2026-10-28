@@ -2165,6 +2165,73 @@ mod tests {
         );
     }
 
+    /// What a command writes to a terminal that is not text is passed on as
+    /// it is; once the user's terminal has gone, the relay stops passing
+    /// anything on, text or not, and ends with the command.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_relay_passes_bytes_on_and_stops_when_the_terminal_goes() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let relayed = |script: &str, gone: bool| {
+            let (mut screen, mut users) = (-1, -1);
+            // SAFETY: the two descriptors are owned by nothing else.
+            let (mut screen, users) = unsafe {
+                assert_eq!(
+                    libc::openpty(
+                        &mut screen,
+                        &mut users,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut::<libc::termios>(),
+                        std::ptr::null_mut::<libc::winsize>(),
+                    ),
+                    0
+                );
+                (
+                    std::fs::File::from_raw_fd(screen),
+                    std::fs::File::from_raw_fd(users),
+                )
+            };
+            let (terminal, theirs) = Terminal::like(users).expect("a terminal like the user's");
+            if gone {
+                drop(std::mem::replace(
+                    &mut screen,
+                    std::fs::File::open("/dev/null").unwrap(),
+                ));
+            }
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(theirs.try_clone().unwrap())
+                .stderr(theirs);
+            let mut child = command.spawn().unwrap();
+            drop(command);
+            let ended = relay_terminal(terminal, ConsoleNames::default());
+            child.wait().unwrap();
+            ended
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the relay ends when the command has gone");
+            // SAFETY: a flag on a descriptor this test owns.
+            unsafe {
+                let flags = libc::fcntl(screen.as_raw_fd(), libc::F_GETFL);
+                libc::fcntl(screen.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+            let mut shown = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = screen.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                shown.extend_from_slice(&buffer[..read]);
+            }
+            shown
+        };
+        assert_eq!(relayed("printf 'a\\377b\\n'", false), b"a\xffb\r\n");
+        for script in ["printf 'text\\n'", "printf '\\377\\n'"] {
+            assert!(relayed(script, true).is_empty(), "{script}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_command_on_a_terminal_still_writes_to_one_and_names_the_project() {
