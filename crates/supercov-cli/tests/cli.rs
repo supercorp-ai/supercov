@@ -17926,14 +17926,14 @@ fn a_go_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
         &[
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.symlink_metadata#source_discovery.rs:473@3",
+                "fs.symlink_metadata#source_discovery.rs:475@3",
             ),
             ("SUPERCOV_SOURCE_ROOTS", "src,main.go"),
         ],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "source_discovery.rs:473"), "{stderr}");
+    assert!(fired_at(&stderr, "source_discovery.rs:475"), "{stderr}");
 }
 
 /// The source roots named, read again in the copy for a Java server beside
@@ -17959,14 +17959,14 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
         &[
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.symlink_metadata#source_discovery.rs:473@2",
+                "fs.symlink_metadata#source_discovery.rs:475@2",
             ),
             ("SUPERCOV_SOURCE_ROOTS", "src"),
         ],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "source_discovery.rs:473"), "{stderr}");
+    assert!(fired_at(&stderr, "source_discovery.rs:475"), "{stderr}");
 }
 
 /// A directory discovery cannot list, or whose listing breaks off, while

@@ -469,7 +469,9 @@ fn existing_roots(
     named: bool,
 ) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
     let mut existing = BTreeSet::new();
-    for path in candidates {
+    // Every caller names a root at least: the project itself, when nothing
+    // else.
+    candidates.into_iter().try_for_each(|path| {
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
                 existing.insert(path);
@@ -479,7 +481,8 @@ fn existing_roots(
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(&path, error)),
         }
-    }
+        Ok(())
+    })?;
     Ok(existing.into_iter().collect())
 }
 
