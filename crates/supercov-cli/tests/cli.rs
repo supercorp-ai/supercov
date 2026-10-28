@@ -3484,6 +3484,48 @@ fn absolute_source_roots_name_the_same_rust_code_in_the_workspace() {
     assert!(whole.contains("Lines      50.00% (2/4)"), "{whole}");
 }
 
+/// A target runner configuration Supercov cannot read -- here a runner that
+/// leads to the crate itself -- refuses the run, saying why, as plain
+/// `cargo test` fails on it. Run without the runner, the tests would pass.
+#[test]
+fn a_target_runner_supercov_cannot_read_refuses_the_run() {
+    let project = Project::empty("unreadable-runner");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn double(n: u32) -> u32 {\n    n * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    project.write(".gitignore", "target/\n");
+    let host = String::from_utf8(
+        std::process::Command::new("rustc")
+            .arg("-vV")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .lines()
+    .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+    .unwrap();
+    project.write(
+        ".cargo/config.toml",
+        &format!("[target.{host}]\nrunner = \"bin/..\"\n"),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let ran = project.supercov(&["--", "cargo", "test", "-q"]);
+    let stderr = ran.stderr();
+    assert_eq!(ran.code(), 1, "{stderr}");
+    assert!(
+        stderr.contains("invalid Cargo configuration: runner path"),
+        "{stderr}"
+    );
+    assert!(project.supercov(&["runs", "--json"]).json()["data"]["runs"][0].is_null());
+}
+
 #[test]
 fn cargo_configuration_and_target_flags_reach_the_measured_build() {
     let project = Project::empty("cargo-config");
