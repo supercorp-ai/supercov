@@ -2885,10 +2885,14 @@ enum PublicQueryOutput {
     Runs {
         data: RunListData,
         pagination: supercov_contracts::AgentPagination,
+        /// The outcome filter the listing was asked for, for its next page.
+        filter: String,
     },
     Coverage {
         output: IndexedQueryOutput,
         warnings: Vec<String>,
+        /// The request as it was asked, which its rendering names again.
+        request: Box<IndexedQueryRequest>,
     },
 }
 
@@ -2936,11 +2940,12 @@ impl PublicQueryOutput {
 
     fn agent_json(&self) -> Result<String, agent_json::AgentError> {
         match self {
-            Self::Runs { data, pagination } => agent_json::success("runs", data, Some(pagination))
-                .map_err(|error| {
-                    supercov_engine::indexed_query::IndexedQueryError::ResponseTooLarge(error)
-                        .agent_error()
-                }),
+            Self::Runs {
+                data, pagination, ..
+            } => agent_json::success("runs", data, Some(pagination)).map_err(|error| {
+                supercov_engine::indexed_query::IndexedQueryError::ResponseTooLarge(error)
+                    .agent_error()
+            }),
             Self::Coverage { output, .. } => {
                 output.agent_json().map_err(|error| error.agent_error())
             }
@@ -3017,14 +3022,20 @@ fn execute_public_query(
             Ok(PublicQueryOutput::Runs {
                 data,
                 pagination: page,
+                filter: filter.clone(),
             })
         }
         PublicQueryInvocation::Coverage {
             request,
             newer_run_id,
             ..
-        } => execute_coverage_query(root, request, newer_run_id.as_deref())
-            .map(|(output, warnings)| PublicQueryOutput::Coverage { output, warnings }),
+        } => execute_coverage_query(root, request, newer_run_id.as_deref()).map(
+            |(output, warnings)| PublicQueryOutput::Coverage {
+                output,
+                warnings,
+                request: request.clone(),
+            },
+        ),
     }
 }
 
@@ -3465,7 +3476,7 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                     eprintln!("{warning}");
                 }
             }
-            println!("{}", render_human(&invocation, &output));
+            println!("{}", render_human(&output));
             ExitCode::SUCCESS
         }
         Err(failure) => {

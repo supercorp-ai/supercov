@@ -11,7 +11,7 @@ use supercov_engine::{
     indexed_query::{IndexedQueryData, IndexedQueryOutput, IndexedQueryRequest},
 };
 
-use crate::{PublicQueryOutput, public_query::PublicQueryInvocation};
+use crate::PublicQueryOutput;
 
 const DEFAULT_LIMIT: usize = 20;
 
@@ -934,65 +934,67 @@ fn test_totals(totals: &supercov_engine::coverage_query::CoverageTestTotals) -> 
     )
 }
 
-fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
-    // Several lines: each as one line reads, one after another.
-    if let IndexedQueryData::Lines(data) = &output.data {
-        let answered = data
-            .lines
-            .iter()
-            .zip(&data.pages)
-            .map(|(line, page)| {
-                let location = match line {
-                    supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
-                        &data.location
-                    }
-                    supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
-                        &data.location
-                    }
-                };
-                let mut one = request.clone();
-                one.file = Some(location.file.clone());
-                one.line = Some(location.line);
-                one.more_lines = Vec::new();
-                // A line of several lists a few tests; asked alone it lists
-                // them all, which is the next page here.
-                let mut page = page.clone();
-                let more = page.has_more;
-                page.has_more = false;
-                page.next_offset = None;
-                let mut text = render_coverage(
-                    &one,
-                    &IndexedQueryOutput {
-                        command: "coverage.line",
-                        data: IndexedQueryData::Line(Box::new(line.clone())),
-                        pagination: Some(page),
-                    },
-                );
-                if more {
-                    text.push_str(&format!(
-                        "\nevery test and phase: supercov runs {} line {}",
-                        shell_quote(&request.run_id),
-                        shell_quote(&format!("{}:{}", location.file, location.line))
-                    ));
+/// Several lines: each as one line reads, one after another.
+fn render_lines(
+    request: &IndexedQueryRequest,
+    data: &supercov_engine::indexed_query::CoverageLinesData,
+) -> String {
+    let answered = data
+        .lines
+        .iter()
+        .zip(&data.pages)
+        .map(|(line, page)| {
+            let location = match line {
+                supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                    &data.location
                 }
-                text
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if data.failed.is_empty() {
-            return answered;
-        }
-        let failed = data
-            .failed
-            .iter()
-            .map(|failure| format!("  {}: {}", failure.location, failure.message))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return format!("{answered}\n\nNot answered\n{failed}");
+                supercov_engine::coverage_query::CoverageCoversData::Line(data) => &data.location,
+            };
+            let mut one = request.clone();
+            one.file = Some(location.file.clone());
+            one.line = Some(location.line);
+            one.more_lines = Vec::new();
+            // A line of several lists a few tests; asked alone it lists
+            // them all, which is the next page here.
+            let mut page = page.clone();
+            let more = page.has_more;
+            page.has_more = false;
+            page.next_offset = None;
+            let mut text = render_coverage(
+                &one,
+                &IndexedQueryOutput {
+                    command: "coverage.line",
+                    data: IndexedQueryData::Line(Box::new(line.clone())),
+                    pagination: Some(page),
+                },
+            );
+            if more {
+                text.push_str(&format!(
+                    "\nevery test and phase: supercov runs {} line {}",
+                    shell_quote(&request.run_id),
+                    shell_quote(&format!("{}:{}", location.file, location.line))
+                ));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if data.failed.is_empty() {
+        return answered;
     }
+    let failed = data
+        .failed
+        .iter()
+        .map(|failure| format!("  {}: {}", failure.location, failure.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{answered}\n\nNot answered\n{failed}")
+}
+
+fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
     let page = output.pagination.as_ref();
     match &output.data {
-        IndexedQueryData::Lines(_) => unreachable!("several lines render one by one above"),
+        IndexedQueryData::Lines(data) => render_lines(request, data),
         IndexedQueryData::Summary(data) => {
             let label = filter_label(request);
             let mut first = format!("run {}", data.run);
@@ -2262,12 +2264,13 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
     }
 }
 
-pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutput) -> String {
-    match (invocation, output) {
-        (
-            PublicQueryInvocation::Runs { filter, .. },
-            PublicQueryOutput::Runs { data, pagination },
-        ) => {
+pub fn render_human(output: &PublicQueryOutput) -> String {
+    match output {
+        PublicQueryOutput::Runs {
+            data,
+            pagination,
+            filter,
+        } => {
             let id_width = data
                 .runs
                 .iter()
@@ -2321,11 +2324,9 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
             }
             lines.join("\n")
         }
-        (
-            PublicQueryInvocation::Coverage { request, .. },
-            PublicQueryOutput::Coverage { output, .. },
-        ) => render_coverage(request, output),
-        _ => unreachable!("query execution preserves invocation kind"),
+        PublicQueryOutput::Coverage {
+            output, request, ..
+        } => render_coverage(request, output),
     }
 }
 
@@ -3165,25 +3166,18 @@ mod tests {
             has_more: false,
             next_offset: None,
         };
-        let text = render_human(
-            &PublicQueryInvocation::Runs {
-                filter: "all".into(),
-                offset: 0,
-                limit: DEFAULT_LIMIT,
-                json: false,
-            },
-            &PublicQueryOutput::Runs {
-                data: supercov_engine::run_query::RunListData {
-                    filters: supercov_engine::coverage_query::CoverageQueryFilters {
-                        outcome: "all".into(),
-                        kind: None,
-                        runner: None,
-                    },
-                    runs: vec![entry],
+        let text = render_human(&PublicQueryOutput::Runs {
+            filter: "all".into(),
+            data: supercov_engine::run_query::RunListData {
+                filters: supercov_engine::coverage_query::CoverageQueryFilters {
+                    outcome: "all".into(),
+                    kind: None,
+                    runner: None,
                 },
-                pagination: page,
+                runs: vec![entry],
             },
-        );
+            pagination: page,
+        });
         assert!(
             text.contains("2026-10-16 10:29:02 UTC  INVALID COVERAGE"),
             "{text}"

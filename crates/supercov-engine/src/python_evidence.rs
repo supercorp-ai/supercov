@@ -1380,10 +1380,9 @@ fn apply_transport(
                         obligation,
                     });
             }
-            // Expanded through the layout as the transport is read, into
-            // records that are never runs.
-            Record::Runs { .. } => unreachable!("slot runs are expanded as they are read"),
-            Record::Exit { .. } => {}
+            // Runs are expanded through the layout as the transport is read,
+            // into the records they stand for; none is left to apply.
+            Record::Runs { .. } | Record::Exit { .. } => {}
         }
         Ok(())
     };

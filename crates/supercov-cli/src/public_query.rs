@@ -642,11 +642,11 @@ pub(crate) fn coverage_request(
             }
             request.selector = Some(options.positional.join(" ").to_lowercase());
         }
-        "minimize" => {
+        // `minimize`, the last of the commands the hierarchy lets through.
+        _ => {
             request.target = options.target;
             request.max_states = Some(DEFAULT_MAX_STATES);
         }
-        _ => unreachable!("coverage hierarchy validates child commands"),
     }
     Ok((request, options.json))
 }
