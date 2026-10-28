@@ -12918,7 +12918,9 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // copy recovered, the target directory, the outputs before and
             // after, the archive, the trash; the runner's target, test
             // binary and source resolved, a test's evidence directory, the
-            // probe evidence listed.
+            // probe evidence listed. Past the build, a call is named by its
+            // place (`#N`, `#N@M`): how many calls a walk of the target
+            // directory makes differs between systems.
             "fs.create_dir_all@1",
             "fs.create_dir_all@2",
             "fs.read@5",
@@ -12926,21 +12928,21 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "fs.read_dir@5",
             "fs.create_dir_all@7",
             "fs.read_dir@11",
-            "fs.read_dir@29",
-            "fs.create_dir_all@11",
-            "fs.create_dir_all@12",
-            "fs.create_dir_all@20",
-            "fs.canonicalize@16",
-            "fs.canonicalize@17",
-            "fs.canonicalize@18",
-            "fs.create_dir@2",
-            "fs.read_dir@26",
+            "fs.read_dir#7@3",
+            "fs.create_dir_all#10",
+            "fs.create_dir_all#11",
+            "fs.create_dir_all#17",
+            "fs.canonicalize#12",
+            "fs.canonicalize#13",
+            "fs.canonicalize#14",
+            "fs.create_dir#2",
+            "fs.read_dir#9",
             // The doctest runner: Supercov's own path resolved, the packages
             // it recorded listed and read, a doctest's evidence listed.
-            "fs.canonicalize@21",
-            "fs.read_dir@27",
-            "fs.read@12",
-            "fs.read_dir@28",
+            "fs.canonicalize#15",
+            "fs.read_dir#10",
+            "fs.read#9",
+            "fs.read_dir#9@2",
             "spawn",
         ],
     );
@@ -12955,12 +12957,12 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 // The attempts' directory, Supercov's own path, Cargo's
                 // runner configuration resolved, the attempts listed and
                 // read, an attempt's evidence listed.
-                "fs.create_dir_all@9",
-                "fs.canonicalize@14",
-                "fs.canonicalize@17",
-                "fs.read_dir@14",
-                "fs.read@10",
-                "fs.read_dir@15",
+                "fs.create_dir_all#8",
+                "fs.canonicalize#12",
+                "fs.canonicalize#5@3",
+                "fs.read_dir#9",
+                "fs.read#7",
+                "fs.read_dir#10",
                 "__nextest-runner/spawn@1",
                 "__nextest-runner/fs.read@1",
                 "__nextest-runner/fs.create_dir_all@1",
@@ -14253,6 +14255,43 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
     }
 }
 
+/// What a JavaScript run writes into its copy before the command starts --
+/// the runtime's types, the Playwright adapter, the Playwright and Vitest
+/// configurations, Vitest's commands, an authored test kept and its
+/// instrumented form, the authored-source map, the statement exclusions, the
+/// manifest, the completion mark, a cached artifact -- each failing ends the
+/// run naming the file, and the next run is clean.
+#[test]
+fn a_javascript_run_that_cannot_write_its_copy_says_so() {
+    for (fault, file) in [
+        ("fs.rename@31", "runtime.d.mts"),
+        ("fs.rename@32", "playwright.mjs"),
+        ("fs.rename@34", "playwright.config.mjs"),
+        ("fs.rename@35", "vitest.config.mjs"),
+        ("fs.rename@38", "vitestCommands.mjs"),
+        ("fs.create_dir_all@12", ".authored/test"),
+        ("fs.rename@40", "test/cart.test.js"),
+        ("fs.rename@41", "authored-sources.json"),
+        ("fs.rename@42", "statement-exclusions.json"),
+        ("fs.rename@43", "manifest.json"),
+        ("fs.rename@44", "instrumentation-complete"),
+        ("fs.rename@45", "injected fault at fs"),
+    ] {
+        let project = Project::cart("js-copy-writes");
+        project.write(".gitignore", "out/\nnode_modules/\n");
+        project.commit("ignore");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(
+            stderr.contains(file) && stderr.contains("injected fault at fs"),
+            "{fault}: {stderr}"
+        );
+        project.supercov(&["--", "node", "--test"]).succeeds();
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
@@ -14301,7 +14340,6 @@ fn a_merge_whose_step_fails_says_so() {
     for fault in [
         "fs.symlink_metadata@1",
         "fs.read_dir@1",
-        "fs.read_to_end_from@6",
         "fs.create_dir_all@1",
         "fs.create_dir_all@2",
         "fs.create_dir_all@3",
@@ -14341,6 +14379,16 @@ fn a_merge_whose_step_fails_says_so() {
             "{fault}: {said}"
         );
     }
+    // A run the store cannot read its record of is named, with why.
+    let project = Project::cart("merge-unreadable-run");
+    let first = project.measure(&["--test-name-pattern=total"]);
+    let second = project.measure(&["--test-name-pattern=shipping"]);
+    project.write(&format!(".supercov/runs/{first}/run.json"), "{");
+    let refused = project.supercov(&["merge", &first, &second]).exits(2);
+    assert!(
+        refused.contains(&format!("Cannot merge coverage run {first}: ")),
+        "{refused}"
+    );
 }
 
 /// The report carries a run's scope where the run has one -- measured under

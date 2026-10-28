@@ -2,7 +2,9 @@
 //! under test. `SUPERCOV_TEST_FAULT` names call sites, comma-separated: `site`
 //! fails every call there, `site=N` only the first N, `site@N` only the Nth,
 //! `site#N` only the first call from the Nth place in the code that calls it
-//! (where the site knows its caller, as [`crate::fault_fs`] does),
+//! (where the site knows its caller, as [`crate::fault_fs`] does) and
+//! `site#N@M` only its Mth -- the count of one place, which no walk over a
+//! varying number of files moves --
 //! `site.operation` only the calls that make that operation (`fs.hard_link`,
 //! where the caller names what it does), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
@@ -30,7 +32,8 @@ struct Fault {
     /// Calls left to fail; `None` for every call.
     remaining: Option<std::sync::atomic::AtomicUsize>,
     /// For `site#N`: N, and the places in the code that called the site so
-    /// far, in the order they first did.
+    /// far, in the order they first did. The calls from the Nth place are
+    /// counted by `skip` and `remaining`.
     place: Option<(usize, std::sync::Mutex<Vec<Place>>)>,
 }
 
@@ -71,16 +74,20 @@ fn parse(text: &str) -> Vec<Fault> {
         .map(|entry| {
             let (site, count) = entry.split_once('=').unwrap_or((entry, ""));
             let (site, place) = site.split_once('#').unwrap_or((site, ""));
-            let (site, nth) = site.split_once('@').unwrap_or((site, ""));
+            // `site@N` the Nth call, `site#N@M` the Mth from the Nth place.
+            let (place, nth) = place.split_once('@').unwrap_or((place, ""));
+            let (site, nth) = site.split_once('@').unwrap_or((site, nth));
             let (site, errno) = site.split_once(':').unwrap_or((site, ""));
             let nth = nth.parse::<usize>().ok();
             Fault {
                 site: site.to_owned(),
                 errno: errno.parse().ok(),
                 skip: nth.map_or(0, |nth| nth.saturating_sub(1)).into(),
+                // A place's first call when no other is named.
                 remaining: nth
                     .map(|_| 1)
                     .or_else(|| count.parse().ok())
+                    .or_else(|| (!place.is_empty()).then_some(1))
                     .map(std::sync::atomic::AtomicUsize::new),
                 place: place
                     .parse::<usize>()
@@ -197,15 +204,18 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
     for fault in faults.iter().filter(named_here) {
         named = true;
         let fails = match (&fault.place, place) {
-            // The first call from a place not seen before, when it is the Nth.
+            // A call from the Nth place the site was called from, counted
+            // as `site@N` counts every call: the first, or the Mth.
             (Some((nth, seen)), Some(place)) => {
                 let mut seen = seen
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                !seen.contains(&place) && {
+                if !seen.contains(&place) {
                     seen.push(place);
-                    seen.len() == *nth
                 }
+                nth.checked_sub(1).and_then(|at| seen.get(at)) == Some(&place)
+                    && !count_down(&fault.skip)
+                    && fault.remaining.as_ref().is_none_or(count_down)
             }
             // A caller that cannot say where it is is never the Nth place.
             (Some(_), None) => false,
@@ -352,5 +362,17 @@ mod tests {
         assert!(!first);
         assert!(second);
         assert!(!again);
+    }
+
+    /// `site#N@M` fails the Mth call from the Nth place only.
+    #[test]
+    fn the_nth_place_fails_its_mth_call() {
+        let calls = super::during("t#2@3", || {
+            let first = here();
+            let mut calls = vec![first];
+            calls.extend((0..4).map(|_| here()));
+            calls
+        });
+        assert_eq!(calls, [false, false, false, true, false]);
     }
 }
