@@ -13929,6 +13929,42 @@ fn a_run_that_cannot_reuse_the_last_copy_says_so() {
     }
 }
 
+/// A JavaScript run's own records -- the abandoned runs recovered, the run's
+/// state at each phase, the runtime's settings, the parent-death watchdog,
+/// the evidence gathered and archived, the trash, the publication -- each
+/// failing ends the run and names what failed, and the next run is clean.
+#[test]
+fn a_javascript_run_whose_record_step_fails_says_so() {
+    for fault in [
+        "fs.create_dir_all@2",
+        "fs.create_dir_all@9",
+        "fs.write@4",
+        "fs.canonicalize@11",
+        "fs.create_dir_all@16",
+        "fs.create_dir_all@17",
+        "fs.read_dir@59",
+        "fs.create_dir_all@18",
+        "fs.create_dir_all@19",
+        "fs.create_dir_all@21",
+        "fs.create_dir_all@23",
+        "fs.create_dir_all@29",
+        "fs.create_dir_all@30",
+    ] {
+        let project = Project::cart("js-records");
+        project.write(".gitignore", "out/\nnode_modules/\n");
+        project.commit("ignore");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(
+            stderr.contains("injected fault at fs") && !stderr.contains("panicked at"),
+            "{fault}: {stderr}"
+        );
+        project.supercov(&["--", "node", "--test"]).succeeds();
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
