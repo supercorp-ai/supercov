@@ -13134,6 +13134,32 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
     );
 }
 
+/// A Rust run of a crate with no doctest writes its unit tests' report,
+/// then its doctests' (none ran): either that cannot be written ends the
+/// run rather than leaving the tests' outcomes unsaid.
+#[test]
+fn a_rust_run_that_cannot_write_its_tests_reports_says_so() {
+    for fault in ["diagnostics@3", "diagnostics@4"] {
+        let project = Project::empty("rust-reports-unwritten");
+        project.write(
+            "Cargo.toml",
+            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        );
+        project.write(
+            "src/lib.rs",
+            "pub fn double(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+        );
+        project.write(".gitignore", "target/\n");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let ran =
+            project.supercov_with(&["--", "cargo", "test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(fired_at(&stderr, "diagnostics"), "{fault}: {stderr}");
+    }
+}
+
 #[test]
 fn a_rust_run_whose_own_step_fails_says_so() {
     each_step_of_a_run_fails(
