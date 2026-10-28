@@ -266,7 +266,7 @@ fn executable(path: &Path) -> bool {
 /// holds the workspaces, under the same name.
 pub fn source_view_path(workspace: &Path) -> Option<PathBuf> {
     let name = workspace.file_name()?;
-    let kind = workspace.parent()?;
+    let kind = workspace.parent().expect("a path with a name has a parent");
     let container = kind.parent()?;
     // `workspace` has its view in `source`, and `workspace-2` in `source-2`.
     let kind = kind.file_name()?.to_str()?;

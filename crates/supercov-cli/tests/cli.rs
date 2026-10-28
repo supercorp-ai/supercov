@@ -12012,6 +12012,8 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
         "edit.cjs",
         "const fs = require('node:fs');\nconst file = process.env.EDITED_PROJECT + '/src/fee.js';\nfs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('var rate = 5', 'let rate = 5'));\n",
     );
+    // An empty directory of the project is walked as one with nothing in it.
+    std::fs::create_dir_all(project.root.join("src/empty")).unwrap();
     project.git(&["init", "-q"]);
     let root = project.root.display().to_string();
     let run = project.supercov_with(&["--", "npm", "test"], &[("EDITED_PROJECT", &root)]);
@@ -12041,6 +12043,40 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
         said.contains("the source changes the command's tools made could not be applied"),
         "{said}"
     );
+    // The source view's directories that cannot be listed part way: the
+    // tools' changes are not applied, the tool reads the instrumented copy,
+    // or what it wrote stays out of the workspace, and the command passes.
+    for (fault, told) in [
+        (
+            "fs.read_dir entry#source_tools.rs:676",
+            "the source changes the command's tools made could not be applied",
+        ),
+        (
+            "fs.read_dir entry#source_tools.rs:403",
+            "reads the instrumented files",
+        ),
+        (
+            "fs.read_dir entry#source_tools.rs:443",
+            "reads the instrumented files",
+        ),
+        (
+            "fs.read_dir entry#source_tools.rs:493",
+            "could not be brought into the workspace",
+        ),
+    ] {
+        project.edit("src/fee.js", "let rate = 5", "var rate = 5");
+        let ran = project.supercov_with(
+            &["--", "npm", "test"],
+            &[("EDITED_PROJECT", &root), ("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 0, "{fault}: {said}");
+        let place = fault.split('#').nth(1).unwrap();
+        assert!(
+            fired_at(&said, place) && said.contains(told),
+            "{fault}: {said}"
+        );
+    }
 }
 
 /// A run whose Docker daemon is a local socket gives the tests a relay to
