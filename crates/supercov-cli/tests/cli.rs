@@ -13902,6 +13902,33 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
     }
 }
 
+/// A run of an unchanged project reuses what the last one instrumented: a
+/// new copy is made beside the old, the instrumented files are carried into
+/// it, and the old copy goes to the trash. A step of that failing ends the
+/// run, and the next run is a clean one.
+#[test]
+fn a_run_that_cannot_reuse_the_last_copy_says_so() {
+    for fault in [
+        "fs.canonicalize@10",
+        "fs.create_dir_all@6",
+        "fs.copy@1",
+        "fs.rename@1",
+        "fs.rename@3",
+        "fs.create_dir_all@10",
+    ] {
+        let project = Project::cart("reuse-copy");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        project.supercov(&["runs", "latest", "--json"]).succeeds();
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let stderr = ran.stderr();
+        assert_eq!(ran.code(), 1, "{fault}: {stderr}");
+        assert!(stderr.contains("injected fault at fs"), "{fault}: {stderr}");
+        project.supercov(&["--", "node", "--test"]).succeeds();
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
