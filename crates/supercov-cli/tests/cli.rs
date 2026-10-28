@@ -14191,6 +14191,68 @@ fn an_html_export_leaves_out_a_source_it_cannot_read() {
     assert!(refused.contains("injected fault at fs"), "{refused}");
 }
 
+/// A stored query refuses when it cannot list the runs, rebuild the index of
+/// the run it reads or of the newer run a diff compares, analyse the run a
+/// minimisation reads, or read the index while answering.
+#[test]
+fn a_stored_query_that_cannot_read_its_runs_is_refused() {
+    let project = Project::cart("stored-query-reads");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let older = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let newer = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let input = project.root.join("query.json");
+    let ask = |command: &str, compared: Option<&str>, fault: &str, unindexed: bool| {
+        if unindexed {
+            for run in [&older, &newer] {
+                let _ = std::fs::remove_file(
+                    project
+                        .root
+                        .join(".supercov/runs")
+                        .join(run.as_str())
+                        .join("query-index.v1.bin"),
+                );
+            }
+        }
+        let request = serde_json::json!({
+            "root": project.root,
+            "query": {"runId": older, "filter": "passed", "command": command, "target": 20.0},
+            "newerRunId": compared,
+        });
+        std::fs::write(&input, request.to_string()).unwrap();
+        project
+            .supercov_with(
+                &["__query-stored-run"],
+                &[
+                    ("SUPERCOV_INTERNAL_INPUT_FILE", input.to_str().unwrap()),
+                    ("SUPERCOV_TEST_FAULT", fault),
+                ],
+            )
+            .exits(2)
+    };
+    for (command, compared, fault, unindexed) in [
+        ("summary", None, "fs.read_dir@1", false),
+        ("minimize", None, "fs.open@7", false),
+        ("diff", Some(newer.as_str()), "fs.open@5", true),
+        ("diff", Some(newer.as_str()), "fs.open@8", true),
+        ("diff", Some(newer.as_str()), "coverage-index-read#1", false),
+    ] {
+        let refused = ask(command, compared, fault, unindexed);
+        assert!(
+            refused.contains("stored query failed"),
+            "{command} {fault}: {refused}"
+        );
+    }
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.
