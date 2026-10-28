@@ -3773,6 +3773,11 @@ pub(crate) mod tests {
             ),
             Err(PythonEvidenceError::UnknownObligation(id)) if id == "nope"
         ));
+        // A phase that hit an obligation the run does not have.
+        assert!(matches!(
+            run_with("unknown-hit", &[json!({"t":"hit","ctx":1,"id":"nowhere"})]),
+            Err(PythonEvidenceError::UnknownObligation(id)) if id == "nowhere"
+        ));
     }
 
     #[test]
