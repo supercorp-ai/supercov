@@ -15956,6 +15956,47 @@ fn a_doctest_helper_whose_file_operation_fails_ends_cleanly() {
     }
 }
 
+/// The runtool rustdoc hands each merged doctest harness to: its children's
+/// directory, the harness started, the order of its cases read, a child's
+/// record read. Each failing ends the run, naming where.
+#[cfg(unix)]
+#[test]
+fn a_doctest_runtool_step_that_fails_is_named() {
+    let runner = "__doctest-runner/";
+    for (fault, place) in [
+        (
+            "fs.create_dir_all#rust_owned_doctests.rs:1181",
+            "rust_owned_doctests.rs:1181",
+        ),
+        (
+            "spawn#rust_owned_doctests.rs:1186",
+            "rust_owned_doctests.rs:1186",
+        ),
+        (
+            "fs.read#rust_owned_doctests.rs:1194",
+            "rust_owned_doctests.rs:1194",
+        ),
+        (
+            "fs.read#rust_owned_doctests.rs:1205",
+            "rust_owned_doctests.rs:1205",
+        ),
+    ] {
+        let project = Project::empty("doctest-runtool-steps");
+        small_crate(&project);
+        project.edit("Cargo.toml", "edition = \"2021\"", "edition = \"2024\"");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        let fault = format!("{runner}{fault}");
+        let ran = project.supercov_with(
+            &["--", "cargo", "test", "-q"],
+            &[("SUPERCOV_TEST_FAULT", fault.as_str())],
+        );
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_ne!(ran.code(), 0, "{fault}: {said}");
+        assert!(fired_at(&said, place), "{fault}: {said}");
+    }
+}
+
 /// Two standalone doctests of one item, at lines 1 and 11: every word of
 /// either name is in the other's (`1)` in `11)`), so each is run alone by a
 /// filter and a skip of the other, and both are measured.
