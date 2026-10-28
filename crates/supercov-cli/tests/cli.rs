@@ -13013,6 +13013,9 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "fs.read_dir@41",
             "fs.read_dir@52",
             "spawn",
+            // Supercov's own executable unresolved: no watchdog to contain
+            // a crash.
+            "fs.canonicalize#main.rs:2443 => main.rs:2443",
         ],
     );
 }
