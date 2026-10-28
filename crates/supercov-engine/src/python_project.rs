@@ -138,7 +138,7 @@ fn walk(
         let file_type = fs::file_type(&entry).map_err(|error| error.to_string())?;
         let relative = path
             .strip_prefix(root)
-            .map_err(|_| format!("path escaped root: {}", path.display()))?
+            .expect("a walked path lies under the root")
             .to_string_lossy()
             .replace('\\', "/");
         if file_type.is_dir() {
