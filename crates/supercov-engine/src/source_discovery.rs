@@ -376,7 +376,8 @@ impl ExplicitSourceRoots {
             self.configured.join(",")
         );
         if !missing.is_empty() {
-            message.push_str(&format!("; {} does not exist", missing.join(", ")));
+            let verb = if missing.len() == 1 { "does" } else { "do" };
+            message.push_str(&format!("; {} {verb} not exist", missing.join(", ")));
         }
         message.push_str("; name the directories or files that hold your own code");
         message

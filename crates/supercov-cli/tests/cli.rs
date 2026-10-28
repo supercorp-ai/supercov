@@ -11026,6 +11026,15 @@ fn the_wrapped_command_exits_as_it_would_alone_and_a_missing_root_is_named() {
         "{}",
         roots.stderr()
     );
+    let both = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_SOURCE_ROOTS", "nowhere,elsewhere")],
+    );
+    assert!(
+        both.stderr().contains("; nowhere, elsewhere do not exist;"),
+        "{}",
+        both.stderr()
+    );
     // One of several missing is a checkout without that directory.
     project
         .supercov_with(
