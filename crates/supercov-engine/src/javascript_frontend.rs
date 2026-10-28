@@ -2286,6 +2286,26 @@ mod tests {
     }
     use crate::project_discovery::discover_coverage_project;
 
+    /// A file written where its directory is missing gets the directory
+    /// first; a directory, or a file, that still cannot be made is the
+    /// write's failure, and leaves nothing behind.
+    #[test]
+    fn a_write_whose_directory_is_missing_makes_it_or_fails() {
+        let root = temporary("atomic-directory");
+        let path = root.join("made/later/file.txt");
+        crate::fault::during("fs.open_with:2@1", || atomic_write(&path, b"x")).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"x");
+        let other = root.join("missing/file.txt");
+        for faults in ["fs.open_with:2@1,fs.create_dir_all", "fs.open_with:2"] {
+            assert!(
+                crate::fault::during(faults, || atomic_write(&other, b"y")).is_err(),
+                "{faults}"
+            );
+            assert!(!other.exists(), "{faults}");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     fn temporary(name: &str) -> PathBuf {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/supercov-test-fixtures")
