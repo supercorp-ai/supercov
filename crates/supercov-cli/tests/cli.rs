@@ -15906,6 +15906,15 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
     let refused = project.supercov_with(&command, &[("SUPERCOV_SOURCE_ROOTS", "nowhere")]);
     assert_ne!(refused.code(), 0, "{}", refused.stderr());
     assert!(refused.stderr().contains("nowhere"), "{}", refused.stderr());
+    // A root named that is a link is no root.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("pkg", project.root.join("linked")).unwrap();
+        let linked = project.supercov_with(&command, &[("SUPERCOV_SOURCE_ROOTS", "linked")]);
+        assert_ne!(linked.code(), 0, "{}", linked.stderr());
+        assert!(linked.stderr().contains("linked"), "{}", linked.stderr());
+        std::fs::remove_file(project.root.join("linked")).unwrap();
+    }
     for (fault, place) in [
         ("fs.canonicalize#python_run.rs:205", "python_run.rs:205"),
         ("fs.read_dir#python_project.rs:125", "python_project.rs:125"),
@@ -15920,8 +15929,8 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
 /// A query recomputes a run's inputs to judge whether it is current: the
 /// project's root resolved, its tree walked, its files digested. Each
 /// failing, for a Rust, Go, Ruby or Java run, reads the run as stale rather
-/// than failing the query;
-/// so do source roots the run was measured under that resolve to nothing.
+/// than failing the query; so does a source root the run was measured under
+/// that is a link now.
 #[test]
 fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
     let stale_when = |project: &Project, faults: &[(&str, &str)]| {
@@ -15979,7 +15988,9 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
                 ("fs.open#integrity.rs:426", "integrity.rs:426"),
             ],
         );
+        // The root it was measured under is a link now: no root.
         std::fs::rename(project.root.join("lib"), project.root.join("moved")).unwrap();
+        std::os::unix::fs::symlink("moved", project.root.join("lib")).unwrap();
         let read = project.supercov(&["runs", "latest"]);
         let said = format!("{}{}", read.stdout(), read.stderr());
         assert!(said.contains("stale run"), "{said}");
@@ -16017,6 +16028,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         )
         .succeeds();
     std::fs::rename(project.root.join("pkg"), project.root.join("moved")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("moved", project.root.join("pkg")).unwrap();
     let read = project.supercov(&["runs", "latest"]);
     let said = format!("{}{}", read.stdout(), read.stderr());
     assert!(said.contains("stale run"), "{said}");
