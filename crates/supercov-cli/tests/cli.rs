@@ -2235,6 +2235,23 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
         );
         assert!(feed(command, b"{").exits(2).contains(invalid), "{command}");
     }
+    // Input on stdin that cannot be read: a directory in its place.
+    #[cfg(unix)]
+    {
+        let read = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+            .arg("__instrument-js")
+            .stdin(std::fs::File::open(&project.root).unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(read.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&read.stderr);
+        assert!(
+            stderr.contains("failed to read Rust engine input:"),
+            "{stderr}"
+        );
+    }
+    // A launcher that names no tool is refused.
+    assert_eq!(project.supercov(&["__source-tool"]).code(), 2);
 
     let source = r#"[{"file":"a.js","source":"export const f = (x) => x ? 1 : 2;\n"}]"#;
     let timed = feed("__benchmark-js-transform", source.as_bytes()).json();
@@ -11842,6 +11859,65 @@ fn a_query_index_that_cannot_be_rebuilt_is_named_as_the_failure() {
         "{refused}"
     );
     assert!(!refused.contains("wrapped command"), "{refused}");
+}
+
+/// An index that cannot be read partway through a command is named as the
+/// failure: the tests a filter picks, the newer run a diff compares with,
+/// read or opened. A failed run whose index cannot be read still exits as
+/// its command did, naming no test it cannot read.
+#[test]
+fn an_index_that_cannot_be_read_mid_command_is_named() {
+    let project = Project::cart("index-mid-command");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let runs = project.supercov(&["runs", "--json"]).json();
+    let older = runs["data"]["runs"][0]["id"].as_str().unwrap().to_owned();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    // The filter's picks are read from the second index the command opens.
+    let picked = project
+        .supercov_with(
+            &["runs", "latest", "tests", "affected", "--title", "shipping"],
+            &[("SUPERCOV_TEST_FAULT", "coverage-index@2")],
+        )
+        .exits(2);
+    assert!(picked.contains("invalid coverage index"), "{picked}");
+    // The older run's index, then the newer one's: the fourth open.
+    let newer = project
+        .supercov_with(
+            &["diff", &older, "latest", "--json"],
+            &[("SUPERCOV_TEST_FAULT", "coverage-index@4")],
+        )
+        .exits(2);
+    assert!(
+        newer.contains("Failed to read newer coverage index"),
+        "{newer}"
+    );
+    let latest = project.supercov(&["runs", "--json"]).json();
+    let latest = latest["data"]["runs"][0]["id"].as_str().unwrap().to_owned();
+    let index = project
+        .root
+        .join(".supercov/runs")
+        .join(&latest)
+        .join("query-index.v1.bin");
+    std::fs::remove_file(&index).unwrap();
+    std::fs::create_dir(&index).unwrap();
+    let unopened = project
+        .supercov(&["diff", &older, "latest", "--json"])
+        .exits(2);
+    assert!(
+        unopened.contains("Failed to open newer coverage index"),
+        "{unopened}"
+    );
+
+    let project = Project::cart("index-failed-run");
+    project.edit("test/cart.test.js", "20);", "21);");
+    let failed = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "coverage-index@2")],
+    );
+    let stderr = failed.stderr();
+    assert_eq!(failed.code(), 1, "{stderr}");
+    assert!(fired_at(&stderr, "coverage-index"), "{stderr}");
+    assert!(!stderr.contains("test(s) failed"), "{stderr}");
 }
 
 /// A script standing in for rustdoc while Supercov stands in for it during
