@@ -713,13 +713,8 @@ fn read_evidence_file(
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
                 if let Some(before) = before_assertion.remove(&ctx) {
-                    let identity = contexts
-                        .get(&ctx)
-                        .ok_or(RubyEvidenceError::UnknownContext {
-                            file: name.into(),
-                            line: line_number,
-                            context: ctx,
-                        })?;
+                    // A call phase's context is known from its phase record.
+                    let identity = &contexts[&ctx];
                     let asserted = evidence
                         .per_identity
                         .entry(Identity {
@@ -1351,7 +1346,10 @@ fn build_from_evidence(
                             ),
                             error: None,
                         });
-                        runtime.push(snapshot(&index, observations, &id)?);
+                        // Its hits are part of its call phase's, read above.
+                        runtime.push(
+                            snapshot(&index, observations, &id).expect("read with its call phase"),
+                        );
                     }
                     Ok::<(), RubyEvidenceError>(())
                 },
@@ -1939,6 +1937,22 @@ pub(crate) mod tests {
                     json!({"t":"dec","ctx":0,"id":"d","v":"12","o":2}),
                 ],
                 "outcome must be 0 or 1",
+            ),
+            // Hits and decisions in a context no phase opened.
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"ids","first":0,"names":["a"]}),
+                    json!({"t":"hits","ctx":3,"n":[0]}),
+                ],
+                "context 3",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"dec","ctx":3,"id":"d","v":"12","o":1}),
+                ],
+                "context 3",
             ),
         ] {
             let got = read(&records);
@@ -2616,6 +2630,19 @@ pub(crate) mod tests {
             }
             assert_eq!(read(&directory), format!("UnsafeEntry({make:?})"));
         }
+        // macOS names no file that is not UTF-8.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let directory = base.join("bytes");
+            fs::create_dir(&directory).unwrap();
+            fs::write(
+                directory.join(std::ffi::OsStr::from_bytes(b"\xff.mmap")),
+                b"",
+            )
+            .unwrap();
+            assert_eq!(read(&directory), "UnsafeEntry(\"<non-utf8>\")");
+        }
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -2689,6 +2716,81 @@ pub(crate) mod tests {
             }
         }
         assert!(refused > 20, "{refused}");
+    }
+
+    /// An obligation the manifest does not hold, hit in any kind of phase --
+    /// one reported, one left without its outcome, one of a test that
+    /// reported nothing, the load's background -- refuses the run.
+    #[test]
+    fn an_unknown_obligation_in_any_phase_refuses_the_run() {
+        let obligations = build_ruby_obligations("lib/m.rb", b"def f\n  1\nend\n", &mut 0).unwrap();
+        let test = "spec/m_spec.rb[1:1]";
+        let process = serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"],"lines":"exact"});
+        let phase = |ctx: u64, phase: &str| serde_json::json!({"t":"phase","ctx":ctx,"at":5,"worker":"main","test":test,"retry":0,"phase":phase});
+        let outcome = |phase: &str| serde_json::json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":phase,"outcome":"passed","xfail":false,"runner":"rspec"});
+        let unknown = |ctx: u64| serde_json::json!({"t":"hit","ctx":ctx,"id":"rb:unknown"});
+        let exit = serde_json::json!({"t":"exit","at":9});
+        for (label, records) in [
+            (
+                "reported",
+                vec![
+                    process.clone(),
+                    phase(1, "call"),
+                    unknown(1),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+            ),
+            (
+                "unreported phase",
+                vec![
+                    process.clone(),
+                    phase(1, "setup"),
+                    outcome("setup"),
+                    phase(2, "call"),
+                    unknown(2),
+                    exit.clone(),
+                ],
+            ),
+            (
+                "no outcome",
+                vec![
+                    process.clone(),
+                    phase(1, "call"),
+                    outcome("call"),
+                    serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":"spec/m_spec.rb[1:2]","retry":0,"phase":"call"}),
+                    unknown(2),
+                    exit.clone(),
+                ],
+            ),
+            (
+                "background",
+                vec![
+                    process.clone(),
+                    unknown(0),
+                    phase(1, "call"),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+            ),
+        ] {
+            let directory = temporary("unknown-obligation");
+            fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+            let built = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            );
+            assert!(
+                matches!(built, Err(RubyEvidenceError::UnknownObligation(ref id)) if id == "rb:unknown"),
+                "{label}: {:?}",
+                built.err()
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]
