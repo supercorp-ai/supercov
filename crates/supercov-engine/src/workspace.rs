@@ -4941,7 +4941,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
 
         for fault in [
-            "fs.read_dir entry#source_tools.rs:187",
+            "fs.read_dir entry#source_tools.rs:186",
             "fs.create_dir#workspace.rs:660,fs.write#workspace.rs:1001",
         ] {
             let (root, prepared) = prepare(fault, true);

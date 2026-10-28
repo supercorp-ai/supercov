@@ -4412,6 +4412,13 @@ pub(crate) mod tests {
             assert!(matches!(metadata, Ok(None)), "{metadata:?}");
             assert!(matches!(mapped, Ok(None)));
         }
+        // A directory where a slot or the evidence should be opens, and is
+        // nothing to map.
+        #[cfg(unix)]
+        {
+            assert!(map_slot(&base).is_err());
+            assert!(map_evidence(&base).is_err());
+        }
         let no_marker = |marker: &Path| {
             materialize_shared_slot(marker, "p.1.slot", &|_| unreachable!()).map_err(|_| ())
         };
