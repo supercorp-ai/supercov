@@ -345,11 +345,14 @@ fn point_at_entry(config: &WorkerConfig, port: Option<u16>) -> Result<(), String
 
 /// A port nothing listens on now.
 fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-    listener
+    let listener = crate::fault::io("free-port", std::io::ErrorKind::AddrInUse, || {
+        TcpListener::bind("127.0.0.1:0")
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(listener
         .local_addr()
-        .map(|address| address.port())
-        .map_err(|error| error.to_string())
+        .expect("a bound listener has its address")
+        .port())
 }
 
 /// The cfg values of wasm32-unknown-unknown, as the crate's own toolchain
@@ -3327,5 +3330,54 @@ mod tests {
             unwatched("dev --inspector-port 1")
         );
         fs::remove_dir_all(evidence).unwrap();
+    }
+
+    /// What cannot be started or read is nothing: a rustc or Cargo that
+    /// does not start, a port none can be had, a watch stopped before it
+    /// looks, and a directory of windows with none or one unreadable.
+    #[test]
+    fn what_cannot_be_started_or_read_is_nothing() {
+        let package = temporary("worker-unstarted");
+        fs::write(
+            package.join("wrangler.toml"),
+            "[build]\ncommand = \"worker-build\"\n",
+        )
+        .unwrap();
+        let rustc = "spawn#rust_worker.rs:366";
+        assert!(crate::fault::during(rustc, || wasm_target_cfg(&package)).is_none());
+        assert!(
+            crate::fault::during(rustc, || worker_build_cfg(&package, &BTreeMap::new())).is_none()
+        );
+        assert_eq!(
+            crate::fault::during("spawn#rust_worker.rs:1823", || cargo_workspace_root(
+                &package
+            )),
+            None
+        );
+        assert!(crate::fault::during("free-port", free_port).is_err());
+        let stop = AtomicBool::new(true);
+        assert!(watch_other_workers(&package, &|n| package.join(format!("{n}")), &stop).is_empty());
+        assert!(read_windows(&package).unwrap().is_empty());
+        fs::create_dir(package.join("a.windows")).unwrap();
+        assert!(read_windows(&package).is_err());
+        fs::remove_dir_all(package).unwrap();
+    }
+
+    /// A message that is no JSON, and one that is no text, are passed over.
+    #[test]
+    fn a_message_that_is_no_json_or_no_text_is_passed_over() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let written = inspect_with(Arc::clone(&stop), TAKE_PATIENCE, |socket, stop, _| {
+            assert_eq!(receive(socket)["method"], "Runtime.enable");
+            socket.send(tungstenite::Message::Text("not json".into())).unwrap();
+            socket.send(tungstenite::Message::Binary(vec![1, 2].into())).unwrap();
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextsCleared"}),
+            );
+            stop.store(true, Ordering::Release);
+            while socket.read().is_ok() {}
+        });
+        assert_eq!(written, "");
     }
 }
