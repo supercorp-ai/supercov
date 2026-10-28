@@ -17257,3 +17257,38 @@ fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
     );
     project.supercov(&report).succeeds();
 }
+
+/// `tests affected` resolves the project and reads each file it recorded as
+/// it is now: the project that cannot be resolved refuses it, and a file
+/// that cannot be read is read as gone.
+#[test]
+fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
+    let project = Project::cart("affected-unread");
+    project.write(".gitignore", "node_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let unresolved = project.supercov_with(
+        &["runs", "latest", "tests", "affected"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.canonicalize#source_manifest.rs:773",
+        )],
+    );
+    assert_ne!(unresolved.code(), 0, "{}", unresolved.stderr());
+    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:773"));
+    let unread = project.supercov_with(
+        &["runs", "latest", "tests", "affected"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read_to_string#source_manifest.rs:784",
+        )],
+    );
+    let said = format!("{}{}", unread.stdout(), unread.stderr());
+    assert!(!said.contains("panicked"), "{said}");
+    assert!(fired_at(&said, "source_manifest.rs:784"), "{said}");
+}
