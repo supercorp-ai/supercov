@@ -288,6 +288,9 @@ try {
     const lines = `${result.stdout}${result.stderr}`
       .split('\n')
       .map((line) => line.trimEnd())
+      // A file slower than Jest's five seconds is named with its time:
+      // `FAIL tests/failing-types.test.ts (5.638 s)`.
+      .map((line) => line.replace(/^((?:PASS|FAIL) \S+) \([\d.]+ m?s\)$/u, '$1'))
       .filter((line) => line !== '' && !/^\[(?:supercov|coverage)\]|^(?:Time|Tests|Test Suites|Snapshots):|^Ran all|[✕✓]|ts-jest\[/u.test(line));
     assert.ok(lines.length >= 20, result.stdout + result.stderr);
     return lines;
