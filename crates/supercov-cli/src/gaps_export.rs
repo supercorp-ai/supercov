@@ -29,7 +29,8 @@ pub fn command(arguments: &[String]) -> ExitCode {
     let mut output = None;
     let mut format = None;
     let mut index = 0;
-    while index < arguments.len() {
+    // Dispatch sends `<run> gaps ...` here: never empty.
+    loop {
         match arguments[index].as_str() {
             "--format" => {
                 index += 1;
@@ -45,6 +46,9 @@ pub fn command(arguments: &[String]) -> ExitCode {
             other => passed.push(other.to_owned()),
         }
         index += 1;
+        if index >= arguments.len() {
+            break;
+        }
     }
     if format.as_deref() != Some("jsonl") {
         eprintln!("[supercov] gaps --format takes jsonl");
@@ -207,7 +211,8 @@ fn file_details(
 fn shared_options(arguments: &[String]) -> Vec<String> {
     let mut shared = Vec::new();
     let mut index = 0;
-    while index < arguments.len() {
+    // The run is the first argument: never empty.
+    loop {
         if SHARED.contains(&arguments[index].as_str())
             && let Some(value) = arguments.get(index + 1)
         {
@@ -216,8 +221,10 @@ fn shared_options(arguments: &[String]) -> Vec<String> {
             index += 1;
         }
         index += 1;
+        if index >= arguments.len() {
+            break shared;
+        }
     }
-    shared
 }
 
 /// One exported obligation: what `file` says of it, with its file and the
