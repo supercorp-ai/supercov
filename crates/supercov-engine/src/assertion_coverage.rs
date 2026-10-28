@@ -646,10 +646,9 @@ fn credit_module_level(
     for (index, statement) in statements.iter().enumerate() {
         files.entry(statement.file.clone()).or_default().push(index);
     }
+    // A statement is made only of a file whose source there is.
     for (file, indexes) in files {
-        let Some(source) = sources.get(&file) else {
-            continue;
-        };
+        let source = &sources[&file];
         let functions = outermost_functions(language, &file, source);
         let inside = |line: usize| {
             functions
