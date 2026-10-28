@@ -72,18 +72,17 @@ pub fn command(arguments: &[String]) -> ExitCode {
     // export exists for the runs whose gaps do not fit in one. Read through
     // the reply, it refused exactly those.
     let query = |arguments: Vec<String>| -> Result<Value, String> {
-        let invocation = super::parse_public_query("runs", &arguments)
-            .map_err(|error| error.error.message.clone())?;
-        match super::execute_public_query(&root, &invocation)
-            .map_err(|failure| failure.error.message.clone())?
-        {
-            super::PublicQueryOutput::Coverage { output, .. } => Ok(serde_json::json!({
-                "data": serde_json::to_value(&output.data).expect("plain data serializes")
-            })),
-            super::PublicQueryOutput::Runs { .. } => Err("not a coverage query".into()),
-        }
+        let (request, _) =
+            super::public_query::coverage_request(run.clone(), "gaps", &arguments, true)
+                .map_err(|error| error.error.message.clone())?;
+        let (output, _) = super::execute_coverage_query(&root, &request, None)
+            .map_err(|failure| failure.error.message.clone())?;
+        Ok(serde_json::json!({
+            "data": serde_json::to_value(&output.data).expect("plain data serializes")
+        }))
     };
-    let mut gaps_arguments = passed.clone();
+    // Past `<run> gaps`, as dispatch sends them.
+    let mut gaps_arguments = passed[2..].to_vec();
     gaps_arguments.extend(["--json", "--limit", ALL].map(str::to_owned));
     let gaps = match query(gaps_arguments) {
         Ok(gaps) => gaps,
@@ -170,16 +169,13 @@ fn file_details(
         return Ok(Vec::new());
     };
     // The options as `file` reads them, so the rows are the ones it gives.
-    let mut arguments = vec![run.to_owned(), "file".into(), first.clone()];
+    let mut arguments = vec![first.clone()];
     arguments.extend(shared.iter().cloned());
     arguments.extend(["--json", "--limit", ALL].map(str::to_owned));
     // The gaps query took these options already.
-    let super::PublicQueryInvocation::Coverage { request, .. } =
-        super::parse_public_query("runs", &arguments)
-            .expect("`file` takes the options `gaps` took")
-    else {
-        unreachable!("`runs <run> file` is a coverage query")
-    };
+    let (request, _) =
+        super::public_query::coverage_request(run.to_owned(), "file", &arguments, true)
+            .expect("`file` takes the options `gaps` took");
     let inventory = super::public_run_inventory(root).map_err(|error| error.to_string())?;
     let stored = supercov_engine::run_store::select_run(&inventory, Some(&request.run_id))
         .map_err(|error| error.to_string())?;

@@ -486,6 +486,23 @@ fn coverage_invocation(
     arguments: &[String],
     json_output: bool,
 ) -> Result<PublicQueryInvocation, PublicQueryError> {
+    let (request, json) = coverage_request(run_id, command, arguments, json_output)?;
+    Ok(PublicQueryInvocation::Coverage {
+        request: Box::new(request),
+        newer_run_id: None,
+        agent_command: format!("coverage.{command}"),
+        json,
+    })
+}
+
+/// The request `runs <run> <command> <arguments>` makes of the run's index,
+/// and whether its answer is asked for as JSON.
+pub(crate) fn coverage_request(
+    run_id: String,
+    command: &str,
+    arguments: &[String],
+    json_output: bool,
+) -> Result<(IndexedQueryRequest, bool), PublicQueryError> {
     let options = parse_options(command, arguments, json_output)?;
     let agent_command = format!("coverage.{command}");
     let mut request = IndexedQueryRequest {
@@ -631,12 +648,7 @@ fn coverage_invocation(
         }
         _ => unreachable!("coverage hierarchy validates child commands"),
     }
-    Ok(PublicQueryInvocation::Coverage {
-        request: Box::new(request),
-        newer_run_id: None,
-        agent_command,
-        json: options.json,
-    })
+    Ok((request, options.json))
 }
 
 pub fn parse_public_query(

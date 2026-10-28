@@ -1435,10 +1435,12 @@ impl<'a> Collector<'a> {
         let mut node = predicate;
         loop {
             let inner = node.as_parentheses_node().and_then(|parens| {
-                let body = parens.body()?;
-                let statements = body.as_statements_node()?;
+                // Prism holds what parentheses hold, when they hold anything,
+                // as a list of one statement or more.
+                const HELD: &str = "parentheses hold a list of statements";
+                let statements = parens.body()?.as_statements_node().expect(HELD);
                 let mut iter = statements.body().iter();
-                let only = iter.next()?;
+                let only = iter.next().expect(HELD);
                 iter.next().is_none().then_some(only)
             });
             match inner {
@@ -1854,14 +1856,14 @@ impl<'a> Collector<'a> {
         }
         let no_match = match node.else_clause() {
             Some(else_node) => {
-                let Some(id) = self.branch(
-                    else_node.location().start_offset(),
-                    else_node.location().end_offset(),
-                    "case-else",
-                    [("missed", "not selected"), ("selected", "selected")],
-                ) else {
-                    return;
-                };
+                let id = self
+                    .branch(
+                        else_node.location().start_offset(),
+                        else_node.location().end_offset(),
+                        "case-else",
+                        [("missed", "not selected"), ("selected", "selected")],
+                    )
+                    .expect("an else follows its case's first clause, registered fresh above");
                 let statements = self.statements_span(&else_node.statements());
                 let span = statements.unwrap_or_else(|| self.location_span(&else_node.location()));
                 let key_index = self.stdlib(
@@ -2058,14 +2060,14 @@ impl<'a> Collector<'a> {
         }
         let no_match = match node.else_clause() {
             Some(else_node) => {
-                let Some(id) = self.branch(
-                    else_node.location().start_offset(),
-                    else_node.location().end_offset(),
-                    "case-else",
-                    [("missed", "not selected"), ("selected", "selected")],
-                ) else {
-                    return;
-                };
+                let id = self
+                    .branch(
+                        else_node.location().start_offset(),
+                        else_node.location().end_offset(),
+                        "case-else",
+                        [("missed", "not selected"), ("selected", "selected")],
+                    )
+                    .expect("an else follows its case's first clause, registered fresh above");
                 let statements = self.statements_span(&else_node.statements());
                 let span = statements.unwrap_or_else(|| self.location_span(&else_node.location()));
                 let key_index = self.stdlib(
@@ -2303,7 +2305,7 @@ impl<'a> Collector<'a> {
     /// method body, or a `do` block. `close` is where the closing keyword
     /// lives, which is where the propagation clause is inserted when the
     /// construct has no `else` or `ensure`.
-    fn begin_node(&mut self, node: &BeginNode<'_>, close: Option<usize>) {
+    fn begin_node(&mut self, node: &BeginNode<'_>) {
         let has_rescue = node.rescue_clause().is_some();
         let has_ensure = node.ensure_clause().is_some();
         if !has_rescue && !has_ensure {
@@ -2328,14 +2330,14 @@ impl<'a> Collector<'a> {
         let mut index = 0;
         while let Some(clause) = rescue {
             let clause_location = clause.location();
-            let Some(handler_id) = self.branch(
-                clause_location.start_offset(),
-                clause_location.end_offset(),
-                &format!("rescue-{index}"),
-                [("missed", "not selected"), ("selected", "selected")],
-            ) else {
-                return;
-            };
+            let handler_id = self
+                .branch(
+                    clause_location.start_offset(),
+                    clause_location.end_offset(),
+                    &format!("rescue-{index}"),
+                    [("missed", "not selected"), ("selected", "selected")],
+                )
+                .expect("a handler follows its begin's branch, registered fresh above");
             handlers.push(HandlerTarget {
                 missed: format!("{handler_id}:missed"),
                 selected: format!("{handler_id}:selected"),
@@ -2360,30 +2362,25 @@ impl<'a> Collector<'a> {
             self.edit(offset, EditRank::StatementProbe, text, scope_end);
         }
         // Propagation clause: after every user clause, before else/ensure/end.
-        let clause_offset = node
+        // Prism closes every `begin`, explicit or a body's, with its `end`.
+        let offset = node
             .else_clause()
             .map(|clause| clause.else_keyword_loc().start_offset())
             .or_else(|| {
                 node.ensure_clause()
                     .map(|clause| clause.ensure_keyword_loc().start_offset())
             })
-            .or_else(|| node.end_keyword_loc().map(|loc| loc.start_offset()))
-            .or(close);
-        match clause_offset {
-            Some(offset) => self.edit(
-                offset,
-                EditRank::Clause,
-                format!(
-                    "rescue Exception => __supercov_e; {RUBY_PROBE_RECEIVER}.p({key}); raise; "
-                ),
-                offset,
-            ),
-            None => {
-                self.manifest.unmeasured.push(format!("{id}:raised"));
-                let (line, _) = self.line_column(start);
-                self.begin_unmeasured.push((id.clone(), line));
-            }
-        }
+            .unwrap_or_else(|| {
+                node.end_keyword_loc()
+                    .expect("a begin ends with `end`")
+                    .start_offset()
+            });
+        self.edit(
+            offset,
+            EditRank::Clause,
+            format!("rescue Exception => __supercov_e; {RUBY_PROBE_RECEIVER}.p({key}); raise; "),
+            offset,
+        );
         // Completion: the else clause runs only after a completed body.
         if let Some(else_clause) = node.else_clause() {
             match else_clause
@@ -2799,7 +2796,7 @@ impl<'a> Collector<'a> {
         if let Some(body) = node.body()
             && let Some(begin) = body.as_begin_node()
         {
-            self.begin_node(&begin, node.end_keyword_loc().map(|loc| loc.start_offset()));
+            self.begin_node(&begin);
         }
         if node.equal_loc().is_some() {
             // An endless method's body is always a statement list, of one.
@@ -3535,7 +3532,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         // through their hosts, which know the closing keyword; the branch id
         // dedupes the second visit.
         if node.begin_keyword_loc().is_some() {
-            self.begin_node(node, None);
+            self.begin_node(node);
         }
         self.depth += 1;
         ruby_prism::visit_begin_node(self, node);
@@ -3546,7 +3543,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         if let Some(body) = node.body()
             && let Some(begin) = body.as_begin_node()
         {
-            self.begin_node(&begin, Some(node.closing_loc().start_offset()));
+            self.begin_node(&begin);
         }
         self.depth += 1;
         ruby_prism::visit_block_node(self, node);
@@ -3557,7 +3554,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         if let Some(body) = node.body()
             && let Some(begin) = body.as_begin_node()
         {
-            self.begin_node(&begin, Some(node.closing_loc().start_offset()));
+            self.begin_node(&begin);
         }
         self.depth += 1;
         ruby_prism::visit_lambda_node(self, node);
@@ -4714,11 +4711,11 @@ end
     }
 
     /// Each construct visited twice is declared once: a loop, an iterator,
-    /// both `case` forms, safe navigation, a logical value, an operator
-    /// assignment and a `begin` with a rescue.
+    /// both `case` forms with an `else`, safe navigation, a logical value, an
+    /// operator assignment, a `begin` with a rescue and a rescue modifier.
     #[test]
     fn each_construct_visited_twice_is_declared_once() {
-        let source = b"for v in xs\n  v\nend\nxs.each do |x|\n  x\nend\ncase x\nwhen 1 then 2\nend\ncase x\nin Integer then 3\nend\nx&.call\nz = x || y\nh[k] ||= v\nbegin\n  x.call\nrescue StandardError\n  4\nend\n";
+        let source = b"for v in xs\n  v\nend\nxs.each do |x|\n  x\nend\ncase x\nwhen 1 then 2\nelse 5\nend\ncase x\nin Integer then 3\nelse 6\nend\nx&.call\nz = x || y\nh[k] ||= v\nbegin\n  x.call\nrescue StandardError\n  4\nend\nw = x.call rescue 7\n";
         let parsed = ruby_prism::parse(source);
         let program = parsed.node();
         let mut next = 0;
