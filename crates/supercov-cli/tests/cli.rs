@@ -14351,6 +14351,52 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
     }
 }
 
+/// The report carries each file's source from the checkout: one whose path
+/// cannot be resolved, or that cannot be read, is left out and listed as
+/// such. A run index that cannot be read refuses the report, and so does a
+/// report file that cannot be written beside where it goes.
+#[test]
+fn the_report_leaves_out_a_source_it_cannot_read() {
+    let project = Project::cart("report-sources");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.supercov(&["runs", "latest", "--json"]).succeeds();
+    for (fault, output) in [
+        ("fs.canonicalize@2", "unresolved.html"),
+        ("fs.read_to_string@6", "unread.html"),
+    ] {
+        project
+            .supercov_with(
+                &["report", "--output", output],
+                &[("SUPERCOV_TEST_FAULT", fault)],
+            )
+            .succeeds();
+        let data = report_data(&project.read(output)).to_string();
+        assert!(
+            data.contains(r#""omittedSources":["src/cart.js"]"#),
+            "{fault}: {data}"
+        );
+    }
+    let refused = project
+        .supercov_with(
+            &["report", "--output", "unindexed.html"],
+            &[("SUPERCOV_TEST_FAULT", "coverage-index@2")],
+        )
+        .exits(2);
+    assert!(refused.contains("could not read run"), "{refused}");
+    let crowded = project
+        .supercov_with(
+            &["report", "--output", "crowded.html"],
+            &[("SUPERCOV_TEST_FAULT", "fs.open_with:17")],
+        )
+        .exits(2);
+    assert!(
+        crowded.contains("could not allocate a temporary file"),
+        "{crowded}"
+    );
+}
+
 /// An import refuses a run whose stored record it cannot read: its manifest,
 /// frontend declaration or source record garbled on disk. And a file the
 /// evidence names that the project does not have is skipped and named.

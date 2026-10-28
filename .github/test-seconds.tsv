@@ -2163,6 +2163,7 @@ the_platform_listener_attributes_coverage_without_touching_test_source	0.5	0.3
 the_read_views_name_their_odd_inputs_and_thin_corners	0.9	1.0
 the_report_compares_two_runs_and_names_a_mistake	1.2	1.2
 the_report_details_an_unmeasured_gap_and_spans_a_run_never_saved	0.7	0.7
+the_report_leaves_out_a_source_it_cannot_read	2.0	3.0
 the_report_refuses_a_run_compared_with_itself_and_opens_when_it_can	4.2	2.2
 the_runtime_compiles_at_the_oldest_release_a_project_may_ask_for	4.0	2.0
 the_scope_reads_manifests_licences_and_checkouts_and_says_what_it_left_out	0.1	0.1
