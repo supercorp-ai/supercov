@@ -3479,6 +3479,24 @@ fn the_html_report_says_what_it_could_not_embed() {
         serde_json::json!({}),
         "{data}"
     );
+    // An assessment that judged no statement is shown as one, with none.
+    let runs = whole.supercov(&["runs", "--json"]).json();
+    let id = runs["data"]["runs"][0]["id"].as_str().unwrap();
+    whole.write(
+        &format!(".supercov/runs/{id}/assertion-coverage.json"),
+        "{}",
+    );
+    whole
+        .supercov(&["report", "--no-open", "--output", "assessed.html"])
+        .succeeds();
+    let assessed = report_data(&whole.read("assessed.html"));
+    let assertions = &assessed["runs"][0]["assertions"];
+    assert_eq!(assertions["available"], true, "{assertions}");
+    assert_eq!(
+        assertions["statements"],
+        serde_json::json!([]),
+        "{assertions}"
+    );
 
     let empty = Project::empty("html-nothing");
     empty.git(&["init", "-q"]);
