@@ -661,9 +661,10 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
 /// `file` as a path inside the project, or refused. Discovery names only
 /// such paths; a test fault (`javascript-source-path`) stands in for one
 /// that is not, so each place that refuses one runs under test.
+#[track_caller]
 fn project_relative(file: &str) -> Result<&Path, JavascriptFrontendError> {
     let relative = Path::new(file);
-    if crate::fault::injected("javascript-source-path")
+    if crate::fault::injected_here("javascript-source-path", "project_relative")
         || relative.is_absolute()
         || relative
             .components()
@@ -674,20 +675,22 @@ fn project_relative(file: &str) -> Result<&Path, JavascriptFrontendError> {
     Ok(relative)
 }
 
+#[track_caller]
 fn checked_source_path(workspace: &Path, file: &str) -> Result<PathBuf, JavascriptFrontendError> {
     project_relative(file).map(|relative| workspace.join(relative))
 }
 
-fn runtime_specifier(file: &str, name: &str) -> Result<String, JavascriptFrontendError> {
-    let relative = project_relative(file)?;
+/// The specifier a source at `relative`, a path `project_relative` checked,
+/// imports the runtime file `name` by.
+fn runtime_specifier(relative: &Path, name: &str) -> String {
     let depth = relative
         .parent()
         .map_or(0, |parent| parent.components().count());
-    Ok(if depth == 0 {
+    if depth == 0 {
         format!("./.supercov/node_modules/{name}")
     } else {
         format!("{}.supercov/node_modules/{name}", "../".repeat(depth))
-    })
+    }
 }
 
 /// The banner that exempts an instrumented source from the host project's lint
@@ -968,12 +971,9 @@ fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
 /// run's settings and does nothing where the preload already has. The line
 /// goes in before the helper declarations, and the source map gains an empty
 /// line, so every mapped position still holds.
-fn bootstrap_loader(
-    output: &mut crate::js_instrumenter::CandidateOutput,
-    file: &str,
-) -> Result<(), JavascriptFrontendError> {
+fn bootstrap_loader(output: &mut crate::js_instrumenter::CandidateOutput, relative: &Path) {
     let Some(binding) = output.runtime.as_ref() else {
-        return Ok(());
+        return;
     };
     // A TypeScript file's helpers carry their types; its loader is one line.
     let Some(found) = helper_declaration(
@@ -982,11 +982,11 @@ fn bootstrap_loader(
         "globalThis.__SUPERCOV_DIRECT_RUNTIME__",
         true,
     ) else {
-        return Ok(());
+        return;
     };
     let loader = format!(
         "{}\n",
-        crate::js_instrumenter::runtime_loader(&runtime_specifier(file, "bootstrap.cjs")?)
+        crate::js_instrumenter::runtime_loader(&runtime_specifier(relative, "bootstrap.cjs"))
     );
     let offset = output.code[..found]
         .rfind('\n')
@@ -999,7 +999,6 @@ fn bootstrap_loader(
         *mappings = lines.join(";");
     }
     output.code.insert_str(offset, &loader);
-    Ok(())
 }
 
 /// The `mappings` of an instrumented file's map. The instrumenter maps every
@@ -1662,9 +1661,10 @@ pub fn prepare_javascript_frontend(
     let mut authored = BTreeSet::new();
     let sources_started = Instant::now();
     for file in &project.source_files {
-        let path = checked_source_path(workspace, file)?;
+        let relative = project_relative(file)?;
+        let path = workspace.join(relative);
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
-        let capability_wrapper = runtime_specifier(file, "capability.mjs")?;
+        let capability_wrapper = runtime_specifier(relative, "capability.mjs");
         let elide = crate::typescript_imports::elides_type_imports(workspace, file, command);
         let instrumented = timed(&SETUP.instrument_ns, || {
             crate::fault::or("instrument-source", injected_instrumentation_error, || {
@@ -1724,12 +1724,12 @@ pub fn prepare_javascript_frontend(
         {
             output.code = output.code.replace(
                 crate::js_instrumenter::RUNTIME_TYPES_MODULE,
-                &runtime_specifier(file, "runtime.mjs")?,
+                &runtime_specifier(relative, "runtime.mjs"),
             );
         }
         bootstrap_runtime(&mut output, &standalone_runtime, browser_suite, images);
         if !browser_suite {
-            bootstrap_loader(&mut output, file)?;
+            bootstrap_loader(&mut output, relative);
         }
         keep_directives_first(&source, &mut output);
         // The command can compile TypeScript itself (`npm test` may begin
@@ -1779,14 +1779,14 @@ pub fn prepare_javascript_frontend(
     let assertions_started = Instant::now();
     let mut assertion_calls = 0;
     for entry in &project.source_scope.entries {
-        let path = checked_source_path(workspace, &entry.file)?;
+        let relative = project_relative(&entry.file)?;
+        let path = workspace.join(relative);
         let Ok(source) = fs::read_to_string(&path) else {
             continue;
         };
         let capability_wrapper = (!project.source_files.contains(&entry.file))
-            .then(|| runtime_specifier(&entry.file, "capability.mjs"))
-            .transpose()?;
-        let assertion_runtime = runtime_specifier(&entry.file, "bootstrap.cjs")?;
+            .then(|| runtime_specifier(relative, "capability.mjs"));
+        let assertion_runtime = runtime_specifier(relative, "bootstrap.cjs");
         let instrumented =
             crate::fault::or("instrument-test", injected_instrumentation_error, || {
                 crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
@@ -1960,8 +1960,11 @@ mod tests {
             "fs.rename@1",
             "fs.rename@33",
             "fs.rename@34",
-            "javascript-source-path@1",
-            "javascript-source-path@7",
+            // A path the project does not hold: an authored copy's, a
+            // source's, a test file's.
+            "javascript-source-path#javascript_frontend.rs:468",
+            "javascript-source-path#javascript_frontend.rs:1664",
+            "javascript-source-path#javascript_frontend.rs:1782",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2508,20 +2511,13 @@ mod tests {
                 ),
                 "{file}"
             );
-            assert!(
-                matches!(
-                    runtime_specifier(file, "runtime.mjs"),
-                    Err(JavascriptFrontendError::UnsafeSourcePath(_))
-                ),
-                "{file}"
-            );
         }
         assert_eq!(
             checked_source_path(workspace, "src/a.js").unwrap(),
             workspace.join("src/a.js")
         );
         assert_eq!(
-            runtime_specifier("src/a.js", "runtime.mjs").unwrap(),
+            runtime_specifier(Path::new("src/a.js"), "runtime.mjs"),
             "../.supercov/node_modules/runtime.mjs"
         );
     }
@@ -2629,18 +2625,18 @@ mod tests {
         // No runtime to load, or no helper to load it before: nothing goes in.
         let mut unprobed = output.clone();
         unprobed.runtime = None;
-        bootstrap_loader(&mut unprobed, "src/a.ts").unwrap();
+        bootstrap_loader(&mut unprobed, Path::new("src/a.ts"));
         assert_eq!(unprobed.code, output.code);
         let mut helperless = output.clone();
         let begin = helperless.runtime.as_ref().unwrap().mcdc_begin.clone();
         helperless.code = helperless.code.replace(&begin, "renamed");
         let before = helperless.code.clone();
-        bootstrap_loader(&mut helperless, "src/a.ts").unwrap();
+        bootstrap_loader(&mut helperless, Path::new("src/a.ts"));
         assert_eq!(helperless.code, before);
         // Past the last line the map has, the map has nothing to move.
         output.map.as_mut().unwrap()["mappings"] = serde_json::Value::from("");
         output.code = format!("\n\n\n{}", output.code);
-        bootstrap_loader(&mut output, "src/a.ts").unwrap();
+        bootstrap_loader(&mut output, Path::new("src/a.ts"));
         assert_eq!(output.map.as_ref().unwrap()["mappings"], "");
         assert!(
             output
