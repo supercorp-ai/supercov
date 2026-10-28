@@ -694,7 +694,8 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             contents: serde_json::to_vec(sources).expect("plain data serializes"),
         });
     }
-    for entry in archive {
+    // What is left holds the run's coverage model at least.
+    archive.into_iter().try_for_each(|entry| {
         // The records name the run they were made in; they are this run's
         // now. A server's record torn as it was written is kept in the run,
         // counted as corrupt, and cannot be rewritten.
@@ -709,7 +710,8 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             path: entry.path,
             contents,
         });
-    }
+        Ok::<(), String>(())
+    })?;
 
     let mut lock = ProjectLock::acquire(request.root, request.run_id, request.started_at)
         .map_err(|error| format!("Cannot lock coverage store for the import: {error}"))?;
