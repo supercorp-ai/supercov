@@ -876,7 +876,8 @@ fn files_under(
                 })
         })
         .build();
-    for entry in walker {
+    // Never empty: the walk yields the directory it starts from first.
+    walker.into_iter().try_for_each(|entry| {
         let entry =
             entry.map_err(|error| io_error(directory, io::Error::other(error.to_string())))?;
         // Files alone: not a link, a directory, or an entry with no type.
@@ -884,7 +885,7 @@ fn files_under(
             .file_type()
             .is_some_and(|kind| !kind.is_symlink() && kind.is_file())
         {
-            continue;
+            return Ok(());
         }
         let name = entry
             .file_name()
@@ -893,8 +894,8 @@ fn files_under(
         if source_file(name) {
             output.push(entry.into_path());
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[track_caller]
@@ -1473,6 +1474,48 @@ mod tests {
     };
 
     use super::*;
+
+    /// A directory a walk cannot list, or look at, or an entry it cannot
+    /// read, fails discovery; a directory it may not enter, where the system
+    /// enforces that, fails the source walk.
+    #[test]
+    fn a_walk_that_cannot_read_what_it_walks_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-discovery-walk-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.js"), "export const a = 1;\n").unwrap();
+        let mut found = Vec::new();
+        files_under(&root, &root.join("src"), &mut found).unwrap();
+        assert_eq!(found, [root.join("src/a.js")]);
+        for fault in ["fs.read_dir", "fs.read_dir entry"] {
+            assert!(
+                crate::fault::during(fault, || read_directory(&root)).is_err(),
+                "{fault}"
+            );
+        }
+        assert!(
+            crate::fault::during("fs.symlink_metadata", || {
+                files_under(&root, &root.join("src"), &mut Vec::new())
+            })
+            .is_err()
+        );
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let closed = root.join("src/closed");
+            fs::create_dir(&closed).unwrap();
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(files_under(&root, &root.join("src"), &mut Vec::new()).is_err());
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// Text with nothing to strip, a comment that runs to the end, and
     /// targets of every JSON kind, each read as written.
