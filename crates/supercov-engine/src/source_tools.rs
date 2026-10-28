@@ -1270,6 +1270,20 @@ mod tests {
             fs::read_to_string(copy.join("jest")).unwrap(),
             "runs code\n"
         );
+        // An entry of the `.bin` that cannot be listed fails the placing.
+        assert!(
+            crate::fault::during("fs.read_dir entry", || place_launchers(&tools, &copy)).is_err()
+        );
+        // A name that is no text names no tool, where the system allows one.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::OsStr::from_bytes(b"\xff");
+            assert_eq!(
+                launcher_on(false, &source_tools(), Path::new("/s"), &tools, name),
+                None
+            );
+        }
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
