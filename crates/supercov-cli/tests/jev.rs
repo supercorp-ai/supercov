@@ -6053,4 +6053,11 @@ fn a_change_in_no_assessed_statement_asks_nothing() {
         changed.contains("no statement the run assessed has changed since it; nothing was asked."),
         "{changed}"
     );
+    // `tests affected` reads the same changes: code with no statement in it.
+    assert!(
+        project
+            .supercov(&["runs", &run, "tests", "affected"])
+            .succeeds()
+            .contains("3 of 3 tests affected by changes since the run"),
+    );
 }
