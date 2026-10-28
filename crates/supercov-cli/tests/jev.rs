@@ -246,6 +246,20 @@ fn each_git_ask_of_a_patch_review_that_cannot_start_is_handled() {
         assert_ne!(ran.code(), 0, "{fault}: {output}");
         assert!(output.contains(said), "{fault}: {output}");
     }
+    // What is staged: the text the index holds.
+    let project = Project::cart("patch-git-staged");
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    project.git(&["add", "src/cart.js"]);
+    let mut env = jev.to_vec();
+    env.push(("SUPERCOV_TEST_FAULT", "spawn#changes.rs:81@6"));
+    let ran = project.supercov_with(&["quality", "patch", "--staged"], &env);
+    let output = format!("{}{}", ran.stdout(), ran.stderr());
+    assert_ne!(ran.code(), 0, "{output}");
+    assert!(output.contains("cannot read :src/cart.js"), "{output}");
 }
 
 #[test]
@@ -2995,6 +3009,50 @@ fn a_quality_diff_reads_in_either_direction_and_names_its_mistakes() {
         let refused = project.supercov(&args).exits(2);
         assert!(refused.contains(message), "{args:?}: {refused}");
     }
+    // An id of the right shape that names no snapshot, on either side.
+    let missing = format!(
+        "{}{}",
+        &older[..older.len() - 1],
+        if older.ends_with('0') { '1' } else { '0' }
+    );
+    for args in [
+        ["quality", "diff", missing.as_str(), newer.as_str()],
+        ["quality", "diff", newer.as_str(), missing.as_str()],
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(
+            refused.contains("no quality snapshot"),
+            "{args:?}: {refused}"
+        );
+    }
+    // A snapshot whose manifest is gone is named.
+    std::fs::remove_file(
+        project
+            .root
+            .join(format!(".supercov/quality/snapshots/{older}/manifest.json")),
+    )
+    .unwrap();
+    let damaged = project
+        .supercov(&["quality", "diff", older, newer])
+        .exits(2);
+    assert!(
+        damaged.contains("cannot read the snapshot manifest"),
+        "{damaged}"
+    );
+    // A cached answer whose directory or write fails is said, and the
+    // assessment stands.
+    for fault in ["fs.create_dir_all#store.rs:91", "fs.write_all#store.rs:102"] {
+        let mut env = through(&no).to_vec();
+        env.push(("SUPERCOV_TEST_FAULT", fault));
+        let ran = project
+            .supercov_with(&["quality", "--refresh", "--json"], &env)
+            .succeeds();
+        assert!(
+            ran.contains("assessment completed but cache could not be saved: ")
+                && ran.contains("injected fault at fs"),
+            "{fault}: {ran}"
+        );
+    }
 }
 
 fn answer_weakly(_: &str, _: &serde_json::Value) -> serde_json::Value {
@@ -5289,6 +5347,17 @@ fn python_is_read_by_its_own_parser_and_by_patterns_when_that_cannot_run() {
             "line 2  0.90  db.query(\"x\" + y)",
         ],
     );
+    // An interpreter that cannot start is asked for again as the system's.
+    let (base, seen) = gateway(MODEL, answer_reviewer);
+    let mut env = through(&base).to_vec();
+    env.push(("SUPERCOV_TEST_FAULT", "spawn#candidates.rs:493"));
+    let report = project.supercov_with(&["security", "src/app.py", "--refresh"], &env);
+    assert!(
+        report.stderr().contains("test fault at spawn"),
+        "{}",
+        report.stderr()
+    );
+    assert!(classified(&seen, "src/app.py"), "{}", report.stdout());
     // An interpreter that fails leaves every file to the patterns.
     project.write_script("fakebin/python3", "#!/bin/sh\nexit 1\n");
     let path = format!(
@@ -5364,6 +5433,24 @@ fn snapshots_an_older_release_wrote_are_still_read() {
     assert_eq!(
         project.supercov(&["security", "show"]).succeeds(),
         "Security: 1 of 1 file flagged, 0 clean.\nCatalog security-v4, model m, snapshot q_dddddddddddddddd.\n\nFlagged:\n  src/a.js\n    0.90  injection_sink\n\nNarrow with `security gaps`, or read one with `security file <path>`.\n"
+    );
+    // Two catalog snapshots from before a file recorded its size.
+    snapshot(
+        "quality",
+        "q_eeeeeeeeeeeeeeee",
+        r#"{"created_at":"2026-02-02T00-00-00-000000Z","instrument":"catalog","catalog_version":"properties-v1","model":"m","paths":["src"],"counts":{"assessed":1,"errors":0,"scored":1},"health":9.0}"#,
+        r#"{"files":[{"path":"src/a.js","status":"completed","health":9.0,"checks":{"god_class":0.1,"dead_code":0.1}}]}"#,
+    );
+    contains_all(
+        &project
+            .supercov(&[
+                "quality",
+                "diff",
+                "q_cccccccccccccccc",
+                "q_eeeeeeeeeeeeeeee",
+            ])
+            .succeeds(),
+        &["Health fair (5.0) to good (9.0).", "0 declined, 1 improved"],
     );
 }
 

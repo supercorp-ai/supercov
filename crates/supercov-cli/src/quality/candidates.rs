@@ -496,7 +496,9 @@ fn python_parse_with(source: &str, pyenv_version: Option<&str>) -> Option<Option
         .take()
         .expect("stdin is piped")
         .write_all(source.as_bytes());
-    let output = child.wait_with_output().ok()?;
+    let output = child
+        .wait_with_output()
+        .expect("waiting on a child this process started");
     if !output.status.success() {
         return None;
     }
@@ -548,20 +550,27 @@ pub fn resolve_import(root: &Path, from: &str, specifier: &str) -> Option<String
     // Lexical normalisation: `app/./x` and `app/a/../x` both read `app/x`,
     // without touching the filesystem, so a resolved path matches the way
     // discovery names the same file.
+    // (`Path::components` already drops the `.`.)
     let relative = |p: &Path| {
         let mut parts: Vec<String> = Vec::new();
-        for component in p.strip_prefix(root).ok()?.components() {
-            match component.as_os_str().to_string_lossy().as_ref() {
-                "." => {}
-                ".." => {
-                    parts.pop();
-                }
-                other => parts.push(other.to_owned()),
-            }
-        }
+        p.strip_prefix(root)
+            .ok()?
+            .components()
+            .for_each(
+                |component| match component.as_os_str().to_string_lossy().as_ref() {
+                    ".." => {
+                        parts.pop();
+                    }
+                    other => parts.push(other.to_owned()),
+                },
+            );
         Some(parts.join("/"))
     };
-    let base = root.join(from).parent()?.to_path_buf();
+    let base = root
+        .join(from)
+        .parent()
+        .expect("a file in the root has a directory")
+        .to_path_buf();
     if from.ends_with(".py") {
         let dots = specifier.chars().take_while(|c| *c == '.').count();
         let module = &specifier[dots..];
@@ -898,12 +907,21 @@ mod tests {
             resolve_import(&temp, "app/sub/page.js", "../shared").as_deref(),
             Some("app/shared.js")
         );
+        assert_eq!(
+            resolve_import(&temp, "app/sub/page.js", "./.././../app/shared").as_deref(),
+            Some("app/shared.js")
+        );
         // A module importing itself, and one above the root, resolve to
         // nothing.
         assert_eq!(resolve_import(&temp, "app/views.py", ".views"), None);
         std::fs::write(temp.join("outside.py"), "").unwrap();
         assert_eq!(
             resolve_import(&temp.join("app"), "views.py", "..outside"),
+            None
+        );
+        // Nor does one climbing past the top of the filesystem.
+        assert_eq!(
+            resolve_import(&temp, "app/views.py", &".".repeat(200)),
             None
         );
         std::fs::write(temp.join("app/routes.ts"), "").unwrap();

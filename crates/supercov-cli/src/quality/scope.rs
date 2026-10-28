@@ -211,7 +211,7 @@ fn declared_entry_points(directory: &Path) -> Vec<PathBuf> {
             // declared file sitting at the package root, such as Cargo's
             // `build.rs`, is only itself: taking its parent would swallow the
             // whole package.
-            let parent = path.parent()?;
+            let parent = path.parent().expect("a declared file is in its package");
             Some(if parent == directory {
                 path
             } else {
@@ -939,6 +939,19 @@ mod tests {
         assert_eq!(variable_manifest(&empty), None);
         assert!(conventional_directories(&empty).is_empty());
         assert_eq!(package_roots(&empty), BTreeSet::from([empty.clone()]));
+        // A directory or file gone since it was found holds nothing.
+        let gone = root.join("gone");
+        assert_eq!(variable_manifest(&gone), None);
+        assert!(conventional_directories(&gone).is_empty());
+        assert_eq!(third_party(&gone.join("a.js"), "public/a.js"), None);
+        // Packages are looked for five directories down, no further.
+        let deep = root.join("packages/b/c/d/e/f/g/h");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("package.json"), "{}").unwrap();
+        std::fs::write(root.join("packages/b/c/package.json"), "{}").unwrap();
+        let found = package_roots(&root);
+        assert!(found.contains(&root.join("packages/b/c")), "{found:?}");
+        assert!(!found.contains(&deep), "{found:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

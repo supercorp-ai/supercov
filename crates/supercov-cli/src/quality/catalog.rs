@@ -376,23 +376,20 @@ pub mod security {
         candidates
             .iter()
             .enumerate()
-            .filter_map(|(i, candidate)| {
-                let check = checks().iter().find(|c| c.id == candidate.check);
-                let (task, present, absent) = match check {
-                    Some(c) => (
-                        format!(
-                            "Line {} of the file reads: `{}`. Considering only what reaches that line, and how the value got there: {}{}",
-                            candidate.line,
-                            candidate.text,
-                            c.task.replacen("Does this file", "does this line", 1),
-                            ""
-                        ),
-                        c.present.clone(),
-                        c.absent.clone(),
-                    ),
-                    None => return None,
-                };
-                Some((format!("c{i}"), noul(task, &present, &absent)))
+            .map(|(i, candidate)| {
+                // A candidate's check is one the line was classified as, from
+                // the catalog's own.
+                let c = checks()
+                    .iter()
+                    .find(|c| c.id == candidate.check)
+                    .expect("a candidate's check is the catalog's");
+                let task = format!(
+                    "Line {} of the file reads: `{}`. Considering only what reaches that line, and how the value got there: {}",
+                    candidate.line,
+                    candidate.text,
+                    c.task.replacen("Does this file", "does this line", 1),
+                );
+                (format!("c{i}"), noul(task, &c.present, &c.absent))
             })
             .collect()
     }
@@ -561,14 +558,15 @@ pub mod security {
             .map(|f| (f.start.max(line.saturating_sub(40)).max(1), line))
             .unwrap_or((line.saturating_sub(30).max(1), line));
         let mut options = Map::new();
-        for n in start..=end.min(lines.len()) {
+        // The candidate's own line is in the view, so the range holds it.
+        (start..=end.min(lines.len())).for_each(|n| {
             let text = lines[n - 1].trim();
             let comment = text.starts_with("//") || (hash_comments && text.starts_with('#'));
             if !text.is_empty() && !comment {
                 let shown: String = text.chars().take(100).collect();
                 options.insert(format!("L{n}"), Value::String(format!("line {n}: {shown}")));
             }
-        }
+        });
         if options.is_empty() {
             return None;
         }
