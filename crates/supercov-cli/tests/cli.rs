@@ -5232,6 +5232,19 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     assert_eq!(page["data"]["tests"][0]["assertions"], 1);
     // It checks only test code: its file imports nothing measured.
     assert_eq!(page["data"]["tests"][0]["importsMeasured"], false);
+    // A run whose record of what it measured cannot be read says nothing of
+    // what a test's file imports.
+    let unread = project
+        .supercov_with(
+            &["runs", "latest", "tests", "without-evidence", "--json"],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:656=50")],
+        )
+        .json();
+    assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
+    assert!(
+        unread["data"]["tests"][0].get("importsMeasured").is_none(),
+        "{unread}"
+    );
     // `tests affected` is still the other query under `tests`.
     let other = project.supercov(&["runs", "latest", "tests", "nonsense"]);
     assert_eq!(other.code(), 2);
