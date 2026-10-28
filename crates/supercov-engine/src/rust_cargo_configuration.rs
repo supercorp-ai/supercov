@@ -187,44 +187,34 @@ fn command_line(
     }
     let mut targets = Vec::new();
     let mut config = Vec::new();
-    let mut index = 0;
-    while index < invocation.arguments.len() {
-        let argument = &invocation.arguments[index];
-        if argument == "--config" {
-            let value = invocation.arguments.get(index + 1).ok_or_else(|| {
-                RustCargoConfigurationError::Invalid("--config has no value".into())
-            })?;
-            config.push(value.clone());
-            index += 2;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--config=") {
-            if value.is_empty() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--config has no value".into(),
-                ));
+    // The flag whose value the next argument is.
+    let mut pending: Option<&str> = None;
+    // Never empty: the test subcommand is one of them.
+    invocation.arguments.iter().try_for_each(|argument| {
+        match pending.take() {
+            Some("--config") => config.push(argument.clone()),
+            Some(_) => targets.push(argument.clone()),
+            None if argument == "--config" || argument == "--target" => pending = Some(argument),
+            None => {
+                for (flag, list) in [("--config=", &mut config), ("--target=", &mut targets)] {
+                    if let Some(value) = argument.strip_prefix(flag) {
+                        if value.is_empty() {
+                            return Err(RustCargoConfigurationError::Invalid(format!(
+                                "{} has no value",
+                                &flag[..flag.len() - 1]
+                            )));
+                        }
+                        list.push(value.to_owned());
+                    }
+                }
             }
-            config.push(value.to_owned());
-            index += 1;
-            continue;
         }
-        if argument == "--target" {
-            let target = invocation.arguments.get(index + 1).ok_or_else(|| {
-                RustCargoConfigurationError::Invalid("--target has no value".into())
-            })?;
-            targets.push(target.clone());
-            index += 2;
-            continue;
-        }
-        if let Some(target) = argument.strip_prefix("--target=") {
-            if target.is_empty() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--target has no value".into(),
-                ));
-            }
-            targets.push(target.to_owned());
-        }
-        index += 1;
+        Ok(())
+    })?;
+    if let Some(flag) = pending {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "{flag} has no value"
+        )));
     }
     Ok(CommandLine {
         targets,
