@@ -106,6 +106,12 @@ try {
   assert.deepEqual(lines(together, 'one at once'), [], 'work done while two tests ran was given to one');
   assert.deepEqual(lines(together, 'another at once'), []);
   assert.match(run(binary, ['runs', together]).stdout, /no test {20}lines/u);
+  // The server's report refused as one Supercov got wrong fails the run,
+  // saying so.
+  const refused = run(binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'report-request' });
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /Go server's run could not be published/u, refused.stderr);
+  assert.doesNotMatch(refused.stderr, /panicked/u, refused.stderr);
   console.log('[go-server-playwright] a Go server under browser tests is measured, each window credited by time to the test it fell in');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'go-server-playwright-'))) rmSync(root, { recursive: true, force: true });
