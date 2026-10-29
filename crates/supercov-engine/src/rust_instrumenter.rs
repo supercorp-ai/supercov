@@ -3623,6 +3623,11 @@ fn main() {
             .map(|point| point.line)
             .collect::<BTreeSet<_>>();
         assert_eq!(lines, BTreeSet::from([1, 2, 3, 6, 12]), "{lines:?}");
+        // A file all of whose code the target leaves out has nothing to probe.
+        let windows_only = "#[cfg(windows)]\npub fn w() -> u8 {\n    1\n}\n";
+        let instrumented =
+            instrument_rust_file("src/w.rs", windows_only, "crate::rt", false, Some(&cfg)).unwrap();
+        assert!(instrumented.manifest.points.is_empty());
     }
 
     #[test]
