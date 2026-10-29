@@ -1794,8 +1794,8 @@ pub fn run_direct_jvm(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let evidence = merge_evidence(forked);
-            for test in &evidence.tests {
-                outcomes.push(OwnedTestOutcome {
+            outcomes.extend(evidence.tests.iter().map(|test| {
+                OwnedTestOutcome {
                     name: test.name.clone(),
                     runner: test.runner.clone(),
                     // The module is the unit that forked a JVM of its own, so
@@ -1811,8 +1811,8 @@ pub fn run_direct_jvm(
                     // per record, and a test that overlapped is credited with
                     // nothing rather than with a neighbour's work.
                     attributed: !test.unattributed,
-                });
-            }
+                }
+            }));
             parts.push(evidence);
         }
         if !silent.is_empty() {
