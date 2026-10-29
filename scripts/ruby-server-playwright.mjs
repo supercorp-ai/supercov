@@ -247,6 +247,14 @@ test('a test that reaches no server', async () => {
   assert.notEqual(unpublishable.status, 0, unpublishable.stdout + unpublishable.stderr);
   assert.match(unpublishable.stderr, /test fault at server-publish/u, unpublishable.stderr);
   assert.match(unpublishable.stderr, /server's run could not be published: injected fault at server-publish/u, unpublishable.stderr);
+  // Each server's report refused as one Supercov got wrong: each says so,
+  // and the run fails.
+  const refused = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'report-request' });
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /test fault at report-request/u, refused.stderr);
+  assert.match(refused.stderr, /Python server's run could not be published/u, refused.stderr);
+  assert.match(refused.stderr, /Ruby server's run could not be published/u, refused.stderr);
+  assert.doesNotMatch(refused.stderr, /panicked/u, refused.stderr);
   const unpublished = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given'], { SUPERCOV_TEST_FAULT: 'server-unpublished' });
   assert.notEqual(unpublished.status, 0, unpublished.stdout + unpublished.stderr);
   assert.match(unpublished.stderr, /test fault at server-unpublished/u, unpublished.stderr);
