@@ -1263,7 +1263,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 .filter(|guests| *guests > 0)
             {
                 lines.push(format!(
-                    "  Guests           {guests} process(es) ran the workspace in a container or VM without Supercov's settings; their coverage counts for the run, credited to no test"
+                    "  Unattributed     {guests} process(es) initialized coverage without the preload; their coverage counts for the run, credited to no test"
                 ));
             }
             if let Some(workspace) = &data.workspace {

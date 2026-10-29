@@ -4680,7 +4680,7 @@ test("the guest describes the cart", () => {
     );
     let text = project.supercov(&["runs", "latest"]).succeeds();
     assert!(
-        text.contains("  Guests           1 process(es) ran the workspace in a container or VM without Supercov's settings"),
+        text.contains("  Unattributed     1 process(es) initialized coverage without the preload"),
         "{text}"
     );
 }
@@ -5139,6 +5139,34 @@ fn bun_bootstraps_sources_with_nested_frontend_aliases_and_preloads() {
     }
 }
 
+/// Distinct Bun tests must be identified independently, rather than
+/// crediting the combined coverage to an unnamed process.
+#[cfg(unix)]
+#[test]
+#[ignore = "#177: Bun needs a per-test lifecycle adapter; independent of the #176 source bootstrap fix"]
+fn bun_tests_have_separate_test_attribution() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    let project = bun_project("bun-test-attribution", false);
+    project.write(
+        "src/clamp.test.ts",
+        r#"import { expect, test } from "bun:test";
+import { clamp } from "./clamp";
+test("below", () => expect(clamp(-1, 0, 10)).toBe(0));
+test("above", () => expect(clamp(11, 0, 10)).toBe(10));
+"#,
+    );
+    project.commit("two tests");
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Exact for 2 test(s)", "Total       2", "Passed      2"],
+    );
+}
+
 /// Host tests still record coverage when a command selects browser initialization.
 /// The echo makes discovery select that path without requiring a browser installation.
 #[cfg(unix)]
@@ -5157,6 +5185,33 @@ fn a_bun_test_with_browser_initialization_runs_and_measures() {
     project.supercov(&["--", "npm", "test"]).succeeds();
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(&summary, &["Lines      66.67% (2/3)"]);
+}
+
+/// A Bun process can initialize coverage without the Node preload. The report
+/// must describe the missing attribution without inferring that the process
+/// ran in a container or VM.
+#[cfg(unix)]
+#[test]
+fn a_bun_unit_suite_is_not_reported_as_a_container_guest() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    let project = bun_project("bun-not-a-guest", false);
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        !summary.contains("Guests"),
+        "the host Bun process was reported as a container or VM guest: {summary}"
+    );
+    assert!(
+        !summary.contains("container or VM"),
+        "the report assumes where the process ran: {summary}"
+    );
+    assert!(
+        summary.contains("No test recorded coverage") || summary.contains("Exact for 1 test(s)"),
+        "the report must describe the available attribution: {summary}"
+    );
 }
 
 #[cfg(unix)]
