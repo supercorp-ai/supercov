@@ -1841,8 +1841,7 @@ pub fn run_direct_jvm(
             generated_at: &request.started_at,
             test_exit_code: exit_code,
             coverage_model: jvm_coverage_model(),
-        })
-        .map_err(|error| error.to_string())?;
+        });
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
@@ -3479,6 +3478,17 @@ mod tests {
         let diagnostics = String::from_utf8(diagnostics).unwrap();
         assert!(error.contains("wrote no coverage evidence"), "{error}");
         assert!(!diagnostics.contains("wrote no evidence"), "{diagnostics}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_tree_with_no_tests_wrote_no_evidence() {
+        let root = temporary_root("jvm-no-tests");
+        write(&root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        java_module(&root, ".", false);
+        let mut diagnostics = Vec::new();
+        let error = run_direct_jvm(&jvm_request(&root, &["true"]), &mut diagnostics).unwrap_err();
+        assert!(error.contains("wrote no coverage evidence"), "{error}");
         fs::remove_dir_all(&root).ok();
     }
 

@@ -39,7 +39,6 @@ use crate::go_instrumenter::{GoProbe, GoProbeTarget};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedEvidenceError {
     Truncated(&'static str),
-    NoTests,
 }
 
 impl std::fmt::Display for OwnedEvidenceError {
@@ -48,10 +47,6 @@ impl std::fmt::Display for OwnedEvidenceError {
             OwnedEvidenceError::Truncated(part) => {
                 write!(f, "Coverage evidence ended in the middle of its {part}")
             }
-            OwnedEvidenceError::NoTests => write!(
-                f,
-                "the run produced coverage evidence but no test announced itself"
-            ),
         }
     }
 }
@@ -619,7 +614,11 @@ pub struct OwnedRunInputs<'a> {
 /// result, with no coverage. Dropping it would make a suite look smaller than
 /// it is, and a test that ran without reaching any measured line is a fact
 /// worth seeing rather than an absence worth hiding.
-pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, OwnedEvidenceError> {
+///
+/// Callers refuse a run in which no test announced itself and nothing was
+/// reached, so there is always a result: a test's, or the background record
+/// holding what no test could claim.
+pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
     let OwnedRunInputs {
         declaration,
         environment,
@@ -839,16 +838,6 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         });
     }
 
-    // Nothing to publish only when neither a test nor the run as a whole
-    // reached anything. An empty list of outcomes on its own is not that: a Go
-    // package whose every test calls `t.Parallel()` announces no test by
-    // design, and refusing it there discarded a fully measured package --
-    // lines, branches and MC/DC alike -- over the fact that the evidence had
-    // no owner. The background record above is the owner it has.
-    if raw_results.is_empty() {
-        return Err(OwnedEvidenceError::NoTests);
-    }
-
     // A declaration naming a runner that produced nothing claims something the
     // run did not do, and the reader refuses it — rightly. A JVM frontend can
     // drive JUnit and TestNG, but any one project usually runs one of them, so
@@ -883,7 +872,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     declaration
         .runners
         .retain(|runner| observed.contains(runner.runner.as_str()));
-    Ok(OwnedFrontendRun {
+    OwnedFrontendRun {
         declaration,
         tests: raw_results.len(),
         request: CoverageReportRequest {
@@ -895,7 +884,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(test_exit_code)),
         },
-    })
+    }
 }
 
 #[cfg(test)]
@@ -905,11 +894,6 @@ mod tests {
         assert_eq!(
             OwnedEvidenceError::Truncated("header").to_string(),
             "Coverage evidence ended in the middle of its header"
-        );
-        assert!(
-            OwnedEvidenceError::NoTests
-                .to_string()
-                .contains("no test announced itself")
         );
     }
 
@@ -1021,40 +1005,6 @@ mod tests {
     }
 
     #[test]
-    fn a_run_with_no_tests_is_an_error_not_an_empty_report() {
-        // Nothing announced itself and nothing was reached: there is no run
-        // here, and an empty report would claim a floor it never established.
-        // What makes this an error is the second half, not the first -- see
-        // the test below.
-        let evidence = OwnedEvidence::default();
-        let manifest = CoverageManifest {
-            decisions: Vec::new(),
-            points: Vec::new(),
-            branches: Vec::new(),
-            limitations: Vec::new(),
-            unmeasured: Vec::new(),
-            scope: None,
-            assertion_sites: Vec::new(),
-        };
-        assert_eq!(
-            build_frontend_run(OwnedRunInputs {
-                declaration: go_declaration(),
-                environment: "go",
-                manifest: &manifest,
-                probes: &BTreeMap::new(),
-                evidence: &evidence,
-                outcomes: &[],
-                run_id: "run",
-                generated_at: "now",
-                test_exit_code: 0,
-                coverage_model: go_coverage_model(),
-            })
-            .err(),
-            Some(OwnedEvidenceError::NoTests)
-        );
-    }
-
-    #[test]
     fn a_run_nothing_could_be_attributed_to_is_still_a_run() {
         // A Go package where every test calls `t.Parallel()` announces no test
         // by design: probes are a store into one shared array, so what a test
@@ -1105,8 +1055,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 0,
             coverage_model: go_coverage_model(),
-        })
-        .expect("a measured package publishes even when no test can claim it");
+        });
         assert_eq!(run.tests, 1, "the one record is what nobody could claim");
         assert_eq!(run.request.raw_results[0].role, "background");
         assert_eq!(
@@ -1125,8 +1074,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 1,
             coverage_model: go_coverage_model(),
-        })
-        .unwrap();
+        });
         assert_eq!(
             failed.request.raw_results[0].status.as_deref(),
             Some("failed"),
@@ -1293,8 +1241,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 0,
             coverage_model: go_coverage_model(),
-        })
-        .expect("run");
+        });
 
         let result = |name: &str| {
             run.request
@@ -1363,8 +1310,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 0,
             coverage_model: go_coverage_model(),
-        })
-        .expect("run");
+        });
         assert_eq!(run.tests, 1);
         let result = &run.request.raw_results[0];
         assert_eq!(result.test, "TestSilent");

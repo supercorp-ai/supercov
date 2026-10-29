@@ -270,8 +270,7 @@ pub fn publish(
             generated_at: &metadata.started_at,
             test_exit_code: metadata.test_exit_code.unwrap_or_default(),
             coverage_model: server.coverage_model,
-        })
-        .map_err(|error| error.to_string())?;
+        });
         // Never none: there are tests, and a result for each.
         run.request
             .raw_results

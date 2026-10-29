@@ -887,8 +887,7 @@ pub fn run_direct_go(
             generated_at: &request.started_at,
             test_exit_code: exit_code,
             coverage_model: go_coverage_model(),
-        })
-        .map_err(|error| error.to_string())?;
+        });
         // Before anything is written: a run that cannot be read back is not a
         // run, and finding that out at publication is far better than finding
         // it out when someone asks for the report.
