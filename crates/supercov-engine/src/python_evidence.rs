@@ -3777,6 +3777,25 @@ pub(crate) mod tests {
             run_with("unknown-hit", &[json!({"t":"hit","ctx":1,"id":"nowhere"})]),
             Err(PythonEvidenceError::UnknownObligation(id)) if id == "nowhere"
         ));
+        // And one hit before the test's first assertion, which is that
+        // assertion's evidence.
+        let directory = temporary("unknown-asserted");
+        write_transport(
+            &directory.join("main.1.mmap"),
+            &[
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11","executable":"python","argv":["pytest"]}),
+                json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":1,"id":"before"}),
+                json!({"t":"assert","ctx":1}),
+                json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            ],
+            0,
+        );
+        assert!(matches!(
+            build_python_frontend_run(&measured.manifest, &directory, "run-1", "now", 0, Path::new("")),
+            Err(PythonEvidenceError::UnknownObligation(id)) if id == "before"
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
