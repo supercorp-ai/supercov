@@ -1383,7 +1383,10 @@ fn spawn_contained(
                     watchdog_argument.as_ptr(),
                     std::ptr::null(),
                 ];
-                libc::execv(watchdog_program.as_ptr(), arguments.as_ptr());
+                // Returns only when the watchdog could not be started.
+                crate::fault::libc("watchdog-exec", libc::ENOENT, || {
+                    libc::execv(watchdog_program.as_ptr(), arguments.as_ptr())
+                });
                 libc::_exit(125);
             }
             let _ = libc::close(read_descriptor);

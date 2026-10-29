@@ -13429,6 +13429,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
     let silent = [
         "watchdog-orphaned",
         "watchdog-setsid",
+        "watchdog-exec",
         "watchdog-read",
         "proc-fd",
         "fs.read_dir#process_supervision.rs",
@@ -13473,10 +13474,11 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         ),
         ("watchdog-dup-input", watchdog),
         ("watchdog-dup-ready", watchdog),
+        ("watchdog-exec", watchdog),
         ("watchdog-orphaned", watchdog),
         ("watchdog-setsid", watchdog),
         // Its descriptors not listed, to close.
-        ("fs.read_dir#process_supervision.rs:1447", watchdog),
+        ("fs.read_dir#process_supervision.rs:1450", watchdog),
         // A readiness read that fails other than by being interrupted.
         (&format!("ready-read:{}", libc::EIO), watchdog),
     ] {
