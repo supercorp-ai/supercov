@@ -2108,10 +2108,9 @@ fn build_from_evidence(
                 runtime.push(take(identity)?);
                 Ok::<(), PythonEvidenceError>(())
             })?;
-        let test_file = test_files
-            .get(&(worker.clone(), test.clone(), retry))
-            .and_then(|path| relative(root, path))
-            .or_else(|| test.split("::").next().map(str::to_owned));
+        // Only an outcome names a test's file, and this test reported none:
+        // a pytest node id begins with it.
+        let test_file = test.split("::").next().map(str::to_owned);
         raw_results.push(RawTestResult {
             span: None,
             test_id: Some(test.clone()),
