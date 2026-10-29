@@ -2607,6 +2607,9 @@ mod tests {
             ]
         );
         assert!(unit(&kotlin, "Alias").inert);
+        // A property destructured into several names is no one declaration.
+        let destructured = code("D.kt", "class C {\n    val (a, b) = 1 to 2\n}\n").unwrap();
+        assert_eq!(paths(&destructured), [("class", "C")]);
     }
 
     #[test]
