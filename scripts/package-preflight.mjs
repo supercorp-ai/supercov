@@ -251,7 +251,11 @@ assert(
   // and took information out of notes that are published verbatim. The answer
   // to the question above was yes -- still bullets, one per fix -- so the cap
   // moved rather than the content.
-  notes.split(/\s+/).length <= 600,
+  //
+  // Raised to 1600 for 4.21.0, which carries some thirty fixes found while
+  // bringing Supercov's own coverage to 100%: still one bullet each, so the
+  // answer was yes again.
+  notes.split(/\s+/).length <= 1600,
   `the ${manifest.version} changelog section is ${notes.split(/\s+/).length} words; release notes are bullets, not prose`,
 );
 for (const line of notes.split("\n")) {
