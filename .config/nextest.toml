@@ -22,8 +22,10 @@ test-group = "fault-sweeps"
 
 # On Windows a CLI test that waits on something that never comes held its
 # slot for the job's whole budget, and the tests behind it never ran: stop it
-# after six minutes, so it fails by name and the rest still run.
+# after ten minutes, so it fails by name and the rest still run. The longest
+# that finishes, the Rust step sweep, takes about five alone and more beside
+# the rest.
 [[profile.default.overrides]]
 platform = 'cfg(windows)'
 filter = "binary(cli)"
-slow-timeout = { period = "120s", terminate-after = 3 }
+slow-timeout = { period = "120s", terminate-after = 5 }
