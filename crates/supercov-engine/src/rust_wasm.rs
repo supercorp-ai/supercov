@@ -206,16 +206,17 @@ impl RustWasmServer {
         wasm_environment(std::env::var("RUSTFLAGS").unwrap_or_default())
     }
 
-    /// Publish what the tests' wasm ran as a Rust run: each take credited to
-    /// the attempt it was taken at the end of. None when no wasm ran.
-    pub fn publish(
+    /// Build what the tests' wasm ran as a Rust run, to be published under
+    /// the metadata the returned step is given: each take credited to the
+    /// attempt it was taken at the end of. None when no wasm ran.
+    pub fn build_run<'a>(
         self,
-        root: &Path,
+        root: &'a Path,
         evidence_run_id: &str,
-        metadata: RunMetadata,
+        _run: &RunMetadata,
         _served: &[ServedTest],
-        diagnostics: &mut dyn Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+        _diagnostics: &mut dyn Write,
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
         // Every runner's attempts: a Node suite reports none of Playwright's.
         let tests = crate::served_tests::read_attempts(
             &self
@@ -223,8 +224,19 @@ impl RustWasmServer {
                 .join(".supercov/evidence")
                 .join(evidence_run_id),
         );
-        let result = read_records(&self.records).and_then(|records| {
-            crate::rust_wasm_evidence::publish(
+        let hint = format!("{evidence_run_id}-rust-wasm");
+        let records = match read_records(&self.records) {
+            Ok(records) if !records.is_empty() && !tests.is_empty() => records,
+            other => {
+                let result = other
+                    .map(|_| None)
+                    .map_err(|error| note_kept_evidence(root, &self.records, &hint, error));
+                let _ = remove_stored_tree_deferred(root, &self.directory);
+                return result;
+            }
+        };
+        Ok(Some(Box::new(move |metadata, diagnostics| {
+            let result = crate::rust_wasm_evidence::publish(
                 root,
                 WasmRun {
                     language: "Rust wasm",
@@ -239,17 +251,10 @@ impl RustWasmServer {
                 &tests,
                 diagnostics,
             )
-        });
-        let result = result.map_err(|error| {
-            note_kept_evidence(
-                root,
-                &self.records,
-                &format!("{evidence_run_id}-rust-wasm"),
-                error,
-            )
-        });
-        let _ = remove_stored_tree_deferred(root, &self.directory);
-        result
+            .map_err(|error| note_kept_evidence(root, &self.records, &hint, error));
+            let _ = remove_stored_tree_deferred(root, &self.directory);
+            result
+        })))
     }
 }
 

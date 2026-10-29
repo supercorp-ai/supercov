@@ -570,28 +570,30 @@ impl RubyServer {
         ])
     }
 
-    /// Publish what the server ran as a Ruby run of its own, credited to the
-    /// browser tests that sent each request. None when no measured Ruby
+    /// Build what the server ran as a Ruby run of its own, credited to the
+    /// browser tests that sent each request, to be published under the
+    /// metadata the returned step is given. None when no measured Ruby
     /// process ran, or none answered a test's request.
-    pub fn publish(
+    pub fn build_run<'a>(
         self,
-        root: &Path,
+        root: &'a Path,
         evidence_run_id: &str,
-        metadata: RunMetadata,
+        run: &RunMetadata,
         served: &[crate::served_tests::ServedTest],
         diagnostics: &mut dyn Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
         let evidence_directory = self.directory.join("evidence");
-        let result = (|| {
+        let hint = format!("{evidence_run_id}-ruby");
+        let built = (|| {
             if served.is_empty() {
                 return Ok(None);
             }
-            let mut run = match crate::ruby_evidence::build_ruby_server_run(
+            let run = match crate::ruby_evidence::build_ruby_server_run(
                 &self.project.manifest,
                 &evidence_directory,
                 evidence_run_id,
-                &metadata.started_at,
-                metadata.test_exit_code.unwrap_or_default(),
+                &run.started_at,
+                run.test_exit_code.unwrap_or_default(),
                 &self.project.root,
                 served,
             ) {
@@ -613,54 +615,70 @@ impl RubyServer {
             }
             validate_frontend_report_request(&run.declaration, &run.request)
                 .map_err(|error| error.to_string())?;
-            // The evidence was recorded under the browser run's id; a run
-            // published beside it has its own.
-            run.request.run_id = metadata.id.clone();
-            run.request
-                .raw_results
-                .iter_mut()
-                .filter_map(|raw| raw.scope.as_mut())
-                .for_each(|scope| scope.run_id = metadata.id.clone());
-            let work = root.join(".supercov/work").join(&metadata.id);
-            fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-            let archive_path = work.join("ruby-evidence.raw.gz");
-            let entries = run.archive_entries();
-            let entries = crate::source_capture::append(entries, &self.source_inputs);
-            let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
-            let tests = run.tests;
-            drop(run);
-            let metadata = RunMetadata {
-                integrity: self.integrity.clone(),
-                raw_evidence: RawEvidenceMetadata {
-                    schema_version: raw.schema_version,
-                    format: raw.format.into(),
-                    file: raw.file.into(),
-                    files: raw.files,
-                    uncompressed_bytes: raw.uncompressed_bytes,
-                    compressed_bytes: raw.compressed_bytes,
-                },
-                source_roots: self.source_roots.clone(),
-                ..metadata
-            };
-            let run_directory =
-                publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-            let _ = writeln!(
-                diagnostics,
-                "[supercov] Ruby server coverage: {tests} test(s) across {} source file(s)",
-                self.project.plan.files.len()
-            );
-            Ok(Some((run_directory, metadata)))
+            Ok(Some(run))
         })();
-        let result = result.map_err(|error| {
-            note_kept_evidence(
-                root,
-                &evidence_directory,
-                &format!("{evidence_run_id}-ruby"),
-                error,
-            )
-        });
-        let _ = remove_stored_tree_deferred(root, &self.directory);
-        result
+        let mut run = match built {
+            Ok(Some(run)) => run,
+            other => {
+                let result = other
+                    .map(|_| None)
+                    .map_err(|error| note_kept_evidence(root, &evidence_directory, &hint, error));
+                let _ = remove_stored_tree_deferred(root, &self.directory);
+                return result;
+            }
+        };
+        Ok(Some(Box::new(
+            move |metadata: RunMetadata, diagnostics: &mut dyn Write| {
+                let result = (|| {
+                    // The evidence was recorded under the browser run's id; a run
+                    // published beside it has its own.
+                    run.request.run_id = metadata.id.clone();
+                    for scope in run
+                        .request
+                        .raw_results
+                        .iter_mut()
+                        .filter_map(|raw| raw.scope.as_mut())
+                    {
+                        scope.run_id = metadata.id.clone();
+                    }
+                    let work = root.join(".supercov/work").join(&metadata.id);
+                    fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+                    let archive_path = work.join("ruby-evidence.raw.gz");
+                    let entries = run.archive_entries();
+                    let entries = crate::source_capture::append(entries, &self.source_inputs);
+                    let raw =
+                        write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
+                    let tests = run.tests;
+                    drop(run);
+                    let metadata = RunMetadata {
+                        integrity: self.integrity.clone(),
+                        raw_evidence: RawEvidenceMetadata {
+                            schema_version: raw.schema_version,
+                            format: raw.format.into(),
+                            file: raw.file.into(),
+                            files: raw.files,
+                            uncompressed_bytes: raw.uncompressed_bytes,
+                            compressed_bytes: raw.compressed_bytes,
+                        },
+                        source_roots: self.source_roots.clone(),
+                        ..metadata
+                    };
+                    let run_directory = publish_run(root, &metadata, &archive_path)
+                        .map_err(|error| error.to_string())?;
+                    writeln!(
+                        diagnostics,
+                        "[supercov] Ruby server coverage: {tests} test(s) across {} source file(s)",
+                        self.project.plan.files.len()
+                    )
+                    .map_err(|error| error.to_string())?;
+                    Ok((run_directory, metadata))
+                })();
+                let result = result
+                    .map_err(|error| note_kept_evidence(root, &evidence_directory, &hint, error));
+                let _ = remove_stored_tree_deferred(root, &self.directory);
+                result
+            },
+        )))
     }
 }
 
@@ -891,7 +909,7 @@ mod tests {
         let metadata = server_metadata(&server);
         assert!(
             server
-                .publish(&root, run_id, metadata, &[], &mut Vec::new())
+                .build_run(&root, run_id, &metadata, &[], &mut Vec::new())
                 .unwrap()
                 .is_none()
         );
@@ -924,7 +942,7 @@ mod tests {
         let mut diagnostics = Vec::new();
         assert!(
             server
-                .publish(&root, run_id, metadata, &[served], &mut diagnostics)
+                .build_run(&root, run_id, &metadata, &[served], &mut diagnostics)
                 .unwrap()
                 .is_none()
         );

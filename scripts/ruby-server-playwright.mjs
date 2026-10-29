@@ -228,6 +228,12 @@ test('a test that reaches no server', async () => {
   assert.ok(beside, both.stderr);
   assert.equal(ids[1], beside, `the first server's run is the latest, the other's beside it: ${ids}`);
   const bothId = ids[0];
+  // Each server's run names the other: the latest names the run beside it,
+  // and that run names the latest.
+  const companionsOf = (id) => JSON.parse(run(binary, ['runs', id, '--json']).stdout).data.companions ?? [];
+  assert.deepEqual(companionsOf(bothId).map((companion) => [companion.id, companion.role]), [[beside, 'server']]);
+  assert.deepEqual(companionsOf(beside).map((companion) => [companion.id, companion.role]), [[bothId, 'server']]);
+  assert.match(run(binary, ['runs', bothId]).stdout, new RegExp(`(?:Python|Ruby) server: run ${beside}`, 'u'));
   // Failures injected (SUPERCOV_TEST_FAULT): the copy taken by another run
   // after the servers were prepared for it, which prepares them again; a
   // server's run that cannot be published, which fails the run; and a failing
@@ -249,11 +255,11 @@ test('a test that reaches no server', async () => {
   // finished, the evidence cleared, the run's state written, the first run
   // finished -- that fails ends the run, saying where.
   for (const [fault, place] of [
-    ['fs.symlink_metadata#javascript_run.rs:1235', 'javascript_run.rs:1235'],
-    ['fs.symlink_metadata#javascript_run.rs:1249', 'javascript_run.rs:1249'],
-    ['fs.symlink_metadata#javascript_run.rs:1251', 'javascript_run.rs:1251'],
-    ['fs.read#javascript_run.rs:1277', 'javascript_run.rs:1277'],
-    ['fs.symlink_metadata#javascript_run.rs:1289', 'javascript_run.rs:1289'],
+    ['fs.symlink_metadata#javascript_run.rs:1291', 'javascript_run.rs:1291'],
+    ['fs.symlink_metadata#javascript_run.rs:1307', 'javascript_run.rs:1307'],
+    ['fs.symlink_metadata#javascript_run.rs:1309', 'javascript_run.rs:1309'],
+    ['fs.read#javascript_run.rs:1335', 'javascript_run.rs:1335'],
+    ['fs.symlink_metadata#javascript_run.rs:1347', 'javascript_run.rs:1347'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
@@ -263,8 +269,8 @@ test('a test that reaches no server', async () => {
   // directory, its archive, its run moved into place -- is said, and never
   // panics; the first server's failing ends the run.
   for (const [fault, place] of [
-    ['fs.create_dir_all#python_run.rs:786', 'python_run.rs:786'],
-    ['fs.create_dir_all#ruby_run.rs:625', 'ruby_run.rs:625'],
+    ['fs.create_dir_all#python_run.rs:812', 'python_run.rs:812'],
+    ['fs.create_dir_all#ruby_run.rs:645', 'ruby_run.rs:645'],
     ['fs.rename#evidence_archive.rs:471', 'evidence_archive.rs:471'],
     ['fs.rename#evidence_archive.rs:471@2', 'evidence_archive.rs:471'],
     ['fs.rename#lifecycle.rs:1114', 'lifecycle.rs:1114'],

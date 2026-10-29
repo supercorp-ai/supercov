@@ -1070,13 +1070,15 @@ impl ArtifactLauncher {
         hook_directory: &Path,
         user_node_options: Option<OsString>,
     ) -> Result<Self, RustTestRunnerError> {
-        let Ok(plan) = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
+        // A runner configuration Supercov cannot read is refused, as nextest's
+        // is: run without it, tests Cargo would run through a runner would
+        // run as native binaries and pass where `cargo test` fails.
+        let plan = crate::rust_cargo_configuration::resolve_cargo_runner_plan(
             &project.workspace_root,
             &project.workspace_root,
             invocation,
-        ) else {
-            return Ok(Self::default());
-        };
+        )
+        .map_err(|error| RustTestRunnerError::Context(error.to_string()))?;
         let [target] = plan.targets.as_slice() else {
             if plan
                 .targets

@@ -190,21 +190,58 @@ fn credit(
     )
 }
 
-/// Publish what the server ran as a run of its own, credited by time. None
-/// when no instrumented server ran, or no browser test reported.
+/// Whether the server whose work is in `directory` has a run to publish: an
+/// instrumented server ran, and a browser test reported. A server without
+/// one, or whose evidence cannot be read, has its work cleared.
+pub fn has_run(
+    root: &Path,
+    directory: &Path,
+    environment: &str,
+    served: &[ServedTest],
+) -> Result<bool, String> {
+    let evidence_directory = directory.join("evidence");
+    let windows = read_windows(&evidence_directory);
+    if let Ok(windows) = &windows
+        && !served.is_empty()
+        && !windows.is_empty()
+    {
+        return Ok(true);
+    }
+    let result = windows.map(|_| false).map_err(|error| {
+        note_kept_evidence(
+            root,
+            &evidence_directory,
+            &kept_name(directory, environment),
+            error,
+        )
+    });
+    let _ = remove_stored_tree_deferred(root, directory);
+    result
+}
+
+/// The name a server's kept evidence goes by: its run's, then its
+/// environment's.
+fn kept_name(directory: &Path, environment: &str) -> String {
+    let run = directory
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{run}-{environment}")
+}
+
+/// Publish what the server ran as a run of its own, credited by time, once
+/// [`has_run`] has said it has one.
 pub fn publish(
     root: &Path,
     server: OwnedServer,
     metadata: RunMetadata,
     served: &[ServedTest],
     diagnostics: &mut dyn Write,
-) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+) -> Result<(PathBuf, RunMetadata), String> {
     let evidence_directory = server.directory.join("evidence");
     let result = (|| {
         let windows = read_windows(&evidence_directory)?;
-        if served.is_empty() || windows.is_empty() {
-            return Ok(None);
-        }
         let probe_count = server
             .probes
             .keys()
@@ -295,19 +332,13 @@ pub fn publish(
                 overlapped.len()
             );
         }
-        Ok(Some((run_directory, metadata)))
+        Ok((run_directory, metadata))
     })();
     let result = result.map_err(|error| {
-        let run = server
-            .directory
-            .parent()
-            .and_then(Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
         note_kept_evidence(
             root,
             &evidence_directory,
-            &format!("{run}-{}", server.environment),
+            &kept_name(server.directory, server.environment),
             error,
         )
     });
@@ -402,10 +433,10 @@ mod tests {
         );
     }
 
-    /// A server no browser test reported on, or one that swept nothing,
-    /// publishes no run, and its work directory is cleared either way.
+    /// A server no browser test reported on, or one that swept nothing, has
+    /// no run, and its work directory is cleared either way.
     #[test]
-    fn a_server_without_tests_or_windows_publishes_nothing() {
+    fn a_server_without_tests_or_windows_has_no_run() {
         let root = std::env::temp_dir().join(format!(
             "supercov-owned-server-{}-{}",
             std::process::id(),
@@ -415,21 +446,6 @@ mod tests {
                 .as_nanos()
         ));
         let root = crate::test_directory::TestDirectory::adopt(root);
-        let metadata = crate::lifecycle::test_run_metadata("run_server", 0);
-        let manifest = CoverageManifest {
-            unmeasured: Vec::new(),
-            decisions: Vec::new(),
-            points: Vec::new(),
-            branches: Vec::new(),
-            limitations: Vec::new(),
-            scope: None,
-            assertion_sites: Vec::new(),
-        };
-        let probes = BTreeMap::new();
-        let inputs = crate::source_manifest::Inputs {
-            language: "go".into(),
-            files: BTreeMap::new(),
-        };
         let directory = root.join(".supercov/work/run_server/go");
         let tests = [served("one", "passed", (100, 200))];
         for (served, windows) in [(&tests[..0], true), (&tests[..], false)] {
@@ -441,29 +457,8 @@ mod tests {
                 )
                 .unwrap();
             }
-            let published = publish(
-                &root,
-                OwnedServer {
-                    language: "Go",
-                    declaration: crate::owned_evidence::go_declaration(),
-                    environment: "go",
-                    coverage_model: crate::owned_evidence::go_coverage_model(),
-                    manifest: &manifest,
-                    probes: &probes,
-                    widths: &[],
-                    integrity: &metadata.integrity,
-                    source_inputs: &inputs,
-                    source_roots: None,
-                    directory: &directory,
-                    source_files: 0,
-                },
-                metadata.clone(),
-                served,
-                &mut Vec::new(),
-            );
-            assert_eq!(published, Ok(None));
+            assert_eq!(has_run(&root, &directory, "go", served), Ok(false));
             assert!(!directory.exists());
-            assert!(!root.join(".supercov/runs/run_server").exists());
         }
     }
 
@@ -555,11 +550,7 @@ mod tests {
             })
         };
         let mut said = Vec::new();
-        assert!(
-            publishing("run_one", &one, "", &mut said)
-                .unwrap()
-                .is_some()
-        );
+        publishing("run_one", &one, "", &mut said).unwrap();
         assert!(
             String::from_utf8_lossy(&said).contains("Go server coverage: 1 test(s)"),
             "{}",
@@ -577,7 +568,7 @@ mod tests {
             (
                 "run_work",
                 &one[..],
-                "fs.create_dir_all#owned_server.rs:258",
+                "fs.create_dir_all#owned_server.rs:295",
                 9,
             ),
             (
@@ -593,12 +584,8 @@ mod tests {
         // A line about a published run that cannot be written takes nothing
         // from the run.
         for (id, tests, lines) in [("run_said", &one[..], 0), ("run_overlap", &both[..], 1)] {
-            assert!(
-                publishing(id, tests, "", &mut Lines(lines))
-                    .unwrap()
-                    .is_some(),
-                "{id}"
-            );
+            publishing(id, tests, "", &mut Lines(lines))
+                .unwrap_or_else(|error| panic!("{id}: {error}"));
         }
     }
 }

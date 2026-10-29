@@ -1023,18 +1023,19 @@ impl RustWorkerServer {
         ])
     }
 
-    /// Publish what the Workers ran as a Rust run of its own: each window
-    /// credited, by time, to the one browser test whose span it overlaps;
-    /// what no single test's does is the run's background. None when no
-    /// Worker ran or no browser test reported.
-    pub fn publish(
+    /// Build what the Workers ran as a Rust run of its own, to be published
+    /// under the metadata the returned step is given: each window credited,
+    /// by time, to the one browser test whose span it overlaps; what no
+    /// single test's does is the run's background. None when no Worker ran or
+    /// no browser test reported.
+    pub fn build_run<'a>(
         mut self,
-        root: &Path,
+        root: &'a Path,
         _evidence_run_id: &str,
-        metadata: RunMetadata,
+        _run: &RunMetadata,
         served: &[ServedTest],
-        diagnostics: &mut dyn Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+        _diagnostics: &mut dyn Write,
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
         // One per configuration, and there is one at least.
         std::mem::take(&mut self.pollers)
             .into_iter()
@@ -1043,8 +1044,32 @@ impl RustWorkerServer {
             });
         self.others.finish();
         let evidence_directory = self.directory.join("evidence");
-        let result = read_windows(&evidence_directory).and_then(|windows| {
-            crate::rust_wasm_evidence::publish(
+        let kept = |directory: &Path, error| {
+            let run = directory
+                .parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            note_kept_evidence(
+                root,
+                &directory.join("evidence"),
+                &format!("{run}-rust-worker"),
+                error,
+            )
+        };
+        let windows = match read_windows(&evidence_directory) {
+            Ok(windows) if !windows.is_empty() && !served.is_empty() => windows,
+            other => {
+                let result = other
+                    .map(|_| None)
+                    .map_err(|error| kept(&self.directory, error));
+                let _ = remove_stored_tree_deferred(root, &self.directory);
+                return result;
+            }
+        };
+        let served = served.to_vec();
+        Ok(Some(Box::new(move |metadata, diagnostics| {
+            let result = crate::rust_wasm_evidence::publish(
                 root,
                 crate::rust_wasm_evidence::WasmRun {
                     language: "Rust Worker",
@@ -1062,26 +1087,13 @@ impl RustWorkerServer {
                     })
                     .collect(),
                 metadata,
-                served,
+                &served,
                 diagnostics,
             )
-        });
-        let result = result.map_err(|error| {
-            let run = self
-                .directory
-                .parent()
-                .and_then(Path::file_name)
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            note_kept_evidence(
-                root,
-                &evidence_directory,
-                &format!("{run}-rust-worker"),
-                error,
-            )
-        });
-        let _ = remove_stored_tree_deferred(root, &self.directory);
-        result
+            .map_err(|error| kept(&self.directory, error));
+            let _ = remove_stored_tree_deferred(root, &self.directory);
+            result
+        })))
     }
 }
 
@@ -3353,7 +3365,7 @@ mod tests {
             crate::fault::during(rustc, || worker_build_cfg(&package, &BTreeMap::new())).is_none()
         );
         assert_eq!(
-            crate::fault::during("spawn#rust_worker.rs:1827", || cargo_workspace_root(
+            crate::fault::during("spawn#rust_worker.rs:1839", || cargo_workspace_root(
                 &package
             )),
             None

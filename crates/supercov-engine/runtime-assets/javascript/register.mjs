@@ -944,10 +944,40 @@ if (supportDirectory) {
     };
     syncBuiltinESMExports();
 }
+// A file a test asked for by its path that Node did not find in the copy:
+// the copy leaves out build output, and a test that loads `../dist/x.js` an
+// earlier build made fails as a missing module. Noted where
+// SUPERCOV_MISSING_LOADS names, here for `require` and in the loader for
+// `import`, so the run can say which file the copy lacks and why.
+const missingFile = process.env.SUPERCOV_MISSING_LOADS;
+if (missingFile) {
+    const copyRoot = process.env.SUPERCOV_PROJECT_ROOT;
+    const resolveFilename = Module._resolveFilename;
+    Module._resolveFilename = function supercovNotedResolve(request, parent, ...rest) {
+        try {
+            return resolveFilename.call(this, request, parent, ...rest);
+        }
+        catch (error) {
+            if (error?.code === "MODULE_NOT_FOUND" && copyRoot && /^(?:\.{1,2}[\\/]|[\\/])/.test(request)) {
+                try {
+                    const file = resolve(parent?.filename ? dirname(parent.filename) : process.cwd(), request);
+                    const inside = file.startsWith(copyRoot + sep) ? file.slice(copyRoot.length + 1) : undefined;
+                    if (inside && !inside.startsWith(`.supercov${sep}`) && !inside.split(sep).includes("node_modules"))
+                        fs.appendFileSync(missingFile, `${JSON.stringify({ missing: file })}\n`);
+                }
+                catch {
+                    // Not noted: the run says nothing of it, as before.
+                }
+            }
+            throw error;
+        }
+    };
+}
 register(new URL("./resolve-loader.mjs", import.meta.url), {
     data: {
         typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
         supportFile,
+        missingFile,
     },
 });
 if (process.env.SUPERCOV_DEBUG === "1") {

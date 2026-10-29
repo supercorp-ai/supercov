@@ -777,6 +777,11 @@ pub fn run_direct_javascript(
     let evidence_directory = workspace.join(&evidence_relative);
     let server_evidence_root = workspace.join(".supercov/server-evidence");
     let diagnostic_owner = workspace.join(format!(".supercov/diagnostic-owner-{run_id}"));
+    // Where the tests' processes note a file asked for by its path that the
+    // copy did not have (`register.mjs`).
+    let missing_loads = workspace
+        .join(".supercov")
+        .join(format!("missing-loads-{run_id}.jsonl"));
     let mut overrides: BTreeMap<String, String> = BTreeMap::from([
         ("NODE_OPTIONS".into(), node_options(&frontend.preload_path)),
         ("SUPERCOV_CJS_INTERCEPT".into(), "1".into()),
@@ -811,6 +816,10 @@ pub fn run_direct_javascript(
         (
             "SUPERCOV_MANIFEST".into(),
             frontend.manifest_path.display().to_string(),
+        ),
+        (
+            "SUPERCOV_MISSING_LOADS".into(),
+            missing_loads.display().to_string(),
         ),
         (
             "SUPERCOV_PROJECT_ROOT".into(),
@@ -1147,6 +1156,27 @@ pub fn run_direct_javascript(
                 crate::workspace::summarize_paths(&outputs.deleted_in_workspace)
             );
         }
+        // A test that failed on a file the project has and the copy does
+        // not: the copy leaves out build output, and when nothing built it
+        // there the failures read as broken tests. Said, with why.
+        let left_out = left_out_loads(&root, &workspace, &missing_loads);
+        if execution.exit_code != 0 && !left_out.is_empty() {
+            const NAMED: usize = 4;
+            let mut named = left_out
+                .iter()
+                .take(NAMED)
+                .map(|file| file.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if left_out.len() > NAMED {
+                named.push_str(&format!(" and {} more", left_out.len() - NAMED));
+            }
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] warning: the tests could not load {named}, which the project has and its isolated copy does not. The copy leaves out build output (dist/, build/ and the like), and nothing built it there: build in the measured command, as `supercov -- sh -c \"npm run build && npm test\"`"
+            );
+        }
+        let _ = std::fs::remove_file(&missing_loads);
     }
     update_run_state(
         &root,
@@ -1194,58 +1224,86 @@ pub fn run_direct_javascript(
             recorded_by: None,
             companions: None,
         };
-        let mut published = None;
-        let mut server_runs = Vec::new();
+        // Each server's run is built before any is published, so each can
+        // name the others: the first under the command's run id, which `runs
+        // latest` reads, and the rest under ids that sort after it.
+        let mut built = Vec::new();
         let mut failure = None;
-        // Never empty: a project with no source and no server was refused.
-        servers
-            .into_iter()
-            .try_for_each(|server| -> Result<(), String> {
-                let id = if published.is_none() {
+        for server in servers {
+            let language = server.language();
+            let prepared = crate::fault::or(
+                "server-unpublished",
+                || Ok(None),
+                || {
+                    crate::fault::or(
+                        "server-publish",
+                        || Err("injected fault at server-publish".to_owned()),
+                        || server.build_run(&root, &run_id, &metadata, &served, diagnostics),
+                    )
+                },
+            );
+            match prepared {
+                Ok(Some(publish)) => built.push((language, publish)),
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the {language} server's run could not be published: {error}"
+                    );
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        let named = built
+            .iter()
+            .enumerate()
+            .map(|(nth, (language, _))| {
+                let id = if nth == 0 {
                     run_id.clone()
                 } else {
-                    companion_run_id(&run_id, server_runs.len() + 1)
+                    companion_run_id(&run_id, nth)
                 };
-                let language = server.language();
-                let published_run = crate::fault::or(
-                    "server-unpublished",
-                    || Ok(None),
-                    || {
-                        crate::fault::or(
-                            "server-publish",
-                            || Err("injected fault at server-publish".to_owned()),
-                            || {
-                                server.publish(
-                                    &root,
-                                    &run_id,
-                                    RunMetadata {
-                                        id: id.clone(),
-                                        ..metadata.clone()
-                                    },
-                                    &served,
-                                    diagnostics,
-                                )
-                            },
-                        )
-                    },
-                );
-                match published_run {
-                    Ok(Some(run)) if published.is_none() => published = Some(run),
-                    Ok(Some((directory, _))) => {
-                        finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
-                        server_runs.push((language.to_owned(), directory));
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let _ = writeln!(
-                            diagnostics,
-                            "[supercov] the {language} server's run could not be published: {error}"
-                        );
-                        failure.get_or_insert(error);
+                (id, *language)
+            })
+            .collect::<Vec<_>>();
+        let mut published = None;
+        let mut server_runs = Vec::new();
+        for (nth, (language, publish)) in built.into_iter().enumerate() {
+            let companions = named
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != nth)
+                .map(|(_, (id, language))| crate::run_store::CompanionRun {
+                    id: id.clone(),
+                    language: (*language).into(),
+                    role: "server".into(),
+                })
+                .collect::<Vec<_>>();
+            let id = named[nth].0.clone();
+            let server_metadata = RunMetadata {
+                id: id.clone(),
+                companions: (!companions.is_empty()).then_some(companions),
+                ..metadata.clone()
+            };
+            match publish(server_metadata, diagnostics) {
+                Ok(run) if nth == 0 => published = Some(run),
+                Ok((directory, _)) => {
+                    finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
+                    server_runs.push((language.to_owned(), directory));
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the {language} server's run could not be published: {error}"
+                    );
+                    failure.get_or_insert(error);
+                    // The others would name a run that is not there.
+                    if nth == 0 {
+                        break;
                     }
                 }
-                Ok(())
-            })?;
+            }
+        }
         remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
             .map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &server_evidence_root)
@@ -1409,7 +1467,14 @@ pub fn run_direct_javascript(
             }]),
             ..metadata.clone()
         };
-        match server.publish(&root, &run_id, server_metadata, &served, diagnostics) {
+        let published = server
+            .build_run(&root, &run_id, &metadata, &served, diagnostics)
+            .and_then(|prepared| {
+                prepared
+                    .map(|publish| publish(server_metadata, diagnostics))
+                    .transpose()
+            });
+        match published {
             Ok(Some((directory, _))) => {
                 finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                 server_runs.push((language.to_owned(), directory));
@@ -1460,6 +1525,31 @@ pub fn run_direct_javascript(
 /// The id of the `nth` run published beside `run_id` from the same command:
 /// a public id `nth` below it when `run_id` is one, since runs that started
 /// together are listed by id, highest first.
+/// The files the tests' processes noted in `notes` as asked for by their
+/// path and missing from the copy at `workspace`, that the project at `root`
+/// has: as paths in the project, each once.
+fn left_out_loads(root: &Path, workspace: &Path, notes: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(notes) else {
+        return Vec::new();
+    };
+    let copies = [
+        workspace.to_owned(),
+        crate::workspace::canonicalize_simplified(workspace).unwrap_or_default(),
+    ];
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|note| note["missing"].as_str().map(PathBuf::from))
+        .filter_map(|file| {
+            copies
+                .iter()
+                .find_map(|copy| file.strip_prefix(copy).ok().map(Path::to_owned))
+        })
+        .filter(|relative| root.join(relative).is_file() && !workspace.join(relative).exists())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn companion_run_id(run_id: &str, nth: usize) -> String {
     match run_id
         .strip_prefix("run_")
@@ -1587,32 +1677,28 @@ impl Server {
         }
     }
 
-    fn publish(
+    /// The server's run, built and waiting for the metadata it is published
+    /// under, when it has one.
+    fn build_run<'a>(
         self,
-        root: &Path,
+        root: &'a Path,
         evidence_run_id: &str,
-        metadata: RunMetadata,
+        run: &RunMetadata,
         served: &[crate::served_tests::ServedTest],
         diagnostics: &mut dyn std::io::Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
         match self {
             Self::Python(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+                server.build_run(root, evidence_run_id, run, served, diagnostics)
             }
-            Self::Ruby(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
-            }
-            Self::Go(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
-            }
-            Self::Jvm(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
-            }
+            Self::Ruby(server) => server.build_run(root, evidence_run_id, run, served, diagnostics),
+            Self::Go(server) => server.build_run(root, evidence_run_id, run, served, diagnostics),
+            Self::Jvm(server) => server.build_run(root, evidence_run_id, run, served, diagnostics),
             Self::RustWorker(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+                server.build_run(root, evidence_run_id, run, served, diagnostics)
             }
             Self::RustWasm(server) => {
-                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+                server.build_run(root, evidence_run_id, run, served, diagnostics)
             }
         }
     }

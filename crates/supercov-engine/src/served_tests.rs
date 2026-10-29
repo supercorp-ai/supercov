@@ -37,6 +37,17 @@ pub struct ServedTest {
     pub attempt_id: Option<String>,
 }
 
+/// A server's run, built from what it ran, waiting for the metadata it is
+/// published under: its id, and the runs published beside it. Each server's
+/// run is built before any is published, so every run can name the others.
+pub type PreparedRun<'a> = Box<
+    dyn FnOnce(
+            crate::run_store::RunMetadata,
+            &mut dyn std::io::Write,
+        ) -> Result<(std::path::PathBuf, crate::run_store::RunMetadata), String>
+        + 'a,
+>;
+
 /// One phase starting: in which process (its transport), where in its
 /// records, and of which attempt (worker, test, retry).
 pub type PhaseStart = (String, usize, Attempt);

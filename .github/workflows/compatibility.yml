@@ -66,7 +66,8 @@ jobs:
     # ubuntu-latest is now, and has no browser builds for it: the minimum leg
     # runs on the last Ubuntu it supports, the current one on the latest.
     runs-on: ${{ matrix.name == 'minimum' && 'ubuntu-24.04' || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    # Four bounded attempts at the browsers' packages, then the fixtures.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -101,19 +102,47 @@ jobs:
         run: |
           npm pkg delete 'devDependencies.@vitest/browser-playwright' 'devDependencies.@vitest/coverage-v8'
           npm install --no-save "@playwright/test@$PLAYWRIGHT_VERSION" "vite@$VITE_VERSION" "vitest@$VITEST_VERSION"
+      # The browsers' system packages, kept between runs: the Azure mirror
+      # served them at 50 KB/s for hours on 2026-10-26, and no attempt at
+      # its 119 MB finished.
+      - id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/apt-archives
+          key: apt-playwright-${{ matrix.name }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.playwright }}
       # The fixture matrix drives Chromium, Firefox and WebKit. An apt mirror
       # that slows to a package every few seconds held this step until the
-      # job's limit twice on 2026-10-26; each attempt is bounded and the next
-      # starts over, which reaches a mirror at its usual pace.
+      # job's limit twice on 2026-10-26; each attempt is bounded, and what an
+      # attempt fetched is kept for the next, so attempts add up.
       - name: Install the browsers and what they need
         run: |
-          for attempt in 1 2 3; do
+          mkdir -p ~/apt-archives/partial
+          printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
+            | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+          for attempt in 1 2 3 4 5 6; do
             timeout 8m npx playwright install --with-deps && exit 0
             echo "attempt $attempt did not finish; trying again"
-            # An apt stopped part way leaves dpkg to finish first.
+            # Four attempts at Azure's mirror fetched 27 MB each on
+            # 2026-10-27 and still left 43 MB: the rest come from Ubuntu's.
+            echo http://archive.ubuntu.com/ubuntu/ | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+            # The timeout ends npx, not the apt-get it started under sudo:
+            # left running, that holds dpkg's lock, and the next attempt
+            # failed at once on 2026-10-26. End what holds the locks, then
+            # let dpkg finish what was stopped part way.
+            sudo fuser -k /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
+            sleep 2
             sudo dpkg --configure -a || true
           done
           exit 1
+      # Saved whether or not the install finished: what it fetched is the
+      # next run's head start. apt wrote it as root.
+      - if: always() && steps.apt-archives.outputs.cache-hit != 'true'
+        run: sudo chown -R "$USER" ~/apt-archives
+      - if: always() && steps.apt-archives.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-archives
+          key: apt-playwright-${{ matrix.name }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.playwright }}
       - run: npm run test:fixture
         timeout-minutes: 10
       # A failure here ends this commit's other runs too: no waiting on them.

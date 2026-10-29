@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Added**
+
+- A run whose tests failed loading files the project has and its isolated copy does not, such as `dist/` an earlier build made, names those files and says why: the copy leaves out build output, and nothing built it there. The failures read as broken tests before, with `build=0ms` in the timings the only sign.
+
 **Changed**
 
 - A Rust `for` loop over a non-empty array literal, a constant of the file that is one, a range between integer literals or constants of the file that are one, a `split`, `iter::once`, or a `chain` with one of these on either side (`for x in [a, b]`, `for k in KINDS`, `for i in 0..8`, `for copy in 1..=MOST`, `for part in text.split(',')`, `for phase in steps.iter().chain(once(&last))`, through `iter`, `enumerate`, `map` and the like) counts only its entry, not a zero-iterations outcome it can never take, as a JavaScript loop over an array literal already does.
@@ -9,6 +13,8 @@
 
 **Fixed**
 
+- A browser suite with no JavaScript source whose tests drove servers in two languages, such as Puma beside a Python server, published a run per server that named neither of the others: `runs <id>` said nothing of the run beside it. Each names the other now, as a browser run and its servers' runs already did.
+- `supercov -- cargo test` ran the tests without a target runner Cargo is configured with when Supercov could not read the runner, such as one that leads to the crate itself, and they passed where plain `cargo test` fails. The run is refused, naming the configuration, as `cargo nextest run` already was.
 - A Rust run ignored `SUPERCOV_COMMAND_TIMEOUT_MS`: a hung test kept it running for good, and a value of it or of `SUPERCOV_DIAGNOSTIC_INTERVAL_MS` that is no number of milliseconds was not refused. It now refuses such a value before starting anything and keeps the deadline as other languages' runs do: past it, the tests still running are stopped, no other is started, what ran is published (nothing, where no test reported), and the run exits `124`.
 - An assertion question about the last value of a Kotlin `if` or `when` branch that ends a lambda whose value is used (`val x = run { if (c) { log(); 4 } else 5 }`) asked what happens if the value is skipped, a change that would not compile; it asks what happens if the branch yields the default value (null, 0 or false) instead, as for any other branch value. A lambda whose value nobody takes (`run { .. }` on its own) is asked as before.
 - A Cargo runner, compiler or wrapper configured by a relative path out of the workspace (`runner = "../tools/run"`) was refused on Linux and macOS and accepted on Windows. It is run from where the path leads on every platform, as Cargo runs it; a path that leads back into the workspace is read from the copy, and one that is the workspace itself is still refused.
