@@ -16685,7 +16685,9 @@ fn a_nextest_run_from_a_supercov_whose_path_is_not_utf_8_says_so() {
     small_crate(&project);
     project.git(&["init", "-q"]);
     project.commit("fixture");
-    let directory = project.root.join(std::ffi::OsStr::from_bytes(b"bin\xff"));
+    // Outside the project, whose own walk would refuse the name first.
+    let elsewhere = Project::empty("nextest-not-utf-8-bin");
+    let directory = elsewhere.root.join(std::ffi::OsStr::from_bytes(b"bin\xff"));
     std::fs::create_dir(&directory).unwrap();
     let copied = directory.join("supercov");
     std::fs::copy(env!("CARGO_BIN_EXE_supercov"), &copied).unwrap();
