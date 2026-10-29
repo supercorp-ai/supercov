@@ -480,6 +480,26 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // A wasm library whose Cargo workspace lies above the root belongs
+        // to no workspace this run instruments.
+        fs::write(
+            directory.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"inner/lib\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let inner = directory.join("inner");
+        fs::create_dir_all(inner.join("lib/src")).unwrap();
+        fs::write(
+            inner.join("lib/Cargo.toml"),
+            "[package]\nname = \"l\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwasm-bindgen = \"0.2\"\n",
+        )
+        .unwrap();
+        fs::write(inner.join("lib/src/lib.rs"), "").unwrap();
+        assert!(
+            RustWasmServer::prepare(&inner, &inner, &inner, "run", &[])
+                .unwrap()
+                .is_empty()
+        );
         let owners = read_records(&directory)
             .unwrap()
             .into_iter()
