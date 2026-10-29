@@ -16498,6 +16498,88 @@ fn a_file_a_rust_test_writes_comes_back_to_the_project() {
     );
 }
 
+/// An argument that is not text is refused by name, never a panic.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf_8_is_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let project = Project::empty("not-utf-8-argument");
+    let output = project
+        .supercov_command(&["runs"])
+        .arg(std::ffi::OsStr::from_bytes(b"run\xff"))
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{said}");
+    assert!(
+        said.contains("is not UTF-8") && !said.contains("panicked"),
+        "{said}"
+    );
+}
+
+/// A Rust project holding a name that is not text is refused, naming it:
+/// what a run is judged current against is read by name. Only Linux lets a
+/// file be named so.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_rust_project_holding_a_name_that_is_not_utf_8_is_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let project = Project::empty("rust-not-utf-8");
+    small_crate(&project);
+    std::fs::write(
+        project
+            .root
+            .join(std::ffi::OsStr::from_bytes(b"notes\xff.txt")),
+        "",
+    )
+    .unwrap();
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let ran = project.supercov(&["--", "cargo", "test", "-q"]);
+    let said = ran.stderr();
+    assert_ne!(ran.code(), 0, "{said}");
+    assert!(
+        said.contains("Rust project contains a non-UTF-8 path") && !said.contains("panicked"),
+        "{said}"
+    );
+}
+
+/// Supercov run from a directory whose name is not text cannot name itself
+/// as nextest's runner, and says so. Only Linux lets a directory be named so.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_nextest_run_from_a_supercov_whose_path_is_not_utf_8_says_so() {
+    use std::os::unix::ffi::OsStrExt;
+    if !nextest_installed() {
+        return;
+    }
+    let project = Project::empty("nextest-not-utf-8");
+    small_crate(&project);
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let directory = project.root.join(std::ffi::OsStr::from_bytes(b"bin\xff"));
+    std::fs::create_dir(&directory).unwrap();
+    let copied = directory.join("supercov");
+    std::fs::copy(env!("CARGO_BIN_EXE_supercov"), &copied).unwrap();
+    // The helper's command, with the copy as its program.
+    let helper = project.supercov_command(&["--", "cargo", "nextest", "run"]);
+    let mut command = std::process::Command::new(&copied);
+    command.args(helper.get_args()).current_dir(&project.root);
+    for (name, value) in helper.get_envs() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let output = command.output().unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(output.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains("the Supercov executable path is not UTF-8") && !said.contains("panicked"),
+        "{said}"
+    );
+}
+
 /// A nextest run refuses an option it cannot tell the selected tests from,
 /// and a Cargo configuration it cannot read, before running anything.
 #[test]

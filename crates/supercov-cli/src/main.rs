@@ -280,7 +280,22 @@ fn main() -> ExitCode {
             Err(_) => ExitCode::from(125),
         };
     }
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // Every command past these reads its arguments as text; Supercov's own
+    // path, which need not be, is not one of them.
+    let arguments = match os_arguments
+        .into_iter()
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(arguments) => arguments,
+        Err(argument) => {
+            eprintln!(
+                "[supercov] argument {} is not UTF-8",
+                argument.to_string_lossy()
+            );
+            return ExitCode::from(2);
+        }
+    };
     // Doctests of the owned frontend: a merged harness spawns this program
     // once per case; Cargo runs it in place of rustdoc during `cargo test
     // --doc`. Both are told apart by their environment alone.
