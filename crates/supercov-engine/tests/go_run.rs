@@ -637,7 +637,11 @@ fn a_package_whose_evidence_is_cut_short_fails_the_run_naming_it() {
     let mut diagnostics = Vec::new();
     let error = run_direct_go(&request, &mut diagnostics).expect_err("evidence cut short");
     assert!(error.contains("ended in the middle of its"), "{error}");
-    assert!(error.contains(&evidence.display().to_string()), "{error}");
+    // Named by its file, whose separators differ by platform.
+    assert!(
+        error.contains("run-go-cut-short") && error.contains(".bin"),
+        "{error}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
