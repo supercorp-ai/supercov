@@ -2778,6 +2778,27 @@ mod tests {
         );
     }
 
+    /// A file whose addition, taken out, no longer parses -- a line the
+    /// function stood before now continues the statement above it -- is a
+    /// change, not an addition.
+    #[test]
+    fn an_addition_whose_removal_joins_two_statements_is_a_change() {
+        let before = code("h.js", "const a = b;\n/re/.test(a);\n").unwrap();
+        let added = "const a = b\nfunction added() {\n  return 1;\n}\n/re/.test(a)\n";
+        assert!(code("h.js", added).is_some());
+        assert_eq!(only_added(&before, "h.js", added), None);
+    }
+
+    /// So is a Python file whose import, taken out with the function that
+    /// alone used it, leaves the statement beside it on its line.
+    #[test]
+    fn a_python_addition_whose_import_shares_a_line_is_a_change() {
+        let before = code("h.py", "x = 1\n").unwrap();
+        let added = "import os; x = 1\n\n\ndef added():\n    return os.sep\n";
+        assert!(code("h.py", added).is_some());
+        assert_eq!(only_added(&before, "h.py", added), None);
+    }
+
     #[test]
     fn what_is_not_a_function_with_a_body_is_no_addition() {
         let before = code("h.ts", "export function open() {\n  return 1;\n}\n").unwrap();
