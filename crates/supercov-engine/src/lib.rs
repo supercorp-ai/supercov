@@ -2,6 +2,22 @@
 //! thin generated shims; instrumentation, orchestration, analysis and queries
 //! are owned here.
 
+// Stored indexes and evidence address lengths and offsets in 64 bits, read
+// back as `usize` without a check that could only fail on a narrower target.
+// Every target Supercov ships is 64-bit.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("Supercov builds for 64-bit targets only");
+
+// Standard error that cannot be written is not Supercov's failure:
+// `supercov -- npm test 2>&1 | head` closes it early, and std's `eprintln!`
+// panics then. This writes where it does and passes over a write that fails.
+macro_rules! eprintln {
+    ($($argument:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($argument)*);
+    }};
+}
+
 pub mod agent_json;
 pub mod assertion_coverage;
 pub mod child_signal_guard;
@@ -17,6 +33,8 @@ pub mod decision_shape;
 pub mod docker_proxy;
 pub mod evidence_archive;
 pub mod fault;
+pub mod fault_fs;
+pub mod fault_process;
 pub mod frontend_detection;
 pub mod frontend_protocol;
 pub mod go_instrumenter;
@@ -84,11 +102,13 @@ pub mod source_discovery;
 pub mod source_manifest;
 pub mod source_tools;
 pub mod source_units;
+mod stable_ids;
 pub mod support_reach;
 #[cfg(test)]
 mod test_directory;
 pub mod test_kind;
 pub mod test_loads;
+mod threads;
 mod typescript_imports;
 pub mod workspace;
 

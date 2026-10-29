@@ -336,11 +336,13 @@ fn credit_by_time(
         .filter(|(_, raw)| raw.role != "background")
         .filter_map(|(index, raw)| {
             let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
+            // Phases there are, as `start` says.
             let end = raw
                 .phases
                 .iter()
                 .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
-                .max()?;
+                .max()
+                .expect("a test with a phase's start has its end");
             let attempt = raw.scope.as_ref().map(|scope| scope.attempt_id.clone());
             Some((index, start, end, attempt))
         })
@@ -1074,7 +1076,6 @@ pub enum ReportError {
     InvalidEvent(String),
     InvalidServerRecord(String),
     InvalidArchive(String),
-    MissingManifest,
     InvalidJson {
         path: String,
         reason: String,
@@ -1160,13 +1161,11 @@ struct MutablePhase {
 
 fn vector_key(vector: &McdcVector) -> String {
     let mut key = String::with_capacity(vector.values.len() + 2);
-    for value in &vector.values {
-        key.push(match value {
-            None => '-',
-            Some(false) => 'F',
-            Some(true) => 'T',
-        });
-    }
+    key.extend(vector.values.iter().map(|value| match value {
+        None => '-',
+        Some(false) => 'F',
+        Some(true) => 'T',
+    }));
     key.push(':');
     key.push(if vector.outcome { 'T' } else { 'F' });
     key
@@ -1269,7 +1268,8 @@ pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<&RawTestRe
     let accepted = terminal_retries
         .into_iter()
         .filter_map(|(test, retry)| {
-            let (statuses, expected_failure) = attempts.get(&(test.clone(), retry))?;
+            // The retries are read from the attempts' own keys.
+            let (statuses, expected_failure) = &attempts[&(test.clone(), retry)];
             (statuses.contains("passed") && !expected_failure).then_some((test, retry))
         })
         .collect::<BTreeSet<_>>();
@@ -1539,7 +1539,11 @@ fn observation_of<'o>(
     vector: &McdcVector,
 ) -> Option<&'o mut MutableObservation> {
     let index = *vector_indexes.get(id)?.get(&vector_key(vector))?;
-    vectors_by_decision.get_mut(id)?.get_mut(index)
+    // Indexed only where the decision's observations are.
+    vectors_by_decision
+        .get_mut(id)
+        .expect("a decision with an index has its observations")
+        .get_mut(index)
 }
 
 fn hash_slot<'m, V: Default, S: std::hash::BuildHasher>(
@@ -2486,28 +2490,32 @@ fn create_coverage_view_with_model(
                     error,
                 }
             })?;
-        let mut conditions = Vec::with_capacity(meta.conditions.len());
-        for (index, source) in meta.conditions.iter().enumerate() {
-            let witness = witnesses[index].map(|witness| {
-                [
-                    vectors[witness.first].clone(),
-                    vectors[witness.second].clone(),
-                ]
-            });
-            let witness_tests = witnesses[index].map(|witness| {
-                [
-                    observations[witness.first].tests.clone(),
-                    observations[witness.second].tests.clone(),
-                ]
-            });
-            conditions.push(ConditionResult {
-                index,
-                source: source.clone(),
-                covered: witness.is_some(),
-                witness,
-                witness_tests,
-            });
-        }
+        let conditions = meta
+            .conditions
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let witness = witnesses[index].map(|witness| {
+                    [
+                        vectors[witness.first].clone(),
+                        vectors[witness.second].clone(),
+                    ]
+                });
+                let witness_tests = witnesses[index].map(|witness| {
+                    [
+                        observations[witness.first].tests.clone(),
+                        observations[witness.second].tests.clone(),
+                    ]
+                });
+                ConditionResult {
+                    index,
+                    source: source.clone(),
+                    covered: witness.is_some(),
+                    witness,
+                    witness_tests,
+                }
+            })
+            .collect::<Vec<_>>();
         let decision_tests =
             tests_by_hit.reached(tests_by_decision.remove(&meta.id).unwrap_or_default());
         let decision_confidence = confidence(
@@ -2831,7 +2839,9 @@ fn create_coverage_view_with_model(
         summary.completeness_blocked = Some(true);
     }
 
-    let dimension_coverage = |field: &str| -> Result<Vec<DimensionCoverage>, ReportError> {
+    // Each dimension summarises the decisions summarised whole above, over
+    // fewer tests: what read whole reads in part.
+    let dimension_coverage = |field: &str| -> Vec<DimensionCoverage> {
         let values = tests
             .iter()
             .map(|test| {
@@ -2869,7 +2879,7 @@ fn create_coverage_view_with_model(
                     .filter(in_dimension)
                     .map(|test| test.id.clone())
                     .collect::<BTreeSet<_>>();
-                Ok(DimensionCoverage {
+                DimensionCoverage {
                     kind: (field == "kind").then(|| value.clone()),
                     runner: (field == "runner").then(|| value.clone()),
                     // Counted whether or not anything could be attributed to
@@ -2892,8 +2902,9 @@ fn create_coverage_view_with_model(
                         &branches,
                         &lines,
                         Some(&selected),
-                    )?,
-                })
+                    )
+                    .expect("summarised whole above"),
+                }
             })
             .collect()
     };
@@ -2913,8 +2924,8 @@ fn create_coverage_view_with_model(
         limitations: manifest.limitations.clone(),
         transport: None,
         summary,
-        coverage_by_kind: dimension_coverage("kind")?,
-        coverage_by_runner: dimension_coverage("runner")?,
+        coverage_by_kind: dimension_coverage("kind"),
+        coverage_by_runner: dimension_coverage("runner"),
         decisions,
         points,
         branches,
@@ -3016,15 +3027,17 @@ pub fn analyze_coverage_results(
         let view = build(&all);
         (
             view,
-            passed
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-            failed
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            passed.join().unwrap_or_else(crate::threads::rethrow),
+            failed.join().unwrap_or_else(crate::threads::rethrow),
         )
     });
-    let (view, passed, failed) = (view?, passed?, failed?);
+    // The passing and failing results are the whole view's, fewer of them:
+    // what built whole builds in part.
+    let view = view?;
+    let (passed, failed) = (
+        passed.expect("built whole above"),
+        failed.expect("built whole above"),
+    );
     let execution = match request.test_exit_code {
         ExitCodeInput::Missing => None,
         ExitCodeInput::Present(test_exit_code) => Some(ExecutionResult {
@@ -3080,18 +3093,14 @@ fn parse_in_parallel<T: Send>(
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
+            .map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
             .collect::<Vec<_>>()
     });
-    let mut parsed = Vec::new();
-    for part in parts {
+    // One part a worker, and there is always a worker.
+    parts.into_iter().try_fold(Vec::new(), |mut parsed, part| {
         parsed.extend(part?);
-    }
-    Ok(parsed)
+        Ok(parsed)
+    })
 }
 
 fn parse_entry<T: for<'de> Deserialize<'de>>(
@@ -3272,11 +3281,15 @@ pub fn archive_request(
         return Err(error);
     }
     raw_results.extend(journal_results);
-    let manifest = entries
-        .iter()
-        .find(|entry| entry.path == "manifest.json")
-        .ok_or(ReportError::MissingManifest)
-        .and_then(parse_entry::<CoverageManifest>)?;
+    // A read archive holds its manifest, declaration and model, or it is
+    // refused as it is read.
+    let held = |path: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .expect("a read archive holds its manifest, declaration and model")
+    };
+    let manifest = parse_entry::<CoverageManifest>(held("manifest.json"))?;
 
     let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
@@ -3402,16 +3415,8 @@ pub fn archive_request(
             + execution.corrupt_records,
         corrupt_files: scoped.corrupt_files + background.corrupt_files + execution.corrupt_files,
     };
-    let mut frontend = entries
-        .iter()
-        .find(|entry| entry.path == "frontend.json")
-        .ok_or_else(|| ReportError::InvalidArchive("missing frontend.json".into()))
-        .and_then(parse_entry::<FrontendRunDeclaration>)?;
-    let persisted = entries
-        .iter()
-        .find(|entry| entry.path == "coverage-model.json")
-        .ok_or_else(|| ReportError::InvalidArchive("missing coverage-model.json".into()))
-        .and_then(parse_entry::<PersistedCoverageModel>)?;
+    let mut frontend = parse_entry::<FrontendRunDeclaration>(held("frontend.json"))?;
+    let persisted = parse_entry::<PersistedCoverageModel>(held("coverage-model.json"))?;
     let coverage_model =
         persisted
             .into_declaration()
@@ -3480,7 +3485,8 @@ fn separate_repeated_executions(raw_results: &mut [RawTestResult]) {
             continue;
         }
         let mut renamed = BTreeMap::<String, String>::new();
-        for phase in &raw.phases {
+        // A record that repeats a phase has phases.
+        raw.phases.iter().for_each(|phase| {
             let count = executions.entry(phase.id.clone()).or_insert(1);
             let fresh = loop {
                 *count += 1;
@@ -3490,16 +3496,16 @@ fn separate_repeated_executions(raw_results: &mut [RawTestResult]) {
                 }
             };
             renamed.insert(phase.id.clone(), fresh);
-        }
+        });
         let rename = |phase: &mut Option<String>| {
             if let Some(fresh) = phase.as_ref().and_then(|id| renamed.get(id)) {
                 *phase = Some(fresh.clone());
             }
         };
-        for phase in &mut raw.phases {
+        raw.phases.iter_mut().for_each(|phase| {
             phase.id = renamed[&phase.id].clone();
             rename(&mut phase.caused_by_phase_id);
-        }
+        });
         for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
             rename(&mut snapshot.phase_id);
             for event in &mut snapshot.events {
@@ -3590,6 +3596,24 @@ impl TransportStats {
 
 #[cfg(test)]
 mod tests {
+    /// No result passes or fails.
+    #[test]
+    fn no_result_passes_or_fails() {
+        assert!(super::passing_coverage_results(&[]).is_empty());
+        assert!(super::failed_coverage_results(&[]).is_empty());
+        // And no evidence file holds no record.
+        assert!(
+            super::parse_json_lines::<serde_json::Value>(std::iter::empty())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_analysis_error_is_a_report_s() {
+        let error = crate::coverage_analysis::AnalysisError::EmptyDecision { decision: 0 };
+        assert!(matches!(ReportError::from(error), ReportError::Analysis(_)));
+    }
 
     #[test]
     fn a_test_filter_picks_by_any_value_of_each_criterion_and_every_criterion_given() {
@@ -3879,7 +3903,9 @@ mod tests {
         // A third that overlaps the second: they ran at once.
         let mut beside = raw("report", 0, "passed", &[]);
         beside.phases = vec![phase(350, 450)];
-        let mut results = vec![first, second, beside];
+        // A test that reported no phase has no time to credit.
+        let unphased = raw("unphased", 0, "passed", &[]);
+        let mut results = vec![first, second, beside, unphased];
         // A second process repeats the work left after every test: it is
         // counted once.
         let left = credit_by_time(
@@ -3898,6 +3924,7 @@ mod tests {
         // Before any test, while two ran at once, and after all: no test's.
         assert_eq!(results[2].server.len(), 0);
         assert_eq!(results[2].attribution, ATTRIBUTION_EXACT);
+        assert!(results[3].server.is_empty());
         let left = left
             .iter()
             .filter_map(|record| record.timestamp_ms)
@@ -4023,6 +4050,10 @@ mod tests {
                     "id": "macro", "kind": "semantic-safety", "file": "w.rs", "line": 4,
                     "column": 0, "source": "m!()", "reason": "a macro", "blocking": false
                 }),
+                serde_json::json!({
+                    "id": "beside", "kind": "semantic-safety", "file": "a.rs", "line": 4,
+                    "column": 0, "source": "m!()", "reason": "a macro", "blocking": false
+                }),
             ],
             unmeasured: Vec::new(),
             scope: Some(scope),
@@ -4043,8 +4074,10 @@ mod tests {
             assert_eq!(view.summary.branches.total, 0);
             assert!(view.summary.unmeasured_obligations.unwrap() >= 3);
             // Of the file's limitations only its note stays, and blocks: the
-            // run's measurement is not complete.
-            assert_eq!(view.limitations.len(), 1, "{:?}", view.limitations);
+            // run's measurement is not complete. The file beside it keeps its
+            // own.
+            assert_eq!(view.limitations.len(), 2, "{:?}", view.limitations);
+            assert_eq!(view.limitations[1]["id"], "beside");
             assert_eq!(view.limitations[0]["wholeFile"], true);
             assert!(blocking_limitation(&view.limitations[0]));
             assert!(!view.summary.coverage_complete);
@@ -4069,6 +4102,18 @@ mod tests {
             create_coverage_view(&unscoped, &[raw("test", 0, "passed", &[])], "time").unwrap();
         assert_eq!(view.summary.statements.total, 1);
         assert!(view.scope.is_none());
+        // An empty scope lists the file all the same.
+        let listed = whole_files_unmeasured(&manifest(serde_json::json!({"entries": []}))).unwrap();
+        assert_eq!(listed.scope.unwrap()["entries"][0]["file"], "w.rs");
+        // A note that does not say which file, or why, leaves every file in.
+        let mut unnamed = manifest(serde_json::json!({"entries": []}));
+        unnamed.limitations = vec![
+            serde_json::json!({"wholeFile": true, "reason": "x"}),
+            serde_json::json!({"wholeFile": true, "file": 1, "reason": "x"}),
+            serde_json::json!({"wholeFile": true, "file": "w.rs"}),
+            serde_json::json!({"wholeFile": true, "file": "w.rs", "reason": 1}),
+        ];
+        assert!(whole_files_unmeasured(&unnamed).is_none());
     }
 
     #[test]
@@ -4254,6 +4299,13 @@ mod tests {
         };
         assert_eq!(read(record(None, Some(vector.clone()))), "missing meta");
         assert_eq!(
+            read(ServerRecord {
+                record_type: "hit".into(),
+                ..record(None, None)
+            }),
+            "missing hit id"
+        );
+        assert_eq!(
             read(record(
                 Some(meta("decision", "src/app.js", "left && right")),
                 None
@@ -4423,6 +4475,21 @@ mod tests {
             create_coverage_view(&manifest, &[changed], "time"),
             Err(ReportError::InvalidServerRecord(reason))
                 if reason.contains("differs from the frozen manifest")
+        ));
+
+        // A vector of fewer conditions than its decision has is no reading
+        // of it.
+        let mut narrow = raw("test", 0, "passed", &[]);
+        narrow.runtime[0].decisions.push(DecisionSnapshot {
+            meta: manifest.decisions[0].clone(),
+            vectors: vec![McdcVector {
+                values: vec![Some(true)],
+                outcome: true,
+            }],
+        });
+        assert!(matches!(
+            create_coverage_view(&manifest, &[narrow], "time"),
+            Err(ReportError::DecisionAnalysis { .. })
         ));
     }
 
@@ -4706,6 +4773,43 @@ mod tests {
             Err(ReportError::ScopeMismatch { actual, .. }) if actual == "other"
         ));
         assert!(analyze_coverage_results(&request(vec![raw("a", 0, "passed", &["a"])])).is_ok());
+        // A decision of no condition has nothing to analyse, and no view is
+        // built of it.
+        let empty = CoverageReportRequest {
+            manifest: CoverageManifest {
+                decisions: vec![DecisionMeta {
+                    id: "d".into(),
+                    file: "a".into(),
+                    line: 1,
+                    column: 1,
+                    source: "x".into(),
+                    conditions: Vec::new(),
+                    kind: "if".into(),
+                }],
+                ..manifest.clone()
+            },
+            ..request(vec![raw("a", 0, "passed", &["a"])])
+        };
+        assert!(matches!(
+            analyze_coverage_results(&empty),
+            Err(ReportError::Analysis(_))
+        ));
+        assert!(
+            coverage_views(&empty, &[crate::coverage_index::CoverageViewId::All], None)
+                .unwrap()
+                .all(|view| view.is_err())
+        );
+        // A coverage model named by no identifier is refused as one.
+        let mut model = javascript_coverage_model();
+        model.language = "Not An Identifier".into();
+        let invalid = CoverageReportRequest {
+            coverage_model: Some(model),
+            ..request(vec![raw("a", 0, "passed", &["a"])])
+        };
+        assert!(matches!(
+            analyze_coverage_results(&invalid),
+            Err(ReportError::InvalidJson { path, .. }) if path == "coverage-model.json"
+        ));
     }
 
     #[test]
@@ -4922,6 +5026,63 @@ mod tests {
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
+    /// An archive whose declaration or model cannot be read is refused,
+    /// naming which.
+    #[test]
+    fn an_archive_whose_declaration_or_model_does_not_read_is_refused() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("known", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let manifest = EvidenceArchiveEntry {
+            path: "manifest.json".into(),
+            contents: serde_json::to_vec(&manifest).unwrap(),
+        };
+        let mut model = serde_json::to_value(
+            PersistedCoverageModel::from_declaration(&javascript_coverage_model()).unwrap(),
+        )
+        .unwrap();
+        model["schemaVersion"] = serde_json::json!(999);
+        let analysed = |entries: Vec<EvidenceArchiveEntry>| {
+            let path = archive(entries);
+            let result = analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: path.clone(),
+                run_id: "run".into(),
+                generated_at: "time".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Missing,
+                test_filter: None,
+            });
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+            result
+        };
+        for (entry, named) in [
+            ("frontend.json", b"not json".to_vec()),
+            ("coverage-model.json", b"not json".to_vec()),
+            ("coverage-model.json", serde_json::to_vec(&model).unwrap()),
+        ]
+        .map(|(path, contents)| {
+            (
+                EvidenceArchiveEntry {
+                    path: path.into(),
+                    contents,
+                },
+                path,
+            )
+        }) {
+            let result = analysed(vec![manifest.clone(), entry]);
+            assert!(
+                matches!(&result, Err(ReportError::InvalidJson { path, .. }) if path == named),
+                "{named}: {result:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_torn_background_record_is_counted_not_fatal() {
         // Pool VMs restored from one snapshot are clones with the same pid and
@@ -5010,6 +5171,18 @@ mod tests {
                     "{\"type\":\"hit\",\"id\":\"background-hit\"}\n",
                     "{\"type\":\"decision\",\"meta\":{\"id\":\"torn\",\"file\":\"app/rou{\"type\":\"hit\",\"id\":\"other-clone\"}\n",
                     "{\"type\":\"hit\",\"id\":\"after-tear\"}\n",
+                )
+                .as_bytes()
+                .to_vec(),
+            },
+            // A request served for a test whose result never arrived: its
+            // scope joins no result, and it is set aside.
+            EvidenceArchiveEntry {
+                path: "server/orphan.jsonl".into(),
+                contents: concat!(
+                    "{\"type\":\"hit\",\"id\":\"orphan\",\"scope\":{\"version\":1,",
+                    "\"runId\":\"run\",\"workerId\":\"w\",\"testId\":\"gone\",",
+                    "\"testKey\":\"gone\",\"retry\":0,\"attemptId\":\"a\"}}\n",
                 )
                 .as_bytes()
                 .to_vec(),
@@ -5179,6 +5352,36 @@ mod tests {
             })
         );
     }
+    /// A server record naming a phase its test does not have counts for no
+    /// phase, as one stamped before every phase does not.
+    #[test]
+    fn a_server_record_of_no_phase_of_its_test_counts_for_none() {
+        let request: CoverageReportRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run",
+            "manifest": { "decisions": [], "points": [], "branches": [] },
+            "rawResults": [{
+                "test": "test",
+                "status": "passed",
+                "phases": [{
+                    "id": "t-0:assertion:1", "kind": "assertion",
+                    "operation": "assert.ok", "startedAtMs": 5
+                }],
+                "browser": [],
+                "server": [
+                    { "type": "hit", "id": "elsewhere", "timestampMs": 6, "phaseId": "z-0:assertion:9" },
+                    { "type": "hit", "id": "early", "timestampMs": 1 }
+                ]
+            }],
+            "generatedAt": "time",
+            "testExitCode": 0
+        }))
+        .unwrap();
+        let report = analyze_coverage_results(&request).unwrap();
+        let phases = &report.view.phases;
+        assert_eq!(phases.len(), 1);
+        assert_eq!(phases[0].server_events, 0, "{phases:?}");
+    }
+
     #[test]
     fn a_phase_leaked_from_another_test_is_untagged_and_an_unknown_one_is_kept() {
         let record = |test: &str, phases: &[&str], events: &[(&str, &str)]| -> RawTestResult {
@@ -5253,7 +5456,10 @@ mod tests {
                     "events": events.iter().map(|(id, phase)| serde_json::json!({
                         "type": "hit", "id": id, "timestampMs": 0, "phaseId": phase, "environment": "server"
                     })).collect::<Vec<_>>()
-                }]
+                }],
+                "server": events.iter().map(|(id, phase)| serde_json::json!({
+                    "type": "hit", "id": format!("server-{id}"), "phaseId": phase
+                })).collect::<Vec<_>>()
             }))
             .unwrap()
         };
@@ -5263,6 +5469,13 @@ mod tests {
             record("passed", &[("third", "t-0:assertion:1")]),
         ];
         separate_repeated_executions(&mut results);
+        // A server record of each execution follows its phase's new name.
+        for raw in &results {
+            assert_eq!(
+                raw.server[0].phase_id, raw.runtime[0].events[0].phase_id,
+                "{raw:?}"
+            );
+        }
         let ids = |raw: &RawTestResult| {
             raw.phases
                 .iter()

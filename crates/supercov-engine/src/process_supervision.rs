@@ -1,5 +1,6 @@
 //! Privacy-preserving child-process supervision for arbitrary test commands.
 
+use crate::fault_process::Launch;
 // Descriptor and watchdog handling reads the filesystem only on Unix; on
 // Windows the module path is unused and the first Windows build said so.
 #[cfg(unix)]
@@ -50,6 +51,13 @@ pub enum SupervisionError {
     UnsupportedPlatform(&'static str),
 }
 
+/// The error of a file that may not be run: EACCES, or Windows' access
+/// denied. EPERM is a step of Supercov's own refused.
+#[cfg(windows)]
+const NOT_RUNNABLE: i32 = 5;
+#[cfg(not(windows))]
+const NOT_RUNNABLE: i32 = 13;
+
 impl std::fmt::Display for SupervisionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -60,10 +68,18 @@ impl std::fmt::Display for SupervisionError {
                 )
             }
             Self::EmptyCommand => write!(formatter, "test command must not be empty"),
+            // Said by kind, which every platform reports alike, before the
+            // platform's own words: Windows looks a program up itself and
+            // has its own for one that is not there.
             Self::Spawn { program, source } => {
+                let kind = match source.kind() {
+                    std::io::ErrorKind::NotFound => "no such program: ",
+                    _ if source.raw_os_error() == Some(NOT_RUNNABLE) => "not allowed to run: ",
+                    _ => "",
+                };
                 write!(
                     formatter,
-                    "could not spawn {}: {source}",
+                    "could not spawn {}: {kind}{source}",
                     program.to_string_lossy()
                 )
             }
@@ -275,10 +291,10 @@ impl Terminal {
 #[cfg(unix)]
 fn one_place(left: &std::fs::File, right: &std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (left.metadata(), right.metadata()) {
-        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-        _ => false,
-    }
+    left.metadata()
+        .ok()
+        .zip(right.metadata().ok())
+        .is_some_and(|(left, right)| left.dev() == right.dev() && left.ino() == right.ino())
 }
 
 #[cfg(not(unix))]
@@ -441,7 +457,7 @@ fn relay(
         };
         let mut pending = Vec::new();
         let mut buffer = [0_u8; 8192];
-        loop {
+        'relay: loop {
             let read = match pipe.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => read,
@@ -454,18 +470,18 @@ fn relay(
                 // Whoever reads this has gone: the command is told so by
                 // its next write, as it would have been.
                 if pass(&pending[passed..=passed + end]).is_err() {
-                    let _ = ended.send(());
-                    return;
+                    pending.clear();
+                    break 'relay;
                 }
                 passed += end + 1;
             }
             pending.drain(..passed);
             if pending.len() > RELAY_LINE_LIMIT {
-                if pass(&pending).is_err() {
-                    let _ = ended.send(());
-                    return;
-                }
+                let gone = pass(&pending).is_err();
                 pending.clear();
+                if gone {
+                    break;
+                }
             }
         }
         if !pending.is_empty() {
@@ -493,10 +509,11 @@ const TERMINAL_SIZE_EVERY: Duration = Duration::from_millis(250);
 fn relay_terminal(mut terminal: Terminal, names: ConsoleNames) -> std::sync::mpsc::Receiver<()> {
     let (ended, wait) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        let Ok(mut to) = terminal.real.try_clone() else {
-            let _ = ended.send(());
-            return;
-        };
+        // The terminal this process holds open duplicates.
+        let mut to = terminal
+            .real
+            .try_clone()
+            .expect("an open terminal duplicates");
         let mut pass = |bytes: &[u8]| -> io::Result<()> {
             match std::str::from_utf8(bytes) {
                 Ok(text) => to.write_all(names.line(text).as_bytes())?,
@@ -531,10 +548,10 @@ fn relay_terminal(mut terminal: Terminal, names: ConsoleNames) -> std::sync::mps
             let read = match crate::fault::io("terminal-read", io::ErrorKind::Interrupted, || {
                 terminal.ours.read(&mut buffer)
             }) {
-                Ok(0) => break,
-                Ok(read) => read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+                // Nothing on macOS, an error on Linux: the same hang-up.
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
             };
             pending.extend_from_slice(&buffer[..read]);
             if let Some(end) = pending.iter().rposition(|byte| *byte == b'\n') {
@@ -577,13 +594,8 @@ impl CommandSpec {
                     operation: "create captured process output",
                     source,
                 })?;
-            let errors =
-                output
-                    .try_clone()
-                    .map_err(|source| SupervisionError::PlatformOperation {
-                        operation: "clone captured process output",
-                        source,
-                    })?;
+            // A file just opened duplicates.
+            let errors = output.try_clone().expect("a file just opened duplicates");
             command
                 .stdout(Stdio::from(output))
                 .stderr(Stdio::from(errors));
@@ -703,16 +715,19 @@ impl Default for SupervisionOptions {
 
 impl SupervisionOptions {
     pub fn from_environment() -> Result<Self, SupervisionError> {
+        Self::from_variables(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_environment`], with the variables `variable` gives.
+    fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Result<Self, SupervisionError> {
         Ok(Self {
             diagnostic_interval: positive_milliseconds(
-                std::env::var("SUPERCOV_DIAGNOSTIC_INTERVAL_MS")
-                    .ok()
-                    .as_deref(),
+                variable("SUPERCOV_DIAGNOSTIC_INTERVAL_MS").as_deref(),
                 "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
             )?
             .unwrap_or_else(|| Duration::from_millis(DEFAULT_DIAGNOSTIC_INTERVAL_MS)),
             timeout: positive_milliseconds(
-                std::env::var("SUPERCOV_COMMAND_TIMEOUT_MS").ok().as_deref(),
+                variable("SUPERCOV_COMMAND_TIMEOUT_MS").as_deref(),
                 "SUPERCOV_COMMAND_TIMEOUT_MS",
             )?,
             termination_grace: Duration::from_millis(COMMAND_TERMINATION_GRACE_MS),
@@ -778,13 +793,6 @@ pub struct SupervisedResult {
     pub signal: Option<i32>,
     pub timed_out: bool,
     pub interrupted_signal: Option<ForwardedSignal>,
-}
-
-#[derive(Debug)]
-pub struct SupervisedOutput {
-    pub result: SupervisedResult,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
 }
 
 impl SupervisedResult {
@@ -877,11 +885,12 @@ pub fn descendant_process_tree(root_pid: u32) -> Vec<ProcessSnapshot> {
     let mut descendants = std::collections::BTreeSet::from([root_pid]);
     loop {
         let before = descendants.len();
-        for process in &inventory {
+        // This process is among them wherever processes can be listed.
+        inventory.iter().for_each(|process| {
             if descendants.contains(&process.parent_pid) {
                 descendants.insert(process.pid);
             }
-        }
+        });
         if descendants.len() == before {
             break;
         }
@@ -918,7 +927,8 @@ pub fn format_process_diagnostic(
         output.push_str(&format!("\n  pid={root_pid} process details unavailable"));
         return output;
     }
-    for process in tree {
+    // Not empty, as just checked.
+    tree.iter().for_each(|process| {
         output.push_str(&format!(
             "\n  pid={} ppid={} exe={}",
             process.pid, process.parent_pid, process.executable
@@ -929,7 +939,7 @@ pub fn format_process_diagnostic(
         if let Some(cpu_tenths) = process.cpu_tenths {
             output.push_str(&format!(" cpu={}.{}s", cpu_tenths / 10, cpu_tenths % 10));
         }
-    }
+    });
     output
 }
 
@@ -942,6 +952,11 @@ struct SignalFlags {
 #[cfg(unix)]
 impl SignalFlags {
     fn install() -> Result<Self, SupervisionError> {
+        if crate::fault::injected("signal-install") {
+            return Err(SupervisionError::Signal(io::Error::other(
+                "injected fault at signal-install",
+            )));
+        }
         Self::install_for(&[libc::SIGHUP, libc::SIGINT, libc::SIGTERM])
     }
 
@@ -1152,7 +1167,7 @@ impl JobHandle {
         Ok(())
     }
 
-    fn terminate(&self) {
+    pub(crate) fn terminate(&self) {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
         // SAFETY: the handle owns this invocation's process tree. Failure can
         // only mean the tree has already exited, so termination is best effort.
@@ -1306,7 +1321,7 @@ fn spawn_contained(
 ) -> Result<(Child, Option<ParentDeathGuard>), SupervisionError> {
     let Some(watchdog_program) = watchdog_program else {
         command.process_group(0);
-        let child = command.spawn().map_err(|source| SupervisionError::Spawn {
+        let child = command.launch().map_err(|source| SupervisionError::Spawn {
             program: program.clone(),
             source,
         })?;
@@ -1316,10 +1331,7 @@ fn spawn_contained(
     let read_descriptor = read.as_raw_fd();
     let write_descriptor = write.as_raw_fd();
     let watchdog_program = std::ffi::CString::new(watchdog_program.as_os_str().as_bytes())
-        .map_err(|_| SupervisionError::PlatformOperation {
-            operation: "encode parent-death watchdog executable",
-            source: io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"),
-        })?;
+        .expect("a path the system resolved holds no NUL byte");
     let watchdog_argument =
         std::ffi::CString::new("__watch-process-group").expect("static CString");
     crate::fault::prepare();
@@ -1371,7 +1383,10 @@ fn spawn_contained(
                     watchdog_argument.as_ptr(),
                     std::ptr::null(),
                 ];
-                libc::execv(watchdog_program.as_ptr(), arguments.as_ptr());
+                // Returns only when the watchdog could not be started.
+                crate::fault::libc("watchdog-exec", libc::ENOENT, || {
+                    libc::execv(watchdog_program.as_ptr(), arguments.as_ptr())
+                });
                 libc::_exit(125);
             }
             let _ = libc::close(read_descriptor);
@@ -1395,7 +1410,7 @@ fn spawn_contained(
             Ok(())
         });
     }
-    let child = command.spawn().map_err(|source| {
+    let child = command.launch().map_err(|source| {
         if source.raw_os_error() == Some(WATCHDOG_ENDED) {
             SupervisionError::PlatformOperation {
                 operation: "start the watchdog that stops the command if Supercov is killed",
@@ -1432,16 +1447,16 @@ pub fn watch_parent_process_group() -> io::Result<()> {
         } else {
             Path::new("/dev/fd")
         };
-    let descriptors = fs::read_dir(descriptor_root)?
+    let descriptors = crate::fault_fs::read_dir(descriptor_root)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
         .filter(|descriptor| !matches!(*descriptor, 0 | 3))
         .collect::<Vec<_>>();
-    for descriptor in descriptors {
+    descriptors.into_iter().for_each(|descriptor| {
         // SAFETY: closing a descriptor that the directory iterator already
         // released, or one concurrently absent, is harmless.
         let _ = unsafe { libc::close(descriptor) };
-    }
+    });
     let ready = [1_u8];
     // SAFETY: pre-exec mapped the private readiness pipe to descriptor 3.
     if unsafe { libc::write(3, ready.as_ptr().cast(), ready.len()) } != 1 {
@@ -1520,11 +1535,11 @@ impl Keyboard {
     fn give(&mut self, group: libc::pid_t, ours_to_give: bool) -> bool {
         use std::os::fd::AsRawFd;
         if self.terminal.is_none() {
-            self.terminal = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/tty")
-                .ok();
+            self.terminal = crate::fault_fs::open_with(
+                fs::OpenOptions::new().read(true).write(true),
+                "/dev/tty",
+            )
+            .ok();
         }
         let Some(terminal) = &self.terminal else {
             return false;
@@ -1647,6 +1662,13 @@ fn write_diagnostic(child: &Child, started: Instant, verbose: bool, writer: &mut
     let _ = writeln!(writer, "{}", diagnostic).and_then(|_| writer.flush());
 }
 
+/// The first time after `now` on the schedule that `next` starts, however
+/// many intervals have passed.
+fn next_interval(next: Instant, now: Instant, interval: Duration) -> Instant {
+    let behind = now.duration_since(next).as_nanos() / interval.as_nanos();
+    next + interval * u32::try_from(behind + 1).unwrap_or(u32::MAX)
+}
+
 fn validate_options(options: SupervisionOptions) -> Result<(), SupervisionError> {
     if options.diagnostic_interval.is_zero() || options.termination_grace.is_zero() {
         return Err(SupervisionError::InvalidMilliseconds {
@@ -1659,28 +1681,6 @@ fn validate_options(options: SupervisionOptions) -> Result<(), SupervisionError>
         });
     }
     Ok(())
-}
-
-fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn captured_bytes(
-    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-    stream: &'static str,
-) -> Result<Vec<u8>, SupervisionError> {
-    reader
-        .join()
-        .map_err(|_| SupervisionError::PlatformOperation {
-            operation: "join captured process output reader",
-            source: io::Error::other(format!("{stream} reader panicked")),
-        })?
-        .map_err(|source| SupervisionError::PlatformOperation {
-            operation: "read captured process output",
-            source,
-        })
 }
 
 /// Whether a command that ended with `status` or of `signal` was ended by
@@ -1715,13 +1715,14 @@ impl ProcessSupervisor {
     }
 
     pub fn new_crash_safe(watchdog_program: &Path) -> Result<Self, SupervisionError> {
-        let watchdog_program = fs::canonicalize(watchdog_program).map_err(|source| {
-            SupervisionError::PlatformOperation {
-                operation: "resolve parent-death watchdog executable",
-                source,
-            }
-        })?;
-        if !fs::metadata(&watchdog_program).is_ok_and(|metadata| metadata.is_file()) {
+        let watchdog_program =
+            crate::fault_fs::canonicalize(watchdog_program).map_err(|source| {
+                SupervisionError::PlatformOperation {
+                    operation: "resolve parent-death watchdog executable",
+                    source,
+                }
+            })?;
+        if !crate::fault_fs::metadata(&watchdog_program).is_ok_and(|metadata| metadata.is_file()) {
             return Err(SupervisionError::PlatformOperation {
                 operation: "validate parent-death watchdog executable",
                 source: io::Error::new(io::ErrorKind::InvalidInput, "expected a regular file"),
@@ -1764,58 +1765,6 @@ impl ProcessSupervisor {
         result
     }
 
-    pub fn supervise_captured(
-        &self,
-        spec: &CommandSpec,
-        options: SupervisionOptions,
-        writer: &mut dyn Write,
-    ) -> Result<SupervisedOutput, SupervisionError> {
-        validate_options(options)?;
-        if spec.captured_output.is_some() {
-            return Err(SupervisionError::PlatformOperation {
-                operation: "configure separate captured process output",
-                source: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "merged and separate capture cannot be requested together",
-                ),
-            });
-        }
-        if let Some(signal) = self.signals.received() {
-            return Ok(SupervisedOutput {
-                result: SupervisedResult {
-                    status: None,
-                    signal: Some(signal.raw()),
-                    timed_out: false,
-                    interrupted_signal: Some(signal),
-                },
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            });
-        }
-        let mut command = spec.command()?;
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let (mut child, parent_death_guard) = spawn_contained(
-            &mut command,
-            &spec.program,
-            self.watchdog_program.as_deref(),
-        )?;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let stdout_reader = thread::spawn(move || read_pipe(stdout));
-        let stderr_reader = thread::spawn(move || read_pipe(stderr));
-        let result = self.monitor(&mut child, options, writer);
-        // Closing the liveness writer makes the watchdog kill any descendants
-        // that retained the output pipes after the root command exited.
-        drop(parent_death_guard);
-        let stdout = captured_bytes(stdout_reader, "stdout")?;
-        let stderr = captured_bytes(stderr_reader, "stderr")?;
-        Ok(SupervisedOutput {
-            result: result?,
-            stdout,
-            stderr,
-        })
-    }
-
     fn monitor(
         &self,
         child: &mut Child,
@@ -1832,14 +1781,15 @@ impl ProcessSupervisor {
         let mut keyboard = Keyboard::default();
 
         loop {
-            let status = match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    signal_process_group(child, libc::SIGKILL);
-                    let _ = child.wait();
-                    return Err(SupervisionError::Wait(error));
-                }
-            };
+            let status =
+                match crate::fault::io("child-wait", io::ErrorKind::Other, || child.try_wait()) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        signal_process_group(child, libc::SIGKILL);
+                        let _ = child.wait();
+                        return Err(SupervisionError::Wait(error));
+                    }
+                };
             if let Some(status) = status {
                 let (status, signal) = exit_parts(status);
                 // With the terminal lent, Ctrl-C went to the command alone.
@@ -1890,9 +1840,7 @@ impl ProcessSupervisor {
             }
             if now >= next_diagnostic && !timed_out {
                 write_diagnostic(child, started, verbose, writer);
-                while next_diagnostic <= now {
-                    next_diagnostic += options.diagnostic_interval;
-                }
+                next_diagnostic = next_interval(next_diagnostic, now, options.diagnostic_interval);
             }
             if termination.is_some_and(|(terminated_at, _)| {
                 now.duration_since(terminated_at) >= options.termination_grace
@@ -1945,7 +1893,7 @@ impl ProcessSupervisor {
         }
         let mut command = spec.command()?;
         let targets = Relays::request(&mut command, spec.console.as_ref());
-        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
+        let mut child = command.launch().map_err(|source| SupervisionError::Spawn {
             program: spec.program.clone(),
             source,
         })?;
@@ -1968,64 +1916,6 @@ impl ProcessSupervisor {
         result
     }
 
-    pub fn supervise_captured(
-        &self,
-        spec: &CommandSpec,
-        options: SupervisionOptions,
-        writer: &mut dyn Write,
-    ) -> Result<SupervisedOutput, SupervisionError> {
-        validate_options(options)?;
-        if spec.captured_output.is_some() {
-            return Err(SupervisionError::PlatformOperation {
-                operation: "configure separate captured process output",
-                source: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "merged and separate capture cannot be requested together",
-                ),
-            });
-        }
-        if let Some(signal) = self.signals.received() {
-            return Ok(SupervisedOutput {
-                result: SupervisedResult {
-                    status: None,
-                    signal: None,
-                    timed_out: false,
-                    interrupted_signal: Some(signal),
-                },
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            });
-        }
-        let mut command = spec.command()?;
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
-            program: spec.program.clone(),
-            source,
-        })?;
-        if let Err(error) = self.job.assign(&child) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        if let Err(error) = resume_suspended_process(child.id()) {
-            self.job.terminate();
-            let _ = child.wait();
-            return Err(error);
-        }
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let stdout_reader = thread::spawn(move || read_pipe(stdout));
-        let stderr_reader = thread::spawn(move || read_pipe(stderr));
-        let result = self.monitor(&mut child, options, writer);
-        let stdout = captured_bytes(stdout_reader, "stdout")?;
-        let stderr = captured_bytes(stderr_reader, "stderr")?;
-        Ok(SupervisedOutput {
-            result: result?,
-            stdout,
-            stderr,
-        })
-    }
-
     fn monitor(
         &self,
         child: &mut Child,
@@ -2042,14 +1932,15 @@ impl ProcessSupervisor {
         let mut escalated = false;
 
         loop {
-            let status = match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    self.job.terminate();
-                    let _ = child.wait();
-                    return Err(SupervisionError::Wait(error));
-                }
-            };
+            let status =
+                match crate::fault::io("child-wait", io::ErrorKind::Other, || child.try_wait()) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        self.job.terminate();
+                        let _ = child.wait();
+                        return Err(SupervisionError::Wait(error));
+                    }
+                };
             if let Some(status) = status {
                 let (status, signal) = exit_parts(status);
                 return Ok(SupervisedResult {
@@ -2082,9 +1973,7 @@ impl ProcessSupervisor {
             }
             if now >= next_diagnostic && !timed_out {
                 write_diagnostic(child, started, verbose, writer);
-                while next_diagnostic <= now {
-                    next_diagnostic += options.diagnostic_interval;
-                }
+                next_diagnostic = next_interval(next_diagnostic, now, options.diagnostic_interval);
             }
             if !escalated
                 && termination.is_some_and(|terminated_at| {
@@ -2124,38 +2013,51 @@ impl ProcessSupervisor {
             "this target has no process-tree containment implementation",
         ))
     }
-
-    pub fn supervise_captured(
-        &self,
-        _spec: &CommandSpec,
-        _options: SupervisionOptions,
-        _writer: &mut dyn Write,
-    ) -> Result<SupervisedOutput, SupervisionError> {
-        Err(SupervisionError::UnsupportedPlatform(
-            "this target has no process-tree containment implementation",
-        ))
-    }
-}
-
-pub fn supervise_command(
-    spec: &CommandSpec,
-    options: SupervisionOptions,
-    writer: &mut dyn Write,
-) -> Result<SupervisedResult, SupervisionError> {
-    ProcessSupervisor::new()?.supervise(spec, options, writer)
-}
-
-pub fn supervise_captured_command(
-    spec: &CommandSpec,
-    options: SupervisionOptions,
-    writer: &mut dyn Write,
-) -> Result<SupervisedOutput, SupervisionError> {
-    ProcessSupervisor::new()?.supervise_captured(spec, options, writer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn supervise_command(
+        spec: &CommandSpec,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedResult, SupervisionError> {
+        ProcessSupervisor::new()?.supervise(spec, options, writer)
+    }
+
+    /// Each setting is read, and refused by name where it is no positive
+    /// number of milliseconds.
+    #[test]
+    fn supervision_settings_are_read_or_refused_by_name() {
+        let options = SupervisionOptions::from_variables(|name| {
+            (name == "SUPERCOV_COMMAND_TIMEOUT_MS").then(|| "70".to_owned())
+        })
+        .unwrap();
+        assert_eq!(options.timeout, Some(Duration::from_millis(70)));
+        for refused in [
+            "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
+            "SUPERCOV_COMMAND_TIMEOUT_MS",
+        ] {
+            let error = SupervisionOptions::from_variables(|name| {
+                (name == refused).then(|| "soon".to_owned())
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(refused), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_next_diagnostic_is_the_first_on_its_schedule_after_now() {
+        let start = Instant::now();
+        let second = Duration::from_secs(1);
+        assert_eq!(next_interval(start, start, second), start + second);
+        assert_eq!(
+            next_interval(start, start + Duration::from_millis(2500), second),
+            start + 3 * second
+        );
+    }
 
     /// Somewhere a relay can write that the test can read afterwards.
     #[derive(Clone, Default)]
@@ -2227,7 +2129,11 @@ mod tests {
             ],
         };
         assert_eq!(relayed(uneven), b"one\ntw");
-        for input in [b"line\n".to_vec(), vec![b'a'; RELAY_LINE_LIMIT * 2]] {
+        for input in [
+            b"line\n".to_vec(),
+            b"\xff\n".to_vec(),
+            vec![b'a'; RELAY_LINE_LIMIT * 2],
+        ] {
             relay(io::Cursor::new(input), Gone, ConsoleNames::default())
                 .recv_timeout(Duration::from_secs(10))
                 .expect("a relay with no reader ends");
@@ -2260,6 +2166,73 @@ mod tests {
             String::from_utf8(kept.0.lock().unwrap().clone()).unwrap(),
             "# example.com/shop [example.com/shop.test]\n./crypto.go:4:15: undefined: undefinedThing\npkg/inner/inner.go:4:9: cannot use s\n\tat ../../../../../elsewhere.go:1 and a/../../../../b.go\n[ERROR] Please refer to /home/me/shop/target/surefire-reports for the individual test results.\nlast line, with no end"
         );
+    }
+
+    /// What a command writes to a terminal that is not text is passed on as
+    /// it is; once the user's terminal has gone, the relay stops passing
+    /// anything on, text or not, and ends with the command.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_relay_passes_bytes_on_and_stops_when_the_terminal_goes() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let relayed = |script: &str, gone: bool| {
+            let (mut screen, mut users) = (-1, -1);
+            // SAFETY: the two descriptors are owned by nothing else.
+            let (mut screen, users) = unsafe {
+                assert_eq!(
+                    libc::openpty(
+                        &mut screen,
+                        &mut users,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut::<libc::termios>(),
+                        std::ptr::null_mut::<libc::winsize>(),
+                    ),
+                    0
+                );
+                (
+                    std::fs::File::from_raw_fd(screen),
+                    std::fs::File::from_raw_fd(users),
+                )
+            };
+            let (terminal, theirs) = Terminal::like(users).expect("a terminal like the user's");
+            if gone {
+                drop(std::mem::replace(
+                    &mut screen,
+                    std::fs::File::open("/dev/null").unwrap(),
+                ));
+            }
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(theirs.try_clone().unwrap())
+                .stderr(theirs);
+            let mut child = command.spawn().unwrap();
+            drop(command);
+            let ended = relay_terminal(terminal, ConsoleNames::default());
+            child.wait().unwrap();
+            ended
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the relay ends when the command has gone");
+            // SAFETY: a flag on a descriptor this test owns.
+            unsafe {
+                let flags = libc::fcntl(screen.as_raw_fd(), libc::F_GETFL);
+                libc::fcntl(screen.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+            let mut shown = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = screen.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                shown.extend_from_slice(&buffer[..read]);
+            }
+            shown
+        };
+        assert_eq!(relayed("printf 'a\\377b\\n'", false), b"a\xffb\r\n");
+        for script in ["printf 'text\\n'", "printf '\\377\\n'"] {
+            assert!(relayed(script, true).is_empty(), "{script}");
+        }
     }
 
     #[cfg(unix)]
@@ -2402,6 +2375,21 @@ mod tests {
             resolve_program_with(OsStr::new("tool"), &root, path.clone(), None),
             root.join("tool.CMD").into_os_string()
         );
+        // No PATH searches nowhere, and a PATHEXT of no extension tries
+        // only the name itself.
+        assert_eq!(
+            resolve_program_with(OsStr::new("tool"), &root, None, None),
+            OsString::from("tool")
+        );
+        assert_eq!(
+            resolve_program_with(
+                OsStr::new("named.exe"),
+                &root,
+                path.clone(),
+                Some(";;".into())
+            ),
+            root.join("named.exe").into_os_string()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2484,30 +2472,6 @@ mod tests {
             supervise_command(&spec, SupervisionOptions::default(), &mut diagnostics).unwrap();
         assert_eq!(result.exit_code(), 7);
         assert!(!result.timed_out);
-        assert!(diagnostics.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn captures_stdout_and_stderr_separately_without_losing_status() {
-        let spec = CommandSpec {
-            program: "/bin/sh".into(),
-            arguments: vec![
-                "-c".into(),
-                "printf stdout-value; printf stderr-value >&2; exit 9".into(),
-            ],
-            cwd: std::env::current_dir().unwrap(),
-            environment: None,
-            captured_output: None,
-            console: None,
-        };
-        let mut diagnostics = Vec::new();
-        let output =
-            supervise_captured_command(&spec, SupervisionOptions::default(), &mut diagnostics)
-                .unwrap();
-        assert_eq!(output.result.exit_code(), 9);
-        assert_eq!(output.stdout, b"stdout-value");
-        assert_eq!(output.stderr, b"stderr-value");
         assert!(diagnostics.is_empty());
     }
 
@@ -2711,6 +2675,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.exit_code(), 0);
+        // Nor does a timeout line nobody reads.
+        let slow = CommandSpec {
+            arguments: vec!["-c".into(), "sleep 5".into()],
+            ..spec
+        };
+        let result = supervise_command(
+            &slow,
+            SupervisionOptions {
+                diagnostic_interval: Duration::from_secs(60),
+                timeout: Some(Duration::from_millis(50)),
+                termination_grace: Duration::from_millis(50),
+            },
+            &mut BrokenWriter,
+        )
+        .unwrap();
+        assert!(result.timed_out);
     }
 
     /// A terminal of the user's: what is written to the second shows at the
@@ -2785,6 +2765,33 @@ mod tests {
                 .expect("the relay ends with the user's terminal");
             drop(writer.join().unwrap());
         }
+    }
+
+    /// A line with no end -- a prompt -- reaches the terminal once the
+    /// command has paused a moment, not when the terminal's size is next
+    /// asked for.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_reaches_the_terminal_after_a_short_pause() {
+        let (mut screen, users) = user_terminal();
+        let (terminal, mut theirs) = Terminal::like(users).expect("a terminal");
+        let started = Instant::now();
+        let ended = relay_terminal(terminal, ConsoleNames::default());
+        theirs.write_all(b"continue? ").unwrap();
+        let mut seen = Vec::new();
+        let mut buffer = [0_u8; 64];
+        while !seen.ends_with(b"continue? ") {
+            let read = screen.read(&mut buffer).unwrap();
+            seen.extend_from_slice(&buffer[..read]);
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(theirs);
+        drop(screen);
+        let _ = ended.recv_timeout(Duration::from_secs(10));
     }
 
     #[cfg(unix)]
@@ -2887,6 +2894,14 @@ mod tests {
             Err(SupervisionError::Signal(_))
         ));
         assert_eq!(disposition(), before);
+        // Refused first, nothing is put back; asked for none, none is kept.
+        assert!(SignalFlags::install_for(&[libc::SIGKILL]).is_err());
+        let none = SignalFlags::install_for(&[]).unwrap();
+        // A hangup the guard saw is read as one.
+        RECEIVED_SIGNAL.store(libc::SIGHUP, Ordering::SeqCst);
+        assert_eq!(none.received(), Some(ForwardedSignal::Sighup));
+        drop(none);
+        assert_eq!(RECEIVED_SIGNAL.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -3068,12 +3083,13 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Separate capture is refused beside merged capture, and a command is
-    /// not started once the run has been told to stop.
+    /// A command is not started once the run has been told to stop, and
+    /// options that cannot be kept, a command that names nothing and one that
+    /// cannot start are refused before anything runs.
     #[cfg(unix)]
     #[test]
-    fn a_captured_command_is_not_started_merged_or_after_a_signal() {
-        let root = scratch_directory("captured");
+    fn a_command_is_not_started_after_a_signal_or_when_it_cannot_be() {
+        let root = scratch_directory("not-started");
         let marker = root.join("ran");
         let spec = CommandSpec {
             program: "/bin/sh".into(),
@@ -3083,27 +3099,47 @@ mod tests {
             captured_output: None,
             console: None,
         };
+        // A supervisor that cannot forward the user's signals is none.
+        assert!(matches!(
+            crate::fault::during("signal-install", ProcessSupervisor::new),
+            Err(SupervisionError::Signal(_))
+        ));
         let supervisor = ProcessSupervisor::new().unwrap();
-        let merged = CommandSpec {
-            captured_output: Some(root.join("output")),
+        let never = SupervisionOptions {
+            diagnostic_interval: Duration::ZERO,
+            ..SupervisionOptions::default()
+        };
+        assert!(supervisor.supervise(&spec, never, &mut Vec::new()).is_err());
+        let empty = CommandSpec {
+            program: "".into(),
             ..spec.clone()
         };
-        assert!(matches!(
-            supervisor.supervise_captured(&merged, SupervisionOptions::default(), &mut Vec::new()),
-            Err(SupervisionError::PlatformOperation { .. })
-        ));
+        let absent = CommandSpec {
+            program: "/nonexistent/supercov-command".into(),
+            ..spec.clone()
+        };
+        for refused in [&empty, &absent] {
+            assert!(
+                supervisor
+                    .supervise(refused, SupervisionOptions::default(), &mut Vec::new())
+                    .is_err()
+            );
+        }
+        // A watchdog that is not there, or is no file, is refused.
+        for watchdog in [root.join("absent"), root.clone()] {
+            assert!(matches!(
+                ProcessSupervisor::new_crash_safe(&watchdog),
+                Err(SupervisionError::PlatformOperation { .. })
+            ));
+        }
         RECEIVED_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
-        let output = supervisor
-            .supervise_captured(&spec, SupervisionOptions::default(), &mut Vec::new())
+        let result = supervisor
+            .supervise(&spec, SupervisionOptions::default(), &mut Vec::new())
             .unwrap();
         drop(supervisor);
-        assert_eq!(
-            output.result.interrupted_signal,
-            Some(ForwardedSignal::Sigterm)
-        );
-        assert_eq!(output.result.exit_code(), 143);
-        assert!(output.stdout.is_empty() && output.stderr.is_empty());
-        assert!(!marker.exists() && !root.join("output").exists());
+        assert_eq!(result.interrupted_signal, Some(ForwardedSignal::Sigterm));
+        assert_eq!(result.exit_code(), 143);
+        assert!(!marker.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3193,5 +3229,100 @@ mod console_name_tests {
             assert!(validate_options(options).is_err(), "{options:?}");
         }
         assert!(validate_options(SupervisionOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn each_supervision_error_says_what_failed() {
+        let failed = || io::Error::other("busy");
+        let messages = [
+            SupervisionError::InvalidMilliseconds {
+                name: "timeout".into(),
+            },
+            SupervisionError::EmptyCommand,
+            SupervisionError::Spawn {
+                program: "node".into(),
+                source: io::ErrorKind::NotFound.into(),
+            },
+            SupervisionError::Spawn {
+                program: "node".into(),
+                source: io::Error::from_raw_os_error(NOT_RUNNABLE),
+            },
+            SupervisionError::Spawn {
+                program: "node".into(),
+                source: failed(),
+            },
+            SupervisionError::Wait(failed()),
+            SupervisionError::Signal(failed()),
+            SupervisionError::PlatformOperation {
+                operation: "create a pipe",
+                source: failed(),
+            },
+            SupervisionError::UnsupportedPlatform("no process groups"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages[0],
+            "timeout must be a positive integer number of milliseconds"
+        );
+        assert_eq!(messages[1], "test command must not be empty");
+        assert!(
+            messages[2].starts_with("could not spawn node: no such program: "),
+            "{}",
+            messages[2]
+        );
+        assert!(
+            messages[3].starts_with("could not spawn node: not allowed to run: "),
+            "{}",
+            messages[3]
+        );
+        assert_eq!(messages[4], "could not spawn node: busy");
+        assert_eq!(messages[5], "could not wait for test command: busy");
+        assert_eq!(messages[6], "could not install signal forwarding: busy");
+        assert_eq!(messages[7], "could not create a pipe: busy");
+        assert_eq!(
+            messages[8],
+            "unsupported process supervision platform: no process groups"
+        );
+    }
+
+    #[test]
+    fn each_signal_and_process_state_has_its_names() {
+        assert_eq!(
+            ForwardedSignal::ALL.map(ForwardedSignal::name),
+            ["SIGHUP", "SIGINT", "SIGTERM"]
+        );
+        assert_eq!(
+            ForwardedSignal::ALL.map(ForwardedSignal::exit_code),
+            [129, 130, 143]
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            ForwardedSignal::ALL.map(ForwardedSignal::raw),
+            [libc::SIGHUP, libc::SIGINT, libc::SIGTERM]
+        );
+        use sysinfo::ProcessStatus;
+        let letters = [
+            ProcessStatus::Idle,
+            ProcessStatus::Run,
+            ProcessStatus::Sleep,
+            ProcessStatus::Stop,
+            ProcessStatus::Zombie,
+            ProcessStatus::Tracing,
+            ProcessStatus::Dead,
+            ProcessStatus::Wakekill,
+            ProcessStatus::Waking,
+            ProcessStatus::Parked,
+            ProcessStatus::LockBlocked,
+            ProcessStatus::UninterruptibleDiskSleep,
+            ProcessStatus::Suspended,
+            ProcessStatus::Unknown(9),
+        ]
+        .map(process_status);
+        assert_eq!(
+            letters,
+            [
+                "I", "R", "S", "T", "Z", "t", "X", "K", "W", "P", "L", "D", "S", "?"
+            ]
+        );
     }
 }

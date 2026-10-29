@@ -381,8 +381,7 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
         generated_at: "now",
         test_exit_code: 0,
         coverage_model: go_coverage_model(),
-    })
-    .expect("frontend run");
+    });
     assert_eq!(run.tests, 2);
     let report =
         supercov_engine::coverage_report::analyze_coverage_results(&run.request).expect("report");

@@ -24,13 +24,20 @@ pub(crate) fn write_reports(
     diagnostics: &mut dyn std::io::Write,
     reports: &[Announced],
 ) -> std::io::Result<()> {
-    use std::io::Write as _;
+    write_reports_to(diagnostics, &mut std::io::stdout().lock(), reports)
+}
+
+/// [`write_reports`], each report to `output`.
+fn write_reports_to(
+    diagnostics: &mut dyn std::io::Write,
+    output: &mut dyn std::io::Write,
+    reports: &[Announced],
+) -> std::io::Result<()> {
     for announced in reports {
         if let Some(heading) = &announced.heading {
             writeln!(diagnostics, "{heading}")?;
             diagnostics.flush()?;
         }
-        let mut output = std::io::stdout().lock();
         output.write_all(announced.report.as_bytes())?;
         output.flush()?;
     }
@@ -80,12 +87,12 @@ fn failure_detail(stdout: &str) -> Option<&str> {
 /// Text without what a terminal reads as colour: on one, libtest writes
 /// `ok` as `ESC[32mokESC(BESC[m`.
 fn plain(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains('\u{1b}') {
+    let Some(mut at) = text.find('\u{1b}') else {
         return text.into();
-    }
+    };
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(at) = rest.find('\u{1b}') {
+    loop {
         out.push_str(&rest[..at]);
         let sequence = &rest[at + 1..];
         let length = match sequence.as_bytes().first() {
@@ -98,6 +105,10 @@ fn plain(text: &str) -> std::borrow::Cow<'_, str> {
             _ => 0,
         };
         rest = &sequence[length..];
+        match rest.find('\u{1b}') {
+            Some(next) => at = next,
+            None => break,
+        }
     }
     out.push_str(rest);
     out.into()
@@ -226,9 +237,9 @@ pub(crate) fn merged_report(reports: &[&str], quiet: bool, known: &[(&str, &str)
         }
         report.push_str("\nfailures:\n");
         failed.sort_unstable();
-        for name in &failed {
+        failed.iter().for_each(|name| {
             let _ = writeln!(report, "    {name}");
-        }
+        });
     }
     let _ = writeln!(
         report,
@@ -370,18 +381,19 @@ pub(crate) fn libtest_report(cases: &[CaseOutput<'_>], quiet: bool) -> String {
     // A terse line is ended by what follows it.
     if !failed.is_empty() {
         report.push_str("\nfailures:\n\n");
-        for detail in &details {
+        // A failed case left its detail.
+        details.iter().for_each(|detail| {
             report.push_str(detail);
             if !detail.ends_with('\n') {
                 report.push('\n');
             }
             report.push('\n');
-        }
+        });
         report.push_str("\nfailures:\n");
         failed.sort_unstable();
-        for name in &failed {
+        failed.iter().for_each(|name| {
             let _ = writeln!(report, "    {name}");
-        }
+        });
     }
     // Each process filtered out every test but its own.
     let filtered = (filtered.unwrap_or(0) + 1).saturating_sub(cases.len());
@@ -428,6 +440,88 @@ mod tests {
         format!(
             "\nrunning 1 test\ntest {name} ... FAILED\n\nfailures:\n\n---- {name} stdout ----\n\nthread '{name}' (7) panicked at src/lib.rs:8:9:\n{message}\n{BACKTRACE_NOTE}\n\nfailures:\n    {name}\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.02s\n\n"
         )
+    }
+
+    /// No report at all is a run of no doctest.
+    /// A stream that takes `writes` writes and then refuses them, and
+    /// refuses to flush when `flushes` is false.
+    struct Refusing {
+        writes: usize,
+        flushes: bool,
+    }
+
+    impl std::io::Write for Refusing {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self.writes == 0 {
+                return Err(std::io::Error::other("closed"));
+            }
+            self.writes -= 1;
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.flushes {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("closed"))
+            }
+        }
+    }
+
+    /// A report whose heading or text cannot be written, or not flushed,
+    /// says so rather than going on.
+    #[test]
+    fn a_report_that_cannot_be_written_says_so() {
+        let reports = [Announced {
+            heading: Some("     Running tests".into()),
+            report: "ok\n".into(),
+        }];
+        let write = |diagnostics: Refusing, output: Refusing| {
+            let (mut diagnostics, mut output) = (diagnostics, output);
+            write_reports_to(&mut diagnostics, &mut output, &reports).is_ok()
+        };
+        let fine = || Refusing {
+            writes: usize::MAX,
+            flushes: true,
+        };
+        assert!(write(fine(), fine()));
+        assert!(!write(
+            Refusing {
+                writes: 0,
+                flushes: true
+            },
+            fine()
+        ));
+        assert!(!write(
+            Refusing {
+                writes: usize::MAX,
+                flushes: false
+            },
+            fine()
+        ));
+        assert!(!write(
+            fine(),
+            Refusing {
+                writes: 0,
+                flushes: true
+            }
+        ));
+        assert!(!write(
+            fine(),
+            Refusing {
+                writes: usize::MAX,
+                flushes: false
+            }
+        ));
+    }
+
+    #[test]
+    fn no_report_merges_into_a_run_of_nothing() {
+        let report = merged_report(&[], false, &[]);
+        assert!(report.starts_with("\nrunning 0 tests\n"), "{report}");
+        assert!(
+            report.contains("test result: ok. 0 passed; 0 failed"),
+            "{report}"
+        );
     }
 
     #[test]
@@ -597,6 +691,19 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
             ),
             "{terse}"
         );
+        // A result line cut off before its counts gives no word of its own:
+        // the plain one is written.
+        let cut = [CaseOutput {
+            name: "a",
+            exit: 0,
+            stdout: "\nrunning 1 test\ntest a ... ok\n\ntest result: ok",
+            stderr: "",
+        }];
+        assert!(
+            libtest_report(&cut, false).contains("test result: ok. 1 passed;"),
+            "{}",
+            libtest_report(&cut, false)
+        );
     }
 
     #[test]
@@ -675,6 +782,8 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
         ] {
             assert!(counts(refused).is_none(), "{refused}");
         }
+        // A failure's heading with no list of failures after it, cut off.
+        assert_eq!(failure_detail("\nfailures:\n\n---- t stdout ----\n"), None);
     }
 
     /// Reports with no lines and no result still make one report; a quiet

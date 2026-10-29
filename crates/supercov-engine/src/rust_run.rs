@@ -1,8 +1,8 @@
 //! Public, isolated Rust coverage run lifecycle.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeSet,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,
@@ -75,6 +75,9 @@ fn is_coverage_output(name: &str) -> bool {
     matches!(extension, Some("profraw" | "profdata"))
 }
 
+/// Every path the walk visits was joined onto the root it started from.
+const UNDER_ROOT: &str = "a walked path lies under the root";
+
 fn collect_project_inputs(
     root: &Path,
     directory: &Path,
@@ -101,7 +104,7 @@ fn collect_project_inputs(
         {
             continue;
         }
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let file_type = fs::file_type(&entry).map_err(|error| error.to_string())?;
         if file_type.is_dir() {
             // What a build wrote, wherever it lies: a Cargo target directory
             // of a crate in a subdirectory, the wasm wasm-bindgen generated.
@@ -111,14 +114,10 @@ fn collect_project_inputs(
             }
             collect_project_inputs(root, &path, false, regular, links)?;
         } else if file_type.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| format!("project input escaped root: {}", path.display()))?;
+            let relative = path.strip_prefix(root).expect(UNDER_ROOT);
             regular.push(relative.to_owned());
         } else if file_type.is_symlink() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| format!("project link escaped root: {}", path.display()))?;
+            let relative = path.strip_prefix(root).expect(UNDER_ROOT);
             let target = fs::read_link(&path).map_err(|error| error.to_string())?;
             links.push(format!(
                 "{}=>{}",
@@ -273,6 +272,10 @@ fn run_direct_rust_timed(
     if request.command.is_empty() {
         return Err("test command must not be empty".into());
     }
+    // Read before anything is started, as every language's run reads them:
+    // a value that is no number of milliseconds is refused here.
+    let supervision = crate::process_supervision::SupervisionOptions::from_environment()
+        .map_err(|error| error.to_string())?;
     // The shared probe runtime maps its evidence file and hooks thread and
     // process creation on macOS, Linux and Windows; on any other host every
     // probe is a no-op, so a run there would report zero coverage without a
@@ -293,12 +296,11 @@ fn run_direct_rust_timed(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         // `wasm-pack test` is learned once and then run as the `cargo test` it
@@ -336,12 +338,15 @@ fn run_direct_rust_timed(
             &FrontendIntegrityInputs::embedded_rust(),
         )
         .map_err(|error| error.to_string())?;
-        let build_cache_key = rust_build_cache_key(&integrity, &request.command)
-            .map_err(|error| error.to_string())?;
+        let build_cache_key = rust_build_cache_key(
+            &integrity,
+            &integrity_inputs.execution_configuration,
+            &request.command,
+        );
 
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
-        let workspace = cached_workspace_path(&root, &lock).map_err(|error| error.to_string())?;
+        let workspace = cached_workspace_path(&root, &lock);
         if let Some(planted) = crate::workspace::planted_cargo_configuration(&root, &workspace) {
             return Err(format!(
                 "{} would change how Supercov builds the project but not how `cargo test` does; remove it",
@@ -355,12 +360,11 @@ fn run_direct_rust_timed(
         let mut copy_ms = 0.0;
         let reused_build = cached.is_some();
         let mut project = if let Some(cached) = cached {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] detected Rust; reusing authenticated instrumented workspace {}",
                 workspace.display()
-            )
-            .map_err(|error| error.to_string())?;
+            );
             PreparedRustProject {
                 workspace_root: workspace.clone(),
                 target_directory: target_directory.clone(),
@@ -376,12 +380,11 @@ fn run_direct_rust_timed(
             let workspace =
                 prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
             copy_ms = elapsed_ms(copy_started);
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] detected Rust; instrumenting isolated Cargo workspace {}",
                 workspace.display()
-            )
-            .map_err(|error| error.to_string())?;
+            );
             let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
             let roots = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
                 &root, &workspace, &ambient,
@@ -404,22 +407,21 @@ fn run_direct_rust_timed(
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         if phase_timing {
             let preparation = &project.preparation;
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] workspace timings cache-check={cache_read_ms:.1}ms copy={copy_ms:.1}ms metadata={:.1}ms discovery={:.1}ms instrument={:.1}ms runtime={:.1}ms",
                 preparation.metadata_ms,
                 preparation.discovery_ms,
                 preparation.instrument_ms,
                 preparation.runtime_ms,
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let nextest = request
             .command
             .windows(2)
             .any(|pair| pair == ["nextest", "run"]);
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "{}",
             if nextest {
@@ -427,8 +429,7 @@ fn run_direct_rust_timed(
             } else {
                 "[supercov] building once and running each libtest case and doctest in its own process"
             }
-        )
-        .map_err(|error| error.to_string())?;
+        );
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
         // A test that starts a Rust Worker with `wrangler dev` finds
@@ -444,6 +445,10 @@ fn run_direct_rust_timed(
         )?;
         let before = crate::workspace::workspace_output_baseline(&workspace)
             .map_err(|error| error.to_string())?;
+        let deadline = crate::child_signal_guard::Deadline::start(
+            supervision.timeout,
+            supervision.termination_grace,
+        );
         let run = run_prepared_rust_tests(
             &project,
             command,
@@ -452,8 +457,32 @@ fn run_direct_rust_timed(
             rust_workers.as_ref(),
             &runner_environment,
             diagnostics,
-        )
-        .map_err(|error| error.to_string())?;
+        );
+        // Past the deadline the tests that ran are the run, and it ends as
+        // a supervised command that timed out does.
+        let run = match (run, deadline.passed()) {
+            (Ok(mut run), Some(milliseconds))
+                if run.request.raw_results.iter().any(|raw| raw.role == "test") =>
+            {
+                let _ = writeln!(
+                    diagnostics,
+                    "[supercov] command timed out after {milliseconds} ms: the tests still running were stopped, and no other was started"
+                );
+                run.exit_code = supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE;
+                run
+            }
+            (Ok(run), None) => run,
+            // No test reported before the deadline: there is nothing to
+            // publish, as for a supervised command.
+            (_, Some(milliseconds)) => {
+                return Err(format!(
+                    "the test command exited {} before any test reported an outcome: it ran past SUPERCOV_COMMAND_TIMEOUT_MS ({milliseconds} ms), and no run was published",
+                    supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE
+                ));
+            }
+            (Err(error), None) => return Err(error.to_string()),
+        };
+        drop(deadline);
         // A snapshot a test accepted, a report: they stayed in the copy, and
         // the project had the old ones or none.
         let outputs = crate::workspace::sync_outputs_of(
@@ -470,7 +499,7 @@ fn run_direct_rust_timed(
             .into_iter()
             .filter(|line| !line.contains("stayed in the isolated workspace"))
         {
-            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "{line}");
         }
         write_rust_build_cache(
             &root,
@@ -491,10 +520,7 @@ fn run_direct_rust_timed(
             .join(&request.run_id)
             .join("evidence.raw.gz");
         let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                &source_inputs,
-            )?,
+            crate::source_capture::append(run.archive_entries(), &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
@@ -566,18 +592,13 @@ fn run_direct_rust_timed(
     if result.is_err() {
         let _ =
             remove_stored_tree_deferred(&root, &root.join(".supercov/work").join(&request.run_id));
-        if let Ok(workspace) = crate::fault::or(
-            "cleanup-copy-path",
-            || Err(crate::workspace::WorkspaceError::UnsafePath(root.clone())),
-            || cached_workspace_path(&root, &lock),
-        ) {
-            let _ = remove_stored_tree_deferred(
-                &root,
-                &workspace
-                    .join(".supercov/rust-evidence")
-                    .join(&request.run_id),
-            );
-        }
+        let workspace = cached_workspace_path(&root, &lock);
+        let _ = remove_stored_tree_deferred(
+            &root,
+            &workspace
+                .join(".supercov/rust-evidence")
+                .join(&request.run_id),
+        );
     }
     let release = lock.release().map_err(|error| error.to_string());
     match (result, release) {
@@ -590,6 +611,41 @@ fn run_direct_rust_timed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link in the project is part of what identifies a run, by where it
+    /// points; an empty directory adds nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_the_project_is_part_of_its_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-inputs-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='a'\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        let command = ["cargo".to_owned(), "test".to_owned()];
+        let plain = collect_integrity_inputs(&root, &command).unwrap();
+        std::os::unix::fs::symlink("lib.rs", root.join("src/alias.rs")).unwrap();
+        let linked = collect_integrity_inputs(&root, &command).unwrap();
+        assert_ne!(format!("{plain:?}"), format!("{linked:?}"));
+        // A listing, an entry, a directory below, or a link that cannot be
+        // read fails the walk.
+        for fault in [
+            "fs.read_dir",
+            "fs.read_dir entry",
+            "fs.read_dir@3",
+            "fs.read_link",
+        ] {
+            assert!(
+                crate::fault::during(fault, || collect_integrity_inputs(&root, &command)).is_err(),
+                "{fault}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn project(name: &str) -> PathBuf {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

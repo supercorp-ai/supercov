@@ -6,8 +6,9 @@
 //! thread. The runtime never computes coverage: the reader rebuilds the
 //! records in execution order and the evidence model takes them from there.
 
+use crate::fault_fs as fs;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -66,6 +67,25 @@ pub const EVIDENCE_DIR_ENV: &str = "SUPERCOV_RUST_EVIDENCE_DIR";
 /// Every process a measured command starts finds the run's id here: a test
 /// or a harness that wants to know it is measured looks for this variable.
 pub const RUN_ID_ENV: &str = "SUPERCOV_RUN_ID";
+
+/// The environment a measured command runs in: the inherited one, with the
+/// run's id in `RUN_ID_ENV` and, where Supercov set one of the command's own
+/// variables (Go's `GOFLAGS`, Maven's `MAVEN_OPTS`), that value in place of
+/// the inherited one.
+pub(crate) fn measured_environment(
+    inherited: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    replaced: Option<(&str, String)>,
+    run_id: &str,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let replaced_name = replaced.as_ref().map(|(name, _)| *name);
+    inherited
+        .filter(|(name, _)| {
+            name != RUN_ID_ENV && replaced_name.is_none_or(|replaced| name != replaced)
+        })
+        .chain(replaced.map(|(name, value)| (name.into(), value.into())))
+        .chain([(RUN_ID_ENV.into(), run_id.into())])
+        .collect()
+}
 /// The instrumentation the tests a runner starts belong to: a runner of
 /// Supercov's (nextest's target runner, the doctest wrappers) runs in a
 /// process of its own and reads it from here.
@@ -96,34 +116,16 @@ pub fn render_rust_region_runtime(
     layout: &crate::rust_instrumenter::RustProbeLayout,
     // The ordinals of the `cfgs` in this crate's own files.
     crate_cfgs: &[usize],
-) -> Result<String, String> {
-    let valid_identifier = !module_name.is_empty()
-        && module_name.bytes().enumerate().all(|(index, byte)| {
-            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
-        });
-    if !valid_identifier {
-        return Err("invalid Rust runtime module name".into());
-    }
-    if token.is_empty() || token.len() > 16 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid Rust region token".into());
-    }
-    if crate_key.is_empty() || !crate_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid Rust runtime crate key".into());
-    }
+) -> String {
+    // Every name here is Supercov's own: the runtime module chosen to clash
+    // with none of the crate's, the instrumentation's hex token and a crate
+    // key of it, and gates the instrumenter read with `cfg!`'s parser.
     let mut table = String::new();
     for ordinal in crate_cfgs {
-        let gate = layout
-            .cfgs
-            .get(*ordinal)
-            .ok_or("a crate names a cfg gate the layout lacks")?;
-        // Re-parsed, so only a predicate `cfg!` accepts reaches the source.
-        let predicate = gate
-            .predicate
-            .parse::<cargo_platform::CfgExpr>()
-            .map_err(|error| format!("invalid cfg predicate {:?}: {error}", gate.predicate))?;
+        let predicate = &layout.cfgs[*ordinal].predicate;
         table.push_str(&format!("({ordinal}, cfg!({predicate})), "));
     }
-    Ok(REGION_TEMPLATE
+    REGION_TEMPLATE
         .replace("__SUPERCOV_MODULE__", module_name)
         .replace("__SUPERCOV_HITS__", &layout.hits.len().to_string())
         .replace(
@@ -144,7 +146,7 @@ pub fn render_rust_region_runtime(
         .replace(
             "__SUPERCOV_CLEAR_EXPORT__",
             &format!("__supercov_clear_{crate_key}"),
-        ))
+        )
 }
 
 struct RegionHeader {
@@ -160,31 +162,31 @@ fn region_header(
     layout: &crate::rust_instrumenter::RustProbeLayout,
 ) -> Result<RegionHeader, RustProbeReadError> {
     const HEADER: usize = 128;
-    let u32_at = |offset: usize| -> Result<u32, RustProbeReadError> {
-        bytes
-            .get(offset..offset + 4)
-            .map(|word| u32::from_le_bytes(word.try_into().unwrap_or([0; 4])))
-            .ok_or(RustProbeReadError::InvalidHeader)
+    let header = bytes
+        .get(..HEADER)
+        .ok_or(RustProbeReadError::InvalidHeader)?;
+    let u32_at = |offset: usize| {
+        u32::from_le_bytes(
+            header[offset..offset + 4]
+                .try_into()
+                .expect("four bytes of the header"),
+        )
     };
-    if bytes.get(..8) != Some(REGION_MAGIC.as_slice())
-        || u32_at(8)? != REGION_VERSION
-        || u32_at(12)? as usize != HEADER
-        || u32_at(16)? as usize != layout.hits.len()
-        || u32_at(20)? as usize != layout.assertions.len()
-        || u32_at(24)? as usize != layout.decisions.len()
-        || u32_at(72)? as usize != layout.cfgs.len()
+    // The token, Supercov's own hex, fits the header's sixteen bytes for it.
+    if header[..8] != *REGION_MAGIC
+        || u32_at(8) != REGION_VERSION
+        || u32_at(12) as usize != HEADER
+        || u32_at(16) as usize != layout.hits.len()
+        || u32_at(20) as usize != layout.assertions.len()
+        || u32_at(24) as usize != layout.decisions.len()
+        || u32_at(72) as usize != layout.cfgs.len()
+        || header[56..56 + token.len()] != *token.as_bytes()
     {
         return Err(RustProbeReadError::InvalidHeader);
     }
-    let stored_token = bytes
-        .get(56..56 + token.len())
-        .ok_or(RustProbeReadError::InvalidHeader)?;
-    if stored_token != token.as_bytes() {
-        return Err(RustProbeReadError::InvalidHeader);
-    }
     Ok(RegionHeader {
-        entries_per_decision: u32_at(28)? as usize,
-        body_at: u32_at(32)? as usize,
+        entries_per_decision: u32_at(28) as usize,
+        body_at: u32_at(32) as usize,
     })
 }
 
@@ -374,37 +376,44 @@ pub fn read_rust_cfg_settlement(
     if layout.cfgs.is_empty() {
         return Ok(settled);
     }
-    let mut directories = vec![root.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(RustProbeReadError::Io(error.to_string())),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| RustProbeReadError::Io(error.to_string()))?;
-            let kind = entry
-                .file_type()
+    settle_under(root, token, layout, &mut settled)?;
+    Ok(settled)
+}
+
+/// What the regions of `token` at any depth under `directory` said of the
+/// `cfg` gates, folded into `settled`.
+fn settle_under(
+    directory: &Path,
+    token: &str,
+    layout: &crate::rust_instrumenter::RustProbeLayout,
+    settled: &mut [u8],
+) -> Result<(), RustProbeReadError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(RustProbeReadError::Io(error.to_string())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+        let kind =
+            fs::file_type(&entry).map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_dir() {
+            settle_under(&entry.path(), token, layout, settled)?;
+        } else if kind.is_file()
+            && name.starts_with(&format!("{token}-"))
+            && name.ends_with(".region")
+        {
+            let bytes = fs::read(entry.path())
                 .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if kind.is_dir() {
-                directories.push(entry.path());
-            } else if kind.is_file()
-                && name.starts_with(&format!("{token}-"))
-                && name.ends_with(".region")
-            {
-                let bytes = fs::read(entry.path())
-                    .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
-                for (slot, bits) in settled
-                    .iter_mut()
-                    .zip(parse_rust_region_cfgs(&bytes, token, layout)?)
-                {
-                    *slot |= bits;
-                }
-            }
+            // Both as long as the layout's cfgs, which are some.
+            settled
+                .iter_mut()
+                .zip(parse_rust_region_cfgs(&bytes, token, layout)?)
+                .for_each(|(slot, bits)| *slot |= bits);
         }
     }
-    Ok(settled)
+    Ok(())
 }
 
 /// Every region of `token`'s instrumentation in a test's evidence
@@ -428,8 +437,7 @@ pub fn read_rust_region_directory(
         if !name.starts_with(&format!("{token}-")) || !name.ends_with(".region") {
             continue;
         }
-        if !entry
-            .file_type()
+        if !fs::file_type(&entry)
             .map_err(|error| RustProbeReadError::Io(error.to_string()))?
             .is_file()
         {
@@ -464,6 +472,60 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    /// A measured command's environment: the run's id in place of any it
+    /// inherited, and a variable Supercov set in place of the inherited one;
+    /// the rest as inherited.
+    #[test]
+    fn a_measured_command_gets_the_run_id_and_what_supercov_set() {
+        use std::ffi::OsString;
+        let pair = |name: &str, value: &str| (OsString::from(name), OsString::from(value));
+        let inherited = || {
+            [
+                pair(RUN_ID_ENV, "outer"),
+                pair("GOFLAGS", "-v"),
+                pair("HOME", "/home/t"),
+            ]
+            .into_iter()
+        };
+        assert_eq!(
+            super::measured_environment(inherited(), Some(("GOFLAGS", "-count=1".into())), "run"),
+            [
+                pair("HOME", "/home/t"),
+                pair("GOFLAGS", "-count=1"),
+                pair(RUN_ID_ENV, "run"),
+            ]
+        );
+        assert_eq!(
+            super::measured_environment(inherited(), None, "run"),
+            [
+                pair("GOFLAGS", "-v"),
+                pair("HOME", "/home/t"),
+                pair(RUN_ID_ENV, "run"),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_probe_read_error_says_what_failed() {
+        use super::RustProbeReadError as E;
+        let messages = [
+            E::Io("gone".into()),
+            E::UnsafeEntry("../p".into()),
+            E::InvalidHeader,
+            E::InvalidRecord(4),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Rust probe I/O failed: gone",
+                "unsafe Rust probe entry: ../p",
+                "invalid Rust probe header",
+                "invalid Rust probe record at line 4",
+            ]
+        );
+    }
+
     use super::*;
     use crate::rust_instrumenter::{RustProbeLayout, instrument_rust_source};
     use std::collections::BTreeMap;
@@ -482,7 +544,6 @@ mod tests {
             probes,
             &crate_cfgs,
         )
-        .unwrap()
     }
 
     /// Every region an evidence directory holds, read back as records.
@@ -1447,6 +1508,33 @@ fn main() {
             ),
             Err(RustProbeReadError::InvalidRecord(1))
         );
+        // Each field of a decision record that cannot be read is named by
+        // its line, and a record cut off mid-write is passed over.
+        let probes = layout(&[], &["rs:decision:d"]);
+        let region = empty_region(&probes);
+        for record in [
+            &b"D\t1\t1\t0\t\xff\t1\n"[..],
+            b"D\t1\t1\tx\t12\t1\n",
+            b"D\t1\t1\t9\t12\t1\n",
+            b"D\t1\t1\t0\t13\t1\n",
+            b"D\tx\t1\t0\t12\t1\n",
+            b"D\t1\tx\t0\t12\t1\n",
+        ] {
+            assert_eq!(
+                parse_rust_region(&region, Some(record), TOKEN, &probes),
+                Err(RustProbeReadError::InvalidRecord(1)),
+                "{}",
+                String::from_utf8_lossy(record)
+            );
+        }
+        let read = parse_rust_region(
+            &region,
+            Some(b"D\t1\t1\t0\t102\t1\nD\t2\t1"),
+            TOKEN,
+            &probes,
+        )
+        .unwrap();
+        assert_eq!(read.len(), 1);
     }
 
     /// A run's regions are found at any depth; anything else under the root,
@@ -1490,7 +1578,60 @@ fn main() {
             read_rust_cfg_settlement(&file, TOKEN, &probes),
             Err(RustProbeReadError::Io(_))
         ));
+        // An entry, its type, a directory below or a region that cannot be
+        // read stops the settlement.
+        for fault in [
+            "fs.read_dir entry#rust_runtime.rs:391",
+            "fs.read_dir entry#rust_runtime.rs:391@2",
+            "fs.file_type#rust_runtime.rs:399",
+            "fs.read#rust_runtime.rs:407",
+        ] {
+            let read =
+                crate::fault::during(fault, || read_rust_cfg_settlement(&root, TOKEN, &probes));
+            assert!(
+                matches!(read, Err(RustProbeReadError::Io(_))),
+                "{fault}: {read:?}"
+            );
+        }
+        // A region that is none.
+        fs::write(root.join(format!("{TOKEN}-9.region")), b"not a region").unwrap();
+        assert_eq!(
+            read_rust_cfg_settlement(&root, TOKEN, &probes),
+            Err(RustProbeReadError::InvalidHeader)
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A region cut short after its header, its page still marked touched,
+    /// holds none of the slots past its end.
+    #[test]
+    fn a_region_cut_short_reads_no_slot_past_its_end() {
+        let probes = layout(&["rs:point:a"], &[]);
+        let mut region = empty_region(&probes);
+        region[128] |= 1;
+        let body_at = u32::from_le_bytes(region[32..36].try_into().unwrap()) as usize;
+        region.truncate(body_at + 4);
+        assert_eq!(
+            parse_rust_region(&region, None, TOKEN, &probes),
+            Ok(Vec::new())
+        );
+    }
+
+    /// A decision slot marked as written but holding no first sighting --
+    /// torn as it was written -- reads as nothing.
+    #[test]
+    fn a_decision_slot_with_no_first_sighting_reads_as_nothing() {
+        let probes = layout(&[], &["rs:decision:d"]);
+        let mut region = empty_region(&probes);
+        // One slot a decision, its body past the page map.
+        region[28..32].copy_from_slice(&1u32.to_le_bytes());
+        region[32..36].copy_from_slice(&256u32.to_le_bytes());
+        region[128] |= 1;
+        region[256] = 2;
+        assert_eq!(
+            parse_rust_region(&region, None, TOKEN, &probes),
+            Ok(Vec::new())
+        );
     }
 
     #[test]
@@ -1513,6 +1654,19 @@ fn main() {
             read_rust_region_directory(&directory, TOKEN, &probes),
             Err(RustProbeReadError::Io(_))
         ));
+        // An entry that cannot be read, and a region that is none.
+        assert!(matches!(
+            crate::fault::during("fs.read_dir entry#rust_runtime.rs:429", || {
+                read_rust_region_directory(&directory, TOKEN, &probes)
+            }),
+            Err(RustProbeReadError::Io(_))
+        ));
+        fs::remove_dir(directory.join(format!("{TOKEN}-1.overflow"))).unwrap();
+        fs::write(directory.join(format!("{TOKEN}-1.region")), b"not a region").unwrap();
+        assert_eq!(
+            read_rust_region_directory(&directory, TOKEN, &probes),
+            Err(RustProbeReadError::InvalidHeader)
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1608,35 +1762,6 @@ fn main() {
         let probes = instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1")
             .unwrap()
             .probes;
-        let render = |module: &str, token: &str, key: &str, cfgs: &[usize]| {
-            render_rust_region_runtime(module, token, key, &probes, cfgs).err()
-        };
-        assert_eq!(render("__supercov_runtime_v1", TOKEN, "abcdef", &[]), None);
-        for module in ["", "1runtime", "run-time"] {
-            assert_eq!(
-                render(module, TOKEN, "abcdef", &[]).as_deref(),
-                Some("invalid Rust runtime module name"),
-                "{module:?}"
-            );
-        }
-        for token in ["", "0123456789abcdef0", "xyz"] {
-            assert_eq!(
-                render("rt", token, "abcdef", &[]).as_deref(),
-                Some("invalid Rust region token"),
-                "{token:?}"
-            );
-        }
-        for key in ["", "key"] {
-            assert_eq!(
-                render("rt", TOKEN, key, &[]).as_deref(),
-                Some("invalid Rust runtime crate key"),
-                "{key:?}"
-            );
-        }
-        assert_eq!(
-            render("rt", TOKEN, "abcdef", &[99]).as_deref(),
-            Some("a crate names a cfg gate the layout lacks")
-        );
         // A header as the runtime writes it, then each field wrong in turn.
         let mut header = vec![0u8; 128];
         header[..8].copy_from_slice(REGION_MAGIC);
@@ -1687,6 +1812,16 @@ fn main() {
                 region_header(&bytes, TOKEN, &probes),
                 Err(RustProbeReadError::InvalidHeader)
             ));
+        }
+        // A header cut short anywhere is no header.
+        for cut in 0..header.len().min(76) {
+            assert!(
+                matches!(
+                    region_header(&header[..cut], TOKEN, &probes),
+                    Err(RustProbeReadError::InvalidHeader)
+                ),
+                "cut at {cut}"
+            );
         }
     }
 }

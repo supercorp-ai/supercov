@@ -486,6 +486,23 @@ fn coverage_invocation(
     arguments: &[String],
     json_output: bool,
 ) -> Result<PublicQueryInvocation, PublicQueryError> {
+    let (request, json) = coverage_request(run_id, command, arguments, json_output)?;
+    Ok(PublicQueryInvocation::Coverage {
+        request: Box::new(request),
+        newer_run_id: None,
+        agent_command: format!("coverage.{command}"),
+        json,
+    })
+}
+
+/// The request `runs <run> <command> <arguments>` makes of the run's index,
+/// and whether its answer is asked for as JSON.
+pub(crate) fn coverage_request(
+    run_id: String,
+    command: &str,
+    arguments: &[String],
+    json_output: bool,
+) -> Result<(IndexedQueryRequest, bool), PublicQueryError> {
     let options = parse_options(command, arguments, json_output)?;
     let agent_command = format!("coverage.{command}");
     let mut request = IndexedQueryRequest {
@@ -575,7 +592,7 @@ fn coverage_invocation(
             // what a query costs.
             let mut selectors = options.positional.clone();
             if let Some(path) = &options.from_file {
-                let text = std::fs::read_to_string(path).map_err(|error| {
+                let text = supercov_engine::fault_fs::read_to_string(path).map_err(|error| {
                     PublicQueryError::invalid(
                         Some(&agent_command),
                         json_output,
@@ -596,19 +613,20 @@ fn coverage_invocation(
                     "Usage: supercov runs <run-id> line <source-file:line>... [--from-file <path>]",
                 ));
             }
-            let mut locations = Vec::with_capacity(selectors.len());
-            for selector in &selectors {
-                let Some(location) = parse_location(selector) else {
-                    let mut error = PublicQueryError::invalid(
-                        Some(&agent_command),
-                        json_output,
-                        "Expected <source-file>:<line>, with lines counted from 1",
-                    );
-                    error.error.details = Some(json!({ "selector": selector }));
-                    return Err(error);
-                };
-                locations.push(location);
-            }
+            let mut locations = selectors
+                .iter()
+                .map(|selector| {
+                    parse_location(selector).ok_or_else(|| {
+                        let mut error = PublicQueryError::invalid(
+                            Some(&agent_command),
+                            json_output,
+                            "Expected <source-file>:<line>, with lines counted from 1",
+                        );
+                        error.error.details = Some(json!({ "selector": selector }));
+                        error
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let (file, line) = locations.remove(0);
             request.file = Some(file);
             request.line = Some(line);
@@ -624,18 +642,13 @@ fn coverage_invocation(
             }
             request.selector = Some(options.positional.join(" ").to_lowercase());
         }
-        "minimize" => {
+        // `minimize`, the last of the commands the hierarchy lets through.
+        _ => {
             request.target = options.target;
             request.max_states = Some(DEFAULT_MAX_STATES);
         }
-        _ => unreachable!("coverage hierarchy validates child commands"),
     }
-    Ok(PublicQueryInvocation::Coverage {
-        request: Box::new(request),
-        newer_run_id: None,
-        agent_command,
-        json: options.json,
-    })
+    Ok((request, options.json))
 }
 
 pub fn parse_public_query(
@@ -755,6 +768,45 @@ pub fn parse_public_query(
 
 #[cfg(test)]
 mod tests {
+    /// Each query's help names its own usage; an unknown one, the list.
+    #[test]
+    fn each_query_s_help_is_its_own_usage() {
+        let help = |child: &str| {
+            help_for(
+                "runs",
+                &["latest".to_owned(), child.to_owned(), "--help".to_owned()],
+            )
+            .unwrap()
+        };
+        for child in [
+            "summary",
+            "files",
+            "gaps",
+            "tests-without-evidence",
+            "kinds",
+            "runners",
+            "scope",
+            "file",
+            "decision",
+            "line",
+            "test",
+            "minimize",
+        ] {
+            let usage = help(child);
+            let named = if child == "summary" {
+                "[--filter"
+            } else {
+                child.split('-').next().unwrap()
+            };
+            assert!(
+                usage.starts_with("Usage: supercov runs <run-id> "),
+                "{child}: {usage}"
+            );
+            assert!(usage.contains(named), "{child}: {usage}");
+        }
+        assert_eq!(help("unknown"), "Usage: supercov runs <run-id> --help\n");
+    }
+
     use super::*;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -860,5 +912,74 @@ mod tests {
             error.error.message,
             "--limit must be a number of entries, or 0 for all of them"
         );
+    }
+
+    /// Each option missing what it needs, or given where it means nothing,
+    /// is refused with what it needs.
+    #[test]
+    fn an_option_missing_its_value_or_out_of_place_says_what_it_needs() {
+        for (arguments, message) in [
+            (&["run-1", "--run"][..], "--run requires a run ID"),
+            (&["run-1", "--kind"], "--kind requires a test kind"),
+            (&["run-1", "--runner"], "--runner requires a runner name"),
+            (&["run-1", "--tag", ""], "--tag requires a tag"),
+            (&["run-1", "--title"], "--title requires text"),
+            (&["run-1", "--test-file", ""], "--test-file requires"),
+            (
+                &["run-1", "files", "--files"],
+                "--files is only supported by",
+            ),
+            (
+                &["run-1", "line", "--from-file"],
+                "--from-file needs a file",
+            ),
+            (
+                &["run-1", "file", "a.rs", "--group", "dir"],
+                "--group must be decision",
+            ),
+            (&["run-1", "files", "--group"], "--group must be dir"),
+            (
+                &["run-1", "gaps", "--group", "dir"],
+                "--group is only supported by",
+            ),
+            (
+                &["run-1", "file"],
+                "Usage: supercov runs <run-id> file <source-file>",
+            ),
+            (
+                &["run-1", "line", "a.rs:x"],
+                "Expected <source-file>:<line>",
+            ),
+            (
+                &["run-1", "line", "--from-file", "/nonexistent/locations"],
+                "Could not read /nonexistent/locations",
+            ),
+        ] {
+            let error = parse_public_query("runs", &args(arguments)).unwrap_err();
+            assert_eq!(
+                error.error.code,
+                ErrorCode::InvalidArgument,
+                "{arguments:?}"
+            );
+            assert!(
+                error.error.message.contains(message),
+                "{arguments:?}: {}",
+                error.error.message
+            );
+        }
+        let error = parse_public_query("diff", &args(&["run-1"])).unwrap_err();
+        assert_eq!(
+            error.error.message,
+            "Usage: supercov diff <older-run> <newer-run>"
+        );
+        let error = parse_public_query("diff", &args(&["run-1", "--kind"])).unwrap_err();
+        assert_eq!(error.error.message, "--kind requires a test kind");
+        let PublicQueryInvocation::Coverage { request, .. } =
+            parse_public_query("runs", &args(&["run-1", "minimize", "--target", "90"])).unwrap()
+        else {
+            panic!("expected a minimize query");
+        };
+        assert_eq!(request.command, "minimize");
+        assert_eq!(request.max_states, Some(DEFAULT_MAX_STATES));
     }
 }

@@ -5,9 +5,9 @@
 //! runtime probe plan, and records which files were included, excluded or
 //! unparseable so the run can say exactly what its denominator covers.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -135,10 +135,10 @@ fn walk(
                 path.display()
             )
         })?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let file_type = fs::file_type(&entry).map_err(|error| error.to_string())?;
         let relative = path
             .strip_prefix(root)
-            .map_err(|_| format!("path escaped root: {}", path.display()))?
+            .expect("a walked path lies under the root")
             .to_string_lossy()
             .replace('\\', "/");
         if file_type.is_dir() {
@@ -342,7 +342,7 @@ fn prepare(
             },
             entries,
         })
-        .map_err(|error| error.to_string())?,
+        .expect("plain data serializes"),
     );
     Ok(Some(PreparedPythonProject {
         root: root.to_owned(),
@@ -553,6 +553,26 @@ mod tests {
                 "h11/examples/echo.py"
             ]
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A source that is not UTF-8 is not measured and says why; a name
+    /// that is not UTF-8 stops discovery, naming it.
+    #[test]
+    fn a_source_or_name_that_is_not_utf8_is_named() {
+        let root = fixture("not-utf8");
+        write(&root, "pkg/good.py", "def f(x):\n    return x\n");
+        fs::write(root.join("pkg/binary.py"), [0xff, 0xfe, b'\n']).unwrap();
+        let project = prepare_python_project(&root, None).unwrap();
+        let said = serde_json::to_string(&project.manifest).unwrap();
+        assert!(said.contains("source is not valid UTF-8"), "{said}");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::write(root.join(std::ffi::OsStr::from_bytes(b"pkg/\xff.py")), "").unwrap();
+            let refused = discover_python_files(&root).unwrap_err();
+            assert!(refused.contains("non-UTF-8 path"), "{refused}");
+        }
         fs::remove_dir_all(root).ok();
     }
 

@@ -93,8 +93,9 @@ fn mcdc_records(conditions: &[ConditionRecord], out: &mut String) -> (usize, usi
         let apart = sizes.windows(2).all(|pair| pair[0] != pair[1]);
         let mut groups = if apart { decisions } else { vec![line] };
         groups.sort_by_key(|group| group.len());
-        for group in groups {
-            for (index, condition) in group.iter().enumerate() {
+        // A line chunk holds a condition, so each group does.
+        groups.into_iter().for_each(|group| {
+            group.iter().enumerate().for_each(|(index, condition)| {
                 let named = condition
                     .source
                     .split_whitespace()
@@ -116,8 +117,8 @@ fn mcdc_records(conditions: &[ConditionRecord], out: &mut String) -> (usize, usi
                         group.len()
                     );
                 }
-            }
-        }
+            });
+        });
     }
     (found, hit)
 }
@@ -137,10 +138,7 @@ pub fn lcov(view: &RunView) -> String {
             // a made-up frequency here would be displayed as one.
             let _ = writeln!(out, "FNDA:{},{}", u8::from(function.covered), function.name);
         }
-        let (covered_functions, functions) = file
-            .metric(Metric::Functions)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (covered_functions, functions) = file.metric(Metric::Functions).counts();
         let _ = writeln!(out, "FNF:{functions}");
         let _ = writeln!(out, "FNH:{covered_functions}");
         for branch in &file.branches {
@@ -153,10 +151,7 @@ pub fn lcov(view: &RunView) -> String {
                 if branch.taken { "1" } else { "-" }
             );
         }
-        let (covered_branches, branches) = file
-            .metric(Metric::Branches)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (covered_branches, branches) = file.metric(Metric::Branches).counts();
         let _ = writeln!(out, "BRF:{branches}");
         let _ = writeln!(out, "BRH:{covered_branches}");
         let (conditions, shown) = mcdc_records(&file.conditions, &mut out);
@@ -167,10 +162,7 @@ pub fn lcov(view: &RunView) -> String {
         for (line, covered) in file.line_hits() {
             let _ = writeln!(out, "DA:{line},{}", u8::from(covered));
         }
-        let (covered_lines, lines) = file
-            .metric(Metric::Lines)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (covered_lines, lines) = file.metric(Metric::Lines).counts();
         let _ = writeln!(out, "LF:{lines}");
         let _ = writeln!(out, "LH:{covered_lines}");
         let _ = writeln!(out, "end_of_record");
@@ -202,14 +194,8 @@ pub fn cobertura(view: &RunView, timestamp: u64) -> String {
     );
     out.push_str("      <classes>\n");
     for file in &view.files {
-        let (file_covered, file_lines) = file
-            .metric(Metric::Lines)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
-        let (branch_covered, branch_total) = file
-            .metric(Metric::Branches)
-            .map(|m| (m.covered, m.eligible))
-            .unwrap_or((0, 0));
+        let (file_covered, file_lines) = file.metric(Metric::Lines).counts();
+        let (branch_covered, branch_total) = file.metric(Metric::Branches).counts();
         let _ = writeln!(
             out,
             "        <class name=\"{}\" filename=\"{}\" line-rate=\"{:.4}\" branch-rate=\"{:.4}\" complexity=\"0\">",
@@ -256,6 +242,24 @@ mod tests {
         RunView,
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn xml_escapes_what_markup_reads_and_drops_what_it_cannot_carry() {
+        assert_eq!(xml(""), "");
+        assert_eq!(
+            xml("a & b < c > d \" e ' f\u{1}\tg"),
+            "a &amp; b &lt; c &gt; d &quot; e &apos; f\tg"
+        );
+    }
+
+    /// A run with no file exports a report of nothing in each format.
+    #[test]
+    fn a_view_of_no_file_exports_nothing_measured() {
+        let mut view = fixture();
+        view.files.clear();
+        assert_eq!(lcov(&view), "");
+        assert!(cobertura(&view, 0).contains("<packages>"));
+    }
 
     fn metric(metric: Metric, covered: usize, eligible: usize) -> MetricView {
         MetricView {
@@ -524,6 +528,33 @@ mod tests {
         );
     }
 
+    /// A file Supercov knows of but measured nothing in still has its record,
+    /// its counters at zero.
+    #[test]
+    fn a_file_with_nothing_measured_exports_an_empty_record() {
+        let mut view = fixture();
+        let file = &mut view.files[0];
+        // Every metric counted, none with anything eligible.
+        file.metrics = Metric::ALL
+            .into_iter()
+            .map(|each| metric(each, 0, 0))
+            .collect();
+        file.measured_lines.clear();
+        file.uncovered_lines.clear();
+        file.functions.clear();
+        file.branches.clear();
+        file.conditions.clear();
+        assert_eq!(
+            lcov(&view),
+            "TN:\nSF:src/a & b.ts\nFNF:0\nFNH:0\nBRF:0\nBRH:0\nLF:0\nLH:0\nend_of_record\n"
+        );
+        let xml_text = cobertura(&view, 0);
+        assert!(
+            xml_text.contains("<methods/>\n          <lines>\n          </lines>"),
+            "{xml_text}"
+        );
+    }
+
     #[test]
     fn an_empty_denominator_does_not_become_a_zero_rate() {
         // Cobertura has no "not applicable", and reporting 0% for a file with
@@ -531,7 +562,13 @@ mod tests {
         assert_eq!(rate(0, 0), 1.0);
         let mut view = fixture();
         view.files[0].branches.clear();
-        view.files[0].metrics = vec![metric(Metric::Lines, 3, 4), metric(Metric::Branches, 0, 0)];
+        view.files[0].metrics = Metric::ALL
+            .into_iter()
+            .map(|each| match each {
+                Metric::Lines => metric(each, 3, 4),
+                _ => metric(each, 0, 0),
+            })
+            .collect();
         let xml_text = cobertura(&view, 0);
         assert!(xml_text.contains("branch-rate=\"1.0000\""), "{xml_text}");
     }

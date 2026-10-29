@@ -188,6 +188,15 @@ impl Project {
     }
 
     pub fn supercov_with(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
+        let mut command = self.supercov_command(args);
+        Ran {
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            output: command.envs(env.iter().copied()).output().unwrap(),
+        }
+    }
+
+    /// The command `supercov_with` runs, for a test that starts it its own way.
+    pub fn supercov_command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_supercov"));
         command.args(args).current_dir(&self.root);
         for name in [
@@ -202,10 +211,15 @@ impl Project {
         ] {
             command.env_remove(name);
         }
-        Ran {
-            args: args.iter().map(|arg| arg.to_string()).collect(),
-            output: command.envs(env.iter().copied()).output().unwrap(),
+        // Under nextest the tests inherit its own variables, which a
+        // `cargo nextest run` the test starts would read as its own.
+        for (name, _) in std::env::vars_os() {
+            let name_text = name.to_string_lossy();
+            if name_text == "NEXTEST" || name_text.starts_with("NEXTEST_") {
+                command.env_remove(name);
+            }
         }
+        command
     }
 
     /// Measures `node --test` with these extra arguments and returns the run.
@@ -294,7 +308,7 @@ pub type Answerer = fn(&str, &Value) -> Value;
 
 /// Replaces the answer to the request with this number (from 0) with a
 /// status and a body, sent with `retry-after: 0`, or, for the body `wait`,
-/// `retry-after: 100000`.
+/// `retry-after: 100000`. The body `cut` is promised whole and sent part.
 pub type Faults = fn(usize) -> Option<(u16, &'static str)>;
 
 /// A local server answering every question as `model`, recording each request.
@@ -354,6 +368,14 @@ pub fn gateway_with(model: &'static str, answerer: Answerer, faults: Faults) -> 
                     ),
                 };
                 let wait = if reply == b"wait" { 100_000 } else { 0 };
+                if reply == b"cut" {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                         content-length: 1000\r\nconnection: close\r\n\r\n{{\"answers\""
+                    );
+                    return;
+                }
                 write!(
                     stream,
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\

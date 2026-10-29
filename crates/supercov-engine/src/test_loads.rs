@@ -10,10 +10,10 @@
 //! What cannot be read is said: an import whose path is computed, or one that
 //! resolves to nothing Supercov can name, leaves the answer open, and an open
 //! answer is "it may load anything".
+use crate::fault_fs as fs;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -178,13 +178,13 @@ impl Imports {
     /// installed package's; a computed import, or a change to `sys.path`,
     /// leaves the answer open.
     fn python_loads(&self, file: &str, loads: &mut Loads, queue: &mut VecDeque<String>) {
-        for directory in Path::new(file).ancestors().skip(1) {
-            if let Some(conftest) = normal(&directory.join("conftest.py"))
-                && self.root.join(&conftest).is_file()
-            {
-                queue.push_back(conftest);
-            }
-        }
+        queue.extend(
+            Path::new(file)
+                .ancestors()
+                .skip(1)
+                .filter_map(|directory| normal(&directory.join("conftest.py")))
+                .filter(|conftest| self.root.join(conftest).is_file()),
+        );
         let known = self.python.borrow().get(file).cloned();
         let imports = known.unwrap_or_else(|| {
             let parsed = fs::read_to_string(self.root.join(file))
@@ -322,39 +322,42 @@ impl Imports {
             bases.push(PathBuf::from("src"));
             bases
         };
-        for base in bases {
-            let mut found = Vec::new();
-            let mut package = base.clone();
-            let mut resolved = parts.is_empty();
-            for (index, part) in parts.iter().enumerate() {
-                package = package.join(part);
-                if let Some(init) = exists(&package.join("__init__.py")) {
-                    found.push(init);
-                    resolved = index + 1 == parts.len();
-                } else if index + 1 == parts.len()
-                    && let Some(module) = exists(&package.with_extension("py"))
-                {
-                    found.push(module);
-                    resolved = true;
-                } else {
-                    break;
+        // Never empty: the test's own directory is one.
+        bases
+            .into_iter()
+            .find_map(|base| {
+                let mut found = Vec::new();
+                let mut package = base.clone();
+                let mut resolved = parts.is_empty();
+                for (index, part) in parts.iter().enumerate() {
+                    package = package.join(part);
+                    if let Some(init) = exists(&package.join("__init__.py")) {
+                        found.push(init);
+                        resolved = index + 1 == parts.len();
+                    } else if index + 1 == parts.len()
+                        && let Some(module) = exists(&package.with_extension("py"))
+                    {
+                        found.push(module);
+                        resolved = true;
+                    } else {
+                        break;
+                    }
                 }
-            }
-            if !resolved {
-                continue;
-            }
-            // `from package import name` may name a submodule.
-            for name in names {
-                let submodule = package.join(name);
-                if let Some(file) = exists(&submodule.with_extension("py"))
-                    .or_else(|| exists(&submodule.join("__init__.py")))
-                {
-                    found.push(file);
+                if !resolved {
+                    return None;
                 }
-            }
-            return found;
-        }
-        Vec::new()
+                // `from package import name` may name a submodule.
+                for name in names {
+                    let submodule = package.join(name);
+                    if let Some(file) = exists(&submodule.with_extension("py"))
+                        .or_else(|| exists(&submodule.join("__init__.py")))
+                    {
+                        found.push(file);
+                    }
+                }
+                Some(found)
+            })
+            .unwrap_or_default()
     }
 
     fn specifiers(&self, file: &str) -> Option<Vec<Specifier>> {
@@ -574,6 +577,7 @@ fn normal(path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+#[track_caller]
 fn read_json(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&crate::source_discovery::strip_trailing_commas(
@@ -596,8 +600,8 @@ fn collect_strings(value: &Value, into: &mut Vec<String>) {
 fn aliases(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
     let mut found = Vec::new();
     let mut config = root.join("tsconfig.json");
-    let mut seen = BTreeSet::new();
-    while seen.insert(config.clone()) && seen.len() < 16 {
+    let mut seen = BTreeSet::from([config.clone()]);
+    loop {
         let Some(json) = read_json(&config) else {
             break;
         };
@@ -638,6 +642,10 @@ fn aliases(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
                     named.push(".json");
                     config = PathBuf::from(named);
                 }
+                // A cycle, or a chain longer than any real one, ends here.
+                if !seen.insert(config.clone()) || seen.len() >= 16 {
+                    break;
+                }
             }
             _ => break,
         }
@@ -652,7 +660,9 @@ fn parse(file: &str, source: &str) -> Option<Vec<Specifier>> {
     use oxc_ast::ast::*;
     use oxc_ast_visit::{Visit, walk};
 
-    let source_type = crate::js_instrumenter::project_source_type(Path::new(file)).ok()?;
+    // Read only for the extensions `reads_imports` names, which it knows.
+    let source_type = crate::js_instrumenter::project_source_type(Path::new(file))
+        .expect("a file read for its imports has an extension the parser knows");
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked {
@@ -792,11 +802,9 @@ fn python_imports(source: &str) -> Option<Vec<PythonImport>> {
     impl<'a> Visitor<'a> for Collector {
         fn visit_stmt(&mut self, stmt: &'a Stmt) {
             match stmt {
-                Stmt::Import(import) => {
-                    for alias in &import.names {
-                        self.0.push(module(alias.name.as_str()));
-                    }
-                }
+                Stmt::Import(import) => self
+                    .0
+                    .extend(import.names.iter().map(|alias| module(alias.name.as_str()))),
                 Stmt::ImportFrom(import) => self.0.push(PythonImport::Module {
                     module: import
                         .module
@@ -810,22 +818,19 @@ fn python_imports(source: &str) -> Option<Vec<PythonImport>> {
                         .map(|alias| alias.name.to_string())
                         .collect(),
                 }),
-                Stmt::Assign(assign) => {
-                    for target in &assign.targets {
-                        if matches!(target, Expr::Name(name) if name.id.as_str() == "pytest_plugins")
-                        {
-                            match strings(&assign.value) {
-                                Some(plugins) => self.0.extend(plugins.iter().map(|p| module(p))),
-                                None => self.0.push(PythonImport::Computed(
-                                    "names its pytest plugins by computation",
-                                )),
-                            }
-                        }
-                        if is_sys_path(target) {
-                            self.0.push(PythonImport::Computed("changes sys.path"));
+                Stmt::Assign(assign) => assign.targets.iter().for_each(|target| {
+                    if matches!(target, Expr::Name(name) if name.id.as_str() == "pytest_plugins") {
+                        match strings(&assign.value) {
+                            Some(plugins) => self.0.extend(plugins.iter().map(|p| module(p))),
+                            None => self.0.push(PythonImport::Computed(
+                                "names its pytest plugins by computation",
+                            )),
                         }
                     }
-                }
+                    if is_sys_path(target) {
+                        self.0.push(PythonImport::Computed("changes sys.path"));
+                    }
+                }),
                 _ => {}
             }
             walk_stmt(self, stmt);
@@ -930,11 +935,15 @@ fn ruby_requires(source: &str) -> Option<Vec<RubyRequire>> {
 }
 
 pub fn configuration_runner(file: &str) -> Option<&'static str> {
-    let name = file.rsplit('/').next()?.to_ascii_lowercase();
+    let name = file
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if !name.contains(".config.") && !name.contains(".workspace.") {
         return None;
     }
-    let stem = name.split('.').next()?;
+    let stem = name.split('.').next().unwrap_or_default();
     match stem {
         "playwright" | "playwright-ct" => Some("playwright"),
         "vitest" => Some("vitest"),
@@ -1485,7 +1494,7 @@ mod tests {
         let root = project(&[
             (
                 "package.json",
-                r##"{"imports":{"#missing":"./gone.js","#fallback":["./gone.js","./lib/real.js"]}}"##,
+                r##"{"imports":{"#missing":"./gone.js","#fallback":["./gone.js","./lib/real.js"],"#lib/*.js":"./lib/*.js","#up":"./../outside.js","#count":5}}"##,
             ),
             (
                 "tsconfig.json",
@@ -1498,6 +1507,11 @@ mod tests {
                 "import { x } from '@/x';\nimport '#fallback';\n",
             ),
             ("b.test.ts", "import '#missing';\n"),
+            // A pattern whose end does not match, a target that climbs out,
+            // and one that is no path.
+            ("c.test.ts", "import '#lib/real.ts';\n"),
+            ("d.test.ts", "import '#up';\n"),
+            ("e.test.ts", "import '#count';\n"),
         ]);
         let imports = Imports::new(&root);
         let loads = imports.loads(["a.test.ts"]);
@@ -1505,6 +1519,9 @@ mod tests {
         assert!(loads.files.contains("src/x.ts"), "{loads:?}");
         assert!(loads.files.contains("lib/real.js"), "{loads:?}");
         assert!(imports.loads(["b.test.ts"]).open.is_some());
+        for file in ["c.test.ts", "d.test.ts", "e.test.ts"] {
+            assert!(imports.loads([file]).open.is_some(), "{file}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1647,5 +1664,129 @@ mod tests {
         );
         assert!(loads.open.is_some());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The edges of following imports: subpath imports exact, conditional
+    /// and empty; an alias with nothing behind it; a relative import two
+    /// packages up; a missing relative require; and configurations that
+    /// name nothing.
+    #[test]
+    fn imports_at_the_edges_load_what_they_name_or_leave_the_answer_open() {
+        let root = project(&[
+            (
+                "package.json",
+                r##"{"imports":{"#config":"./config.js","#cond":{"node":"./cond.js","default":["./cond.js"]},"#none":[],"#pkg":"lodash"}}"##,
+            ),
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions":{"paths":{"@exact":["src/exact.ts"],"@gone/*":[]}}}"#,
+            ),
+            ("config.js", "export {};\n"),
+            ("cond.js", "export {};\n"),
+            ("src/exact.ts", "export {};\n"),
+            (
+                "a.test.js",
+                "import '#config';\nimport '#cond';\nimport '#pkg';\nimport '@exact';\n",
+            ),
+            ("none.test.js", "import '#none';\n"),
+            ("gone.test.js", "import '@gone/thing';\n"),
+            ("rooted.test.js", "import '/etc/thing';\n"),
+            ("pkg/__init__.py", ""),
+            ("pkg/helper.py", ""),
+            ("pkg/sub/__init__.py", ""),
+            ("pkg/sub/test_up.py", "from .. import helper\n"),
+            (".rspec", ""),
+            ("spec/a_spec.rb", "require_relative 'missing'\n"),
+            ("vitest.config.js", "export default {};\n"),
+        ]);
+        let imports = Imports::new(&root);
+        let loaded = imports.loads(["a.test.js"]);
+        assert_eq!(loaded.open, None, "{loaded:?}");
+        for file in ["config.js", "cond.js", "src/exact.ts"] {
+            assert!(loaded.files.contains(file), "{file}: {loaded:?}");
+        }
+        for file in ["none.test.js", "gone.test.js", "rooted.test.js"] {
+            assert!(imports.loads([file]).open.is_some(), "{file}");
+        }
+        let up = imports.loads(["pkg/sub/test_up.py"]);
+        assert!(up.files.contains("pkg/helper.py"), "{up:?}");
+        let spec = imports.loads(["spec/a_spec.rb"]);
+        assert_eq!(
+            spec.open.as_deref(),
+            Some("spec/a_spec.rb requires 'missing', which Supercov cannot find")
+        );
+        assert!(imports.named_by("vitest.config.js").is_empty());
+        fs::remove_dir_all(&root).unwrap();
+        // Nothing declared is nothing to follow.
+        let root = project(&[
+            ("package.json", r#"{"imports":{}}"#),
+            ("tsconfig.json", r#"{"compilerOptions":{"paths":{}}}"#),
+        ]);
+        let imports = Imports::new(&root);
+        assert!(imports.subpaths.is_empty() && imports.aliases.is_empty());
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(normal(Path::new("/etc/x")), None);
+        assert_eq!(normal(Path::new("../x")), None);
+        assert_eq!(normal(Path::new("")).as_deref(), Some(""));
+        assert_eq!(normal(Path::new("a/./b/../c")).as_deref(), Some("a/c"));
+        // A part that is no text names no file of the project.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let unnamed = Path::new(std::ffi::OsStr::from_bytes(b"a/\xff/c"));
+            assert_eq!(normal(unnamed), None);
+        }
+    }
+
+    /// Each way a Python file names a module, or names one by computation,
+    /// and each way a script names one to `require` or a mock.
+    #[test]
+    fn each_way_a_file_names_a_module_is_read() {
+        let named = |source: &str| {
+            python_imports(source).map(|imports| {
+                imports
+                    .into_iter()
+                    .map(|import| match import {
+                        PythonImport::Module { module, .. } => module,
+                        PythonImport::Computed(why) => format!("({why})"),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(named("import\n"), None);
+        assert_eq!(
+            named("pytest_plugins = ['a', 'b']\npytest_plugins = ('c',)\n").unwrap(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            named("pytest_plugins = ['a', other]\n").unwrap(),
+            ["(names its pytest plugins by computation)"]
+        );
+        assert_eq!(
+            named("importlib.import_module(name)\n__import__(name)\n__import__('d')\n").unwrap(),
+            [
+                "(imports a module named by computation)",
+                "(imports a module named by computation)",
+                "d"
+            ]
+        );
+        let specifiers = |source: &str| {
+            parse("a.test.js", source)
+                .unwrap()
+                .into_iter()
+                .map(|specifier| match specifier {
+                    Specifier::Literal(name) => name,
+                    Specifier::Computed => "(computed)".to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            specifiers(
+                "require.resolve('r');\na.b.mock('no');\nmake()('no');\nrequire(...names);\n"
+            ),
+            ["r", "(computed)"]
+        );
+        assert_eq!(configuration_runner("ava.config.js"), Some("ava"));
+        assert!(strings("notes.txt", "'a'").is_empty());
     }
 }

@@ -14,10 +14,11 @@
 //! A runner the user already configured for the target keeps running the
 //! binaries: this program wraps it rather than replacing it.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     process::Command,
@@ -32,7 +33,7 @@ use crate::{
     rust_project::PreparedRustProject,
     rust_runner_attempt::{
         RustRunnerInvocationIdentity, classify_rust_runner_environment,
-        parse_nextest_version_output, validate_nextest_version,
+        parse_nextest_version_output,
     },
     rust_test_runner::{
         CargoTestInvocation, RustTestRunnerError, capped_rustflags, instrumented_stack_environment,
@@ -132,7 +133,7 @@ pub(crate) fn run_nextest(
     // The identity contract is pinned to the nextest versions it was verified
     // against; anything else fails before a test runs.
     let version = cargo(&nextest_version_arguments(invocation))
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !version.status.success() {
         return Err(RustTestRunnerError::CargoFailed(combined_output(
@@ -140,11 +141,9 @@ pub(crate) fn run_nextest(
             &version.stderr,
         )));
     }
+    // Read only when it is a release new enough to run test by test.
     let version = parse_nextest_version_output(&version.stdout)
         .map_err(|error| RustTestRunnerError::Context(error.to_string()))?;
-    validate_nextest_version(&version).map_err(|error| {
-        RustTestRunnerError::UnsupportedCommand(format!("cargo-nextest {version}: {error}"))
-    })?;
     if crate::rust_runner_attempt::newer_than_checked(&version) {
         writeln!(
             diagnostics,
@@ -172,7 +171,11 @@ pub(crate) fn run_nextest(
             })
             .collect(),
     };
-    fs::write(root.join(PLAN_FILE), serde_json::to_vec(&runner_plan)?).map_err(io_error)?;
+    fs::write(
+        root.join(PLAN_FILE),
+        serde_json::to_vec(&runner_plan).expect("plain data serializes"),
+    )
+    .map_err(io_error)?;
     let runner_configuration = runner_configuration_arguments(&program, root, &runner_plan)?;
 
     // The listing: every test nextest selected, per binary, before any runs.
@@ -184,7 +187,7 @@ pub(crate) fn run_nextest(
         list_arguments.extend(listing.runner_arguments);
     }
     let listed = cargo(&list_arguments)
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !listed.status.success() {
         return Err(RustTestRunnerError::CargoFailed(combined_output(
@@ -196,10 +199,9 @@ pub(crate) fn run_nextest(
         TestListSummary::parse_json(String::from_utf8_lossy(&listed.stdout)).map_err(|error| {
             RustTestRunnerError::CargoJson(format!("invalid nextest test listing: {error}"))
         })?;
-    let metadata =
-        cargo(&cargo_metadata_arguments(invocation).map_err(RustTestRunnerError::Context)?)
-            .output()
-            .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
+    let metadata = cargo(&cargo_metadata_arguments(invocation))
+        .launch_output()
+        .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !metadata.status.success() {
         return Err(RustTestRunnerError::CargoFailed(combined_output(
             &metadata.stdout,
@@ -231,14 +233,17 @@ pub(crate) fn run_nextest(
     let exit_code = status.code().unwrap_or(1);
 
     // Every attempt the runner recorded, checked against the listing.
-    let mut selected = BTreeSet::new();
-    for (binary_id, suite) in &catalog.rust_suites {
-        for (name, case) in &suite.test_cases {
-            if case.filter_match.is_match() {
-                selected.insert((binary_id.to_string(), name.to_string()));
-            }
-        }
-    }
+    let selected = catalog
+        .rust_suites
+        .iter()
+        .flat_map(|(binary_id, suite)| {
+            suite
+                .test_cases
+                .iter()
+                .filter(|(_, case)| case.filter_match.is_match())
+                .map(move |(name, _)| (binary_id.to_string(), name.to_string()))
+        })
+        .collect::<BTreeSet<_>>();
     let mut records = read_attempts(&root.join(ATTEMPTS_DIRECTORY))?;
     records.sort_by(|left, right| {
         (&left.binary_id, &left.test_name, left.attempt).cmp(&(
@@ -268,12 +273,8 @@ pub(crate) fn run_nextest(
             )));
         }
         ran.insert(key);
-        let artifact = artifacts.get(&record.binary_id).ok_or_else(|| {
-            RustTestRunnerError::Context(format!(
-                "nextest ran a binary its listing lacks: {}",
-                record.binary_id
-            ))
-        })?;
+        // Selected, so listed, and every listed binary is an artifact.
+        let artifact = &artifacts[&record.binary_id];
         let test_id = format!("{}::{}", artifact.source, record.test_name);
         let passed = record.exit_code == 0;
         if !passed {
@@ -371,14 +372,14 @@ fn runner_configuration_arguments(
     root: &Path,
     plan: &RunnerPlan,
 ) -> Result<Vec<String>, RustTestRunnerError> {
-    let json = |value: &str| serde_json::to_string(value).map_err(RustTestRunnerError::Json);
+    let json = |value: &str| serde_json::Value::from(value).to_string();
     let program = json(program.to_str().ok_or_else(|| {
         RustTestRunnerError::Context("the Supercov executable path is not UTF-8".into())
-    })?)?;
+    })?);
     let root = json(root.to_str().ok_or_else(|| {
         RustTestRunnerError::Context("the nextest evidence root is not UTF-8".into())
-    })?)?;
-    let marker = json(RUNNER_MODE_ARGUMENT)?;
+    })?);
+    let marker = json(RUNNER_MODE_ARGUMENT);
     let mut arguments = Vec::with_capacity(plan.targets.len() * 2);
     let mut seen = BTreeSet::new();
     for target in &plan.targets {
@@ -388,7 +389,7 @@ fn runner_configuration_arguments(
                 target.target
             )));
         }
-        let triple = json(&target.target)?;
+        let triple = json(&target.target);
         arguments.push("--config".into());
         arguments.push(format!(
             "target.{triple}.runner=[{program},{marker},{root},{triple}]"
@@ -578,7 +579,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
     let attempt = match identity {
         RustRunnerInvocationIdentity::NextestList(_) => {
             let status = command
-                .status()
+                .launch_status()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             return Ok(exit_code(&status));
         }
@@ -599,7 +600,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
             &plan.token,
             &evidence,
         ))
-        .status()
+        .launch_status()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let code = exit_code(&status);
     let record = AttemptRecord {
@@ -613,7 +614,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
     };
     fs::write(
         attempts.join(format!("{sequence:08}.json")),
-        serde_json::to_vec(&record)?,
+        serde_json::to_vec(&record).expect("plain data serializes"),
     )
     .map_err(io_error)?;
     Ok(code)
@@ -623,20 +624,18 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
 /// creating its marker exclusively.
 fn claim_sequence(directory: &Path) -> Result<usize, RustTestRunnerError> {
     fs::create_dir_all(directory).map_err(io_error)?;
-    for candidate in 0..1_000_000_usize {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(directory.join(format!("{candidate:08}.claim")))
-        {
-            Ok(_) => return Ok(candidate),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io_error(error)),
-        }
-    }
-    Err(RustTestRunnerError::Io(
-        "too many nextest attempt claims".into(),
-    ))
+    (0_usize..)
+        .find_map(|candidate| {
+            match fs::open_with(
+                fs::OpenOptions::new().write(true).create_new(true),
+                directory.join(format!("{candidate:08}.claim")),
+            ) {
+                Ok(_) => Some(Ok(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(io_error(error))),
+            }
+        })
+        .expect("claims are tried until one is made or fails")
 }
 
 /// The child's exit code as nextest should see it: the code itself, or the
@@ -679,9 +678,11 @@ pub(crate) struct CargoMetadataTarget {
 /// The `cargo metadata` command for the workspace a test command selects:
 /// its toolchain override and the options that choose the manifest, the
 /// configuration and how Cargo may resolve.
+/// Past a listing of the same invocation, which refuses an option with no
+/// value.
 pub(crate) fn cargo_metadata_arguments(
     invocation: &crate::rust_test_runner::CargoTestInvocation,
-) -> Result<Vec<String>, String> {
+) -> Vec<String> {
     let command = invocation.command_position();
     let mut arguments = invocation.arguments[..command]
         .iter()
@@ -693,11 +694,8 @@ pub(crate) fn cargo_metadata_arguments(
         "--format-version=1".into(),
         "--no-deps".into(),
     ]);
-    let command_width = match invocation.kind {
-        crate::rust_test_runner::RustCargoCommandKind::CargoTest => 1,
-        crate::rust_test_runner::RustCargoCommandKind::NextestRun => 2,
-    };
-    let mut index = command + command_width;
+    // Past `nextest run`: only a nextest run asks for its metadata.
+    let mut index = command + 2;
     while index < invocation.arguments.len() {
         let argument = &invocation.arguments[index];
         let name = argument
@@ -715,13 +713,13 @@ pub(crate) fn cargo_metadata_arguments(
                 let value = invocation
                     .arguments
                     .get(index)
-                    .ok_or_else(|| format!("Cargo option {argument} has no value"))?;
+                    .expect("the listing refused an option with no value");
                 arguments.push(value.clone());
             }
         }
         index += 1;
     }
-    Ok(arguments)
+    arguments
 }
 
 #[cfg(test)]
@@ -949,6 +947,18 @@ mod tests {
         assert!(
             runner_configuration_arguments(Path::new("/s"), Path::new("/r"), &duplicated).is_err()
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let unreadable = Path::new(std::ffi::OsStr::from_bytes(b"/\xff"));
+            let error = |program: &Path, root: &Path| {
+                runner_configuration_arguments(program, root, &plan)
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(error(unreadable, Path::new("/r")).contains("executable path is not UTF-8"));
+            assert!(error(Path::new("/s"), unreadable).contains("evidence root is not UTF-8"));
+        }
     }
 
     #[test]
@@ -1026,7 +1036,7 @@ mod tests {
             runner_arguments: Vec::new(),
         };
         assert_eq!(
-            cargo_metadata_arguments(&invocation).unwrap(),
+            cargo_metadata_arguments(&invocation),
             [
                 "+nightly",
                 "metadata",
@@ -1039,14 +1049,6 @@ mod tests {
                 "-Z",
                 "unstable-options",
             ]
-        );
-        let missing = CargoTestInvocation {
-            arguments: ["nextest", "run", "--config"].map(String::from).to_vec(),
-            ..invocation
-        };
-        assert_eq!(
-            cargo_metadata_arguments(&missing).unwrap_err(),
-            "Cargo option --config has no value"
         );
     }
 
@@ -1217,20 +1219,28 @@ exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
         }
 
         fn run(&self, arguments: &[&str]) -> (Result<NextestOutcome, RustTestRunnerError>, String) {
+            let mut diagnostics = Vec::new();
+            let outcome = self.run_into(arguments, &mut diagnostics);
+            (outcome, String::from_utf8(diagnostics).unwrap())
+        }
+
+        fn run_into(
+            &self,
+            arguments: &[&str],
+            diagnostics: &mut dyn std::io::Write,
+        ) -> Result<NextestOutcome, RustTestRunnerError> {
             let mut command = vec![self.cargo.display().to_string()];
             command.extend(arguments.iter().map(|argument| (*argument).to_owned()));
             let invocation =
                 crate::rust_test_runner::cargo_invocation(&self.root, &command).unwrap();
-            let mut diagnostics = Vec::new();
-            let outcome = run_nextest(
+            run_nextest(
                 &self.project,
                 &invocation,
                 &self.evidence,
                 "run",
                 None,
-                &mut diagnostics,
-            );
-            (outcome, String::from_utf8(diagnostics).unwrap())
+                diagnostics,
+            )
         }
     }
 
@@ -1337,6 +1347,40 @@ exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
         }
     }
 
+    /// A version that does not read or is too old, a listing or metadata
+    /// that is no JSON, and an attempt record that is none each stop the
+    /// run with what was wrong.
+    #[cfg(unix)]
+    #[test]
+    fn each_answer_nextest_or_cargo_gives_that_cannot_be_read_stops_the_run() {
+        for (step, output, said) in [
+            ("version", "nonsense\n", "cargo-nextest product identity"),
+            (
+                "version",
+                "cargo-nextest 0.9.100\nrelease: 0.9.100\nhost: x86_64-unknown-linux-gnu\n",
+                "older than 0.9.138",
+            ),
+            ("list", "not json", "invalid nextest test listing"),
+            ("metadata", "not json", "invalid Cargo metadata"),
+        ] {
+            let fake = FakeNextest::new();
+            fake.answer(step, output);
+            let error = fake.run(&["nextest", "run"]).0.err().unwrap().to_string();
+            assert!(error.contains(said), "{step}: {error}");
+            assert!(!fake.calls().contains("nextest run"), "{step}");
+        }
+        let fake = FakeNextest::new();
+        fs::write(
+            fake.root.join("fake/run.sh"),
+            format!(
+                "mkdir -p '{0}/attempts' && printf 'not json' > '{0}/attempts/00000000.json'\n",
+                fake.evidence.display()
+            ),
+        )
+        .unwrap();
+        assert!(fake.run(&["nextest", "run"]).0.is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_nextest_newer_than_the_checked_releases_is_named() {
@@ -1368,5 +1412,127 @@ exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
             matches!(&error, RustTestRunnerError::UnsafeArtifact(path) if path.ends_with("not-a-file")),
             "{error:?}"
         );
+    }
+
+    /// Diagnostics that cannot be written.
+    #[cfg(unix)]
+    struct Closed;
+
+    #[cfg(unix)]
+    impl std::io::Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A line nextest's run must say -- a release newer than the checked
+    /// ones, a failed attempt -- that cannot be written ends the run.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_the_run_cannot_write_ends_it() {
+        let fake = FakeNextest::new();
+        fake.answer(
+            "version",
+            "cargo-nextest 9.0.0\nrelease: 9.0.0\nhost: x86_64-unknown-linux-gnu\n",
+        );
+        assert!(matches!(
+            fake.run_into(&["nextest", "run"], &mut Closed),
+            Err(RustTestRunnerError::Io(_))
+        ));
+        let fake = FakeNextest::new();
+        fake.runs(&[("tests::alpha", 1, 101)], 100);
+        assert!(matches!(
+            fake.run_into(&["nextest", "run"], &mut Closed),
+            Err(RustTestRunnerError::Io(_))
+        ));
+    }
+
+    /// A runner the user configured for the host is the one the plan wraps.
+    #[cfg(unix)]
+    #[test]
+    fn a_configured_runner_is_wrapped_in_the_plan() {
+        let fake = FakeNextest::new();
+        fs::create_dir_all(fake.root.join(".cargo")).unwrap();
+        fs::write(
+            fake.root.join(".cargo/config.toml"),
+            "[target.'cfg(unix)']\nrunner = \"/bin/echo\"\n",
+        )
+        .unwrap();
+        fake.runs(&[("tests::alpha", 1, 0)], 0);
+        let (outcome, _) = fake.run(&["nextest", "run"]);
+        assert_eq!(outcome.unwrap().results.len(), 1);
+        let plan = fs::read_to_string(fake.evidence.join(PLAN_FILE)).unwrap();
+        assert!(plan.contains("/bin/echo"), "{plan}");
+    }
+
+    /// A listed binary or a target source that is not there, a source
+    /// outside the workspace, and a target directory or attempt that cannot
+    /// be read each stop the run.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_whose_files_cannot_be_resolved_stops_the_run() {
+        let fake = FakeNextest::new();
+        fake.list(&fake.project.target_directory.join("debug/deps/gone"));
+        assert!(matches!(
+            fake.run(&["nextest", "run"]).0,
+            Err(RustTestRunnerError::Io(_))
+        ));
+        for source in [fake.root.join("src/gone.rs"), PathBuf::from("/bin/sh")] {
+            let fake = FakeNextest::new();
+            fake.answer(
+                "metadata",
+                &serde_json::json!({"packages": [{
+                    "id": "path+file:///fixture#0.0.0",
+                    "name": "fixture",
+                    "targets": [{"name": "fixture", "kind": ["lib"], "src_path": source}],
+                }]})
+                .to_string(),
+            );
+            assert!(
+                fake.run(&["nextest", "run"]).0.is_err(),
+                "{}",
+                source.display()
+            );
+        }
+        for fault in [
+            "fs.canonicalize#rust_owned_nextest.rs:427",
+            "fs.read_dir entry#rust_owned_nextest.rs:505",
+        ] {
+            let fake = FakeNextest::new();
+            fake.runs(&[("tests::alpha", 1, 0)], 0);
+            let outcome = crate::fault::during(fault, || fake.run(&["nextest", "run"]).0);
+            assert!(
+                matches!(outcome, Err(RustTestRunnerError::Io(_))),
+                "{fault}: {:?}",
+                outcome.err()
+            );
+        }
+    }
+
+    /// The runner refuses a target that is no text and a plan that is no
+    /// JSON before it starts anything.
+    #[cfg(unix)]
+    #[test]
+    fn the_runner_refuses_a_target_or_plan_it_cannot_read() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-nextest-runner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let run =
+            |target: OsString| nextest_runner(vec![root.clone().into(), target, "binary".into()]);
+        assert_eq!(run(OsString::from_vec(b"bad-\xff".to_vec())), 2);
+        fs::write(root.join(PLAN_FILE), "not json").unwrap();
+        assert_eq!(run("x86_64".into()), 2);
+        fs::remove_dir_all(root).unwrap();
     }
 }

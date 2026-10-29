@@ -11,9 +11,9 @@
 //! that says so. The run's own records are left exactly as they were.
 //!
 //! The run is not changed: the import publishes a new run, made from it.
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 
@@ -90,12 +90,12 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
     let mut files = BTreeMap::<String, RecordedFile>::new();
     let mut current: Option<String> = None;
     let mut function_lines = BTreeMap::<String, usize>::new();
-    let number = |value: &str, what: &str, at: usize| {
+    fn number<T: std::str::FromStr>(value: &str, what: &str, at: usize) -> Result<T, String> {
         value
             .trim()
-            .parse::<u64>()
+            .parse::<T>()
             .map_err(|_| format!("line {at}: {what} is not a number: {value}"))
-    };
+    }
     for (index, raw) in text.lines().enumerate() {
         let at = index + 1;
         let line = raw.trim();
@@ -127,8 +127,7 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
                         let [line, count, ..] = fields[..] else {
                             return Err(format!("line {at}: DA needs a line and a count"));
                         };
-                        let line = usize::try_from(number(line, "DA line", at)?)
-                            .map_err(|_| format!("line {at}: DA line out of range"))?;
+                        let line: usize = number(line, "DA line", at)?;
                         // Some tools write a negative or fractional count for a
                         // line that ran; only zero says it did not.
                         let count = count.trim().parse::<u64>().unwrap_or_else(|_| {
@@ -139,14 +138,13 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
                     }
                     // FN:<line>,<name> or, in LCOV 2, FN:<line>,<end>,<name>
                     "FN" if fields.len() >= 2 => {
-                        let line = usize::try_from(number(fields[0], "FN line", at)?)
-                            .map_err(|_| format!("line {at}: FN line out of range"))?;
+                        let line: usize = number(fields[0], "FN line", at)?;
                         let name = fields[1..].last().expect("two fields").to_string();
                         function_lines.insert(name, line);
                     }
                     // FNDA:<count>,<name>
                     "FNDA" if fields.len() >= 2 => {
-                        let count = number(fields[0], "FNDA count", at)?;
+                        let count: u64 = number(fields[0], "FNDA count", at)?;
                         let name = fields[1..].join(",");
                         if let Some(&line) = function_lines
                             .get(&name)
@@ -424,7 +422,8 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
         .unwrap_or_else(|_| request.root.to_owned());
     let mut by_file = BTreeMap::<String, RecordedFile>::new();
     let mut skipped = Vec::new();
-    for (path, file) in recorded {
+    // A tracefile names a file at least.
+    recorded.into_iter().for_each(|(path, file)| {
         match project_path(request.root, &canonical_root, &path, &measured) {
             Ok(project) => {
                 let merged = by_file.entry(project).or_default();
@@ -437,16 +436,19 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             }
             Err(reason) => skipped.push((path, reason)),
         }
-    }
+    });
 
     let skipped_paths = skipped.len();
     let mut hits = BTreeSet::<String>::new();
     let mut lines_run = 0;
     let mut added_files = Vec::new();
-    let evidence_name = request.evidence.file_name().map_or_else(
-        || request.evidence.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
+    // The evidence was read from it, so it names a file.
+    let evidence_name = request
+        .evidence
+        .file_name()
+        .expect("evidence read from a file names it")
+        .to_string_lossy()
+        .into_owned();
     for (file, recorded) in &by_file {
         if !measured.contains(file)
             && let Some((status, reason)) = scope_status(&manifest, file)
@@ -486,21 +488,26 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                 .filter(|(_, count)| **count > 0)
                 .map(|(line, _)| *line)
                 .collect::<BTreeSet<_>>();
-            for point in manifest.points.iter().filter(|point| point.file == *file) {
-                let credited = match point.kind {
-                    PointKind::Statement => ran.contains(&point.line),
-                    PointKind::Function => entered.contains(&point.line),
-                };
-                if credited {
-                    hits.insert(point.id.clone());
-                }
-            }
+            manifest
+                .points
+                .iter()
+                .filter(|point| point.file == *file)
+                .for_each(|point| {
+                    let credited = match point.kind {
+                        PointKind::Statement => ran.contains(&point.line),
+                        PointKind::Function => entered.contains(&point.line),
+                    };
+                    if credited {
+                        hits.insert(point.id.clone());
+                    }
+                });
             continue;
         }
         // A file the run did not measure: the evidence's own lines are its
-        // statements, and its source joins the run's record of sources.
+        // statements, and its source joins the run's record of sources. One
+        // of the project's files that is no text has neither.
         let Some(text) = text else {
-            skipped.push((file.clone(), "no such file in the project".into()));
+            skipped.push((file.clone(), "not a text file".into()));
             continue;
         };
         let source_lines = text.lines().collect::<Vec<_>>();
@@ -637,7 +644,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             };
             archive.push(EvidenceArchiveEntry {
                 path: format!("imported-{imports}/mcdc.json"),
-                contents: serde_json::to_vec(&record).map_err(|error| error.to_string())?,
+                contents: serde_json::to_vec(&record).expect("plain data serializes"),
             });
             if !declaration
                 .runners
@@ -675,20 +682,23 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
     let mut entries = Vec::with_capacity(archive.len() + 4);
     entries.push(EvidenceArchiveEntry {
         path: "frontend.json".into(),
-        contents: serde_json::to_vec(&declaration).map_err(|error| error.to_string())?,
+        contents: serde_json::to_vec(&declaration).expect("plain data serializes"),
     });
     entries.push(EvidenceArchiveEntry {
         path: "manifest.json".into(),
-        contents: serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+        contents: serde_json::to_vec(&manifest).expect("plain data serializes"),
     });
     if let Some(sources) = &sources {
         entries.push(EvidenceArchiveEntry {
             path: crate::source_capture::ARCHIVE_PATH.into(),
-            contents: serde_json::to_vec(sources).map_err(|error| error.to_string())?,
+            contents: serde_json::to_vec(sources).expect("plain data serializes"),
         });
     }
-    for entry in archive {
-        // The records name the run they were made in; they are this run's now.
+    // What is left holds the run's coverage model at least.
+    archive.into_iter().try_for_each(|entry| {
+        // The records name the run they were made in; they are this run's
+        // now. A server's record torn as it was written is kept in the run,
+        // counted as corrupt, and cannot be rewritten.
         let contents = if entry.path == "coverage-model.json" {
             entry.contents
         } else {
@@ -700,7 +710,8 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             path: entry.path,
             contents,
         });
-    }
+        Ok::<(), String>(())
+    })?;
 
     let mut lock = ProjectLock::acquire(request.root, request.run_id, request.started_at)
         .map_err(|error| format!("Cannot lock coverage store for the import: {error}"))?;
@@ -1018,6 +1029,17 @@ mod tests {
             1,
             "{background:?}"
         );
+        // Records with no line add their file with no statement and credit
+        // nothing.
+        let empty = root.join("empty.info");
+        std::fs::write(
+            &empty,
+            "SF:src/app.js\nend_of_record\nSF:src/new.js\nend_of_record\n",
+        )
+        .unwrap();
+        let nothing = import("run-a", Credit::Background, "run-g", &empty).unwrap();
+        assert_eq!(nothing.lines_run, 0);
+        assert_eq!(nothing.added_files, ["src/new.js"]);
         let profile = root.join("default.profraw");
         std::fs::write(
             &profile,
@@ -1028,6 +1050,23 @@ mod tests {
             import("run-a", Credit::Background, "run-f", &profile)
                 .unwrap_err()
                 .contains("is an LLVM profile")
+        );
+        // A server's record torn as it was written is kept in the run, and
+        // cannot be carried into another: the import says so.
+        crate::run_store::create_analyzable_test_run_with(
+            &root,
+            "run-torn",
+            vec![crate::evidence_archive::EvidenceArchiveEntry {
+                path: "server/background/worker.jsonl".into(),
+                contents: b"{\"type\":\"hit\",\"id\":\"statement\"}\n{\"type\":\"hi".to_vec(),
+            }],
+        );
+        let torn = import("run-torn", Credit::Background, "run-h", &evidence).unwrap_err();
+        assert!(
+            torn.contains(
+                "Cannot import into run run-torn: cannot merge malformed recognized JSON evidence"
+            ),
+            "{torn}"
         );
     }
 
@@ -1048,31 +1087,29 @@ mod tests {
         let root = crate::test_directory::TestDirectory::adopt(base);
         let directory = crate::run_store::create_analyzable_test_run(&root, "run-a");
         let evidence_path = directory.join("evidence.raw.gz");
-        let mut entries = read_archive(&evidence_path).unwrap();
-        let manifest = entries
-            .iter_mut()
-            .find(|entry| entry.path == "manifest.json")
-            .unwrap();
-        let mut value: Value = serde_json::from_slice(&manifest.contents).unwrap();
-        value["scope"] = json!({"entries": [
-            {"file": "src/app.js", "status": "included", "reason": "javascript source"},
-            {"file": "src/empty.js", "status": "included", "reason": "javascript source"},
-            {"file": "src/vendor.js", "status": "excluded", "reason": "vendored"},
-        ]});
-        manifest.contents = serde_json::to_vec(&value).unwrap();
-        let archive = write_archive(entries, &evidence_path).unwrap();
-        let metadata_path = directory.join("run.json");
-        let mut metadata: RunMetadata =
-            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
-        metadata.raw_evidence = RawEvidenceMetadata {
-            schema_version: archive.schema_version,
-            format: archive.format.into(),
-            file: archive.file.into(),
-            files: archive.files,
-            uncompressed_bytes: archive.uncompressed_bytes,
-            compressed_bytes: archive.compressed_bytes,
+        let scoped = |scope: Value| {
+            let mut entries = read_archive(&evidence_path).unwrap();
+            let manifest = entries
+                .iter_mut()
+                .find(|entry| entry.path == "manifest.json")
+                .unwrap();
+            let mut value: Value = serde_json::from_slice(&manifest.contents).unwrap();
+            value["scope"] = scope;
+            manifest.contents = serde_json::to_vec(&value).unwrap();
+            let archive = write_archive(entries, &evidence_path).unwrap();
+            let metadata_path = directory.join("run.json");
+            let mut metadata: RunMetadata =
+                serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+            metadata.raw_evidence = RawEvidenceMetadata {
+                schema_version: archive.schema_version,
+                format: archive.format.into(),
+                file: archive.file.into(),
+                files: archive.files,
+                uncompressed_bytes: archive.uncompressed_bytes,
+                compressed_bytes: archive.compressed_bytes,
+            };
+            std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         };
-        std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         for file in ["src/empty.js", "src/vendor.js"] {
             std::fs::write(root.join(file), "one();\n").unwrap();
         }
@@ -1082,16 +1119,37 @@ mod tests {
             "SF:src/empty.js\nDA:1,1\nend_of_record\nSF:src/vendor.js\nDA:1,1\nend_of_record\n",
         )
         .unwrap();
-        let outcome = import_line_evidence(&ImportRequest {
-            root: &root,
-            run: Some("run-a"),
-            evidence: &evidence,
-            credit: Credit::Background,
-            status: None,
-            run_id: "run-b",
-            started_at: "2026-01-01T00:00:00.000Z",
-        })
-        .unwrap();
+        let import = |run_id: &str| {
+            import_line_evidence(&ImportRequest {
+                root: &root,
+                run: Some("run-a"),
+                evidence: &evidence,
+                credit: Credit::Background,
+                status: None,
+                run_id,
+                started_at: "2026-01-01T00:00:00.000Z",
+            })
+            .unwrap()
+        };
+        // A run that keeps no scope, or one that lists no entries, leaves
+        // nothing out.
+        for (scope, run_id) in [
+            (Value::Null, "run-none"),
+            (json!({}), "run-unlisted"),
+            (json!({"entries": "none"}), "run-not-a-list"),
+        ] {
+            scoped(scope);
+            assert_eq!(
+                import(run_id).added_files,
+                ["src/empty.js", "src/vendor.js"]
+            );
+        }
+        scoped(json!({"entries": [
+            {"file": "src/app.js", "status": "included", "reason": "javascript source"},
+            {"file": "src/empty.js", "status": "included", "reason": "javascript source"},
+            {"file": "src/vendor.js", "status": "excluded", "reason": "vendored"},
+        ]}));
+        let outcome = import("run-b");
         assert_eq!(outcome.added_files, ["src/empty.js"]);
         assert_eq!(
             outcome.skipped,
@@ -1099,6 +1157,35 @@ mod tests {
                 "src/vendor.js".to_owned(),
                 "the run leaves it out: vendored".to_owned()
             )]
+        );
+    }
+
+    /// Each malformed number of a tracefile is named with its line; a count
+    /// written negative or fractional ran; nothing at all is no tracefile.
+    #[test]
+    fn a_tracefile_s_numbers_are_read_or_named() {
+        assert_eq!(
+            parse_lcov("").unwrap_err(),
+            "no SF record: this is not an LCOV tracefile"
+        );
+        for (text, error) in [
+            ("SF:a.js\nDA:x,1\n", "line 2: DA line is not a number: x"),
+            ("SF:a.js\nFN:x,f\n", "line 2: FN line is not a number: x"),
+            (
+                "SF:a.js\nFNDA:x,f\n",
+                "line 2: FNDA count is not a number: x",
+            ),
+            (
+                "SF:a.js\nDA:99999999999999999999999,1\n",
+                "line 2: DA line is not a number: 99999999999999999999999",
+            ),
+        ] {
+            assert_eq!(parse_lcov(text).unwrap_err(), error, "{text}");
+        }
+        let files = parse_lcov("SF:a.js\nDA:1,-1\nDA:2,0.5\nDA:3,0.0\n").unwrap();
+        assert_eq!(
+            files["a.js"].lines,
+            BTreeMap::from([(1, 1), (2, 1), (3, 0)])
         );
     }
 }

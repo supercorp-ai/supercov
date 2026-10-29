@@ -4,9 +4,9 @@
 //! commands. This layer owns ordering, fail-fast behavior, timings and the
 //! single persistent signal guard across every external phase.
 
+use crate::fault_fs as fs;
 use std::{
-    fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{SeekFrom, Write},
     path::Path,
     time::Instant,
 };
@@ -98,10 +98,10 @@ fn publish_captured_output(
 ) {
     if failed || verbose {
         let result = (|| -> std::io::Result<()> {
-            let mut file = File::open(path)?;
-            let length = file.metadata()?.len();
+            let mut file = fs::open(path)?;
+            let length = fs::file_metadata(&file)?.len();
             if length > CAPTURED_OUTPUT_LIMIT {
-                file.seek(SeekFrom::End(-(CAPTURED_OUTPUT_LIMIT as i64)))?;
+                fs::seek(&mut file, SeekFrom::End(-(CAPTURED_OUTPUT_LIMIT as i64)))?;
                 writeln!(
                     writer,
                     "[supercov] {phase} output truncated to the final {} bytes",
@@ -109,7 +109,7 @@ fn publish_captured_output(
                 )?;
             }
             let mut buffer = Vec::with_capacity(length.min(CAPTURED_OUTPUT_LIMIT) as usize);
-            file.read_to_end(&mut buffer)?;
+            fs::read_to_end_from(&mut file, &mut buffer)?;
             writer.write_all(&buffer)?;
             writer.flush()
         })();
@@ -283,6 +283,17 @@ mod tests {
         assert_eq!(seen, [PhaseKind::Build, PhaseKind::Test]);
         assert_eq!(fs::read_to_string(order).unwrap(), "build-test");
         assert_eq!(result.phases.len(), 2);
+        // A plan run where the user's signals cannot be forwarded runs
+        // nothing.
+        let refused = crate::fault::during("signal-install", || {
+            execute_plan(
+                &plan,
+                SupervisionOptions::default(),
+                &mut Vec::new(),
+                |_, _| Ok(()),
+            )
+        });
+        assert!(refused.is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -443,6 +454,36 @@ mod tests {
                 .unwrap()
                 .starts_with("[supercov] could not read build output: ")
         );
+        // A writer that takes nothing, of a long output and a short one,
+        // loses the output and still removes the log.
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("closed"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for contents in [&output[..], b"short"] {
+            fs::write(&log, contents).unwrap();
+            publish_captured_output(&log, "build", true, false, &mut Closed);
+            assert!(!log.exists());
+        }
+        // Its size, the seek to its end, or the read that cannot be made says
+        // the output could not be read.
+        for fault in ["fs.file_metadata", "fs.seek", "fs.read_to_end_from"] {
+            fs::write(&log, &output).unwrap();
+            let mut writer = Vec::new();
+            crate::fault::during(fault, || {
+                publish_captured_output(&log, "build", true, false, &mut writer);
+            });
+            assert!(
+                String::from_utf8_lossy(&writer).contains("could not read build output"),
+                "{fault}"
+            );
+            assert!(!log.exists(), "{fault}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -509,5 +550,25 @@ mod tests {
         assert_eq!(String::from_utf8(writer).unwrap(), "partial");
         assert!(!log.exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_orchestration_error_says_what_failed() {
+        use super::OrchestrationError as E;
+        let messages = [
+            E::InvalidPlan("cycle".into()),
+            E::PhaseSetup {
+                phase: "server".into(),
+                reason: "port".into(),
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "invalid execution plan: cycle",
+                "could not prepare server phase: port",
+            ]
+        );
     }
 }

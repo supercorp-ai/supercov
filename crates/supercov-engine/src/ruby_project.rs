@@ -5,9 +5,9 @@
 //! runtime probe plan, and records which files were included, excluded or
 //! unparseable so the run can say exactly what its denominator covers.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -108,10 +108,10 @@ fn walk(root: &Path, directory: &Path, files: &mut RubyFiles) -> Result<(), Stri
             .file_name()
             .into_string()
             .map_err(|_| format!("Ruby project contains a non-UTF-8 path: {}", path.display()))?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let file_type = fs::file_type(&entry).map_err(|error| error.to_string())?;
         let relative = path
             .strip_prefix(root)
-            .map_err(|_| format!("path escaped root: {}", path.display()))?
+            .expect("a walked path lies under the root")
             .to_string_lossy()
             .replace('\\', "/");
         if file_type.is_dir() {
@@ -304,7 +304,7 @@ fn prepare(
             },
             entries,
         })
-        .map_err(|error| error.to_string())?,
+        .expect("plain data serializes"),
     );
     let mut plan = RubyProbePlan {
         version: RUBY_PROBE_PLAN_VERSION,
@@ -422,6 +422,19 @@ mod tests {
         let named =
             prepare_ruby_project(&root, Some(&explicit_roots(&root, &["examples"]))).unwrap();
         assert_eq!(named.files.sources, ["examples/usage.rb"]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A name that is not UTF-8 stops discovery, naming it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_is_named() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = fixture("not-utf8");
+        write(&root, "lib/good.rb", "def f(x) = x\n");
+        fs::write(root.join(std::ffi::OsStr::from_bytes(b"lib/\xff.rb")), "").unwrap();
+        let refused = discover_ruby_files(&root).unwrap_err();
+        assert!(refused.contains("non-UTF-8 path"), "{refused}");
         fs::remove_dir_all(root).ok();
     }
 

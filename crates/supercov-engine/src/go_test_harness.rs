@@ -30,9 +30,13 @@ pub struct GoTestFile {
     pub edits: Vec<GoEdit>,
 }
 
-fn function_name(node: Node, source: &str) -> Option<String> {
-    node.child_by_field_name("name")
-        .map(|name| source[name.byte_range()].to_owned())
+/// A function declaration's name: a tree with no error gives every one its
+/// name.
+fn function_name(node: Node, source: &str) -> String {
+    let name = node
+        .child_by_field_name("name")
+        .expect("a function declaration has its name");
+    source[name.byte_range()].to_owned()
 }
 
 /// Go's own rule for what the toolchain will run as a test, from
@@ -73,7 +77,9 @@ fn is_checkpoint_only_function(name: &str, node: Node, source: &str) -> bool {
 }
 
 fn first_parameter<'t>(node: Node<'t>) -> Option<Node<'t>> {
-    let parameters = node.child_by_field_name("parameters")?;
+    let parameters = node
+        .child_by_field_name("parameters")
+        .expect("a function declaration has its parameter list");
     let mut cursor = parameters.walk();
     parameters
         .children(&mut cursor)
@@ -81,7 +87,9 @@ fn first_parameter<'t>(node: Node<'t>) -> Option<Node<'t>> {
 }
 
 fn parameter_type(node: Node, source: &str) -> Option<String> {
-    let kind = first_parameter(node)?.child_by_field_name("type")?;
+    let kind = first_parameter(node)?
+        .child_by_field_name("type")
+        .expect("a parameter declaration has its type");
     Some(source[kind.byte_range()].trim().to_owned())
 }
 
@@ -128,9 +136,7 @@ pub fn instrument_test_file(
         if child.kind() != "function_declaration" {
             continue;
         }
-        let Some(name) = function_name(child, source) else {
-            continue;
-        };
+        let name = function_name(child, source);
         let Some(body) = child.child_by_field_name("body") else {
             continue;
         };
@@ -295,25 +301,28 @@ fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
             .find(|child| child.kind() == "statement_list")
             .unwrap_or(body)
     };
+    // A body that calls `t.Parallel()` has a statement at least.
     let mut cursor = statements.walk();
-    for statement in statements.children(&mut cursor).filter(Node::is_named) {
-        // The grammar wraps a call standing alone as a statement in an
-        // `expression_statement`; it is never a statement's child on its own.
-        let call = match statement.kind() {
-            "expression_statement" => match statement.named_child(0) {
-                Some(inner) if inner.kind() == "call_expression" => inner,
-                // Some other expression standing alone -- a channel receive,
-                // say -- which is not the call being looked for; the next
-                // statement might be.
-                _ => continue,
-            },
-            _ => continue,
-        };
-        if callee(call, source).is_some_and(|function| function.ends_with(".Parallel")) {
-            return Some(statement.end_byte());
-        }
-    }
-    None
+    statements
+        .children(&mut cursor)
+        .filter(Node::is_named)
+        .find_map(|statement| {
+            // The grammar wraps a call standing alone as a statement in an
+            // `expression_statement`; it is never a statement's child on its own.
+            let call = match statement.kind() {
+                "expression_statement" => match statement.named_child(0) {
+                    Some(inner) if inner.kind() == "call_expression" => inner,
+                    // Some other expression standing alone -- a channel receive,
+                    // say -- which is not the call being looked for; the next
+                    // statement might be.
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            callee(call, source)
+                .is_some_and(|function| function.ends_with(".Parallel"))
+                .then(|| statement.end_byte())
+        })
 }
 
 /// What a call expression calls, as written; nothing for any other node.
@@ -322,7 +331,9 @@ fn callee<'s>(node: Node, source: &'s str) -> Option<&'s str> {
     if node.kind() != "call_expression" {
         return None;
     }
-    let function = node.child_by_field_name("function")?;
+    let function = node
+        .child_by_field_name("function")
+        .expect("a call has its function");
     Some(source[function.byte_range()].trim_end())
 }
 
@@ -578,6 +589,29 @@ mod tests {
         );
     }
 
+    /// Run in parallel, a test that pauses itself belongs to no test: it is
+    /// named with its outcome, read from its parameter, or reported passed
+    /// where it names none.
+    #[test]
+    fn a_parallel_test_left_unserialised_is_named_with_no_coverage() {
+        let source = "package p\n\nimport \"testing\"\n\nfunc TestNamed(t *testing.T) {\n\tt.Parallel()\n}\n\nfunc TestUnnamed(*testing.T) {\n\tsuite.Parallel()\n}\n";
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", false).expect("instrument");
+        assert_eq!(file.unattributed, ["TestNamed", "TestUnnamed"]);
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(
+            out.contains(&format!(
+                "defer {HARNESS_UNATTRIBUTED}(t, \"TestNamed\")();"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("__supercov.Ran(\"TestUnnamed\", \"passed\")"),
+            "{out}"
+        );
+    }
+
     #[test]
     fn a_serialised_run_leaves_a_serial_test_where_it_was() {
         // `serialised` only moves the announcement for a test that pauses
@@ -669,6 +703,23 @@ mod tests {
         ));
         assert_eq!(file.tests, ["TestOne"]);
         assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    /// Serialised, a test that pauses itself only inside an `if` makes no
+    /// call of its own to wait for: it is announced at the top of its body.
+    #[test]
+    fn a_serialised_test_that_pauses_only_conditionally_is_announced_first() {
+        let source = "package p\n\nimport \"testing\"\n\nfunc TestMaybe(t *testing.T) {\n\tdoWork()\n\tif slow {\n\t\tt.Parallel()\n\t}\n}\n";
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        let announced = out
+            .find("__supercovTest(t, \"TestMaybe\")")
+            .expect("announced");
+        assert!(announced < out.find("doWork()").unwrap(), "{out}");
+        // A file of nothing at all has no declaration to walk.
+        let empty = instrument_test_file("", "__supercov", "evidence.bin", false);
+        assert!(empty.unwrap().edits.is_empty());
     }
 
     #[test]
@@ -785,7 +836,7 @@ mod tests {
         // of examples, and reported between 74% and 95% of one unchanged suite
         // depending on which test finished last.
         let (file, out) = instrumented(
-            "package p\n\nimport \"testing\"\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n\nfunc FuzzWork(f *testing.F) {\n\tdoWork()\n}\n\nfunc Examples(t *testing.T) {\n\tdoWork()\n}\n\nfunc ExampleHelper(x int) {\n\tdoWork()\n}\n",
+            "package p\n\nimport \"testing\"\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n\nfunc FuzzWork(f *testing.F) {\n\tdoWork()\n}\n\nfunc Examples(t *testing.T) {\n\tdoWork()\n}\n\nfunc ExampleHelper(x int) {\n\tdoWork()\n}\n\nfunc FuzzNothing() {\n\tdoWork()\n}\n",
         );
         // Both are swept before they return, and both are named for having
         // run. The Example sweeps inline because it has no receiver to read an
@@ -821,6 +872,8 @@ mod tests {
         assert!(file.tests.is_empty(), "{file:?}");
         assert!(!out.contains("\"Examples\""), "{out}");
         assert!(!out.contains("\"ExampleHelper\""), "{out}");
+        // Nor is a Fuzz function that takes no *testing.F.
+        assert!(!out.contains("\"FuzzNothing\""), "{out}");
     }
 
     #[test]

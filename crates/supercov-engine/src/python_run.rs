@@ -6,10 +6,10 @@
 //! points the interpreter at it through environment variables, supervises the
 //! user's command unchanged, and publishes the joined evidence.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,
@@ -88,21 +88,23 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
     ]
 }
 
+#[track_caller]
 fn write_runtime(directory: &Path) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
-    for (name, contents) in embedded_runtime_files() {
-        let path = directory.join(name);
-        fs::write(&path, contents).map_err(|error| format!("{}: {error}", path.display()))?;
-    }
-    Ok(())
+    // The runtime has its files.
+    embedded_runtime_files()
+        .into_iter()
+        .try_for_each(|(name, contents)| {
+            let path = directory.join(name);
+            fs::write(&path, contents).map_err(|error| format!("{}: {error}", path.display()))
+        })
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     for entry in fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))? {
         let entry = entry.map_err(|error| error.to_string())?;
         let target = destination.join(entry.file_name());
-        if entry
-            .file_type()
+        if fs::file_type(&entry)
             .map_err(|error| error.to_string())?
             .is_dir()
         {
@@ -230,19 +232,22 @@ pub fn current_python_integrity(
 /// deduplicated: a line with two assertions is one line to arm.
 fn assertion_sites(files: &crate::source_manifest::Files) -> BTreeMap<String, Vec<usize>> {
     let mut sites = BTreeMap::<String, Vec<usize>>::new();
-    for (file, text) in files.iter().filter(|(file, _)| file.ends_with(".py")) {
-        let Ok(starts) = assertion_starts(text) else {
-            continue;
-        };
-        let lines = sites.entry(file.clone()).or_default();
-        lines.extend(
-            starts
-                .into_iter()
-                .map(|start| text[..start].bytes().filter(|b| *b == b'\n').count() + 1),
-        );
-        lines.sort_unstable();
-        lines.dedup();
-    }
+    files
+        .iter()
+        .filter(|(file, _)| file.ends_with(".py"))
+        .for_each(|(file, text)| {
+            let Ok(starts) = assertion_starts(text) else {
+                return;
+            };
+            let lines = sites.entry(file.clone()).or_default();
+            lines.extend(
+                starts
+                    .into_iter()
+                    .map(|start| text[..start].bytes().filter(|b| *b == b'\n').count() + 1),
+            );
+            lines.sort_unstable();
+            lines.dedup();
+        });
     sites.retain(|_, lines| !lines.is_empty());
     sites
 }
@@ -306,16 +311,14 @@ fn archive_python_run(
             )
         });
         let archived = (|| {
-            let entries = run.archive_entries().map_err(|error| error.to_string())?;
+            let entries = run.archive_entries();
             let serialized_ms = elapsed_ms(publication_started) - joined_ms;
-            let entries = crate::source_capture::append(entries, source_inputs)?;
+            let entries = crate::source_capture::append(entries, source_inputs);
             let raw = write_archive(entries, archive_path).map_err(|error| error.to_string())?;
             let archive_ms = elapsed_ms(publication_started) - joined_ms - serialized_ms;
             Ok::<_, String>((raw, serialized_ms, archive_ms))
         })();
-        let analysed = analysis
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let analysed = analysis.join().unwrap_or_else(crate::threads::rethrow);
         (archived, analysed)
     });
     let (raw, serialized_ms, archive_ms) = archived?;
@@ -359,12 +362,11 @@ fn run_direct_python_in(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let adapter_started = Instant::now();
@@ -400,21 +402,19 @@ fn run_direct_python_in(
         };
         fs::write(
             &plan_path,
-            serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
+            serde_json::to_vec(&plan).expect("plain data serializes"),
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] detected Python; measuring {} source file(s) in place through probes compiled at import",
             project.plan.files.len(),
-        )
-        .map_err(|error| error.to_string())?;
+        );
         for (file, reason) in &project.unparseable {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         let adapter_setup_ms = elapsed_ms(adapter_started);
 
@@ -517,11 +517,10 @@ fn run_direct_python_in(
         let (tests, interpreters, python_versions) =
             (run.tests, run.interpreters, run.python_versions.clone());
         if verbose {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] python evidence: join={joined_ms}ms serialize={serialized_ms}ms archive={archive_ms}ms analysis={analysis_ms}ms (beside the archive)"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if ambient
             .get("SUPERCOV_KEEP_WORK")
@@ -637,12 +636,11 @@ impl PythonServer {
         command: &[String],
     ) -> Result<Option<Self>, String> {
         let ambient = std::env::vars().collect::<BTreeMap<_, _>>();
-        // Roots named for the JavaScript source may hold no Python at all.
-        let Ok(roots) =
-            crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
-        else {
-            return Ok(None);
-        };
+        // Roots named for the JavaScript source may hold no Python at all. They
+        // resolve: the suite's own discovery read them first and refused any
+        // that did not.
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
+            .expect("roots the suite's discovery accepted resolve");
         let Some(project) =
             crate::python_project::prepare_python_server_project(root, roots.as_ref())?
         else {
@@ -678,7 +676,7 @@ impl PythonServer {
         let plan_path = directory.join("plan.json");
         fs::write(
             &plan_path,
-            serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
+            serde_json::to_vec(&plan).expect("plain data serializes"),
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
         Ok(Some(Self {
@@ -775,11 +773,10 @@ impl PythonServer {
                 raw.role == "test" && raw.runtime.iter().any(|snapshot| !snapshot.hits.is_empty())
             });
             if !answered {
-                writeln!(
+                let _ = writeln!(
                     diagnostics,
                     "[supercov] a Python process ran, and no request a test sent reached measured Python code; no Python run was published"
-                )
-                .map_err(|error| error.to_string())?;
+                );
                 return Ok(None);
             }
             validate_frontend_report_request(&run.declaration, &run.request)
@@ -802,14 +799,11 @@ impl PythonServer {
                     // The evidence was recorded under the browser run's id; a run
                     // published beside it has its own.
                     run.request.run_id = metadata.id.clone();
-                    for scope in run
-                        .request
+                    run.request
                         .raw_results
                         .iter_mut()
                         .filter_map(|raw| raw.scope.as_mut())
-                    {
-                        scope.run_id = metadata.id.clone();
-                    }
+                        .for_each(|scope| scope.run_id = metadata.id.clone());
                     run.request.integrity = serde_json::to_value(&self.integrity).ok();
                     let work = root.join(".supercov/work").join(&metadata.id);
                     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
@@ -841,12 +835,11 @@ impl PythonServer {
                         },
                     )
                     .map_err(|error| error.to_string())?;
-                    writeln!(
-                    diagnostics,
-                    "[supercov] Python server coverage: {tests} test(s) across {} source file(s)",
-                    self.project.plan.files.len()
-                )
-                .map_err(|error| error.to_string())?;
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] Python server coverage: {tests} test(s) across {} source file(s)",
+                        self.project.plan.files.len()
+                    );
                     Ok((run_directory, metadata))
                 })();
                 let result = result.map_err(|error| {
@@ -920,6 +913,21 @@ mod tests {
         );
     }
     use super::*;
+
+    /// A list the user set is kept, with ours after it; an empty one is
+    /// none.
+    #[test]
+    fn an_appended_list_keeps_what_was_set() {
+        assert_eq!(
+            append_list(Some("-X dev".into()), "-X utf8", " "),
+            OsString::from("-X dev -X utf8")
+        );
+        assert_eq!(
+            append_list(Some("".into()), "-X utf8", " "),
+            OsString::from("-X utf8")
+        );
+        assert_eq!(append_list(None, "-X utf8", " "), OsString::from("-X utf8"));
+    }
     use crate::source_discovery::{ExplicitSourceRoots, fold_roots_into_configuration};
 
     fn fixture(name: &str) -> PathBuf {
@@ -989,6 +997,13 @@ mod tests {
                 .fingerprint,
             recorded.fingerprint,
             "a first-party file changing does"
+        );
+        // A file it cannot digest leaves no fingerprint to compare.
+        assert!(
+            crate::fault::during("fs.open#integrity.rs:427", || {
+                current_python_integrity(&root, &command, Some(&configured))
+            })
+            .is_err()
         );
         fs::remove_dir_all(root).ok();
     }
@@ -1083,7 +1098,10 @@ mod tests {
         let root = fixture("copied");
         let copy = root.with_extension("copy");
         fs::create_dir_all(&copy).unwrap();
+        // An empty directory is copied as one.
+        fs::create_dir_all(root.join("empty")).unwrap();
         copy_tree(&root, &copy).unwrap();
+        assert!(copy.join("empty").is_dir());
         assert_eq!(
             fs::read_to_string(copy.join("vendor/pkg/b.py")).unwrap(),
             "def g():\n    return 1\n"

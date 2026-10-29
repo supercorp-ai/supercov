@@ -29,7 +29,8 @@ pub fn command(arguments: &[String]) -> ExitCode {
     let mut output = None;
     let mut format = None;
     let mut index = 0;
-    while index < arguments.len() {
+    // Dispatch sends `<run> gaps ...` here: never empty.
+    loop {
         match arguments[index].as_str() {
             "--format" => {
                 index += 1;
@@ -45,6 +46,9 @@ pub fn command(arguments: &[String]) -> ExitCode {
             other => passed.push(other.to_owned()),
         }
         index += 1;
+        if index >= arguments.len() {
+            break;
+        }
     }
     if format.as_deref() != Some("jsonl") {
         eprintln!("[supercov] gaps --format takes jsonl");
@@ -68,18 +72,17 @@ pub fn command(arguments: &[String]) -> ExitCode {
     // export exists for the runs whose gaps do not fit in one. Read through
     // the reply, it refused exactly those.
     let query = |arguments: Vec<String>| -> Result<Value, String> {
-        let invocation = super::parse_public_query("runs", &arguments)
-            .map_err(|error| error.error.message.clone())?;
-        match super::execute_public_query(&root, &invocation)
-            .map_err(|failure| failure.error.message.clone())?
-        {
-            super::PublicQueryOutput::Coverage { output, .. } => serde_json::to_value(&output.data)
-                .map(|data| serde_json::json!({ "data": data }))
-                .map_err(|error| error.to_string()),
-            super::PublicQueryOutput::Runs { .. } => Err("not a coverage query".into()),
-        }
+        let (request, _) =
+            super::public_query::coverage_request(run.clone(), "gaps", &arguments, true)
+                .map_err(|error| error.error.message.clone())?;
+        let (output, _) = super::execute_coverage_query(&root, &request, None)
+            .map_err(|failure| failure.error.message.clone())?;
+        Ok(serde_json::json!({
+            "data": serde_json::to_value(&output.data).expect("plain data serializes")
+        }))
     };
-    let mut gaps_arguments = passed.clone();
+    // Past `<run> gaps`, as dispatch sends them.
+    let mut gaps_arguments = passed[2..].to_vec();
     gaps_arguments.extend(["--json", "--limit", ALL].map(str::to_owned));
     let gaps = match query(gaps_arguments) {
         Ok(gaps) => gaps,
@@ -107,8 +110,12 @@ pub fn command(arguments: &[String]) -> ExitCode {
     let mut lines = String::new();
     let mut written = 0usize;
     for (file, detail) in files.iter().zip(&details) {
-        for gap_line in &detail.gap_lines {
-            for obligation in &gap_line.obligations {
+        // A file the gaps name has a gap line, and a gap line an obligation.
+        detail
+            .gap_lines
+            .iter()
+            .flat_map(|gap_line| gap_line.obligations.iter().map(move |o| (gap_line, o)))
+            .for_each(|(gap_line, obligation)| {
                 let row = Row {
                     file,
                     obligation,
@@ -119,12 +126,11 @@ pub fn command(arguments: &[String]) -> ExitCode {
                 );
                 lines.push('\n');
                 written += 1;
-            }
-        }
+            });
     }
     match output {
         Some(path) => {
-            if let Err(error) = std::fs::write(&path, &lines) {
+            if let Err(error) = supercov_engine::fault_fs::write(&path, &lines) {
                 eprintln!("[supercov] {}: {error}", path.display());
                 return ExitCode::from(2);
             }
@@ -163,25 +169,25 @@ fn file_details(
         return Ok(Vec::new());
     };
     // The options as `file` reads them, so the rows are the ones it gives.
-    let mut arguments = vec![run.to_owned(), "file".into(), first.clone()];
+    let mut arguments = vec![first.clone()];
     arguments.extend(shared.iter().cloned());
     arguments.extend(["--json", "--limit", ALL].map(str::to_owned));
-    let super::PublicQueryInvocation::Coverage { request, .. } =
-        super::parse_public_query("runs", &arguments).map_err(|error| error.error.message)?
-    else {
-        return Err("not a coverage query".into());
-    };
+    // The gaps query took these options already.
+    let (request, _) =
+        super::public_query::coverage_request(run.to_owned(), "file", &arguments, true)
+            .expect("`file` takes the options `gaps` took");
     let inventory = super::public_run_inventory(root).map_err(|error| error.to_string())?;
     let stored = supercov_engine::run_store::select_run(&inventory, Some(&request.run_id))
-        .map_err(|error| error.to_string())?;
+        .expect("the gaps query read this run");
     let container = super::open_query_index_for(stored, request.test_filter().as_ref())
         .map_err(|error| error.to_string())?;
     let index = supercov_engine::coverage_index::CoverageIndex::new(&container)
         .map_err(|error| error.to_string())?;
-    let view = request.view().map_err(|error| format!("{error:?}"))?;
+    let view = request.view().expect("the gaps query read this view");
     let read = supercov_engine::coverage_query::FileDetailSource::read(&index, view)
         .map_err(|error| format!("{error:?}"))?;
-    files
+    // Each file the gaps named is one of the run's.
+    Ok(files
         .iter()
         .map(|file| {
             let (detail, _) = supercov_engine::coverage_query::coverage_file_detail_from(
@@ -197,17 +203,18 @@ fn file_details(
                     limit: usize::MAX,
                 },
             )
-            .map_err(|error| format!("{file}: {error:?}"))?;
-            Ok(detail)
+            .expect("a file the gaps named has its detail");
+            detail
         })
-        .collect()
+        .collect())
 }
 
 /// The options among `arguments` that `file` takes as well, with their values.
 fn shared_options(arguments: &[String]) -> Vec<String> {
     let mut shared = Vec::new();
     let mut index = 0;
-    while index < arguments.len() {
+    // The run is the first argument: never empty.
+    loop {
         if SHARED.contains(&arguments[index].as_str())
             && let Some(value) = arguments.get(index + 1)
         {
@@ -216,8 +223,10 @@ fn shared_options(arguments: &[String]) -> Vec<String> {
             index += 1;
         }
         index += 1;
+        if index >= arguments.len() {
+            break shared;
+        }
     }
-    shared
 }
 
 /// One exported obligation: what `file` says of it, with its file and the

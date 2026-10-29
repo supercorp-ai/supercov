@@ -3,6 +3,7 @@
 //! change model that says which tests a later edit could have reached.
 //! `tests affected`, `runs source` and assertions coverage all read these.
 
+use crate::fault_fs as fs;
 use crate::{
     coverage_report::{
         ArchiveReportRequest, CoverageReport, ExitCodeInput, analyze_coverage_archive,
@@ -17,7 +18,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 pub type Files = BTreeMap<String, String>;
@@ -286,11 +286,8 @@ impl std::ops::Deref for RunInputs {
     }
 }
 /// The run's manifest with the current checkout's sources, which must be the
-/// run's own byte for byte.
-pub fn load_inputs(root: &Path, run: &StoredRun) -> Result<RunInputs, String> {
-    load_inputs_for(root, run, |_| true)
-}
-/// [`load_inputs`] checking only the files `needed` names against the run.
+/// run's own byte for byte: the files `needed` names are checked against the
+/// run.
 pub fn load_inputs_for(
     root: &Path,
     run: &StoredRun,
@@ -441,7 +438,7 @@ fn write_json(
     name: &str,
     value: &impl serde::Serialize,
 ) -> Result<(), String> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    let mut bytes = serde_json::to_vec_pretty(value).expect("plain data serializes");
     bytes.push(b'\n');
     atomic_write(root, &run.directory.join(name), &bytes).map_err(|e| e.to_string())
 }
@@ -686,7 +683,8 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
     let mut tests = BTreeMap::<(String, String), (usize, Value)>::new();
     let mut changed = BTreeMap::<String, Value>::new();
     let mut meaning = Value::Null;
-    for parent in parents {
+    // Not empty, as just checked.
+    parents.iter().try_for_each(|parent| -> Result<(), String> {
         let Some(stored) = inventory.runs.iter().find(|stored| stored.id == *parent) else {
             return Err(format!(
                 "Run {} was merged from {parent}, which is no longer stored, and a merge is answered from the runs it was merged from. Ask the others, or measure the suite again",
@@ -726,15 +724,17 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
         if meaning.is_null() {
             meaning = report["meaning"].clone();
         }
-    }
+        Ok(())
+    })?;
     let mut buckets = BUCKETS.map(|_| Vec::new());
-    for (rank, test) in tests.into_values() {
+    // Each run merged has a test at least.
+    tests.into_values().for_each(|(rank, test)| {
         buckets[rank].push(test);
-    }
+    });
     // Most likely to fail first, as within one run.
-    for bucket in &mut buckets[..2] {
+    buckets[..2].iter_mut().for_each(|bucket| {
         bucket.sort_by_key(|entry| std::cmp::Reverse(entry["nameMatch"].as_u64().unwrap_or(0)));
-    }
+    });
     let [affected, undetermined, unaffected] = buckets;
     let total = affected.len() + undetermined.len() + unaffected.len();
     Ok(json!({
@@ -1059,7 +1059,8 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                     &configurations,
                 )
             });
-            for (file, what) in &helpers {
+            // There are helpers: the checkout and the run are read for them.
+            helpers.iter().for_each(|(file, what)| {
                 // A file a process that served the run's tests loaded -- a
                 // mock server's -- reached those tests and no others.
                 let served_by = ran.support.as_ref().and_then(|support| {
@@ -1078,7 +1079,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                     if served {
                         reasons.push(format!("{what} (a server that served this test loaded it)"));
                     }
-                    continue;
+                    return;
                 }
                 let loaded = match loads {
                     Some(loads) if loads.open.is_none() => {
@@ -1094,7 +1095,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                         _ => format!("{what} (a file tests may load)"),
                     });
                 }
-            }
+            });
         }
         for (file, names) in &named_by_tests {
             if record.files.contains_key(*file) || *file == record.test.file.as_str() {
@@ -1203,7 +1204,14 @@ fn named_by_tests<'a>(
                 narrow: false,
                 ..
             } => {
-                let stem = file.rsplit('/').next()?.split('.').next()?.to_owned();
+                let stem = file
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .split('.')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
                 let mut names = before
                     .units
                     .iter()
@@ -1362,6 +1370,27 @@ fn byte_column_in(
 
 #[cfg(test)]
 mod tests {
+    /// On an empty line of JavaScript the first column is the line's end,
+    /// and no other column is on it.
+    #[test]
+    fn an_empty_line_has_its_first_column_only() {
+        assert_eq!(super::byte_column("a\n\nb\n", 2, 1, "javascript"), Some(1));
+        assert_eq!(super::byte_column("a\n\nb\n", 2, 2, "javascript"), None);
+    }
+
+    /// An execution recorded before attribution was a question is exact.
+    #[test]
+    fn an_execution_that_says_nothing_of_attribution_is_exact() {
+        let execution = serde_json::from_str::<Execution>(
+            r#"{"test":{"file":"t.js","name":"n"},"passed":true,"files":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            execution.attribution,
+            crate::coverage_report::ATTRIBUTION_EXACT
+        );
+    }
+
     #[test]
     fn a_shard_is_a_number_and_anything_else_is_an_entrys_own_name() {
         assert_eq!(
@@ -1377,6 +1406,19 @@ mod tests {
     }
 
     use super::*;
+
+    /// Line zero and a line past the end hold no text; the last line is
+    /// read to the end, and a carriage return before a line feed is not text.
+    #[test]
+    fn a_line_is_read_as_lines_reads_it() {
+        let source = "a\r\nb";
+        let starts = line_starts(source);
+        assert_eq!(line_text(source, &starts, 0), None);
+        assert_eq!(line_text(source, &starts, 1), Some("a"));
+        assert_eq!(line_text(source, &starts, 2), Some("b"));
+        assert_eq!(line_text(source, &starts, 3), None);
+        assert_eq!(line_text("a\n", &line_starts("a\n"), 2), None);
+    }
     use crate::evidence_archive::{read_archive, write_archive};
     use crate::run_store::discover_runs;
 
@@ -1443,6 +1485,16 @@ mod tests {
                 .contains("different source manifests")
         );
         assert_eq!(the_one(&[], named).unwrap(), None);
+        // One that is no JSON is refused, first or after another.
+        for broken in [
+            vec![entry("shards/0/source-inputs.json", "{")],
+            vec![
+                entry("shards/0/source-inputs.json", r#"{"files":{}}"#),
+                entry("shards/1/source-inputs.json", "{"),
+            ],
+        ] {
+            assert!(the_one(&broken, named).is_err());
+        }
     }
 
     /// `byte_column` as it was before it took line starts.
@@ -1531,7 +1583,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_analyzable_test_run(&root, "first");
         let path = directory.join("evidence.raw.gz");
-        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs);
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
@@ -1747,6 +1799,11 @@ mod tests {
                 "src/config.js",
                 file_change(Some(&js_before), Some(&js_after), Some(&[])).unwrap(),
             ),
+            // A class that did not exist names nothing a test could have read.
+            (
+                "src/app/Fresh.java",
+                file_change(None, Some(&after), Some(&[])).unwrap(),
+            ),
         ]);
         let named = named_by_tests(&changes);
         assert_eq!(
@@ -1754,6 +1811,7 @@ mod tests {
             Some(&BTreeSet::from(["Converter".to_owned()]))
         );
         assert!(!named.contains_key("src/config.js"));
+        assert!(!named.contains_key("src/app/Fresh.java"));
         assert!(names_word("assertEquals(Converter.CLASS, x)", "Converter"));
         assert!(!names_word("ConverterTests", "Converter"));
     }
@@ -1791,7 +1849,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_run_wide_test_run(&root, "parallel");
         let path = directory.join("evidence.raw.gz");
-        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs);
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
@@ -1893,7 +1951,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_partial_test_run(&root, "partial");
         let path = directory.join("evidence.raw.gz");
-        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs);
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
@@ -2208,6 +2266,52 @@ mod tests {
             executions.tests[0].attribution,
             crate::coverage_report::ATTRIBUTION_PARTIAL
         );
+    }
+
+    /// JavaScript columns are placed in the run's sources: with none, or
+    /// without the file, there is no record; a probe at no column of its
+    /// line places nothing. A run with no tests records none.
+    #[test]
+    fn a_javascript_record_needs_the_sources_its_columns_are_in() {
+        let project = Project::new("javascript-columns");
+        let run = project.published(
+            "partial",
+            crate::run_store::create_partial_test_run,
+            &["src/app.js", "tests/app.test.js"],
+        );
+        let mut report = coverage(&run).unwrap();
+        let mut manifest = load_manifest(&run).unwrap().manifest;
+        manifest.language = "javascript".into();
+        assert!(executions(&report, &manifest, None).is_none());
+        assert!(executions(&report, &manifest, Some(&Files::new())).is_none());
+        let sources = Files::from([("src/app.js".to_owned(), APP.to_owned())]);
+        let placed = executions(&report, &manifest, Some(&sources)).unwrap();
+        assert!(placed.probed.is_empty(), "{:?}", placed.probed);
+        report.view.tests.clear();
+        let placed = executions(&report, &manifest, Some(&sources)).unwrap();
+        assert!(placed.tests.is_empty());
+    }
+
+    /// A record of no tests affects none; a record that is gone or no JSON
+    /// names no test files.
+    #[test]
+    fn a_record_of_no_tests_or_none_names_nothing() {
+        let project = Project::new("no-record");
+        let run = project.published(
+            "first",
+            crate::run_store::create_analyzable_test_run,
+            &["src/app.js", "tests/app.test.js"],
+        );
+        edit_record(&run, |executions| executions.tests.clear());
+        let report = project.affected(&run);
+        for key in ["affected", "undetermined", "unaffected"] {
+            assert!(bucket(&report, key).is_empty(), "{report}");
+        }
+        assert_eq!(test_files(&run), Some(BTreeSet::new()));
+        fs::write(run.directory.join(EXECUTIONS_FILE), "{").unwrap();
+        assert_eq!(test_files(&run), None);
+        fs::remove_file(run.directory.join(EXECUTIONS_FILE)).unwrap();
+        assert_eq!(test_files(&run), None);
     }
 
     /// A source file that is now a link out of the project, or a directory,

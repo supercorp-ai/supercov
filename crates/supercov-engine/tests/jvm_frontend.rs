@@ -607,8 +607,7 @@ public final class SupercovConfig {{
         generated_at: "now",
         test_exit_code: 0,
         coverage_model: jvm_coverage_model(),
-    })
-    .expect("frontend run");
+    });
     let report =
         supercov_engine::coverage_report::analyze_coverage_results(&run.request).expect("report");
     let summary = &report.filters.passed.summary;

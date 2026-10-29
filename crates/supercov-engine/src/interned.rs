@@ -54,14 +54,6 @@ impl Hasher for FxHasher {
         self.add(u64::from(value));
     }
 
-    fn write_u32(&mut self, value: u32) {
-        self.add(u64::from(value));
-    }
-
-    fn write_u64(&mut self, value: u64) {
-        self.add(value);
-    }
-
     fn write_usize(&mut self, value: usize) {
         self.add(value as u64);
     }
@@ -154,12 +146,6 @@ impl From<Id> for String {
     }
 }
 
-impl PartialEq<str> for Id {
-    fn eq(&self, other: &str) -> bool {
-        &*self.0 == other
-    }
-}
-
 impl PartialEq<&str> for Id {
     fn eq(&self, other: &&str) -> bool {
         &*self.0 == *other
@@ -175,12 +161,6 @@ impl PartialEq<String> for Id {
 impl PartialEq<Id> for String {
     fn eq(&self, other: &Id) -> bool {
         self.as_str() == &*other.0
-    }
-}
-
-impl PartialEq<Id> for str {
-    fn eq(&self, other: &Id) -> bool {
-        self == &*other.0
     }
 }
 

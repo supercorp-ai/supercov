@@ -18,11 +18,9 @@
 //!   snapshots/<id>/files.json      per file and window: grades and identities
 //! ```
 
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+use supercov_engine::fault_fs as fs;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -42,10 +40,10 @@ pub fn snapshots(project_root: &Path, lane: &str) -> PathBuf {
 
 /// `q_` and sixteen hex characters, following the shape of a public run id:
 /// short, opaque, and carrying no meaning a reader might rely on.
-pub fn identity() -> Result<(String, String), String> {
+pub fn identity() -> (String, String) {
     let created_at = time::OffsetDateTime::now_utc()
         .format(crate::PUBLIC_TIMESTAMP_FORMAT)
-        .map_err(|error| format!("could not generate the snapshot identity: {error}"))?;
+        .expect("a UTC time has every field the format names");
     let seed = format!(
         "{created_at}\0{}\0{}",
         std::process::id(),
@@ -55,7 +53,7 @@ pub fn identity() -> Result<(String, String), String> {
             .as_nanos()
     );
     let digest = format!("{:x}", Sha256::digest(seed.as_bytes()));
-    Ok((format!("q_{}", &digest[..16]), created_at))
+    (format!("q_{}", &digest[..16]), created_at)
 }
 
 /// Checked before any path is built from a selector, so a snapshot id can
@@ -79,12 +77,8 @@ fn ignore_store(path: &Path) -> Result<(), String> {
         return Ok(());
     };
     let ignore = store.join(".gitignore");
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&ignore)
-    {
-        Ok(mut file) => file.write_all(b"*\n").map_err(|e| e.to_string()),
+    match fs::open_with(fs::OpenOptions::new().write(true).create_new(true), &ignore) {
+        Ok(mut file) => fs::write_all(&mut file, b"*\n").map_err(|e| e.to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(format!("{}: {error}", ignore.display())),
     }
@@ -98,13 +92,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     ignore_store(path)?;
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
     let result = (|| -> std::io::Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        let mut file = fs::open_with(
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+            &temp,
+        )?;
+        fs::write_all(&mut file, bytes)?;
+        fs::sync_all(&file)?;
         fs::rename(&temp, path)
     })()
     .map_err(|e| format!("{}: {e}", path.display()));
@@ -136,7 +132,7 @@ pub fn write(
         })
     })?;
     for (name, document) in [("manifest.json", manifest), ("files.json", files)] {
-        let bytes = serde_json::to_vec(document).map_err(|e| not_saved(e.to_string()))?;
+        let bytes = serde_json::to_vec(document).expect("plain data serializes");
         write_atomic(&directory.join(name), &bytes).map_err(not_saved)?;
     }
     // Last, so `latest` never names a snapshot that is still being written.
@@ -200,11 +196,9 @@ pub fn list(project_root: &Path, lane: &str) -> Result<Vec<(String, Value)>, Str
             found.push((id, manifest));
         }
     }
+    // The newest first.
     found.sort_by(|a, b| {
-        b.1["created_at"]
-            .as_str()
-            .cmp(&a.1["created_at"].as_str())
-            .then_with(|| b.0.cmp(&a.0))
+        (b.1["created_at"].as_str(), &b.0).cmp(&(a.1["created_at"].as_str(), &a.0))
     });
     Ok(found)
 }

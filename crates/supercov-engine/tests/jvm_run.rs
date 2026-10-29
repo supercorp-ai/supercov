@@ -745,6 +745,13 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
 
     let root = temporary("kotlin");
     kotlin_fixture(&root);
+    // Valid Kotlin the grammar rejects: a parenthesised call inside a lambda.
+    // The file is still compiled and run, but it is said to carry nothing.
+    write(
+        &root,
+        "src/main/kotlin/app/Apply.kt",
+        "package app\n\nfun apply(g: (Int) -> Int) = run { (g)(1) }\n",
+    );
     let request = DirectJvmRunRequest {
         root: root.clone(),
         command: vec![
@@ -767,6 +774,11 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.tests, 3);
     assert_eq!(result.source_files, 2);
+    let said = String::from_utf8_lossy(&diagnostics);
+    assert!(
+        said.contains("could not parse src/main/kotlin/app/Apply.kt"),
+        "{said}"
+    );
 
     // The decision the Kotlin source declares is in the published manifest,
     // which is what the numbers are measured against.
@@ -785,6 +797,15 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
     assert!(manifest.contains("Calculator.kt"), "{manifest}");
     assert!(manifest.contains("Labels.kt"), "{manifest}");
     assert!(!manifest.contains("does not parse"), "{manifest}");
+    assert_eq!(
+        manifest.matches("file-does-not-parse").count(),
+        1,
+        "{manifest}"
+    );
+    assert!(
+        manifest.contains("\"source\":\"src/main/kotlin/app/Apply.kt\""),
+        "{manifest}"
+    );
     assert_eq!(manifest.matches("\"conditions\"").count(), 1, "{manifest}");
     std::fs::remove_dir_all(root).ok();
 }

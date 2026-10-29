@@ -515,13 +515,14 @@ fn render_security(view: &Value) -> String {
         }
         listed += 1;
         out.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
-        for finding in fired {
+        // Not empty, as checked above.
+        fired.iter().for_each(|finding| {
             out.push_str(&format!(
                 "    {:.2}  {}\n",
                 finding["value"].as_f64().unwrap_or(0.0),
                 finding["check"].as_str().unwrap_or("?")
             ));
-        }
+        });
     }
     let total = view["total"].as_u64().unwrap_or(0) as usize;
     if total > files.len() {
@@ -543,7 +544,8 @@ fn render_gaps(view: &Value) -> String {
         super::files(view["total"].as_u64().unwrap_or(0)),
         view["clean"].as_u64().unwrap_or(0)
     ));
-    for file in files {
+    // Not empty, as checked above.
+    files.iter().for_each(|file| {
         out.push_str(&format!("{}\n", file["path"].as_str().unwrap_or("?")));
         for finding in file["present"].as_array().unwrap_or(&empty) {
             out.push_str(&format!(
@@ -552,7 +554,7 @@ fn render_gaps(view: &Value) -> String {
                 finding["check"].as_str().unwrap_or("?")
             ));
         }
-    }
+    });
     let total = view["total"].as_u64().unwrap_or(0) as usize;
     if total > files.len() {
         out.push_str(&format!(
@@ -599,7 +601,7 @@ fn render_file_catalog(view: &Value) -> String {
     }
     if let Some(lines) = view["unchecked_lines"].as_u64().filter(|lines| *lines > 0) {
         out.push_str(&format!(
-            "\n{lines} line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of.\n"
+            "\n{lines} line(s) not checked one by one: a request asking about them did not fit beside the code, or was refused.\n"
         ));
     }
     out.push_str("\nEach line is a model judgment you can check against the file.\n");
@@ -636,9 +638,9 @@ fn render_scope(view: &Value) -> String {
         .filter(|reasons| !reasons.is_empty())
     {
         out.push_str("\nFiles left out, by reason:\n");
-        for (reason, count) in reasons {
+        reasons.iter().for_each(|(reason, count)| {
             out.push_str(&format!("  {:>5}  {reason}\n", count.as_u64().unwrap_or(0)));
-        }
+        });
     }
     let shown = view["not_included"].as_array().unwrap_or(&empty);
     if !shown.is_empty() {
@@ -726,7 +728,8 @@ fn render_quality_diff(view: &Value) -> String {
             return;
         }
         out.push_str(&format!("\n{title}\n"));
-        for row in rows {
+        // Not empty, as checked above.
+        rows.iter().for_each(|row| {
             let movement = row["movement"].as_f64().unwrap_or(0.0);
             out.push_str(&format!(
                 "  {movement:+.2}  {}\n",
@@ -751,7 +754,7 @@ fn render_quality_diff(view: &Value) -> String {
                     "          the file did not change, so this is the model's own variation\n",
                 );
             }
-        }
+        });
         more(out, key, rows.len());
     };
     section(
@@ -771,7 +774,7 @@ fn render_quality_diff(view: &Value) -> String {
     let added = view["added"].as_array().unwrap_or(&empty);
     if !added.is_empty() {
         out.push_str("\nAdded:\n");
-        for row in added {
+        added.iter().for_each(|row| {
             let fired: Vec<String> = row["present"]
                 .as_array()
                 .unwrap_or(&none)
@@ -794,15 +797,15 @@ fn render_quality_diff(view: &Value) -> String {
                     format!("  ({})", fired.join(", "))
                 }
             ));
-        }
+        });
         more(&mut out, "added", added.len());
     }
     let removed = view["removed"].as_array().unwrap_or(&empty);
     if !removed.is_empty() {
         out.push_str("\nRemoved:\n");
-        for row in removed {
+        removed.iter().for_each(|row| {
             out.push_str(&format!("  {}\n", row["path"].as_str().unwrap_or("?")));
-        }
+        });
         more(&mut out, "removed", removed.len());
     }
     out
@@ -855,7 +858,8 @@ fn render_snapshots(view: &Value) -> String {
         if view["total"] == 1 { "" } else { "s" },
         view["shown"]
     );
-    for row in rows {
+    // Not empty, as checked above.
+    rows.iter().for_each(|row| {
         let counts = &row["counts"];
         text.push_str(&format!(
             "\n{} — {}\n   {} assessed, {} errors; scanned {}\n",
@@ -882,6 +886,20 @@ fn render_snapshots(view: &Value) -> String {
                         .join(" ")),
             ));
         }
-    }
+    });
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No limit lists every row; a file not yet judged has no band.
+    #[test]
+    fn no_limit_lists_all_and_no_health_has_no_band() {
+        assert_eq!(limited(vec![1, 2, 3], 0), (3, vec![1, 2, 3]));
+        assert_eq!(limited(vec![1, 2, 3], 2), (3, vec![1, 2]));
+        assert_eq!(band(None), "—");
+        assert_eq!(band(Some(4.94)), "weak");
+    }
 }

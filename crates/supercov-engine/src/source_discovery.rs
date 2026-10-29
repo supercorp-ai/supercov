@@ -3,9 +3,10 @@
 //! Discovery defines the coverage denominator. The walker never follows
 //! links and turns unclassified first-party files into explicit blockers.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::{Component, Path, PathBuf},
 };
 
@@ -206,6 +207,7 @@ pub enum SourceDiscoveryError {
     Io { path: PathBuf, source: io::Error },
     NonUtf8Path(PathBuf),
     InvalidRoot(PathBuf),
+    OutsideRoot(PathBuf),
 }
 
 impl std::fmt::Display for SourceDiscoveryError {
@@ -222,6 +224,11 @@ impl std::fmt::Display for SourceDiscoveryError {
             Self::InvalidRoot(path) => write!(
                 formatter,
                 "source root is not a regular file or directory: {}",
+                path.display()
+            ),
+            Self::OutsideRoot(path) => write!(
+                formatter,
+                "source root is outside the project: {}",
                 path.display()
             ),
         }
@@ -352,13 +359,6 @@ impl ExplicitSourceRoots {
         root_contains(&self.roots, &lexical_normalize(&self.root.join(relative)))
     }
 
-    /// The roots exactly as they were written, including any that name nothing.
-    /// An error about roots quotes these, because the one that does not exist
-    /// is usually the typo the person needs to see.
-    pub fn configured(&self) -> &[String] {
-        &self.configured
-    }
-
     /// Refuse roots that left a frontend nothing to measure. A typo in the
     /// variable must not become a green run over zero files -- the failure mode
     /// most likely to pass unnoticed in an agent loop.
@@ -366,6 +366,11 @@ impl ExplicitSourceRoots {
         if remaining > 0 {
             return Ok(());
         }
+        Err(self.nothing_left(language))
+    }
+
+    /// What to say of roots that left no `language` source to measure.
+    pub fn nothing_left(&self, language: &str) -> String {
         let missing = self
             .configured
             .iter()
@@ -377,10 +382,11 @@ impl ExplicitSourceRoots {
             self.configured.join(",")
         );
         if !missing.is_empty() {
-            message.push_str(&format!("; {} does not exist", missing.join(", ")));
+            let verb = if missing.len() == 1 { "does" } else { "do" };
+            message.push_str(&format!("; {} {verb} not exist", missing.join(", ")));
         }
         message.push_str("; name the directories or files that hold your own code");
-        Err(message)
+        message
     }
 
     /// The scope a frontend that has no scope of its own records when explicit
@@ -463,7 +469,9 @@ fn existing_roots(
     named: bool,
 ) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
     let mut existing = BTreeSet::new();
-    for path in candidates {
+    // Every caller names a root at least: the project itself, when nothing
+    // else.
+    candidates.into_iter().try_for_each(|path| {
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
                 existing.insert(path);
@@ -473,7 +481,8 @@ fn existing_roots(
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(&path, error)),
         }
-    }
+        Ok(())
+    })?;
     Ok(existing.into_iter().collect())
 }
 
@@ -493,7 +502,7 @@ fn root_contains(roots: &[PathBuf], path: &Path) -> bool {
     })
 }
 
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     let mut output = PathBuf::new();
     for component in path.components() {
         match component {
@@ -524,7 +533,7 @@ fn resolve(root: &Path, value: impl AsRef<Path>) -> PathBuf {
 fn local_path(root: &Path, path: &Path) -> Result<String, SourceDiscoveryError> {
     let local = path
         .strip_prefix(root)
-        .map_err(|_| SourceDiscoveryError::InvalidRoot(path.to_owned()))?;
+        .map_err(|_| SourceDiscoveryError::OutsideRoot(path.to_owned()))?;
     if local.as_os_str().is_empty() {
         return Ok(".".into());
     }
@@ -541,6 +550,12 @@ fn local_path(root: &Path, path: &Path) -> Result<String, SourceDiscoveryError> 
         .map(|parts| parts.join("/"))
 }
 
+/// [`local_path`] of a path a walk of `root` found: the walk read each name
+/// it went through as UTF-8, under the root.
+fn walked(root: &Path, path: &Path) -> String {
+    local_path(root, path).expect("a walked path is UTF-8 under its root")
+}
+
 fn generated_directory(name: &str) -> bool {
     GENERATED_DIRECTORIES.contains(&name)
 }
@@ -553,6 +568,7 @@ fn owned_workspace_store(path: &Path) -> bool {
 /// clone, a submodule, or an agent worktree such as `.claude/worktrees/*` —
 /// not this project's source. Treating its files as ambiguous first-party
 /// code turned one real project's report into 1,032 blocking limitations.
+#[track_caller]
 fn nested_checkout(path: &Path) -> bool {
     fs::symlink_metadata(path.join(".git")).is_ok()
 }
@@ -566,9 +582,7 @@ fn nested_checkout(path: &Path) -> bool {
 /// receives its Vite build, and every such bundle was an ambiguous blocker.
 fn built_asset(file: &str) -> bool {
     let mut segments = file.rsplit('/');
-    let Some(name) = segments.next() else {
-        return false;
-    };
+    let name = segments.next().expect("a split yields a segment");
     let in_asset_directory =
         segments.any(|segment| matches!(segment, "assets" | "static" | "public"));
     let Some(stem) = name
@@ -876,14 +890,16 @@ fn files_under(
                 })
         })
         .build();
-    for entry in walker {
+    // Never empty: the walk yields the directory it starts from first.
+    walker.into_iter().try_for_each(|entry| {
         let entry =
             entry.map_err(|error| io_error(directory, io::Error::other(error.to_string())))?;
-        let Some(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_symlink() || !kind.is_file() {
-            continue;
+        // Files alone: not a link, a directory, or an entry with no type.
+        if !entry
+            .file_type()
+            .is_some_and(|kind| !kind.is_symlink() && kind.is_file())
+        {
+            return Ok(());
         }
         let name = entry
             .file_name()
@@ -892,10 +908,11 @@ fn files_under(
         if source_file(name) {
             output.push(entry.into_path());
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
+#[track_caller]
 fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
@@ -916,7 +933,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
                 .into_string()
                 .map_err(|name| SourceDiscoveryError::NonUtf8Path(directory.join(name)))?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|error| io_error(&path, error))?;
+            let file_type = fs::file_type(&entry).map_err(|error| io_error(&path, error))?;
             // An entry's type is the link's own, never its target's: a link
             // to a directory is no directory here.
             if !file_type.is_dir()
@@ -927,7 +944,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
             {
                 continue;
             }
-            let local = local_path(root, &path)?;
+            let local = walked(root, &path);
             let under_package_parent = local
                 .split('/')
                 .any(|segment| PACKAGE_PARENTS.contains(&segment));
@@ -941,7 +958,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
 
     let mut found = BTreeSet::from([root.to_owned()]);
     visit(root, root, 0, &mut found)?;
-    for directory in declared_workspace_packages(root)? {
+    for directory in declared_workspace_packages(root) {
         found.insert(directory);
     }
     Ok(found.into_iter().collect())
@@ -953,7 +970,7 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
 /// where packages live, and it routinely names directories outside the
 /// conventional parents (a real project keeps its Shopify extensions under
 /// `app_extensions/*`; every file there was an ambiguous blocker).
-fn declared_workspace_packages(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
+fn declared_workspace_packages(root: &Path) -> Vec<PathBuf> {
     let mut patterns = Vec::new();
     let manifest = read_json(&root.join("package.json")).unwrap_or(Value::Null);
     let declared = match manifest.get("workspaces") {
@@ -1026,7 +1043,7 @@ fn declared_workspace_packages(root: &Path) -> Result<Vec<PathBuf>, SourceDiscov
             }
         }
     }
-    Ok(found)
+    found
 }
 
 fn string_targets(value: &Value, depth: usize, output: &mut Vec<String>) {
@@ -1062,7 +1079,11 @@ fn entry_targets(directory: &Path, manifest: &Value) -> Vec<PathBuf> {
             if !target.starts_with('.') || target.contains("node_modules") {
                 return None;
             }
-            let prefix = target.split('*').next()?.trim_end_matches('/');
+            let prefix = target
+                .split('*')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('/');
             (!prefix.is_empty()).then(|| resolve(directory, prefix))
         })
         .collect()
@@ -1370,10 +1391,9 @@ pub fn discover_source_scope(
     let mut included = Vec::new();
     let mut limitations = Vec::new();
     for path in all_files {
-        let file = local_path(&root, &path)?;
+        let file = walked(&root, &path);
         let package_root = nearest_package_root(&path, &packages)
-            .map(|package| local_path(&root, package))
-            .transpose()?
+            .map(|package| walked(&root, package))
             .filter(|package| package != ".");
         let entry = |status, reason: &str| SourceScopeEntry {
             file: file.clone(),
@@ -1436,8 +1456,8 @@ pub fn discover_source_scope(
     promote_loaded(&root, &mut entries, &mut included, &mut limitations);
     let source_files = included
         .iter()
-        .map(|path| local_path(&root, path))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|path| walked(&root, path))
+        .collect::<Vec<_>>();
     let source_roots = existing_roots
         .iter()
         .map(|path| local_path(&root, path))
@@ -1468,6 +1488,201 @@ mod tests {
 
     use super::*;
 
+    /// A name under `app/` that is not text names no file the App Router
+    /// serves, nor does the `app/` directory itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_under_app_that_is_not_text_is_no_app_router_file() {
+        use std::os::unix::ffi::OsStrExt;
+        let app = PathBuf::from("/project/app");
+        let unreadable = app.join(std::ffi::OsStr::from_bytes(b"route\xff.ts"));
+        assert!(!next_app_file(std::slice::from_ref(&app), &unreadable));
+        assert!(!next_app_file(std::slice::from_ref(&app), &app));
+        assert!(next_app_file(
+            std::slice::from_ref(&app),
+            &app.join("route.ts")
+        ));
+    }
+
+    /// A directory a walk cannot list, or look at, or an entry it cannot
+    /// read, fails discovery; a directory it may not enter, where the system
+    /// enforces that, fails the source walk.
+    #[test]
+    fn a_walk_that_cannot_read_what_it_walks_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-discovery-walk-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.js"), "export const a = 1;\n").unwrap();
+        let mut found = Vec::new();
+        files_under(&root, &root.join("src"), &mut found).unwrap();
+        assert_eq!(found, [root.join("src/a.js")]);
+        for fault in ["fs.read_dir", "fs.read_dir entry"] {
+            assert!(
+                crate::fault::during(fault, || read_directory(&root)).is_err(),
+                "{fault}"
+            );
+        }
+        assert!(
+            crate::fault::during("fs.symlink_metadata", || {
+                files_under(&root, &root.join("src"), &mut Vec::new())
+            })
+            .is_err()
+        );
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let closed = root.join("src/closed");
+            fs::create_dir(&closed).unwrap();
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(files_under(&root, &root.join("src"), &mut Vec::new()).is_err());
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Text with nothing to strip, a comment that runs to the end, and
+    /// targets of every JSON kind, each read as written.
+    #[test]
+    fn jsonc_and_targets_at_their_edges() {
+        assert_eq!(strip_jsonc_comments(""), "");
+        assert_eq!(strip_trailing_commas(""), "");
+        assert!(!strip_jsonc_comments("{} //").contains("//"));
+        assert!(!strip_jsonc_comments("{} /* open").contains("/*"));
+        // A comment opened at the very end, and the empty path.
+        assert_eq!(strip_jsonc_comments("{} /*"), "{} ");
+        assert_eq!(lexical_normalize(Path::new("")), PathBuf::new());
+        let mut targets = Vec::new();
+        string_targets(
+            &serde_json::json!({"a": [], "b": {}, "c": 5, "d": ["./x.js", {"e": "./y.js"}]}),
+            0,
+            &mut targets,
+        );
+        assert_eq!(targets, ["./x.js", "./y.js"]);
+    }
+
+    /// No package declares no setup; a Jest setup named by one string under
+    /// a `rootDir` is test infrastructure; `.` in a path is no step.
+    #[test]
+    fn a_jest_setup_is_read_from_any_form_of_its_field() {
+        assert!(declared_test_setup(&[]).is_empty());
+        assert_eq!(lexical_normalize(Path::new("/a/./b")), Path::new("/a/b"));
+        let root = std::env::temp_dir().join(format!(
+            "supercov-jest-setup-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config/setup.js"), "").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"jest": {"rootDir": "<rootDir>/config", "globalSetup": "<rootDir>/setup.js", "setupFiles": 5}}"#,
+        )
+        .unwrap();
+        let setup = declared_test_setup(std::slice::from_ref(&root));
+        assert_eq!(setup.len(), 1, "{setup:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A project the repository around it ignores is ignored, unless a
+    /// deeper rule takes it back.
+    #[test]
+    fn an_enclosing_repository_ignores_a_project_until_a_deeper_rule_keeps_it() {
+        let repository = std::env::temp_dir().join(format!(
+            "supercov-enclosing-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let project = repository.join("tmp/copy");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(repository.join(".gitignore"), "tmp/\n").unwrap();
+        assert!(ignored_by_enclosing_repository(&project));
+        fs::write(repository.join("tmp/.gitignore"), "!copy/\n").unwrap();
+        assert!(!ignored_by_enclosing_repository(&project));
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    /// An empty pnpm workspace declares no package.
+    #[test]
+    fn an_empty_pnpm_workspace_declares_nothing() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-empty-pnpm-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("pnpm-workspace.yaml"), "").unwrap();
+        fs::write(root.join("package.json"), r#"{"workspaces": 5}"#).unwrap();
+        assert!(declared_workspace_packages(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A tsconfig that is not there, or no JSON, names no root.
+    #[test]
+    fn a_tsconfig_that_is_no_json_names_no_root() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-tsconfig-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(tsconfig_roots(&root).is_empty());
+        fs::write(root.join("tsconfig.json"), "{").unwrap();
+        assert!(tsconfig_roots(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A path whose name is not UTF-8 is named, not read as some other.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::path::Path::new("/root");
+        let path = root.join(std::ffi::OsStr::from_bytes(b"\xff.js"));
+        assert!(matches!(
+            local_path(root, &path),
+            Err(SourceDiscoveryError::NonUtf8Path(named)) if named == path
+        ));
+    }
+
+    /// A source or package directory whose name is not UTF-8 is refused by
+    /// name rather than read as some other. (macOS names none.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tree_holding_a_name_that_is_not_utf8_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-non-utf8-tree-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::write(root.join("src/a.js"), "").unwrap();
+        let odd = std::ffi::OsStr::from_bytes(b"\xff");
+        // Deeper than packages are looked for, so the source walk meets it.
+        let deep = root.join("src/a/b/c/d/e/f");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join(odd).with_extension("js"), "").unwrap();
+        assert!(matches!(
+            discover_source_scope(&root, None),
+            Err(SourceDiscoveryError::NonUtf8Path(_))
+        ));
+        fs::remove_dir_all(root.join("src/a")).unwrap();
+        fs::create_dir(root.join(odd)).unwrap();
+        assert!(matches!(
+            discover_source_scope(&root, None),
+            Err(SourceDiscoveryError::NonUtf8Path(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A bundler's output is a script under an asset directory with an
     /// eight-character hash that has a digit or both cases.
     #[test]
@@ -1490,6 +1705,8 @@ mod tests {
         }
         for (path, normal) in [
             ("a/./b/../c", "a/c"),
+            // Only a leading `.` is a component of its own.
+            ("./a", "a"),
             ("../a", "../a"),
             ("a/../../b", "../b"),
         ] {
@@ -2361,7 +2578,6 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("libs/core"), root.join("apps/linked")).unwrap();
         let mut found = declared_workspace_packages(&root)
-            .unwrap()
             .into_iter()
             .map(|path| {
                 path.strip_prefix(&root)
@@ -2375,8 +2591,32 @@ mod tests {
         // A workspaces list, rather than an object, is read the same way.
         fs::write(root.join("package.json"), r#"{"workspaces":["apps/*"]}"#).unwrap();
         fs::remove_file(root.join("pnpm-workspace.yaml")).unwrap();
-        let listed = declared_workspace_packages(&root).unwrap();
+        let listed = declared_workspace_packages(&root);
         assert_eq!(listed, [root.join("apps/web")]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_source_discovery_error_says_what_failed() {
+        use super::SourceDiscoveryError as E;
+        let messages = [
+            E::Io {
+                path: std::path::PathBuf::from("a"),
+                source: std::io::Error::other("disk full"),
+            },
+            E::NonUtf8Path(std::path::PathBuf::from("a")),
+            E::InvalidRoot(std::path::PathBuf::from("a")),
+            E::OutsideRoot(std::path::PathBuf::from("/a")),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "a: disk full",
+                "source path is not valid UTF-8: a",
+                "source root is not a regular file or directory: a",
+                "source root is outside the project: /a",
+            ]
+        );
     }
 }

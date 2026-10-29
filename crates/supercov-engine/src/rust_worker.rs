@@ -11,9 +11,10 @@
 //! to the one browser test whose span it overlaps, as for a Go or JVM server;
 //! what no single test's window holds is the run's background.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -25,7 +26,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::{
@@ -123,6 +123,14 @@ struct WorkerConfig {
 /// A plain walk: a `.gitignore` above the project (a monorepo's, or the
 /// checkout a fixture sits in) must not hide the project itself.
 fn worker_configs(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    collect_worker_configs(root, 0, &mut found);
+    found.sort();
+    found
+}
+
+/// The Worker configurations in `directory` and, to six levels, below it.
+fn collect_worker_configs(directory: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     const SKIPPED: &[&str] = &[
         "node_modules",
         "target",
@@ -132,45 +140,39 @@ fn worker_configs(root: &Path) -> Vec<PathBuf> {
         ".supercov",
         ".wrangler",
     ];
-    let mut found = Vec::new();
-    let mut directories = vec![(root.to_path_buf(), 0)];
-    while let Some((directory, depth)) = directories.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                if depth < 6 && !SKIPPED.contains(&name) {
-                    directories.push((path, depth + 1));
-                }
-                continue;
+        let Ok(kind) = fs::file_type(&entry) else {
+            continue;
+        };
+        if kind.is_dir() {
+            if depth < 6 && !SKIPPED.contains(&name) {
+                collect_worker_configs(&path, depth + 1, found);
             }
-            if !kind.is_file()
-                || !matches!(name, "wrangler.toml" | "wrangler.json" | "wrangler.jsonc")
-            {
-                continue;
-            }
-            let builds_rust = read_config(&path).is_some_and(|(_, document)| {
-                build_command(&document).is_some_and(|command| command.contains("worker-build"))
-            });
-            if builds_rust && path.with_file_name("Cargo.toml").is_file() {
-                found.push(path);
-            }
+            continue;
+        }
+        if !kind.is_file() || !matches!(name, "wrangler.toml" | "wrangler.json" | "wrangler.jsonc")
+        {
+            continue;
+        }
+        let builds_rust = read_config(&path).is_some_and(|(_, document)| {
+            build_command(&document).is_some_and(|command| command.contains("worker-build"))
+        });
+        if builds_rust && path.with_file_name("Cargo.toml").is_file() {
+            found.push(path);
         }
     }
-    found.sort();
-    found
 }
 
 /// A configuration as JSON whatever it was written in.
+#[track_caller]
 fn read_config(path: &Path) -> Option<(String, Value)> {
     let text = fs::read_to_string(path).ok()?;
     let document = if path
@@ -178,7 +180,7 @@ fn read_config(path: &Path) -> Option<(String, Value)> {
         .is_some_and(|extension| extension == "toml")
     {
         let table = text.parse::<toml::Table>().ok()?;
-        serde_json::to_value(table).ok()?
+        serde_json::to_value(table).expect("a TOML table is JSON")
     } else {
         serde_json::from_str(&strip_jsonc(&text)).ok()?
     };
@@ -235,6 +237,7 @@ fn strip_jsonc(text: &str) -> String {
                 }
             }
             '/' if characters.peek() == Some(&'/') => {
+                characters.next();
                 for inner in characters.by_ref() {
                     if inner == '\n' {
                         out.push('\n');
@@ -317,7 +320,7 @@ fn rewrite_config(config: &WorkerConfig, entry: &str, port: Option<u16>) -> Resu
             }
             document["dev"]["inspector_port"] = json!(port);
         }
-        serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?
+        serde_json::to_string_pretty(&document).expect("plain data serializes")
     };
     fs::write(path, rewritten).map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -340,13 +343,20 @@ fn point_at_entry(config: &WorkerConfig, port: Option<u16>) -> Result<(), String
     rewrite_config(config, ENTRY_FILE, port)
 }
 
+/// A listener on a loopback port of its own.
+pub(crate) fn local_listener() -> Result<TcpListener, String> {
+    crate::fault::io("local-listener", std::io::ErrorKind::AddrInUse, || {
+        TcpListener::bind("127.0.0.1:0")
+    })
+    .map_err(|error| error.to_string())
+}
+
 /// A port nothing listens on now.
-fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-    listener
+pub(crate) fn free_port() -> Result<u16, String> {
+    Ok(local_listener()?
         .local_addr()
-        .map(|address| address.port())
-        .map_err(|error| error.to_string())
+        .expect("a bound listener has its address")
+        .port())
 }
 
 /// The cfg values of wasm32-unknown-unknown, as the crate's own toolchain
@@ -357,7 +367,7 @@ pub(crate) fn wasm_target_cfg(
     let output = std::process::Command::new("rustc")
         .args(["--print", "cfg", "--target", "wasm32-unknown-unknown"])
         .current_dir(crate_directory)
-        .output()
+        .launch_output()
         .ok()?;
     target_cfg_of(&output)
 }
@@ -491,10 +501,7 @@ impl Drop for Poller {
 }
 
 fn poll(port: u16, path: &str, windows: &Path, stop: &AtomicBool) {
-    let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(windows)
+    let Ok(mut file) = fs::open_with(fs::OpenOptions::new().create(true).append(true), windows)
     else {
         return;
     };
@@ -665,6 +672,7 @@ pub const INSPECTORS_ENV: &str = "SUPERCOV_WRANGLER_INSPECTORS";
 const HOOK_FILE: &str = "supercov-wrangler-hook.cjs";
 
 /// Writes the hook into `directory`, and says where it is.
+#[track_caller]
 fn write_hook(directory: &Path) -> Result<PathBuf, String> {
     let hook = directory.join(HOOK_FILE);
     fs::write(&hook, INSPECTOR_HOOK).map_err(|error| format!("{}: {error}", hook.display()))?;
@@ -715,7 +723,12 @@ fn inspector_targets(port: u16) -> Vec<String> {
 
 /// The port of an inspector URL the hook noted: `ws://127.0.0.1:<port>`.
 fn inspector_port(url: &str) -> Option<u16> {
-    url.trim_end_matches('/').rsplit(':').next()?.parse().ok()
+    url.trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .ok()
 }
 
 /// Reads every Worker of each `wrangler dev` whose notes land in a
@@ -847,26 +860,10 @@ fn read_windows(directory: &Path) -> Result<Vec<Window>, String> {
 }
 
 fn window_from(value: &Value) -> Option<Window> {
-    let mut regions = Vec::new();
-    for region in value.get("regions")?.as_array()? {
-        let crate_key = region.get(0)?.as_str()?.to_owned();
-        let length = usize::try_from(region.get(1)?.as_u64()?).ok()?;
-        let mut bytes = vec![0_u8; length];
-        for segment in region.get(2)?.as_array()? {
-            let offset = usize::try_from(segment.get(0)?.as_u64()?).ok()?;
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(segment.get(1)?.as_str()?)
-                .ok()?;
-            bytes
-                .get_mut(offset..offset + data.len())?
-                .copy_from_slice(&data);
-        }
-        regions.push((crate_key, bytes));
-    }
     Some(Window {
         start: value.get("start")?.as_i64()?,
         end: value.get("end")?.as_i64()?,
-        regions,
+        regions: crate::rust_wasm::regions_from(value)?,
     })
 }
 
@@ -907,12 +904,11 @@ impl RustWorkerServer {
         let mut by_workspace = BTreeMap::<PathBuf, Vec<WorkerConfig>>::new();
         for path in configs {
             let Some(config) = parse_config(&path) else {
-                writeln!(
+                let _ = writeln!(
                     diagnostics,
                     "[supercov] {} names no `main`; its Worker is not measured",
                     path.display()
-                )
-                .map_err(|error| error.to_string())?;
+                );
                 continue;
             };
             let crate_directory = path.parent().unwrap_or(workspace).to_owned();
@@ -963,17 +959,22 @@ impl RustWorkerServer {
                 })
             };
             let mut pollers = Vec::new();
-            for (number, config) in configs.iter().enumerate() {
-                let port = match config.inspector_port {
-                    Some(port) => port,
-                    None => free_port()?,
-                };
-                point_at_entry(config, Some(port))?;
-                pollers.push(Poller::start(
-                    port,
-                    evidence.join(format!("{number:04}.windows")),
-                ));
-            }
+            // Grouped from the configurations, so a workspace has one at least.
+            configs
+                .iter()
+                .enumerate()
+                .try_for_each(|(number, config)| -> Result<(), String> {
+                    let port = match config.inspector_port {
+                        Some(port) => port,
+                        None => free_port()?,
+                    };
+                    point_at_entry(config, Some(port))?;
+                    pollers.push(Poller::start(
+                        port,
+                        evidence.join(format!("{number:04}.windows")),
+                    ));
+                    Ok(())
+                })?;
             servers.push(Self {
                 project,
                 pollers,
@@ -1035,9 +1036,12 @@ impl RustWorkerServer {
         served: &[ServedTest],
         _diagnostics: &mut dyn Write,
     ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
-        for poller in std::mem::take(&mut self.pollers) {
-            poller.finish();
-        }
+        // One per configuration, and there is one at least.
+        std::mem::take(&mut self.pollers)
+            .into_iter()
+            .for_each(|poller| {
+                poller.finish();
+            });
         self.others.finish();
         let evidence_directory = self.directory.join("evidence");
         let kept = |directory: &Path, error| {
@@ -1132,7 +1136,12 @@ impl CargoTestWorkers {
         let Some(real) = on_path(&path, "wrangler") else {
             return Ok(None);
         };
-        let supercov = std::env::current_exe().map_err(|error| error.to_string())?;
+        let supercov = crate::fault::io(
+            "worker-exe",
+            std::io::ErrorKind::NotFound,
+            std::env::current_exe,
+        )
+        .map_err(|error| error.to_string())?;
         fs::create_dir_all(tools).map_err(|error| format!("{}: {error}", tools.display()))?;
         write_stand_in(tools, &supercov)?;
         let hook = write_hook(tools)?;
@@ -1360,7 +1369,7 @@ fn watched_arguments(
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn();
+                .launch();
         }
     }
     Watched {
@@ -1476,30 +1485,20 @@ fn wrap_config(
     let directory = path.parent().unwrap_or(Path::new("."));
     let name = format!("{WRAPPED_PREFIX}{}-{number}", std::process::id());
     let folder = directory.join(&name);
-    fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
     let import = if Path::new(&main).is_absolute() {
         main.replace('\\', "/")
     } else {
         format!("../{}", main.trim_start_matches("./"))
     };
-    fs::write(folder.join(REGISTRY_FILE), REGISTRY)
-        .and_then(|()| {
-            fs::write(
-                folder.join(ENTRY_FILE),
-                format!(
-                    "// Generated by Supercov: the configuration's entry, with its wasm instances remembered.\nimport './{REGISTRY_FILE}';\nexport * from '{import}';\nexport {{ default }} from '{import}';\n"
-                ),
-            )
-        })
-        .map_err(|error| format!("{}: {error}", folder.display()))?;
     let entry = format!("{name}/{ENTRY_FILE}");
     let toml = path
         .extension()
         .is_some_and(|extension| extension == "toml");
     let rewritten = if toml {
+        // `read_config` parsed it with the same parser, to the same spec.
         let mut document = text
             .parse::<toml_edit::DocumentMut>()
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+            .expect("a configuration read as TOML is a TOML document");
         document["main"] = toml_edit::value(entry.as_str());
         if let (Some(name), Some(_)) = (environment, &environment_main) {
             document["env"][name]["main"] = toml_edit::value(entry.as_str());
@@ -1511,11 +1510,30 @@ fn wrap_config(
         if let (Some(name), Some(_)) = (environment, &environment_main) {
             document["env"][name]["main"] = json!(entry);
         }
-        serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?
+        serde_json::to_string_pretty(&document).expect("plain data serializes")
     };
     let extension = if toml { "toml" } else { "json" };
     let copy = directory.join(format!("{name}.{extension}"));
-    fs::write(&copy, rewritten).map_err(|error| format!("{}: {error}", copy.display()))?;
+    fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
+    let written = fs::write(folder.join(REGISTRY_FILE), REGISTRY)
+        .and_then(|()| {
+            fs::write(
+                folder.join(ENTRY_FILE),
+                format!(
+                    "// Generated by Supercov: the configuration's entry, with its wasm instances remembered.\nimport './{REGISTRY_FILE}';\nexport * from '{import}';\nexport {{ default }} from '{import}';\n"
+                ),
+            )
+        })
+        .map_err(|error| format!("{}: {error}", folder.display()))
+        .and_then(|()| {
+            fs::write(&copy, rewritten).map_err(|error| format!("{}: {error}", copy.display()))
+        });
+    // Nothing notes what a wrap that failed wrote, so nothing would remove it.
+    if let Err(reason) = written {
+        let _ = fs::remove_file(&copy);
+        let _ = fs::remove_dir_all(&folder);
+        return Err(reason);
+    }
     Ok((copy.clone(), vec![copy, folder]))
 }
 
@@ -1640,7 +1658,7 @@ fn exec_wrangler(
     }
     #[cfg(not(unix))]
     {
-        match command.status() {
+        match command.launch_status() {
             Ok(status) => status.code().unwrap_or(1),
             Err(error) => {
                 eprintln!(
@@ -1708,12 +1726,12 @@ pub fn poll_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
     // with them.
     remove_wrapped(&windows.with_extension("started"));
     let parts = others.map(OtherWorkers::finish).unwrap_or_default();
-    for part in std::iter::once(part).chain(parts) {
+    std::iter::once(part).chain(parts).for_each(|part| {
         if fs::symlink_metadata(&part).is_ok() {
             let whole = part.with_extension("");
             let _ = fs::rename(&part, &whole);
         }
-    }
+    });
     0
 }
 
@@ -1823,7 +1841,7 @@ pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
         .current_dir(directory)
-        .output()
+        .launch_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -1835,6 +1853,7 @@ pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     /// The poller takes only a pid and a port; once that process is gone it
     /// stops, and what it wrote is renamed to say the run is whole.
@@ -2075,6 +2094,12 @@ mod tests {
         assert_eq!(strip_jsonc("{\"n\": 1 / 2}"), "{\"n\": 1 / 2}");
         // A star inside a block comment does not end it.
         assert_eq!(strip_jsonc("/* a * b **/{}"), "{}");
+        // Nothing, a quote at the very end, a comment the text ends in.
+        assert_eq!(strip_jsonc(""), "");
+        assert_eq!(strip_jsonc("\""), "\"");
+        assert_eq!(strip_jsonc("{}/*"), "{}");
+        assert_eq!(strip_jsonc("{}//"), "{}");
+        assert_eq!(strip_jsonc("// only a comment"), "");
     }
 
     #[test]
@@ -2122,6 +2147,7 @@ mod tests {
             Some(9231)
         );
         assert_eq!(named_inspector_port(&os(&["dev", "--port", "8787"])), None);
+        assert_eq!(named_inspector_port(&os(&[])), None);
         assert_eq!(
             named_inspector_port(&os(&["dev", "--inspector-port"])),
             None
@@ -2152,11 +2178,25 @@ mod tests {
                 ["fff999k2", theirs.len(), [segment(&theirs)]],
             ],
         });
+        // A line that is no take, and a take of no regions, add nothing.
+        let empty = json!({"start": 1, "end": 2, "regions": []});
+        let windows = directory.join("worker-41.windows");
         fs::write(
-            directory.join("worker-41.windows"),
-            format!("{line}\n{{\"start\": 3, \"end\""),
+            &windows,
+            format!("{{}}\n{empty}\n{line}\n{{\"start\": 3, \"end\""),
         )
         .unwrap();
+        // The takes unread, a region unwritten, the takes left in place:
+        // each is the run's failure, and the takes are there to read again.
+        for fault in ["fs.read_to_string", "fs.write", "fs.remove_file"] {
+            let failed =
+                crate::fault::during(fault, || materialize_worker_windows(&directory, "abc123"));
+            assert!(
+                failed.is_err_and(|error| error.contains("injected")),
+                "{fault}"
+            );
+            assert!(windows.is_file(), "{fault}");
+        }
         let crates = materialize_worker_windows(&directory, "abc123").unwrap();
         assert_eq!(
             crates,
@@ -2167,7 +2207,7 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         names.sort();
-        assert_eq!(names, ["abc123-worker-0000-000000-0.region"]);
+        assert_eq!(names, ["abc123-worker-0000-000002-0.region"]);
         assert_eq!(fs::read(directory.join(&names[0])).unwrap(), ours);
         // Read once: a second pass finds nothing new.
         assert!(
@@ -2178,6 +2218,39 @@ mod tests {
         assert_eq!(region_token(&ours), Some("abc123"));
         assert_eq!(region_token(&[0_u8; 10]), None);
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A build command is read as a string or as its words, and nothing
+    /// else; a configuration that cannot be read, or names no `main`, is no
+    /// Worker's.
+    #[test]
+    fn a_configuration_is_read_only_as_far_as_it_says() {
+        for (document, command) in [
+            (json!({}), None),
+            (json!({"build": {}}), None),
+            (
+                json!({"build": {"command": "worker-build"}}),
+                Some("worker-build"),
+            ),
+            (
+                json!({"build": {"command": ["worker-build", "--release", 1]}}),
+                Some("worker-build --release"),
+            ),
+            (json!({"build": {"command": 7}}), None),
+        ] {
+            assert_eq!(build_command(&document).as_deref(), command, "{document}");
+        }
+        let root = temporary("configs");
+        for (name, text) in [
+            ("broken.toml", "main = \"m.mjs\"\n["),
+            ("broken.jsonc", "{ \"main\": "),
+            ("no-main.jsonc", "{}"),
+            ("number-main.jsonc", "{ \"main\": 1 }"),
+        ] {
+            fs::write(root.join(name), text).unwrap();
+            assert!(parse_config(&root.join(name)).is_none(), "{name}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A workspace with a Worker and a `wrangler` on PATH gets the stand-in,
@@ -2239,9 +2312,11 @@ mod tests {
     }
 
     fn temporary(name: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "supercov-rust-worker-{}-{}-{name}",
+            "supercov-rust-worker-{}-{}-{}-{name}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -2291,6 +2366,28 @@ mod tests {
                 PathBuf::from("worker/wrangler.toml")
             ]
         );
+        // A directory that cannot be listed, or an entry whose kind cannot
+        // be read, is passed over: here the one Worker below `solo`.
+        write(
+            "solo/w/wrangler.toml",
+            "main = \"m\"\n[build]\ncommand = \"worker-build\"\n",
+        );
+        write("solo/w/Cargo.toml", "");
+        let solo = root.join("solo");
+        assert_eq!(worker_configs(&solo).len(), 1);
+        for fault in ["fs.read_dir", "fs.file_type"] {
+            assert!(
+                crate::fault::during(fault, || worker_configs(&solo)).is_empty(),
+                "{fault}"
+            );
+        }
+        // So is a name that is no text, where the system allows one.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::create_dir(solo.join(std::ffi::OsStr::from_bytes(b"\xff"))).unwrap();
+            assert_eq!(worker_configs(&solo).len(), 1);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2327,6 +2424,31 @@ mod tests {
         assert_eq!(document["main"], ENTRY_FILE);
         assert_eq!(document["dev"]["inspector_port"], 9555);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A configuration that no longer reads as TOML or JSON is not
+    /// rewritten, and says which file it was.
+    #[test]
+    fn a_configuration_that_no_longer_reads_is_not_rewritten() {
+        let root = temporary("unreadable-config");
+        for (name, text) in [
+            ("wrangler.toml", "main = "),
+            ("wrangler.jsonc", "{\"main\": "),
+        ] {
+            let path = root.join(name);
+            fs::write(&path, text).unwrap();
+            let config = WorkerConfig {
+                path: path.clone(),
+                main: "shim.mjs".into(),
+                inspector_port: None,
+            };
+            let refused = rewrite_config(&config, ENTRY_FILE, Some(9444)).unwrap_err();
+            assert!(
+                refused.starts_with(&path.display().to_string()),
+                "{refused}"
+            );
+        }
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -2377,6 +2499,131 @@ mod tests {
         // A segment past the region is a malformed window, not a panic.
         let bad = json!({"start": 0, "end": 1, "regions": [["a", 4, [[2, encode(&[1, 2, 3])]]]]});
         assert!(window_from(&bad).is_none());
+        // Each part written wrong, an offset that would run past the end of
+        // memory among them, is no window either.
+        let data = encode(&[1]);
+        for wrong in [
+            json!({"start": 0, "end": 1}),
+            json!({"start": 0, "end": 1, "regions": "none"}),
+            json!({"start": 0, "end": 1, "regions": [[7, 4, []]]}),
+            json!({"start": 0, "end": 1, "regions": [["a"]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", -1, []]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, "pages"]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [["0", data]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[0]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[0, 5]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[0, "!!"]]]]}),
+            json!({"start": 0, "end": 1, "regions": [["a", 4, [[u64::MAX, data]]]]}),
+            json!({"end": 1, "regions": []}),
+            json!({"start": "0", "end": 1, "regions": []}),
+            json!({"start": 0, "regions": []}),
+            json!({"start": 0, "end": "1", "regions": []}),
+        ] {
+            assert!(window_from(&wrong).is_none(), "{wrong}");
+        }
+    }
+
+    /// A Worker whose Cargo workspace lies above the measured root has no
+    /// server of its own here: its workspace is not one this run instruments.
+    #[test]
+    fn a_worker_whose_cargo_workspace_is_above_the_root_has_no_server() {
+        let outer = temporary("outer-workspace");
+        fs::write(
+            outer.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"inner/worker\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let root = outer.join("inner");
+        fs::create_dir_all(root.join("worker/src")).unwrap();
+        fs::write(
+            root.join("worker/Cargo.toml"),
+            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("worker/src/lib.rs"), "").unwrap();
+        fs::write(
+            root.join("worker/wrangler.toml"),
+            "main = \"build/worker/shim.mjs\"\n\n[build]\ncommand = \"worker-build\"\n",
+        )
+        .unwrap();
+        let mut said = Vec::new();
+        let servers = RustWorkerServer::prepare(&root, &root, "run", &[], &mut said).unwrap();
+        assert!(servers.is_empty() && said.is_empty());
+        fs::remove_dir_all(outer).unwrap();
+    }
+
+    /// A workspace with no Worker has no server to prepare, and one whose
+    /// configuration names no `main` is said not to be measured.
+    #[test]
+    fn a_worker_without_a_main_is_named_and_none_is_no_server() {
+        let root = temporary("no-servers");
+        let mut said = Vec::new();
+        let servers = RustWorkerServer::prepare(&root, &root, "run", &[], &mut said).unwrap();
+        assert!(servers.is_empty() && said.is_empty());
+        fs::create_dir_all(root.join("worker")).unwrap();
+        fs::write(root.join("worker/Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
+        fs::write(
+            root.join("worker/wrangler.toml"),
+            "[build]\ncommand = \"worker-build\"\n",
+        )
+        .unwrap();
+        let servers = RustWorkerServer::prepare(&root, &root, "run", &[], &mut said).unwrap();
+        assert!(servers.is_empty());
+        let said = String::from_utf8(said).unwrap();
+        assert!(
+            said.contains("names no `main`; its Worker is not measured"),
+            "{said}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// No arguments start no `wrangler dev` and name no configuration; a
+    /// note naming nothing says nothing and removes nothing; a `wrangler`
+    /// that cannot be started is said so, with the shell's code.
+    #[test]
+    fn nothing_given_is_nothing_started_noted_or_removed() {
+        assert!(!starts_dev(&[]));
+        let root = temporary("nothing-noted");
+        assert!(started_configs(&[], &root).is_empty());
+        fs::write(root.join("0.started"), "{}").unwrap();
+        assert!(started_worker_configs(&root).is_empty());
+        remove_wrapped(&root.join("0.started"));
+        assert!(root.join("0.started").exists());
+        #[cfg(unix)]
+        assert_eq!(
+            exec_wrangler(std::ffi::OsStr::new("/nonexistent/wrangler"), &[], &[]),
+            126
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_window_is_read_only_whole() {
+        let region = |shape: Value| json!({ "start": 1, "end": 2, "regions": [shape] });
+        for value in [
+            json!({}),
+            json!({ "regions": 1 }),
+            region(json!([1])),
+            region(json!(["k"])),
+            region(json!(["k", -1])),
+            region(json!(["k", 4])),
+            region(json!(["k", 4, 1])),
+            region(json!(["k", 4, [["x"]]])),
+            region(json!(["k", 4, [[0]]])),
+            region(json!(["k", 4, [[0, 1]]])),
+            region(json!(["k", 4, [[0, "!!"]]])),
+            region(json!(["k", 1, [[0, "AAAA"]]])),
+            region(json!(["k", 4, [[u64::MAX, "AA=="]]])),
+            json!({ "regions": [], "start": "1" }),
+            json!({ "regions": [], "start": 1 }),
+        ] {
+            assert!(window_from(&value).is_none(), "{value}");
+        }
+        // A region no page of which was touched is all zeros.
+        let untouched = window_from(&region(json!(["k", 2, []]))).unwrap();
+        assert_eq!(untouched.regions, [("k".to_owned(), vec![0, 0])]);
     }
 
     #[test]
@@ -2503,6 +2750,10 @@ mod tests {
             TAKE_PATIENCE,
             move |socket, stop, _| {
                 assert_eq!(receive(socket)["method"], "Runtime.enable");
+                // A frame that is no text is passed over.
+                socket
+                    .send(tungstenite::Message::binary(vec![1, 2]))
+                    .unwrap();
                 // Notices without the id they are about change nothing.
                 answer(
                     socket,
@@ -2725,6 +2976,10 @@ mod tests {
             ["tracing", "unused"]
         );
         assert_eq!(enabled("worker-build --all-features").len(), features.len());
+        // No command at all builds the defaults; one that turns them off and
+        // names none builds nothing.
+        assert_eq!(enabled(""), ["audit", "default", "tracing"]);
+        assert!(enabled("--no-default-features").is_empty());
     }
 
     /// Only a package whose wrangler configuration builds with worker-build
@@ -2901,6 +3156,34 @@ mod tests {
         let broken = root.join("broken.toml");
         fs::write(&broken, "main = \"m.mjs\"\n[").unwrap();
         assert!(wrap_config(&broken, None, 6).is_err());
+        // A `main` inside a copy Supercov wrapped before is its entry too.
+        let rewrapped = root.join("rewrapped.toml");
+        fs::write(
+            &rewrapped,
+            format!("main = \"{WRAPPED_PREFIX}1-0/other.mjs\"\n"),
+        )
+        .unwrap();
+        assert!(
+            wrap_config(&rewrapped, None, 7)
+                .unwrap_err()
+                .contains("Supercov's entry already")
+        );
+        // A JSON configuration's environment `main` is the entry too.
+        let staged = root.join("staged.json");
+        fs::write(
+            &staged,
+            "{\"main\": \"a.mjs\", \"env\": {\"staging\": {\"main\": \"b.mjs\"}}}",
+        )
+        .unwrap();
+        let (copy, _) = wrap_config(&staged, Some("staging"), 8).unwrap();
+        let document: Value = serde_json::from_str(&fs::read_to_string(&copy).unwrap()).unwrap();
+        assert!(
+            document["env"]["staging"]["main"]
+                .as_str()
+                .unwrap()
+                .ends_with(ENTRY_FILE)
+        );
+        assert!(document["main"].as_str().unwrap().ends_with(ENTRY_FILE));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2948,6 +3231,17 @@ mod tests {
         wrap_started_configs(&mut defaulted, &root.join("crate"), &default_note);
         assert_eq!(defaulted[1], "--config");
         assert!(defaulted[2].to_string_lossy().contains(WRAPPED_PREFIX));
+        // Its folder, the entry beside it, or the copy that cannot be
+        // written leaves the configuration as it is, saying why, and none
+        // of its files behind.
+        let config = root.join("crate/wrangler.toml");
+        for fault in ["fs.create_dir_all", "fs.write", "fs.write@3"] {
+            let refused = crate::fault::during(fault, || wrap_config(&config, None, 9));
+            assert!(
+                refused.is_err_and(|reason| reason.contains("injected")),
+                "{fault}"
+            );
+        }
         // A note that is no note, and a file that is no note, are passed over.
         fs::write(root.join("worker-3.started"), "{").unwrap();
         fs::write(root.join("unrelated.txt"), "x").unwrap();
@@ -3090,5 +3384,58 @@ mod tests {
             unwatched("dev --inspector-port 1")
         );
         fs::remove_dir_all(evidence).unwrap();
+    }
+
+    /// What cannot be started or read is nothing: a rustc or Cargo that
+    /// does not start, a port none can be had, a watch stopped before it
+    /// looks, and a directory of windows with none or one unreadable.
+    #[test]
+    fn what_cannot_be_started_or_read_is_nothing() {
+        let package = temporary("worker-unstarted");
+        fs::write(
+            package.join("wrangler.toml"),
+            "[build]\ncommand = \"worker-build\"\n",
+        )
+        .unwrap();
+        let rustc = "spawn#rust_worker.rs:370";
+        assert!(crate::fault::during(rustc, || wasm_target_cfg(&package)).is_none());
+        assert!(
+            crate::fault::during(rustc, || worker_build_cfg(&package, &BTreeMap::new())).is_none()
+        );
+        assert_eq!(
+            crate::fault::during("spawn#rust_worker.rs:1844", || cargo_workspace_root(
+                &package
+            )),
+            None
+        );
+        assert!(crate::fault::during("local-listener", free_port).is_err());
+        let stop = AtomicBool::new(true);
+        assert!(watch_other_workers(&package, &|n| package.join(format!("{n}")), &stop).is_empty());
+        assert!(read_windows(&package).unwrap().is_empty());
+        fs::create_dir(package.join("a.windows")).unwrap();
+        assert!(read_windows(&package).is_err());
+        fs::remove_dir_all(package).unwrap();
+    }
+
+    /// A message that is no JSON, and one that is no text, are passed over.
+    #[test]
+    fn a_message_that_is_no_json_or_no_text_is_passed_over() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let written = inspect_with(Arc::clone(&stop), TAKE_PATIENCE, |socket, stop, _| {
+            assert_eq!(receive(socket)["method"], "Runtime.enable");
+            socket
+                .send(tungstenite::Message::Text("not json".into()))
+                .unwrap();
+            socket
+                .send(tungstenite::Message::Binary(vec![1, 2].into()))
+                .unwrap();
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextsCleared"}),
+            );
+            stop.store(true, Ordering::Release);
+            while socket.read().is_ok() {}
+        });
+        assert_eq!(written, "");
     }
 }

@@ -19,31 +19,134 @@
 //! registered child is placed in a Job Object that kills its members when its
 //! handle closes, so the test processes die with the runner however it ends.
 
+use crate::fault_process::{Launch, Reap};
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// How many children can be registered at once. The runner runs at most one
 /// child per worker thread, and machines with more cores than this are rare;
 /// a child that finds no free slot is simply not tracked.
 const SLOTS: usize = 512;
-static CHILDREN: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
+static CHILDREN: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 static GUARDS: AtomicUsize = AtomicUsize::new(0);
 
 /// Send `signal` to every registered child. Safe to call from a signal
 /// handler: it only loads atomics and calls `kill(2)`.
 pub fn signal_registered_children(signal: i32) {
-    for slot in &CHILDREN {
+    CHILDREN.iter().for_each(|slot| {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
             #[cfg(unix)]
-            // SAFETY: `kill` with a positive pid signals that process only.
+            // SAFETY: `kill` with a positive pid signals that process only;
+            // a Unix pid is a positive `pid_t`, whatever type it is read as.
             unsafe {
-                libc::kill(pid, signal);
+                libc::kill(pid.cast_signed(), signal);
             }
             #[cfg(not(unix))]
             let _ = signal;
         }
+    });
+}
+
+/// Whether the run's deadline has passed: nothing more is started.
+static EXPIRED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the deadline a [`Deadline`] keeps has passed.
+pub fn deadline_passed() -> bool {
+    EXPIRED.load(Ordering::SeqCst)
+}
+
+/// A run's `SUPERCOV_COMMAND_TIMEOUT_MS`, kept as a supervised command's is
+/// (contracts/v1/process-supervision.md): past it, it asks every
+/// registered child to stop, makes it stop after `grace`, and starts no
+/// other. Dropping it before then ends the watch.
+pub struct Deadline {
+    timeout: Option<Duration>,
+    cancel: Option<std::sync::mpsc::Sender<()>>,
+    watch: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Deadline {
+    /// A deadline `timeout` from now, or none.
+    pub fn start(timeout: Option<Duration>, grace: Duration) -> Self {
+        use std::sync::mpsc::RecvTimeoutError::Timeout;
+        EXPIRED.store(false, Ordering::SeqCst);
+        let Some(limit) = timeout else {
+            return Self {
+                timeout,
+                cancel: None,
+                watch: None,
+            };
+        };
+        let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+        let watch = std::thread::spawn(move || {
+            if cancelled.recv_timeout(limit) != Err(Timeout) {
+                return;
+            }
+            // The run says so on its own diagnostics: the caller holds
+            // standard error while it runs, and a write from here would wait
+            // for it forever.
+            EXPIRED.store(true, Ordering::SeqCst);
+            #[cfg(unix)]
+            {
+                signal_registered_children(libc::SIGTERM);
+                // A child that ignores SIGTERM is killed; one the run
+                // waited for in the meantime is gone already.
+                if cancelled.recv_timeout(grace) == Err(Timeout) {
+                    signal_registered_children(libc::SIGKILL);
+                }
+            }
+            // Windows has no signal to ask with: the guard's Job Object ends
+            // every child in it at once.
+            #[cfg(windows)]
+            {
+                let _ = grace;
+                windows_job::terminate();
+            }
+            #[cfg(not(any(unix, windows)))]
+            let _ = grace;
+        });
+        Self {
+            timeout,
+            cancel: Some(cancel),
+            watch: Some(watch),
+        }
+    }
+
+    /// The milliseconds allowed, when the deadline has passed.
+    pub fn passed(&self) -> Option<u128> {
+        self.timeout
+            .filter(|_| deadline_passed())
+            .map(|timeout| timeout.as_millis())
+    }
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        drop(self.cancel.take());
+        if let Some(watch) = self.watch.take() {
+            let _ = watch.join();
+        }
+    }
+}
+
+/// Start `command`, unless the run's deadline has passed.
+trait Start {
+    fn start(&mut self) -> io::Result<Child>;
+}
+
+impl Start for Command {
+    #[track_caller]
+    fn start(&mut self) -> io::Result<Child> {
+        if deadline_passed() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the command's deadline passed",
+            ));
+        }
+        self.launch()
     }
 }
 
@@ -62,20 +165,15 @@ impl Drop for RegisteredChild {
 
 /// Register a running child so a signal to the runner reaches it.
 pub fn register(child: &Child) -> RegisteredChild {
-    let Ok(pid) = i32::try_from(child.id()) else {
-        return RegisteredChild { slot: None };
-    };
+    let pid = child.id();
     #[cfg(windows)]
     windows_job::assign(child);
-    for (index, slot) in CHILDREN.iter().enumerate() {
-        if slot
-            .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return RegisteredChild { slot: Some(index) };
-        }
+    RegisteredChild {
+        slot: CHILDREN.iter().position(|slot| {
+            slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        }),
     }
-    RegisteredChild { slot: None }
 }
 
 #[cfg(windows)]
@@ -90,7 +188,8 @@ mod windows_job {
     static JOB: Mutex<Option<JobHandle>> = Mutex::new(None);
 
     fn job() -> std::sync::MutexGuard<'static, Option<JobHandle>> {
-        JOB.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        JOB.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn create() {
@@ -104,6 +203,13 @@ mod windows_job {
         // Closing the handle kills whatever is still assigned; the runner has
         // waited for every child by the time the outermost guard drops.
         *job() = None;
+    }
+
+    /// End every child assigned to the job, the job left for any other.
+    pub fn terminate() {
+        if let Some(handle) = job().as_ref() {
+            handle.terminate();
+        }
     }
 
     pub fn assign(child: &Child) {
@@ -122,9 +228,23 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .start()?;
     let _registered = register(&child);
     child.wait_with_output()
+}
+/// Everything `source` gives until it ends or fails, each piece handed to
+/// `each` as it comes. A pipe that fails part way ends what was read there.
+fn read_all(mut source: impl std::io::Read, mut each: impl FnMut(&[u8])) -> Vec<u8> {
+    let mut recorded = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    while let Ok(read) = source.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        recorded.extend_from_slice(&chunk[..read]);
+        each(&chunk[..read]);
+    }
+    recorded
 }
 
 /// `output`, also passing what the child writes on to this process's own
@@ -132,27 +252,21 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 /// output while it runs, and the run still reads all of it. A line of the
 /// child's standard output that `keep` refuses is recorded and not shown.
 pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Result<Output> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .start()?;
     let _registered = register(&child);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (stdout, stderr) = std::thread::scope(|scope| {
         let out = scope.spawn(move || {
-            let mut recorded = Vec::new();
             let mut line = Vec::new();
-            let mut chunk = [0_u8; 8192];
-            let mut source = stdout.expect("piped above");
-            while let Ok(read) = source.read(&mut chunk) {
-                if read == 0 {
-                    break;
-                }
-                recorded.extend_from_slice(&chunk[..read]);
-                for byte in &chunk[..read] {
+            let recorded = read_all(stdout.expect("piped above"), |chunk| {
+                // A chunk is never empty: a read of nothing ends the pipe.
+                chunk.iter().for_each(|byte| {
                     line.push(*byte);
                     if *byte == b'\n' {
                         if keep(&line) {
@@ -160,32 +274,24 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
                         }
                         line.clear();
                     }
-                }
-            }
+                });
+            });
             if keep(&line) {
                 let _ = io::stdout().lock().write_all(&line);
             }
             recorded
         });
         let err = scope.spawn(move || {
-            let mut recorded = Vec::new();
-            let mut chunk = [0_u8; 8192];
-            let mut source = stderr.expect("piped above");
-            while let Ok(read) = source.read(&mut chunk) {
-                if read == 0 {
-                    break;
-                }
-                recorded.extend_from_slice(&chunk[..read]);
-                let _ = io::stderr().lock().write_all(&chunk[..read]);
-            }
-            recorded
+            read_all(stderr.expect("piped above"), |chunk| {
+                let _ = io::stderr().lock().write_all(chunk);
+            })
         });
         (
             out.join().unwrap_or_default(),
             err.join().unwrap_or_default(),
         )
     });
-    let status = child.wait()?;
+    let status = child.reap()?;
     Ok(Output {
         status,
         stdout,
@@ -195,7 +301,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
 
 /// `Command::status()`, with the child registered while it runs.
 pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
-    let mut child = command.spawn()?;
+    let mut child = command.start()?;
     let _registered = register(&child);
     child.wait()
 }
@@ -250,17 +356,17 @@ pub struct ChildSignalGuard {
 }
 
 impl ChildSignalGuard {
-    pub fn install() -> io::Result<Self> {
+    pub fn install() -> Self {
         #[cfg(unix)]
         {
             let mut previous = Vec::new();
             if GUARDS.fetch_add(1, Ordering::SeqCst) == 0 {
+                // `signal` refuses only a signal that is no signal, or one
+                // no handler may take (SIGKILL, SIGSTOP).
                 previous = install_handlers(&[libc::SIGHUP, libc::SIGINT, libc::SIGTERM])
-                    .inspect_err(|_| {
-                        GUARDS.fetch_sub(1, Ordering::SeqCst);
-                    })?;
+                    .expect("SIGHUP, SIGINT and SIGTERM take a handler");
             }
-            Ok(Self { previous })
+            Self { previous }
         }
         #[cfg(not(unix))]
         {
@@ -268,7 +374,7 @@ impl ChildSignalGuard {
                 #[cfg(windows)]
                 windows_job::create();
             }
-            Ok(Self {})
+            Self {}
         }
     }
 }
@@ -315,6 +421,40 @@ mod tests {
         assert_eq!(output.stdout, b"kept\ndropped\ntail");
         assert_eq!(output.stderr, b"err\n");
         assert!(output_streamed(&mut Command::new("/no/such/program"), |_| true).is_err());
+        // A child whose end cannot be waited for is an error, though it ran.
+        assert!(
+            crate::fault::during("wait", || output_streamed(
+                Command::new("sh").args(["-c", "echo ran"]),
+                |_| true
+            ))
+            .is_err()
+        );
+    }
+
+    /// Past its deadline a child that ignores SIGTERM is killed once the
+    /// grace runs out, and no other command starts until the next deadline.
+    #[test]
+    fn a_deadline_kills_what_ignores_it_and_starts_nothing_after() {
+        let started = Instant::now();
+        let deadline =
+            Deadline::start(Some(Duration::from_millis(200)), Duration::from_millis(200));
+        let stubborn =
+            output(Command::new("sh").args(["-c", "trap '' TERM; exec sleep 30"])).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(stubborn.status.code(), None, "killed by a signal");
+        assert!(deadline_passed());
+        assert_eq!(deadline.passed(), Some(200));
+        let refused = output(&mut Command::new("true")).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::TimedOut);
+        drop(deadline);
+        // The next run starts with no deadline passed.
+        let _none = Deadline::start(None, Duration::ZERO);
+        assert!(!deadline_passed());
+        assert!(output(&mut Command::new("true")).is_ok());
     }
 
     fn sleeper() -> Child {
@@ -355,12 +495,15 @@ mod tests {
         let before = disposition(libc::SIGUSR2);
         assert!(install_handlers(&[libc::SIGUSR2, libc::SIGKILL]).is_err());
         assert_eq!(disposition(libc::SIGUSR2), before);
+        // The first failing has nothing to put back; no signal installs none.
+        assert!(install_handlers(&[libc::SIGKILL]).is_err());
+        assert!(install_handlers(&[]).unwrap().is_empty());
     }
 
     #[test]
     fn only_the_outermost_guard_installs_and_restores_handlers() {
-        let outer = ChildSignalGuard::install().unwrap();
-        let inner = ChildSignalGuard::install().unwrap();
+        let outer = ChildSignalGuard::install();
+        let inner = ChildSignalGuard::install();
         assert!(
             inner.previous.is_empty(),
             "a nested guard replaced handlers"
@@ -375,10 +518,7 @@ mod tests {
         let registration = register(&child);
         let slot = registration.slot.unwrap();
         drop(RegisteredChild { slot: None });
-        assert_eq!(
-            CHILDREN[slot].load(Ordering::SeqCst),
-            i32::try_from(child.id()).unwrap()
-        );
+        assert_eq!(CHILDREN[slot].load(Ordering::SeqCst), child.id());
         drop(registration);
         child.kill().unwrap();
         child.wait().unwrap();
@@ -386,7 +526,7 @@ mod tests {
 
     #[test]
     fn a_registered_child_receives_the_signal_and_a_released_one_does_not() {
-        let _guard = ChildSignalGuard::install().unwrap();
+        let _guard = ChildSignalGuard::install();
         let mut tracked = sleeper();
         let mut released = sleeper();
         let registration = register(&tracked);
@@ -406,5 +546,26 @@ mod tests {
         drop(registration);
         released.kill().unwrap();
         released.wait().unwrap();
+    }
+    /// A pipe that fails part way ends the reading there, with what was read
+    /// before it kept.
+    #[test]
+    fn a_pipe_that_fails_ends_what_is_read_from_it() {
+        struct Failing(usize);
+        impl std::io::Read for Failing {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("closed"));
+                }
+                self.0 -= 1;
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+        let mut seen = 0;
+        assert_eq!(read_all(Failing(3), |chunk| seen += chunk.len()), b"xxx");
+        assert_eq!(seen, 3);
+        assert_eq!(read_all(&b"ab"[..], |_| {}), b"ab");
+        assert!(read_all(Failing(0), |_| panic!("nothing was read")).is_empty());
     }
 }

@@ -10,7 +10,7 @@
 // `go run`. Without Docker there is nothing to run, and the gate says so.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 
@@ -161,6 +161,26 @@ try {
       assert.equal(measured.status, 0, `${fault}: ${measured.stdout}${measured.stderr}`);
       assert.ok(measured.stderr.includes(`test fault at ${fault}`), `${fault} was never reached:\n${measured.stderr}`);
     }
+  }
+  // An image another copy of the source built, started again with no build:
+  // the run says the image is from an earlier copy and leaves it alone. The
+  // registry is given the image under another copy's fingerprint, as a run
+  // of that copy would have left it; rebuilding to the same image without
+  // changing it depends on the engine.
+  if (!process.env.ONLY || process.env.ONLY === 'Python') {
+    const cwd = resolve(root, 'python');
+    const project = `supercov-docker-gate-${process.pid}-${cases.findIndex((entry) => entry.language === 'Python')}`;
+    // Its containers removed, so compose creates them again; the image stays.
+    spawnSync('docker', ['compose', '-p', project, 'rm', '-f', '-s'], { cwd, stdio: 'ignore' });
+    const image = spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', `${project}-api`], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(image, `no image ${project}-api`);
+    writeFileSync(resolve(cwd, '.supercov/cache/docker-images.json'), `${JSON.stringify({ [image]: 'an-earlier-copy' })}\n`);
+    const config = resolve(cwd, 'playwright.config.js');
+    writeFileSync(config, readFileSync(config, 'utf8').replace('docker compose up --build', 'docker compose up'));
+    const measured = run(cwd, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'compose-context-outside' });
+    assert.match(measured.stderr, /was built from an earlier copy of the project/u, measured.stderr);
+    // Nothing else measured, so there is no run.
+    assert.match(measured.stderr, /there was nothing to measure/u, measured.stderr);
   }
   console.log('[docker-server-playwright] Go, Java, Node, Python and Ruby servers compose builds from the copy are measured, each test credited its own work, and left stopped');
 } finally {

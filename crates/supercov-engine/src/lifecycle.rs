@@ -4,10 +4,10 @@
 //! atomically moved into durable trash; recursive unlinking is a separate,
 //! retryable operation that the CLI can run in a detached child.
 
+use crate::fault_fs::{self as fs, File, OpenOptions};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -105,13 +105,16 @@ fn checked_id(id: &str) -> Result<(), LifecycleError> {
         .ok_or_else(|| LifecycleError::InvalidRunId(id.into()))
 }
 
-fn absolute_root(root: &Path) -> Result<PathBuf, LifecycleError> {
+/// `root` made absolute. Every command passes the project root it resolved,
+/// which is absolute already; a relative one is read against the working
+/// directory.
+fn absolute_root(root: &Path) -> PathBuf {
     if root.is_absolute() {
-        Ok(root.to_owned())
+        root.to_owned()
     } else {
         std::env::current_dir()
-            .map(|cwd| cwd.join(root))
-            .map_err(|source| io_error(root, source))
+            .expect("a relative root is read against a working directory")
+            .join(root)
     }
 }
 
@@ -125,6 +128,7 @@ fn lexical_descendant(root: &Path, path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+#[track_caller]
 fn reject_linked_ancestors(
     root: &Path,
     path: &Path,
@@ -185,10 +189,11 @@ fn unique_name() -> String {
 /// idiom, on the generated node_modules directory it had just created -- and
 /// NTFS journals directory metadata without an explicit sync. Every place
 /// that syncs a directory goes through here so the rule is stated once.
+#[track_caller]
 pub(crate) fn sync_directory_handle(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        File::open(path).and_then(|directory| directory.sync_all())
+        fs::open(path).and_then(|directory| directory.sync_all())
     }
     #[cfg(not(unix))]
     {
@@ -197,10 +202,12 @@ pub(crate) fn sync_directory_handle(path: &Path) -> io::Result<()> {
     }
 }
 
+#[track_caller]
 pub(crate) fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
     sync_directory_handle(path).map_err(|source| io_error(path, source))
 }
 
+#[track_caller]
 pub(crate) fn atomic_rename(source: &Path, destination: &Path) -> Result<(), LifecycleError> {
     let source_parent = source
         .parent()
@@ -217,6 +224,7 @@ pub(crate) fn atomic_rename(source: &Path, destination: &Path) -> Result<(), Lif
     Ok(())
 }
 
+#[track_caller]
 pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
     let parent = path
         .parent()
@@ -233,10 +241,7 @@ pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(),
         ));
         let mut file =
             match crate::fault::io("atomic-write-create", io::ErrorKind::AlreadyExists, || {
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary)
+                fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary)
             }) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -259,11 +264,25 @@ pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(),
     Err(LifecycleError::LockUnavailable)
 }
 
+/// Remove a publication's staging, as [`remove_stored_tree_deferred`] does;
+/// the fault site `publication-clean-up` fails it.
+#[track_caller]
+fn clear_staging(root: &Path, staging: &Path) -> Result<Option<PathBuf>, LifecycleError> {
+    if crate::fault::injected("publication-clean-up") {
+        return Err(io_error(
+            staging,
+            io::Error::other("injected fault at publication-clean-up"),
+        ));
+    }
+    remove_stored_tree_deferred(root, staging)
+}
+
+#[track_caller]
 pub fn remove_stored_tree_deferred(
     project_root: &Path,
     target: &Path,
 ) -> Result<Option<PathBuf>, LifecycleError> {
-    let root = absolute_root(project_root)?;
+    let root = absolute_root(project_root);
     let target = if target.is_absolute() {
         target.to_owned()
     } else {
@@ -338,7 +357,7 @@ pub fn finish_background_sweep(patience: Duration) -> bool {
 
 /// Retryable trash unlinking. Public commands execute this in a child.
 pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
-    let root = absolute_root(project_root)?;
+    let root = absolute_root(project_root);
     let trash = root.join(TRASH);
     reject_linked_ancestors(&root, &trash, true)?;
     let entries = match crate::fault::io("trash-list", io::ErrorKind::PermissionDenied, || {
@@ -352,11 +371,12 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
         return Ok(0);
     };
     let mut removed = 0;
-    for entry in entries {
+    // The listing holds this sweeper's own lock at least.
+    entries.into_iter().try_for_each(|entry| {
         let entry = entry.map_err(|source| io_error(&trash, source))?;
         let path = entry.path();
         if entry.file_name() == ".deleter.lock" {
-            continue;
+            return Ok(());
         }
         // An entry already gone -- removed by hand, or by a sweeper whose
         // lock was replaced -- is as swept as one removed here.
@@ -365,7 +385,7 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
             fs::symlink_metadata(&path)
         }) {
             Ok(metadata) => metadata,
-            Err(error) if gone(&error) => continue,
+            Err(error) if gone(&error) => return Ok(()),
             Err(source) => return Err(io_error(&path, source)),
         };
         let removal = crate::fault::io("trash-remove", io::ErrorKind::NotFound, || {
@@ -380,7 +400,8 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
             Err(error) if gone(&error) => {}
             Err(source) => return Err(io_error(&path, source)),
         }
-    }
+        Ok(())
+    })?;
     Ok(removed)
 }
 
@@ -391,39 +412,50 @@ struct TrashLock {
 impl TrashLock {
     fn acquire(trash: &Path) -> Result<Option<Self>, LifecycleError> {
         let path = trash.join(".deleter.lock");
-        for _ in 0..2 {
-            match crate::fault::io("trash-lock", io::ErrorKind::PermissionDenied, || {
-                OpenOptions::new().write(true).create_new(true).open(&path)
-            }) {
-                Ok(mut file) => {
-                    write!(file, "{}", std::process::id())
-                        .and_then(|_| file.sync_all())
-                        .map_err(|source| io_error(&path, source))?;
-                    return Ok(Some(Self { path }));
+        let create = || {
+            crate::fault::io("trash-lock", io::ErrorKind::PermissionDenied, || {
+                fs::open_with(OpenOptions::new().write(true).create_new(true), &path)
+            })
+        };
+        let mut file = match create() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if !Self::stale(&path) {
+                    return Ok(None);
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let owner = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|value| value.parse::<u32>().ok());
-                    if owner.is_some_and(process_exists) {
-                        return Ok(None);
-                    }
-                    if owner.is_none() {
-                        let age = fs::metadata(&path)
-                            .and_then(|metadata| metadata.modified())
-                            .ok()
-                            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                            .unwrap_or_default();
-                        if age < INCOMPLETE_LOCK_GRACE {
-                            return Ok(None);
-                        }
-                    }
-                    fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+                fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+                match create() {
+                    Ok(file) => file,
+                    // Another sweeper found it stale too, and took it first.
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+                    Err(source) => return Err(io_error(&path, source)),
                 }
-                Err(source) => return Err(io_error(&path, source)),
+            }
+            Err(source) => return Err(io_error(&path, source)),
+        };
+        fs::write_all(&mut file, std::process::id().to_string().as_bytes())
+            .and_then(|_| fs::sync_all(&file))
+            .map_err(|source| io_error(&path, source))?;
+        Ok(Some(Self { path }))
+    }
+
+    /// Whether the lock at `path` was left by a sweeper that is gone: its
+    /// process no longer runs, or it never finished writing whose it is.
+    fn stale(path: &Path) -> bool {
+        let owner = fs::read_to_string(path)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        match owner {
+            Some(owner) => !process_exists(owner),
+            None => {
+                let age = fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                    .unwrap_or_default();
+                age >= INCOMPLETE_LOCK_GRACE
             }
         }
-        Ok(None)
     }
 }
 
@@ -475,13 +507,15 @@ fn state_path(root: &Path, id: &str) -> PathBuf {
     root.join(".supercov/work").join(id).join("state.json")
 }
 
+#[track_caller]
 pub fn write_run_state(root: &Path, state: &RunState) -> Result<(), LifecycleError> {
     checked_id(&state.id)?;
-    let mut bytes = serde_json::to_vec_pretty(state).map_err(LifecycleError::Metadata)?;
+    let mut bytes = serde_json::to_vec_pretty(state).expect("plain data serializes");
     bytes.push(b'\n');
     atomic_write(root, &state_path(root, &state.id), &bytes)
 }
 
+#[track_caller]
 fn read_state(root: &Path, id: &str) -> Result<Option<RunState>, LifecycleError> {
     checked_id(id)?;
     let path = state_path(root, id);
@@ -495,6 +529,7 @@ fn read_state(root: &Path, id: &str) -> Result<Option<RunState>, LifecycleError>
         .map_err(|error| LifecycleError::InvalidState(error.to_string()))
 }
 
+#[track_caller]
 pub fn update_run_state(
     root: &Path,
     id: &str,
@@ -511,6 +546,7 @@ pub fn update_run_state(
     Ok(state)
 }
 
+#[track_caller]
 pub fn interrupt_run_state(
     root: &Path,
     id: &str,
@@ -641,13 +677,15 @@ fn take_lock(
     shared: bool,
     alive: impl Fn() -> bool,
 ) -> Result<Option<Held>, LifecycleError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|source| io_error(path, source))?;
+    let file = fs::open_with(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|source| io_error(path, source))?;
     let taken = crate::fault::or(
         "lock-unsupported",
         || Err(fs::TryLockError::Error(io::ErrorKind::Unsupported.into())),
@@ -694,6 +732,10 @@ impl ProjectLock {
         alone: bool,
     ) -> Result<Self, LifecycleError> {
         checked_id(run_id)?;
+        // A project is a directory with a name: its copies are named after it.
+        if root.file_name().is_none() {
+            return Err(LifecycleError::UnsafePath(root.into()));
+        }
         let locks = root.join(".supercov/locks");
         reject_linked_ancestors(root, &locks, true)?;
         fs::create_dir_all(&locks).map_err(|source| io_error(&locks, source))?;
@@ -702,14 +744,11 @@ impl ProjectLock {
         // or following a pre-existing symlink.
         let ignore = root.join(".supercov/.gitignore");
         match crate::fault::io("store-ignore", io::ErrorKind::PermissionDenied, || {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&ignore)
+            fs::open_with(OpenOptions::new().write(true).create_new(true), &ignore)
         }) {
-            Ok(mut file) => file
-                .write_all(b"*\n")
-                .map_err(|source| io_error(&ignore, source))?,
+            Ok(mut file) => {
+                fs::write_all(&mut file, b"*\n").map_err(|source| io_error(&ignore, source))?
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => return Err(io_error(&ignore, source)),
         }
@@ -764,8 +803,7 @@ impl ProjectLock {
                 continue;
             }
             let path = locks.join(format!("{name}.json"));
-            let mut payload =
-                serde_json::to_vec_pretty(&owner).map_err(LifecycleError::Metadata)?;
+            let mut payload = serde_json::to_vec_pretty(&owner).expect("plain data serializes");
             payload.push(b'\n');
             fs::write(&path, payload).map_err(|source| io_error(&path, source))?;
             return Ok(Self {
@@ -793,6 +831,10 @@ impl ProjectLock {
             .root
             .join(".supercov/locks")
             .join(format!("{}.json", copy_lock_name(self.copy)));
+        // A release that fails after a run that succeeded, which a test
+        // names directly: no other failure reaches it with the run intact.
+        crate::fault::io("copy-release", io::ErrorKind::Other, || Ok(()))
+            .map_err(|source| io_error(&path, source))?;
         if read_owner(&path).is_some_and(|owner| owner == self.owner) {
             fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
         }
@@ -824,24 +866,27 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     // A clone where the filesystem can make one (APFS, Btrfs, XFS): the
     // archive's blocks are shared, not copied -- 150 MB on a large run --
     // and the clone is the source as it was at that instant.
-    if reflink_copy::reflink(source, destination).is_ok() {
-        File::open(destination)
-            .and_then(|file| file.sync_all())
+    let cloned = crate::fault::or(
+        "clone",
+        // A test stands a copy in for the clone where the file system makes
+        // none, so what follows one is checked there too.
+        || fs::copy(source, destination).is_ok(),
+        || reflink_copy::reflink(source, destination).is_ok(),
+    );
+    if cloned {
+        fs::open(destination)
+            .and_then(|file| fs::sync_all(&file))
             .map_err(|error| io_error(destination, error))?;
         return fs::symlink_metadata(destination)
             .map(|metadata| metadata.len())
             .map_err(|error| io_error(destination, error));
     }
-    let mut input = File::open(source).map_err(|error| io_error(source, error))?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
+    let mut input = fs::open(source).map_err(|error| io_error(source, error))?;
+    let mut output = fs::open_with(OpenOptions::new().write(true).create_new(true), destination)
         .map_err(|error| io_error(destination, error))?;
-    let copied = io::copy(&mut input, &mut output).map_err(|error| io_error(destination, error))?;
-    output
-        .sync_all()
-        .map_err(|error| io_error(destination, error))?;
+    let copied =
+        fs::copy_between(&mut input, &mut output).map_err(|error| io_error(destination, error))?;
+    fs::sync_all(&output).map_err(|error| io_error(destination, error))?;
     Ok(copied)
 }
 
@@ -850,13 +895,12 @@ fn file_sha256(path: &Path) -> Result<[u8; 32], LifecycleError> {
     if !metadata.file_type().is_file() {
         return Err(LifecycleError::UnsafePath(path.into()));
     }
-    let mut file = File::open(path).map_err(|source| io_error(path, source))?;
+    let mut file = fs::open(path).map_err(|source| io_error(path, source))?;
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
     loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| io_error(path, source))?;
+        let read =
+            fs::read_from(&mut file, &mut buffer).map_err(|source| io_error(path, source))?;
         if read == 0 {
             break;
         }
@@ -939,13 +983,13 @@ pub(crate) fn publish_run_with_fault(
         .join("run-publication");
     reject_linked_ancestors(root, &staging, true)?;
     if fs::symlink_metadata(&staging).is_ok() {
-        remove_stored_tree_deferred(root, &staging)?;
+        clear_staging(root, &staging)?;
     }
     let evidence_sha256 = file_sha256(evidence_source)?;
     fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
     let copied = copy_regular_file(evidence_source, &staging.join("evidence.raw.gz"))?;
     if copied != metadata.raw_evidence.compressed_bytes {
-        remove_stored_tree_deferred(root, &staging)?;
+        clear_staging(root, &staging)?;
         return Err(LifecycleError::EvidenceLength {
             expected: metadata.raw_evidence.compressed_bytes,
             actual: copied,
@@ -959,10 +1003,10 @@ pub(crate) fn publish_run_with_fault(
         || file_sha256(&staging.join("evidence.raw.gz")),
     )? != evidence_sha256
     {
-        remove_stored_tree_deferred(root, &staging)?;
+        clear_staging(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
-    let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
+    let mut json = serde_json::to_vec_pretty(metadata).expect("plain data serializes");
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
     // Everything publication derives from the evidence -- the record of what
@@ -1048,9 +1092,7 @@ pub(crate) fn publish_run_with_fault(
             archived_inputs,
         );
         if let Some(index) = index {
-            index
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            index.join().unwrap_or_else(crate::threads::rethrow);
         }
         prepared
     });
@@ -1114,6 +1156,7 @@ fn published_run(root: &Path, id: &str) -> bool {
             .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
+#[track_caller]
 pub fn finalize_published_run(root: &Path, id: &str) -> Result<bool, LifecycleError> {
     checked_id(id)?;
     if !published_run(root, id) {
@@ -1141,9 +1184,7 @@ fn child_directories(path: &Path) -> Result<Vec<String>, LifecycleError> {
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| io_error(path, source))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&entry.path(), source))?;
+        let file_type = fs::file_type(&entry).map_err(|source| io_error(&entry.path(), source))?;
         if file_type.is_symlink() {
             return Err(LifecycleError::UnsafePath(entry.path()));
         }
@@ -1212,7 +1253,7 @@ fn copy_evidence(source: &Path, destination: &Path, files: &mut usize) -> std::i
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let target = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if fs::file_type(&entry)?.is_dir() {
             fs::create_dir_all(&target)?;
             copy_evidence(&entry.path(), &target, files)?;
         } else {
@@ -1304,11 +1345,11 @@ fn remove_idle_copies(root: &Path, locks: &Path) -> Result<(), LifecycleError> {
         else {
             continue;
         };
-        for directory in crate::workspace::copy_directories(&container, copy) {
-            if fs::symlink_metadata(&directory).is_ok() {
-                remove_stored_tree_deferred(root, &directory)?;
-            }
-        }
+        // The copy and its source view.
+        crate::workspace::copy_directories(&container, copy)
+            .iter()
+            .filter(|directory| fs::symlink_metadata(directory).is_ok())
+            .try_for_each(|directory| remove_stored_tree_deferred(root, directory).map(drop))?;
     }
     Ok(())
 }
@@ -1512,6 +1553,58 @@ mod tests {
         root
     }
 
+    /// A run's history that cannot be moved to the trash stops the clean.
+    #[test]
+    fn a_run_history_that_cannot_be_moved_stops_the_clean() {
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        fs::create_dir_all(root.join(".supercov/runs").join(id)).unwrap();
+        write_run_state(
+            &root,
+            &state(&root, id, RunStateStatus::Complete, std::process::id()),
+        )
+        .unwrap();
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1443", || {
+            cleanup_storage_locked(
+                &root,
+                CleanupOptions {
+                    keep: 0,
+                    dry_run: false,
+                },
+                false,
+            )
+        });
+        assert!(stopped.is_err(), "{stopped:?}");
+        assert!(root.join(".supercov/runs").join(id).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An empty trash sweeps nothing, and a listing whose entry cannot be
+    /// read -- of the store's directories, of evidence copied -- fails.
+    #[test]
+    fn an_empty_trash_sweeps_nothing_and_an_unreadable_entry_fails() {
+        let root = project();
+        fs::create_dir_all(root.join(TRASH)).unwrap();
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
+        let store = root.join(".supercov/runs");
+        fs::create_dir_all(store.join("run_a")).unwrap();
+        assert!(
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1178", || {
+                child_directories(&store)
+            })
+            .is_err()
+        );
+        let copied = root.join("copied");
+        fs::create_dir_all(&copied).unwrap();
+        assert!(
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1253", || {
+                copy_evidence(&store, &copied, &mut 0)
+            })
+            .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn removing_a_stored_tree_never_follows_a_link_out_of_it() {
@@ -1536,6 +1629,8 @@ mod tests {
                 .unwrap();
         }
         assert!(sweep_trash(&root).unwrap() >= 2);
+        // An emptied trash has nothing more to sweep.
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
         assert!(!tree.exists());
         assert_eq!(
             fs::read_to_string(outside.join("tsx/dist/loader.mjs")).unwrap(),
@@ -1570,6 +1665,40 @@ mod tests {
         test_run_metadata(id, bytes)
     }
 
+    /// An id that could name a path outside the store is refused wherever
+    /// one is taken: a state written or read, a run published or
+    /// finalized, and a directory found in the store.
+    #[test]
+    fn an_id_that_is_no_run_id_is_refused_everywhere() {
+        let root = project();
+        let bad = "../escape";
+        let refused = |result: Result<(), LifecycleError>| {
+            assert!(
+                matches!(result, Err(LifecycleError::InvalidRunId(ref id)) if id == bad),
+                "{result:?}"
+            );
+        };
+        refused(write_run_state(
+            &root,
+            &state(&root, bad, RunStateStatus::Testing, 1),
+        ));
+        refused(update_run_state(&root, bad, RunStateStatus::Failed, "now", None).map(|_| ()));
+        refused(finalize_published_run(&root, bad).map(|_| ()));
+        let evidence = root.join("evidence.raw.gz");
+        fs::write(&evidence, b"").unwrap();
+        refused(publish_run(&root, &metadata(bad, 0), &evidence).map(|_| ()));
+        // A control character is no part of a run id, though a name holds it.
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(root.join(".supercov/runs/run\u{1}")).unwrap();
+            assert!(matches!(
+                child_directories(&root.join(".supercov/runs")),
+                Err(LifecycleError::InvalidRunId(id)) if id == "run\u{1}"
+            ));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn evidence(root: &Path) -> (PathBuf, u64) {
         use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
         let mut entries = ["manifest.json", "frontend.json", "coverage-model.json"]
@@ -1582,7 +1711,7 @@ mod tests {
         let inputs =
             crate::source_capture::capture(root, "javascript", [PathBuf::from("src/index.js")])
                 .unwrap();
-        entries = crate::source_capture::append(entries, &inputs).unwrap();
+        entries = crate::source_capture::append(entries, &inputs);
         let path = root.join("evidence.gz");
         let metadata = write_archive(entries, &path).unwrap();
         (path, metadata.compressed_bytes)
@@ -1627,6 +1756,14 @@ mod tests {
             atomic_write(&root, &state, b"one")
         })
         .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), b"one");
+        // Sixteen names taken in a row, and it gives up.
+        assert!(matches!(
+            during("atomic-write-create=16", || atomic_write(
+                &root, &state, b"two"
+            )),
+            Err(LifecycleError::LockUnavailable)
+        ));
         assert_eq!(fs::read(&state).unwrap(), b"one");
         assert!(during("atomic-write-sync", || atomic_write(&root, &state, b"two")).is_err());
         assert_eq!(fs::read(&state).unwrap(), b"one");
@@ -1920,6 +2057,14 @@ mod tests {
         fs::write(staging.join("leftover"), b"from an interrupted attempt").unwrap();
         let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
         assert!(!published.join("leftover").exists());
+        // A run's work directory that is a file holds no staging.
+        let other = "2026-01-02T00-00-00-000Z";
+        fs::write(root.join(".supercov/work").join(other), b"not a directory").unwrap();
+        assert!(matches!(
+            publish_run(&root, &metadata(other, bytes), &evidence),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(!root.join(".supercov/runs").join(other).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1956,7 +2101,7 @@ mod tests {
         assert!(!lexical_descendant(&root, &root.join("a/../b")));
         assert!(lexical_descendant(&root, &root.join("a/b")));
         assert_eq!(
-            absolute_root(Path::new("relative")).unwrap(),
+            absolute_root(Path::new("relative")),
             std::env::current_dir().unwrap().join("relative")
         );
         assert!(process_exists(std::process::id()));
@@ -1967,6 +2112,26 @@ mod tests {
             copy_regular_file(&directory, &root.join("copy")),
             Err(LifecycleError::UnsafePath(_))
         ));
+        fs::write(root.join("archive"), "evidence").unwrap();
+        for (fault, copy) in [("clone", "cloned"), ("", "copied")] {
+            let copied = crate::fault::during(fault, || {
+                copy_regular_file(&root.join("archive"), &root.join(copy))
+            });
+            assert_eq!(copied.unwrap(), 8);
+            assert_eq!(fs::read_to_string(root.join(copy)).unwrap(), "evidence");
+        }
+        // A clone that cannot be opened, synced or measured afterwards: the
+        // third to fifth of its file operations, after the source's metadata
+        // and the clone itself.
+        for nth in 3..=5 {
+            let failed = crate::fault::during(&format!("clone,fs@{nth}"), || {
+                copy_regular_file(&root.join("archive"), &root.join(format!("clone-{nth}")))
+            });
+            assert!(
+                matches!(failed, Err(LifecycleError::Io { .. })),
+                "{nth}: {failed:?}"
+            );
+        }
         assert!(matches!(
             file_sha256(&directory),
             Err(LifecycleError::UnsafePath(_))
@@ -2410,6 +2575,21 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Every copy taken by a run still going, and one more is refused.
+    #[test]
+    fn a_run_beyond_the_most_copies_is_refused() {
+        let root = project();
+        let held = (0..MOST_COPIES)
+            .map(|each| ProjectLock::acquire(&root, &format!("run-{each}"), "start").unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            ProjectLock::acquire(&root, "one-more", "start").map(|_| ()),
+            Err(LifecycleError::LockUnavailable)
+        ));
+        drop(held);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn no_run_starts_while_the_store_is_cleaned_and_none_is_cleaned_under() {
         let root = project();
@@ -2694,6 +2874,34 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Kept evidence under a name that is not UTF-8 is refused by name
+    /// rather than removed as some other. (macOS names none.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kept_evidence_under_a_name_that_is_not_utf8_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = project();
+        kept_evidence(&root, "run_cleaned");
+        fs::create_dir_all(
+            root.join(FAILED_EVIDENCE)
+                .join(std::ffi::OsStr::from_bytes(b"\xff")),
+        )
+        .unwrap();
+        let refused = clean_storage(
+            &root,
+            CleanupOptions {
+                keep: 0,
+                dry_run: true,
+            },
+            "now",
+        );
+        assert!(
+            matches!(refused, Err(LifecycleError::UnsafePath(_))),
+            "{refused:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cleaning_everything_reclaims_kept_evidence_and_says_which() {
         let root = project();
@@ -2777,6 +2985,11 @@ mod tests {
         assert!(matches!(
             update_run_state(&root, "run_dir", RunStateStatus::Failed, "now", None),
             Err(LifecycleError::Io { .. })
+        ));
+        // A run with no state at all cannot be marked interrupted.
+        assert!(matches!(
+            interrupt_run_state(&root, "run_absent", "now", "SIGINT"),
+            Err(LifecycleError::InvalidState(reason)) if reason == "state is missing for run_absent"
         ));
         fs::remove_dir_all(root).unwrap();
     }
@@ -2883,5 +3096,606 @@ mod tests {
         assert!(!container.join("workspace-2").exists());
         sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A publication refuses each of its own steps that fails, in the
+    /// order it takes them: hashing the evidence, its staging directory,
+    /// the copy and its hash, `run.json` written, the staging directory
+    /// synced, `runs` made, the move into it, and `runs` synced.
+    #[cfg(unix)]
+    #[test]
+    fn a_publication_refuses_each_step_that_fails() {
+        let id = "2026-01-01T00-00-00-100Z";
+        for fault in [
+            "fs.open",
+            "fs.create_dir_all",
+            "fs.open@2",
+            "fs.open@3",
+            "fs.open@4",
+            "fs.open@8",
+            "fs.create_dir_all@3",
+            "fs.rename@2",
+            "fs.open@9",
+        ] {
+            let root = project();
+            let (evidence, metadata) = analysable_evidence(&root, id);
+            let published =
+                crate::fault::during(fault, || publish_run(&root, &metadata, &evidence));
+            assert!(published.is_err(), "{fault}");
+            assert!(
+                !root
+                    .join(".supercov/runs")
+                    .join(id)
+                    .join("run.json")
+                    .exists()
+                    || fault == "fs.open@9"
+            );
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Recovering abandoned runs refuses each step that fails: its lock's
+    /// directory and lock, a state it cannot read, and each removal and
+    /// update a run it recovers needs.
+    #[test]
+    fn recovering_runs_refuses_each_step_that_fails() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let work = |root: &Path| root.join(".supercov/work").join(id);
+        let abandoned = |root: &Path| {
+            write_run_state(root, &state(root, id, RunStateStatus::Testing, u32::MAX)).unwrap();
+        };
+        let published = |root: &Path, status: RunStateStatus| {
+            let (evidence, metadata) = analysable_evidence(root, id);
+            publish_run(root, &metadata, &evidence).unwrap();
+            write_run_state(root, &state(root, id, status, u32::MAX)).unwrap();
+            fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+        };
+        // A project's state made before the step under test, and its fault.
+        type Case<'a> = (&'a dyn Fn(&Path), &'a str);
+        let cases: [Case; 10] = [
+            (&|_| {}, "fs.create_dir_all"),
+            (&|_| {}, "fs.open_with"),
+            (
+                &|root| {
+                    fs::create_dir_all(work(root)).unwrap();
+                    fs::write(work(root).join("state.json"), "not json").unwrap();
+                },
+                "",
+            ),
+            // A finished run whose leftovers cannot go.
+            (
+                &|root| published(root, RunStateStatus::Complete),
+                "fs.rename",
+            ),
+            // A run whose process is gone: its copy, its staging, a published
+            // run's leftovers, its evidence, its state, its work directory.
+            (
+                &|root| {
+                    abandoned(root);
+                    fs::create_dir_all(work(root).join(root.file_name().unwrap())).unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| {
+                    abandoned(root);
+                    fs::create_dir_all(work(root).join("run-publication")).unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| published(root, RunStateStatus::Testing),
+                "fs.rename",
+            ),
+            (
+                &|root| {
+                    abandoned(root);
+                    fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
+                },
+                "fs.rename",
+            ),
+            // The recover lock is the first file made, the state the second.
+            (&abandoned, "fs.open_with@2"),
+            (&abandoned, "fs.rename@2"),
+        ];
+        for (number, (setup, fault)) in cases.into_iter().enumerate() {
+            let root = project();
+            setup(&root);
+            let recovered = crate::fault::during(fault, || recover_abandoned_runs(&root, "now"));
+            assert!(recovered.is_err(), "case {number} {fault}: {recovered:?}");
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Cleaning storage refuses each step that fails: a store directory it
+    /// cannot list, a state it cannot read, and each removal -- a work
+    /// directory, evidence, a run, kept evidence, the caches -- and the
+    /// recovery and release around it.
+    #[test]
+    fn cleaning_storage_refuses_each_step_that_fails() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let full = CleanupOptions {
+            keep: 0,
+            dry_run: false,
+        };
+        let a_file_at = |path: &'static str| {
+            move |root: &Path| {
+                fs::create_dir_all(root.join(".supercov")).unwrap();
+                fs::write(root.join(path), "").unwrap();
+            }
+        };
+        let runs_file = a_file_at(".supercov/runs");
+        let work_file = a_file_at(".supercov/work");
+        let evidence_file = a_file_at(".supercov/evidence");
+        // A project's state made before the step under test, and its fault.
+        type Case<'a> = (&'a dyn Fn(&Path), &'a str);
+        let cases: [Case; 9] = [
+            (&runs_file, ""),
+            (&work_file, ""),
+            (&evidence_file, ""),
+            (
+                &|root| {
+                    fs::create_dir_all(root.join(".supercov/work").join(id)).unwrap();
+                    fs::write(root.join(".supercov/work").join(id).join("state.json"), "{")
+                        .unwrap();
+                },
+                "",
+            ),
+            (
+                &|root| {
+                    write_run_state(root, &state(root, id, RunStateStatus::Complete, u32::MAX))
+                        .unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap(),
+                "fs.rename",
+            ),
+            (
+                &|root| {
+                    let (evidence, metadata) = analysable_evidence(root, id);
+                    publish_run(root, &metadata, &evidence).unwrap();
+                },
+                "fs.rename",
+            ),
+            (
+                &|root| fs::create_dir_all(root.join(FAILED_EVIDENCE).join(id)).unwrap(),
+                "fs.rename",
+            ),
+            (
+                &|root| fs::create_dir_all(root.join(".supercov/cache")).unwrap(),
+                "fs.rename",
+            ),
+        ];
+        for (number, (setup, fault)) in cases.into_iter().enumerate() {
+            let root = project();
+            setup(&root);
+            let cleaned = crate::fault::during(fault, || cleanup_storage_locked(&root, full, true));
+            assert!(cleaned.is_err(), "case {number} {fault}: {cleaned:?}");
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+        // Around the cleaning: recovery's directory (after the lock's own),
+        // and the release.
+        for fault in ["fs.create_dir_all@2", "fs.remove_file"] {
+            let root = project();
+            let cleaned = crate::fault::during(fault, || clean_storage(&root, full, "now"));
+            assert!(cleaned.is_err(), "{fault}: {cleaned:?}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Keeping a failed run's evidence keeps nothing, and leaves nothing,
+    /// when a step of the copy fails; listing run directories refuses a
+    /// store that is a link and an entry whose type cannot be read.
+    #[cfg(unix)]
+    #[test]
+    fn keeping_evidence_and_listing_runs_refuse_what_fails() {
+        let root = project();
+        let evidence = root.join("evidence");
+        fs::create_dir_all(evidence.join("nested")).unwrap();
+        fs::write(evidence.join("nested/record"), "x").unwrap();
+        let id = "2026-01-01T00-00-00-100Z";
+        for fault in [
+            "fs.create_dir_all",
+            "fs.read_dir",
+            "fs.file_type",
+            "fs.create_dir_all@2",
+            "fs.read_dir@2",
+        ] {
+            let kept = crate::fault::during(fault, || keep_failed_evidence(&root, &evidence, id));
+            assert!(kept.is_none(), "{fault}");
+            assert!(!root.join(FAILED_EVIDENCE).join(id).exists(), "{fault}");
+        }
+        let runs = root.join(".supercov/runs");
+        fs::create_dir_all(runs.join(id)).unwrap();
+        assert!(crate::fault::during("fs.file_type", || child_directories(&runs)).is_err());
+        let linked = root.join(".supercov/linked");
+        std::os::unix::fs::symlink(&runs, &linked).unwrap();
+        assert!(child_directories(&linked).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Taking a project's lock refuses each step that fails: its directory,
+    /// the store's lock, the copy's lock, and its owner's name written; and
+    /// a release that cannot remove that name.
+    #[test]
+    fn taking_and_releasing_a_project_lock_refuse_each_step_that_fails() {
+        // `.gitignore` is made first, then the store's lock, then the copy's.
+        for fault in [
+            "fs.create_dir_all",
+            "fs.open_with@2",
+            "fs.open_with@3",
+            "fs.write",
+        ] {
+            let root = project();
+            let taken = crate::fault::during(fault, || ProjectLock::acquire(&root, "run", "now"));
+            assert!(taken.is_err(), "{fault}");
+            fs::remove_dir_all(root).unwrap();
+        }
+        // The store's ignore file that cannot be written.
+        let root = project();
+        let taken =
+            crate::fault::during("fs.write_all", || ProjectLock::acquire(&root, "run", "now"));
+        assert!(taken.is_err());
+        fs::remove_dir_all(root).unwrap();
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        assert!(crate::fault::during("fs.remove_file", || lock.release()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Sweeping the trash: an empty trash removes nothing; a lock it cannot
+    /// write, or a stale one it cannot clear, is refused.
+    #[test]
+    fn sweeping_the_trash_refuses_a_lock_it_cannot_make() {
+        let root = project();
+        let trash = root.join(TRASH);
+        fs::create_dir_all(&trash).unwrap();
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
+        fs::write(trash.join("old"), "x").unwrap();
+        assert!(crate::fault::during("fs.write_all", || sweep_trash(&root)).is_err());
+        // An entry that cannot be listed is refused (the lock the failed
+        // write left gone first); a lock a live process holds leaves the
+        // trash to it.
+        let _ = fs::remove_file(trash.join(".deleter.lock"));
+        assert!(crate::fault::during("fs.read_dir entry", || sweep_trash(&root)).is_err());
+        fs::write(trash.join(".deleter.lock"), std::process::id().to_string()).unwrap();
+        assert_eq!(sweep_trash(&root).unwrap(), 0);
+        assert!(trash.join("old").exists());
+        // A lock left by a process that is gone is cleared, unless it cannot be.
+        fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
+        assert!(crate::fault::during("fs.remove_file", || sweep_trash(&root)).is_err());
+        // Cleared, it is taken first by another sweeper (the system's
+        // "already exists", by its number there), or cannot be made again.
+        let exists = if cfg!(windows) { 80 } else { 17 };
+        fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
+        assert_eq!(
+            crate::fault::during(&format!("trash-lock:{exists}@2"), || sweep_trash(&root)).unwrap(),
+            0
+        );
+        assert!(trash.join("old").exists());
+        fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
+        assert!(crate::fault::during("trash-lock@2", || sweep_trash(&root)).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Updating a run's state refuses a state that is missing, unreadable
+    /// or not JSON, and one it cannot write; so does marking it interrupted.
+    #[test]
+    fn updating_a_run_state_refuses_what_it_cannot_read_or_write() {
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        let update = |root: &Path| {
+            update_run_state(root, id, RunStateStatus::Testing, "now", None).map(drop)
+        };
+        let interrupt = |root: &Path| interrupt_run_state(root, id, "now", "SIGINT").map(drop);
+        for change in [
+            &update as &dyn Fn(&Path) -> Result<(), LifecycleError>,
+            &interrupt,
+        ] {
+            assert!(change(&root).is_err(), "a missing state");
+            write_run_state(&root, &state(&root, id, RunStateStatus::Testing, u32::MAX)).unwrap();
+            assert!(
+                crate::fault::during("fs.read", || change(&root)).is_err(),
+                "read"
+            );
+            assert!(
+                crate::fault::during("fs.open_with", || change(&root)).is_err(),
+                "write"
+            );
+            fs::write(state_path(&root, id), "not json").unwrap();
+            assert!(change(&root).is_err(), "not JSON");
+            fs::remove_file(state_path(&root, id)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The file helpers refuse each step that fails: a rename's directory,
+    /// the rename, and syncing either directory; a write's directory and the
+    /// sync after it; a hash's metadata, open and read.
+    #[cfg(unix)]
+    #[test]
+    fn the_file_helpers_refuse_each_step_that_fails() {
+        let root = project();
+        fs::create_dir_all(root.join("from")).unwrap();
+        for fault in ["fs.create_dir_all", "fs.rename", "fs.open", "fs.open@2"] {
+            fs::write(root.join("from/file"), "x").unwrap();
+            let renamed = crate::fault::during(fault, || {
+                atomic_rename(&root.join("from/file"), &root.join("to/file"))
+            });
+            assert!(renamed.is_err(), "rename {fault}");
+            let _ = fs::remove_file(root.join("to/file"));
+        }
+        for fault in ["fs.create_dir_all", "fs.open"] {
+            let written = crate::fault::during(fault, || {
+                atomic_write(&root, &root.join("state/value.json"), b"{}")
+            });
+            assert!(written.is_err(), "write {fault}");
+        }
+        fs::write(root.join("evidence"), "bytes").unwrap();
+        // A copy whose source cannot be looked at.
+        assert!(
+            crate::fault::during("fs.symlink_metadata", || {
+                copy_regular_file(&root.join("evidence"), &root.join("copied"))
+            })
+            .is_err()
+        );
+        // A trash that is a link is never moved into.
+        fs::create_dir_all(root.join(".supercov/runs/old")).unwrap();
+        fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join(TRASH)).unwrap();
+        assert!(remove_stored_tree_deferred(&root, &root.join(".supercov/runs/old")).is_err());
+        fs::remove_file(root.join(TRASH)).unwrap();
+        for fault in ["fs.symlink_metadata", "fs.open", "fs.read_from"] {
+            let hashed = crate::fault::during(fault, || file_sha256(&root.join("evidence")));
+            assert!(hashed.is_err(), "hash {fault}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Where a file cannot be cloned (Linux), a copy refuses each step that
+    /// fails: opening either file, the copy, and syncing what was copied.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_plain_copy_refuses_each_step_that_fails() {
+        let root = project();
+        fs::write(root.join("archive"), "evidence").unwrap();
+        for fault in ["fs.open", "fs.open_with", "fs.copy_between", "fs.sync_all"] {
+            let copied = crate::fault::during(fault, || {
+                copy_regular_file(
+                    &root.join("archive"),
+                    &root.join(format!("copy-{}", unique_name())),
+                )
+            });
+            assert!(copied.is_err(), "{fault}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// What the file system will not let go of is an error, not skipped: an
+    /// idle copy whose lock is a directory, an idle copy in a directory that
+    /// may not change, and kept evidence in one.
+    #[cfg(unix)]
+    #[test]
+    fn removal_the_file_system_refuses_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let two_days_ago = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        let idle_lock = |root: &Path, directory: bool| {
+            let lock = root
+                .join(".supercov/locks")
+                .join(format!("{}.lock", copy_lock_name(2)));
+            fs::create_dir_all(lock.parent().unwrap()).unwrap();
+            if directory {
+                fs::create_dir(&lock).unwrap();
+            } else {
+                fs::write(&lock, "").unwrap();
+            }
+            std::fs::File::open(&lock)
+                .unwrap()
+                .set_modified(two_days_ago)
+                .unwrap();
+        };
+        let frozen = |directory: &Path, mode: u32| {
+            fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        // A lock that cannot be opened is not taken, and recovery says so.
+        let root = project();
+        idle_lock(&root, true);
+        assert!(matches!(
+            recover_abandoned_runs(&root, "now"),
+            Err(LifecycleError::Io { .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+        // An idle copy that cannot be moved out of its container.
+        let root = project();
+        idle_lock(&root, false);
+        let container = crate::workspace::workspace_container(&root);
+        fs::create_dir_all(&crate::workspace::copy_directories(&container, 2)[0]).unwrap();
+        // Supercov's own container, as a run marks it.
+        fs::write(
+            container.join(crate::workspace::WORKSPACE_MARKER),
+            crate::workspace::WORKSPACE_MARKER_CONTENTS,
+        )
+        .unwrap();
+        frozen(&container, 0o555);
+        let refused = recover_abandoned_runs(&root, "now");
+        frozen(&container, 0o755);
+        assert!(refused.is_err(), "{refused:?}");
+        fs::remove_dir_all(root).unwrap();
+        // Kept evidence that cannot be moved out of where it is kept.
+        let root = project();
+        let kept = root.join(FAILED_EVIDENCE);
+        fs::create_dir_all(kept.join("2026-01-01T00-00-00-000Z")).unwrap();
+        frozen(&kept, 0o555);
+        let refused = clean_storage(
+            &root,
+            CleanupOptions {
+                keep: 0,
+                dry_run: false,
+            },
+            "now",
+        );
+        frozen(&kept, 0o755);
+        assert!(refused.is_err(), "{refused:?}");
+        let _ = sweep_trash(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A frontend that hands publication a manifest naming a file outside
+    /// the project is refused, and nothing is published.
+    #[test]
+    fn a_publication_handed_an_invalid_manifest_is_refused() {
+        let id = "2026-01-01T00-00-00-100Z";
+        let root = project();
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let inputs = crate::source_manifest::InputManifest {
+            schema_version: crate::source_manifest::MANIFEST_SCHEMA,
+            language: "javascript".into(),
+            files: [(
+                "../outside.js".to_owned(),
+                crate::source_manifest::FileFingerprint::of("x"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let refused = publish_archived_run(
+            &root,
+            &metadata,
+            &evidence,
+            Archived {
+                report: None,
+                inputs: Some(inputs),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("source manifest publication"),
+            "{refused}"
+        );
+        assert!(!root.join(".supercov/runs").join(id).exists());
+        let _ = sweep_trash(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A publication's staging that cannot be cleared -- left by an earlier
+    /// publication, or holding evidence of the wrong length or that changed
+    /// -- is refused by what failed, and nothing is published.
+    #[test]
+    fn a_publication_whose_staging_cannot_be_cleared_is_refused() {
+        let id = "2026-01-01T00-00-00-100Z";
+        for (case, faults) in [
+            ("staged", "publication-clean-up"),
+            ("short", "publication-clean-up"),
+            ("changed", "published-copy-differs,publication-clean-up"),
+        ] {
+            let root = project();
+            let (evidence, mut metadata) = analysable_evidence(&root, id);
+            match case {
+                "staged" => {
+                    fs::create_dir_all(root.join(".supercov/work").join(id).join("run-publication"))
+                        .unwrap()
+                }
+                "short" => metadata.raw_evidence.compressed_bytes += 1,
+                _ => {}
+            }
+            let refused = crate::fault::during(faults, || publish_run(&root, &metadata, &evidence))
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("publication-clean-up"),
+                "{case}: {refused}"
+            );
+            assert!(!root.join(".supercov/runs").join(id).exists(), "{case}");
+            let _ = sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// A run id that is no run's, a path outside the store or climbing out
+    /// of it, and a rename or write at a root with no directory above it,
+    /// are each refused.
+    #[test]
+    fn what_a_store_cannot_hold_is_refused() {
+        let root = std::env::temp_dir();
+        assert!(matches!(
+            ProjectLock::acquire(&root, "not/a run", "now"),
+            Err(LifecycleError::InvalidRunId(_))
+        ));
+        for (path, leaf) in [(Path::new("/elsewhere"), true), (&root.join("../b"), true)] {
+            assert!(matches!(
+                reject_linked_ancestors(&root, path, leaf),
+                Err(LifecycleError::UnsafePath(_))
+            ));
+        }
+        let root_dir = Path::new("/");
+        assert!(matches!(
+            atomic_rename(root_dir, &root.join("x")),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            atomic_rename(&root.join("x"), root_dir),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            atomic_write(&root, root_dir, b""),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn a_root_without_a_name_is_never_locked() {
+        assert!(matches!(
+            ProjectLock::acquire(Path::new("/"), "run", "now"),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn each_lifecycle_error_says_what_failed() {
+        let path = PathBuf::from(".supercov/runs");
+        let messages = [
+            LifecycleError::Io {
+                path: path.clone(),
+                source: io::Error::other("disk full"),
+            },
+            LifecycleError::InvalidRunId("../x".into()),
+            LifecycleError::UnsafePath(path.clone()),
+            LifecycleError::InvalidState("missing".into()),
+            LifecycleError::ActiveRun {
+                run_id: "run".into(),
+                pid: 7,
+            },
+            LifecycleError::StartingRun,
+            LifecycleError::Cleaning,
+            LifecycleError::LockUnavailable,
+            LifecycleError::PublicationExists("run".into()),
+            LifecycleError::Metadata(serde_json::from_str::<u8>("x").unwrap_err()),
+            LifecycleError::EvidenceLength {
+                expected: 2,
+                actual: 3,
+            },
+            LifecycleError::EvidenceChanged,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                ".supercov/runs: disk full",
+                "invalid coverage run ID: ../x",
+                "unsafe Supercov storage path: .supercov/runs",
+                "invalid run state: missing",
+                "coverage run run is active in this project (pid 7). Its storage can be cleaned when no run is active.",
+                "a coverage run is active in this project, starting. Its storage can be cleaned when no run is active.",
+                "this project's Supercov storage is being cleaned. No test ran: start the run again when the cleaning has finished.",
+                "could not acquire the Supercov project lock",
+                "coverage run already exists: run",
+                "invalid run metadata: expected value at line 1 column 1",
+                "evidence length changed before publication: expected 2, got 3",
+                "evidence changed during publication",
+            ]
+        );
     }
 }

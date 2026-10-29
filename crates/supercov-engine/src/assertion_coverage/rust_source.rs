@@ -14,6 +14,9 @@ use std::path::Path;
 /// `Default::default()`, a `let` or assignment's value becoming
 /// `Default::default()`, anything else skipped. Items and `let` without a
 /// value are not assessed.
+/// Ra's parser gives these nodes their parts even in a tree with errors.
+const WHOLE: &str = "the parser gives this node every part its syntax requires";
+
 pub(super) fn statement_starts(source: &str) -> Starts {
     let mut out = Starts::new();
     let parsed = [
@@ -56,10 +59,10 @@ pub(super) fn statement_starts(source: &str) -> Starts {
         for statement in list.statements() {
             let change = match &statement {
                 ast::Stmt::LetStmt(s) => s.initializer().map(|_| Change::ValueUndefined),
-                ast::Stmt::ExprStmt(s) => Some(match s.expr() {
-                    Some(e) => expression(&e, false),
-                    None => Change::Skip,
-                }),
+                // One that lost its expression to a parse error is skipped.
+                ast::Stmt::ExprStmt(s) => {
+                    Some(s.expr().map_or(Change::Skip, |e| expression(&e, false)))
+                }
                 ast::Stmt::Item(_) => None,
             };
             push(statement.syntax(), change);
@@ -219,8 +222,7 @@ fn value_change(
         // is replaced whole by another value of the function's type.
         ast::Expr::LoopExpr(_) => {
             if let Some(ty) = tail_of.and_then(tail_type).filter(|t| t != "()") {
-                let value =
-                    value_of(&ty, crate_view, 0).unwrap_or_else(|| "Default::default()".to_owned());
+                let value = value_of(&ty, crate_view, 0).unwrap_or("Default::default()".to_owned());
                 push(e.syntax(), value);
             }
         }
@@ -286,7 +288,8 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
         }
         let module = module_of(file);
         let root = parse(source).tree();
-        for node in root.syntax().descendants() {
+        // The file's root at least.
+        root.syntax().descendants().for_each(|node| {
             let owner = node
                 .ancestors()
                 .skip(1)
@@ -300,7 +303,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
             };
             if let Some(f) = ast::Fn::cast(node.clone()) {
                 let (Some(name), Some(ty)) = (f.name(), f.ret_type().and_then(|r| r.ty())) else {
-                    continue;
+                    return;
                 };
                 let ty = resolve(&ty.syntax().text().to_string());
                 out.returns
@@ -313,14 +316,14 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                     .or_insert(Some(ty.clone()));
                 // A constructor: an associated function of the type, taking
                 // no `self`, returning the type, safe to call.
-                let Some(owner) = &owner else { continue };
+                let Some(owner) = &owner else { return };
                 let takes_self = f.param_list().is_some_and(|p| p.self_param().is_some());
                 if *owner != ty
                     || takes_self
                     || f.unsafe_token().is_some()
                     || f.generic_param_list().is_some()
                 {
-                    continue;
+                    return;
                 }
                 let parameters = f
                     .param_list()
@@ -339,7 +342,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                 });
             } else if let Some(c) = ast::Const::cast(node.clone()) {
                 let (Some(owner), Some(name), Some(ty)) = (&owner, c.name(), c.ty()) else {
-                    continue;
+                    return;
                 };
                 if resolve(&ty.syntax().text().to_string()) == *owner {
                     out.makers.entry(owner.clone()).or_default().push(Maker {
@@ -350,7 +353,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                     });
                 }
             } else if let Some(e) = ast::Enum::cast(node.clone()) {
-                let Some(name) = e.name() else { continue };
+                let Some(name) = e.name() else { return };
                 let units = e
                     .variant_list()
                     .map(|list| {
@@ -363,7 +366,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                 out.enums.insert(name.text().to_string(), units);
                 out.homes.insert(name.text().to_string(), module.clone());
             } else if let Some(s) = ast::Struct::cast(node) {
-                let Some(name) = s.name() else { continue };
+                let Some(name) = s.name() else { return };
                 let open = match s.field_list() {
                     Some(ast::FieldList::RecordFieldList(list)) => {
                         list.fields().all(|f| f.visibility().is_some())
@@ -376,7 +379,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                         .fields()
                         .filter_map(|f| {
                             Some((
-                                f.name()?.text().to_string(),
+                                f.name().expect(WHOLE).text().to_string(),
                                 words(&f.ty()?.syntax().text().to_string()),
                             ))
                         })
@@ -386,7 +389,7 @@ pub(super) fn signatures<'a>(sources: impl Iterator<Item = (&'a str, &'a str)>) 
                 out.structs.insert(name.text().to_string(), fields);
                 out.homes.insert(name.text().to_string(), module.clone());
             }
-        }
+        });
     }
     out
 }
@@ -454,7 +457,7 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
     let returns = |name: &str| signatures.returns.get(name).cloned().flatten();
     match e {
         ast::Expr::ParenExpr(p) => infer(&p.expr()?, crate_view),
-        ast::Expr::TryExpr(t) => unwrap_try(&infer(&t.expr()?, crate_view)?),
+        ast::Expr::TryExpr(t) => unwrap_try(&infer(&t.expr().expect(WHOLE), crate_view)?),
         ast::Expr::PathExpr(p) => crate_view
             .locals
             .get(&p.syntax().text().to_string())
@@ -472,17 +475,17 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                 format!("({})", types.join(","))
             })
         }
-        ast::Expr::CallExpr(c) => match c.expr()? {
+        ast::Expr::CallExpr(c) => match c.expr().expect(WHOLE) {
             ast::Expr::PathExpr(p) => {
-                let path = p.path()?;
-                let name = path.segment()?.name_ref()?.text().to_string();
+                let path = p.path().expect(WHOLE);
+                let name = path.segment().expect(WHOLE).name_ref()?.text().to_string();
                 if matches!(name.as_str(), "alloc" | "alloc_zeroed" | "realloc") {
                     return Some("*mut u8".into());
                 }
                 if path.qualifier().is_none() {
                     // `Some(x)`; a closure parameter called, `impl Fn() -> T`.
                     if name == "Some" {
-                        let argument = c.arg_list()?.args().next()?;
+                        let argument = c.arg_list().expect(WHOLE).args().next()?;
                         return Some(format!("Option<{}>", infer(&argument, crate_view)?));
                     }
                     if let Some(local) = crate_view.locals.get(&name) {
@@ -495,15 +498,15 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                     let owner = path.qualifier()?.syntax().text().to_string();
                     let made =
                         name == "new" || name.starts_with("from_") || name.starts_with("with_");
-                    (made && owner.rsplit("::").next()?.starts_with(char::is_uppercase))
-                        .then(|| owner.rsplit("::").next().unwrap_or(&owner).to_owned())
+                    let last = owner.rsplit("::").next().unwrap_or(&owner);
+                    (made && last.starts_with(char::is_uppercase)).then(|| last.to_owned())
                 })
             }
             _ => None,
         },
         ast::Expr::MethodCallExpr(m) => {
             let name = m.name_ref()?.text().to_string();
-            let receiver = m.receiver()?;
+            let receiver = m.receiver().expect(WHOLE);
             // Raw pointers: a pointer moved is the same pointer type; a
             // cast names its target; a read gives what it points at.
             let pointer = || -> Option<String> {
@@ -565,10 +568,11 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
         }
         ast::Expr::MacroExpr(m) => {
             let name = m
-                .macro_call()?
-                .path()?
-                .segment()?
-                .name_ref()?
+                .macro_call()
+                .and_then(|call| call.path())
+                .and_then(|path| path.segment())
+                .and_then(|segment| segment.name_ref())
+                .expect(WHOLE)
                 .text()
                 .to_string();
             match name.as_str() {
@@ -618,12 +622,15 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
             let mut tails = branches
                 .into_iter()
                 .flatten()
-                .filter_map(|b| b.stmt_list()?.tail_expr())
+                .filter_map(|b| b.stmt_list().expect(WHOLE).tail_expr())
                 .collect::<Vec<_>>();
             // `else if`: its branches are this one's too.
             let mut chained = i.else_branch();
             while let Some(ast::ElseBranch::IfExpr(next)) = chained {
-                tails.extend(next.then_branch().and_then(|b| b.stmt_list()?.tail_expr()));
+                tails.extend(
+                    next.then_branch()
+                        .and_then(|b| b.stmt_list().expect(WHOLE).tail_expr()),
+                );
                 chained = next.else_branch();
                 if let Some(ast::ElseBranch::Block(b)) = &chained {
                     tails.extend(b.stmt_list().and_then(|l| l.tail_expr()));
@@ -776,7 +783,8 @@ fn scoped<'a>(e: &ast::Expr, crate_view: &Crate<'a>) -> Crate<'a> {
     let at = e.syntax().text_range().start();
     // Outermost first, so an inner binding shadows an outer one.
     let ancestors = e.syntax().ancestors().collect::<Vec<_>>();
-    for ancestor in ancestors.into_iter().rev() {
+    // The expression itself at least.
+    ancestors.into_iter().rev().for_each(|ancestor| {
         let params = if let Some(f) = ast::Fn::cast(ancestor.clone()) {
             f.param_list()
         } else if let Some(c) = ast::ClosureExpr::cast(ancestor.clone()) {
@@ -805,9 +813,9 @@ fn scoped<'a>(e: &ast::Expr, crate_view: &Crate<'a>) -> Crate<'a> {
                     bind(&pat, &ty, &mut out.locals);
                 }
             }
-            continue;
+            return;
         } else {
-            continue;
+            return;
         };
         for param in params.iter().flat_map(|list| list.params()) {
             let (Some(pat), Some(ty)) = (param.pat(), param.ty()) else {
@@ -816,7 +824,7 @@ fn scoped<'a>(e: &ast::Expr, crate_view: &Crate<'a>) -> Crate<'a> {
             let ty = resolve_self(&words(&ty.syntax().text().to_string()), e.syntax());
             bind(&pat, &ty, &mut out.locals);
         }
-    }
+    });
     out
 }
 
@@ -832,9 +840,10 @@ fn bind(pat: &ast::Pat, ty: &str, locals: &mut BTreeMap<String, String>) {
             if let Some(types) = tuple(ty) {
                 let fields = t.fields().collect::<Vec<_>>();
                 if fields.len() == types.len() {
-                    for (field, ty) in fields.iter().zip(&types) {
+                    // A tuple type has two elements at least.
+                    fields.iter().zip(&types).for_each(|(field, ty)| {
                         bind(field, ty, locals);
-                    }
+                    });
                 }
             }
         }
@@ -896,23 +905,23 @@ fn changed(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String> {
     }
     let types = ty.and_then(tuple);
     // A tuple written out: one element changed in place.
+    // Two elements at least: `tuple` reads no other.
     if let Some(elements) = tuple(e) {
-        for (i, element) in elements.iter().enumerate() {
+        return elements.iter().enumerate().find_map(|(i, element)| {
             let element_ty = types
                 .as_ref()
                 .filter(|t| t.len() == elements.len())
                 .map(|t| t[i].as_str())
                 .filter(|t| *t != "_")
                 .or_else(|| crate_view.locals.get(element.as_str()).map(String::as_str));
-            if let Some(changed) = changed(element, element_ty, crate_view)
-                && changed != *element
-            {
-                let mut out = elements.clone();
-                out[i] = changed;
-                return Some(format!("({})", out.join(", ")));
-            }
-        }
-        return None;
+            changed(element, element_ty, crate_view)
+                .filter(|changed| changed != element)
+                .map(|changed| {
+                    let mut out = elements.clone();
+                    out[i] = changed;
+                    format!("({})", out.join(", "))
+                })
+        });
     }
     // A tuple computed: computed, then one element changed.
     if let Some(types) = types {
@@ -1073,7 +1082,7 @@ fn other_variant(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
     {
-        let name = path.rsplit("::").next()?;
+        let name = path.rsplit("::").next().unwrap_or_default();
         let name = if name == "Self" { ty? } else { name };
         if let Some(units) = enums.get(name) {
             return units
@@ -1095,10 +1104,13 @@ fn other_variant(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String
 /// definition.
 fn record(r: &ast::RecordExpr, crate_view: &Crate) -> Option<String> {
     // `Self { .. }` in an impl names the impl's own type.
-    let path = resolve_self(&r.path()?.syntax().text().to_string(), r.syntax());
-    let name = path.rsplit("::").next()?;
+    let path = resolve_self(
+        &r.path().expect(WHOLE).syntax().text().to_string(),
+        r.syntax(),
+    );
+    let name = path.rsplit("::").next().unwrap_or_default();
     let types = crate_view.signatures.structs.get(name)?;
-    let list = r.record_expr_field_list()?;
+    let list = r.record_expr_field_list().expect(WHOLE);
     let fields = list
         .fields()
         .map(|f| {
@@ -1361,30 +1373,32 @@ fn parse(source: &str) -> ra_ap_syntax::Parse<SourceFile> {
 
 /// The declared return type of the function or closure a `return` leaves.
 fn return_type(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
-    for ancestor in node.ancestors().skip(1) {
-        if let Some(f) = ast::Fn::cast(ancestor.clone()) {
-            return Some(
-                f.ret_type()
+    node.ancestors()
+        .skip(1)
+        .find_map(|ancestor| {
+            if let Some(f) = ast::Fn::cast(ancestor.clone()) {
+                return Some(Some(
+                    f.ret_type()
+                        .and_then(|r| r.ty())
+                        .map_or("()".into(), |t| t.syntax().text().to_string()),
+                ));
+            }
+            ast::ClosureExpr::cast(ancestor).map(|c| {
+                c.ret_type()
                     .and_then(|r| r.ty())
-                    .map_or("()".into(), |t| t.syntax().text().to_string()),
-            );
-        }
-        if let Some(c) = ast::ClosureExpr::cast(ancestor) {
-            return c
-                .ret_type()
-                .and_then(|r| r.ty())
-                .map(|t| t.syntax().text().to_string());
-        }
-    }
-    None
+                    .map(|t| t.syntax().text().to_string())
+            })
+        })
+        .flatten()
 }
 
 /// The type a block's value has when it is what the function returns: the
 /// body's value, or a branch or arm of an `if` or `match` that is.
 fn tail_type(list: &ast::StmtList) -> Option<String> {
-    let mut node = list.syntax().parent()?; // the block
+    const HELD: &str = "a block, and what it forms, stand in something";
+    let mut node = list.syntax().parent().expect(HELD); // the block
     loop {
-        let parent = node.parent()?;
+        let parent = node.parent().expect(HELD);
         if let Some(f) = ast::Fn::cast(parent.clone()) {
             return Some(
                 f.ret_type()
@@ -1406,9 +1420,9 @@ fn tail_type(list: &ast::StmtList) -> Option<String> {
         // `expression` is the block itself or the `if` or `match` it climbed
         // to. One that stands in a block directly is that block's tail: the
         // parser puts any other expression in a statement of its own.
-        let holder = expression.parent()?;
+        let holder = expression.parent().expect(HELD);
         let list = ast::StmtList::cast(holder)?;
-        node = list.syntax().parent()?;
+        node = list.syntax().parent().expect(HELD);
     }
 }
 
@@ -1764,6 +1778,15 @@ mod tests {
         );
     }
 
+    /// An item declared inside a function is no statement to change.
+    #[test]
+    fn an_item_inside_a_function_is_no_statement_to_change() {
+        let source = "fn f() {\n    fn inner() {}\n    inner();\n}\n";
+        let starts = statement_starts(source);
+        assert_eq!(starts[&2], [("fn inner() {}".to_owned(), None)]);
+        assert_eq!(starts[&3], [("inner();".to_owned(), Some(Change::Skip))]);
+    }
+
     /// An integration test's helpers are the modules it declares, as a
     /// directory or a file, from a nested crate's `tests` too; a unit test
     /// has none; and a generic test on the file's first line is found.
@@ -1780,7 +1803,7 @@ mod tests {
         std::fs::create_dir_all(root.join("crates/x/tests/common")).unwrap();
         std::fs::write(root.join("crates/x/tests/common/mod.rs"), "").unwrap();
         std::fs::write(root.join("crates/x/tests/util.rs"), "").unwrap();
-        let text = "mod common;\npub mod util;\nmod missing;\nuse std::fmt;\n";
+        let text = "mod common;\npub mod util;\nmod missing;\nmod inline {}\nuse std::fmt;\n";
         assert_eq!(
             helpers(&root, "crates/x/tests/it.rs", text),
             ["crates/x/tests/common/mod.rs", "crates/x/tests/util.rs"]
@@ -1819,6 +1842,217 @@ mod tests {
 #[cfg(test)]
 mod replacement_tests {
     use super::*;
+
+    /// Each shape a value is inferred through: parentheses, `?`, a call of a
+    /// constructor or a crate function, a method of a crate type, `Self`,
+    /// a block, a `match` or an `if`, a literal, a record and a closure.
+    /// Every one is given a replacement, and none is the value itself.
+    /// Values whose type cannot be read off their shape -- an empty block,
+    /// branches with no value, a call of a closure, a record of no known
+    /// type, a method of an unknown receiver -- are changed, where they are
+    /// at all, to something else.
+    #[test]
+    fn values_of_no_readable_type_are_changed_to_something_else_or_not_at_all() {
+        let source = r#"impl Unit {
+    fn odd(&self, n: u32, f: fn() -> u32) -> u32 {
+        let a = {};
+        let b = if n > 1 {} else {};
+        let c = (|| 1u32)();
+        let d = Unknown { x: 1 };
+        let e = unknown.call(n);
+        let g = f()?;
+        let h = Self::Value;
+        let i = match n {};
+        let j = (unknown)(n);
+        let k = Self { n };
+        let l = <Unknown>(n);
+        n
+    }
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let changes = replacements("src/lib.rs", source, &signatures);
+        for (line, line_changes) in &changes {
+            let text = source.lines().nth(*line - 1).unwrap_or("");
+            for (_, changed) in line_changes {
+                assert!(
+                    !text.contains(&format!("= {changed};")),
+                    "{text} -> {changed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn values_of_every_inferred_shape_are_replaced_by_others() {
+        let source = r#"pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+pub enum Mode {
+    On,
+    Off,
+}
+impl Point {
+    pub fn new(x: i32) -> Self {
+        let made = Self { x, y: 0 };
+        made
+    }
+    pub fn flipped(&self) -> Point {
+        Point { x: self.y, y: self.x }
+    }
+    pub fn mode(&self) -> Mode {
+        if self.x > 0 { Mode::On } else { Mode::Off }
+    }
+}
+fn parse(text: &str) -> Result<u32, String> {
+    text.parse().map_err(|_| String::new())
+}
+pub fn shapes(p: &Point, n: u32, text: &str) -> Option<u32> {
+    let a = (n);
+    let b = parse(text).ok()?;
+    let c = Some(n);
+    let d = Box::new(n);
+    let e = p.flipped();
+    let f = { n + 1 };
+    let g = match n { 0 => 1u32, _ => 2 };
+    let h = if n > 1 { 3u32 } else { 4 };
+    let i = true;
+    let j = "";
+    let k = String::new();
+    let l = Point { x: 1, y: 2 };
+    let m = |v: u32| v + 1;
+    let o = 1.5f64;
+    let q = std::cmp::Ordering::Less;
+    let r = vec![1u8];
+    let t = p.mode();
+    let u = Point::new(3);
+    let w = parse(text);
+    Some(a + b)
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let lines = source.lines().collect::<Vec<_>>();
+        let mut replaced = 0;
+        for (number, line) in lines.iter().enumerate() {
+            let Some((_, value)) = line
+                .trim()
+                .strip_prefix("let ")
+                .and_then(|rest| rest.split_once(" = "))
+            else {
+                continue;
+            };
+            let value = value.trim_end_matches(';');
+            let changes = r
+                .get(&(number + 1))
+                .unwrap_or_else(|| panic!("no replacement for {line}"));
+            for (_, replacement) in changes {
+                assert_ne!(replacement, value, "{line}");
+            }
+            replaced += 1;
+        }
+        assert!(replaced >= 20, "{replaced}");
+        // A value built through `Self(..)` names no function to read a type
+        // from: whatever is offered for it is not the value itself.
+        let tuple = "pub struct Id(u32);\nimpl Id {\n    pub fn of(n: u32) -> Self {\n        let made = Self(n);\n        made\n    }\n}\n";
+        let offered = replacements(
+            "src/lib.rs",
+            tuple,
+            &super::signatures([("src/lib.rs", tuple)].into_iter()),
+        );
+        assert!(
+            offered
+                .get(&4)
+                .is_none_or(|changes| changes.iter().all(|(_, value)| value != "Self(n)")),
+            "{offered:?}"
+        );
+    }
+
+    /// A source cut off anywhere -- as an agent leaves a file mid-edit --
+    /// is read without a panic: every prefix of one holding each shape a
+    /// value takes, the parser filling in what the cut left out.
+    #[test]
+    fn every_prefix_of_a_source_is_read_without_a_panic() {
+        let source = r#"pub struct Point { pub x: i32, pub y: i32 }
+pub enum Mode { On, Off }
+impl Point {
+    pub fn new(x: i32) -> Self { let made = Self { x, y: 0 }; made }
+    pub fn mode(&self) -> Mode { if self.x > 0 { Mode::On } else { Mode::Off } }
+}
+fn parse(text: &str) -> Result<u32, String> { text.parse().map_err(|_| String::new()) }
+pub fn shapes(p: &Point, n: u32, text: &str, pair: (u8, u8)) -> Option<u32> {
+    let a = (n);
+    let b = parse(text).ok()?;
+    let c = Some(Box::new(n));
+    let d = match n { 0 => 1u32, _ => 2 };
+    let e = { let inner = n + 1; inner };
+    let f = Point { x: 1, ..*p };
+    let g = |v: u32| -> u32 { v + 1 };
+    let (h, i) = pair;
+    let j: Vec<u8> = vec![1, 2];
+    let k = std::ptr::addr_of_mut!(n);
+    let l = p.mode().clone();
+    let m = if n > 1 { 3u32 } else if n > 0 { 4 } else { 5 };
+    let o = [n; 2];
+    let q = std::cmp::Ordering::Less;
+    Some(a + b)
+}
+"#;
+        for (cut, _) in source.char_indices() {
+            let prefix = &source[..cut];
+            let signatures = signatures([("src/lib.rs", prefix)].into_iter());
+            let _ = replacements("src/lib.rs", prefix, &signatures);
+        }
+    }
+
+    /// A source missing any one character -- a node the parser leaves
+    /// empty in the middle of a file, not only at its end -- is read
+    /// without a panic.
+    #[test]
+    fn a_source_missing_any_one_character_is_read_without_a_panic() {
+        let source = r#"pub struct Point { pub x: i32, pub y: i32 }
+pub struct Pair(u8, u8);
+pub enum Mode { On, Off }
+impl Point {
+    pub fn new(x: i32) -> Self { let made = Self { x, y: 0 }; made }
+    pub fn mode(&self) -> Mode { if self.x > 0 { Mode::On } else { Mode::Off } }
+    pub fn flipped(&self) -> Point { Point { x: self.y, y: self.x } }
+}
+fn parse(text: &str) -> Result<u32, String> { text.parse().map_err(|_| String::new()) }
+pub fn shapes(p: &Point, n: u32, text: &str) -> Option<u32> {
+    let a = (n);
+    let b = parse(text)?;
+    let c = Some(Box::new(n));
+    let d = p.flipped().mode();
+    let e = { n + 1 };
+    let f = Point { x: 1, y: 2 };
+    let g = |v: u32| -> u32 { v + 1 };
+    let h = Pair(1, 2);
+    let i = if n > 1 { 3u32 } else if n > 0 { 4 } else { 5 };
+    let j = Point::new(3);
+    let k = 1.5f32;
+    let l = Vec::<u8>::new();
+    Some(a + b)
+}
+"#;
+        for (cut, character) in source.char_indices() {
+            let edited = format!(
+                "{}{}",
+                &source[..cut],
+                &source[cut + character.len_utf8()..]
+            );
+            let signatures = signatures([("src/lib.rs", edited.as_str())].into_iter());
+            let _ = replacements("src/lib.rs", &edited, &signatures);
+            // And with a bracket or an operator added there, which leaves
+            // other nodes without their parts.
+            for added in ["(", ")", "?"] {
+                let edited = format!("{}{added}{}", &source[..cut], &source[cut..]);
+                let read = super::signatures([("src/lib.rs", edited.as_str())].into_iter());
+                let _ = replacements("src/lib.rs", &edited, &read);
+            }
+        }
+    }
 
     #[test]
     fn a_value_is_replaced_by_a_different_one_of_its_type() {
@@ -2416,6 +2650,74 @@ fn h(e: E) -> Result<Made, E> {
         assert_eq!(starts[&3].len(), 1);
     }
 
+    /// Source the parser only half reads: a field or function with no
+    /// name, an `impl` of no type, `Some()` with nothing in it, blocks and
+    /// branches with no value, and `?` on what nothing types. Each gets the
+    /// change its shape alone allows.
+    #[test]
+    fn half_parsed_shapes_fall_back_to_their_text() {
+        let source = r#"struct S { : u8, y: u8 }
+impl {
+    fn m() -> u8 { 1 }
+}
+fn (a: bool) {}
+fn f(a: bool) -> u8 {
+    let s = Some();
+    let b = { 1; };
+    let d = if a { 1; } else if a { 2; } else { 3 };
+    let t = unknown?;
+    let r = S { y: 1 };
+    0
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(7), "None");
+        assert_eq!(at(8), "Default::default()");
+        assert_eq!(at(10), "Default::default()");
+        assert_eq!(at(11), "S { y: 0 }", "the named field alone");
+    }
+
+    /// Values whose parts a broken file leaves out, and the rarer shapes a
+    /// whole one has, are read for what they hold. Each broken source has
+    /// an error no edition forgives, so the tree read is the one with gaps.
+    #[test]
+    fn values_missing_their_parts_are_read_for_what_they_hold() {
+        let broken = r#"struct S { pub : u8, y: u8 }
+pub enum Mode { On, Off }
+impl Mode {
+    fn other(&self) -> Mode { Self::On }
+}
+impl { type X = u8; fn x() -> Self::X { 1 } }
+fn f(a: bool, c: bool) -> u8 {
+    let v = a::();
+    let w = try;
+    let x = if c try else { 2 };
+    let y = if c { 1 } else if a try else { 3 };
+    let z = S { y: 1, };
+    let u = ();
+    let p = (1u8, 2u8);
+    let g = |v: u8| -> u8 { return v + 1; };
+    let h = std::ptr::addr_of!(a);
+    let k = m!();
+    g(1)
+}
+fn broken( {
+"#;
+        let signatures = signatures([("src/lib.rs", broken)].into_iter());
+        let r = replacements("src/lib.rs", broken, &signatures);
+        assert!(!r.is_empty());
+        // An `if` whose branch is a `try` written without its block.
+        for value in ["if c try else { 2 }", "if c { 1 } else if a try else { 3 }"] {
+            let source = format!(
+                "fn f(a: bool, c: bool) -> u8 {{\n    let x = {value};\n    x\n}}\nfn broken( {{\n"
+            );
+            let read = super::signatures([("src/lib.rs", source.as_str())].into_iter());
+            let _ = replacements("src/lib.rs", &source, &read);
+        }
+    }
+
     /// Text read word by word, brackets that close early, the output of a
     /// callable type, and a doctest's item past more documentation.
     #[test]
@@ -2425,9 +2727,14 @@ fn h(e: E) -> Result<Made, E> {
         assert_eq!(enclosed("(a) (b)", '(', ')'), None);
         assert_eq!(tuple("(a) (b)"), None);
         assert_eq!(callable_output("u8"), None);
+        assert_eq!(callable_output("implFn()"), None, "no output written");
         assert_eq!(callable_output("Box<dynFn()->u8>"), Some("u8"));
         assert_eq!(float_literal_value("2f32"), Some(2.0));
         assert!(boolean("!ready"));
+        // Nothing written has no operator and calls nothing.
+        assert!(!boolean(""));
+        assert!(!integer_shaped(""));
+        assert_eq!(last_method(")"), None);
         let lines = [
             "/// Doc",
             "/// ```",
@@ -2637,6 +2944,45 @@ fn made() -> Thing {
         assert_eq!(r[&13][1].1, "(x + 1) ^ 1");
     }
 
+    /// A value whose type is written but whose expression says nothing of
+    /// it takes the type's own plain value.
+    #[test]
+    fn a_value_of_a_written_type_takes_that_type_s_plain_value() {
+        let source = "fn f() {\n    let a: f64 = compute();\n    let c: Vec<u8> = make();\n    let d: std::ptr::NonNull<u8> = make();\n}\n";
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        for (line, value) in [
+            (2, "0.0"),
+            (3, "Vec::new()"),
+            (4, "std::ptr::NonNull::dangling()"),
+        ] {
+            assert_eq!(r[&line][0].1, value, "line {line}");
+        }
+    }
+
+    /// A tuple's elements and a match's arms are typed by their shapes, so a
+    /// boolean among them is the part changed, wherever it is read again.
+    #[test]
+    fn a_tuple_s_and_a_match_s_parts_are_typed_by_their_shapes() {
+        let source = "fn f(s: &str, x: u8) {\n    let t = (false, s.as_str(), x.to_string(), make());\n    let m = match x {\n        1 => true,\n        _ => false,\n    };\n    let k = (m, t);\n}\n";
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        assert_eq!(r[&2][0].1, "(true, s.as_str(), x.to_string(), make())");
+        assert!(r[&3][0].1.starts_with("!(match x {"), "{}", r[&3][0].1);
+        assert_eq!(r[&7][0].1, "(!(m), t)");
+    }
+
+    /// A value whose type this module cannot read -- an empty `Some()`, a
+    /// call of what is not a path, a cast it cannot see the pointer of, an
+    /// unwrap of the unknown -- takes the type's default.
+    #[test]
+    fn a_value_of_a_type_this_module_cannot_read_takes_the_default() {
+        let source = "fn f() {\n    let a = Some();\n    let b = (make)(1);\n    let c = fns[0](1);\n    let d = p.cast();\n    let e = unknown.unwrap();\n    let g = q.cast::<u8>();\n    let h = <Foo>::new();\n}\n";
+        let r = replacements("src/f.rs", source, &Signatures::default());
+        assert_eq!(r[&2][0].1, "None");
+        for line in 3..=8 {
+            assert_eq!(r[&line][0].1, "Default::default()", "line {line}");
+        }
+    }
+
     /// The rarest readings: an associated type with a value, a tuple element
     /// whose change is itself, a closure whose changed body is a block
     /// already, a `let` that names nothing, and a slice-shaped text with no
@@ -2689,5 +3035,24 @@ fn f() -> ((), u8) {
             Some("&v[..0]".into())
         );
         assert_eq!(changed("&v]", None, &crate_view), None);
+        // A float, an ordering and a vector each have a value of their own.
+        for (ty, value) in [
+            ("f64", "0.0"),
+            ("std::cmp::Ordering", "std::cmp::Ordering::Less"),
+            ("Vec<u8>", "Vec::new()"),
+        ] {
+            assert_eq!(value_of(ty, &crate_view, 0).as_deref(), Some(value), "{ty}");
+        }
+        // A tuple whose elements' types are all unknown has none to change,
+        // an expression no operand, and an impl no item to name `Self::`.
+        assert_eq!(changed("f()", Some("(_, _)"), &crate_view), None);
+        assert!(top_level_operands("").is_empty());
+        let tree = parse("impl S {}").tree();
+        let imp = tree
+            .syntax()
+            .descendants()
+            .find_map(ast::Impl::cast)
+            .unwrap();
+        assert_eq!(resolve_self("Self", imp.syntax()), "S");
     }
 }

@@ -101,6 +101,9 @@ mod tests {
         };
         assert_eq!(from_tags(&tags(&["api", "@E2E"])), Some("e2e"));
         assert_eq!(from_tags(&tags(&["api", "smoke"])), None);
+        assert_eq!(from_tags(&tags(&["@unit"])), Some("unit"));
+        assert_eq!(from_tags(&tags(&["component"])), Some("component"));
+        assert_eq!(super::segment_kind(""), None);
         assert_eq!(
             with_tags(Some("spec/models/a_spec.rb"), &tags(&["integration"])),
             "integration"

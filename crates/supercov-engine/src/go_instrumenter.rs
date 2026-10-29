@@ -90,18 +90,7 @@ pub(crate) fn stable_obligation_id(
     start: usize,
     end: usize,
 ) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    for value in [file, kind, &start.to_string(), &end.to_string()] {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(24);
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
+    let encoded = crate::stable_ids::digest(&[file, kind, &start.to_string(), &end.to_string()]);
     format!("{language}:{kind}:{encoded}")
 }
 
@@ -110,10 +99,10 @@ fn parse_exactly(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError>
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_go::LANGUAGE.into())
-        .map_err(|error| GoInstrumenterError::Parse(error.to_string()))?;
+        .expect("the Go grammar is built for this tree-sitter");
     let tree = parser
         .parse(source, None)
-        .ok_or_else(|| GoInstrumenterError::Parse("parser returned no tree".into()))?;
+        .expect("a parser given its language and no time limit returns a tree");
     if tree.root_node().has_error() {
         return Err(GoInstrumenterError::Parse(parse_failure(&tree, source)));
     }
@@ -327,21 +316,24 @@ pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
 /// actually choked on is deep inside: the innermost one is the one worth
 /// naming.
 pub(crate) fn parse_failure(tree: &tree_sitter::Tree, source: &str) -> String {
-    let mut deepest: Option<(usize, Node)> = None;
     let mut stack = vec![(0_usize, tree.root_node())];
-    while let Some((depth, node)) = stack.pop() {
-        if (node.is_error() || node.is_missing()) && deepest.is_none_or(|(found, _)| depth > found)
-        {
-            deepest = Some((depth, node));
-        }
+    let nodes = std::iter::from_fn(|| {
+        let (depth, node) = stack.pop()?;
         // Every child, not only those that report an error of their own: an
         // ERROR node holds the tokens it did manage to read, and the one that
         // actually failed is among them.
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push((depth + 1, child));
+        stack.extend(node.children(&mut cursor).map(|child| (depth + 1, child)));
+        Some((depth, node))
+    });
+    let deepest = nodes.fold(None, |deepest: Option<(usize, Node)>, (depth, node)| {
+        if (node.is_error() || node.is_missing()) && deepest.is_none_or(|(found, _)| depth > found)
+        {
+            Some((depth, node))
+        } else {
+            deepest
         }
-    }
+    });
     let Some((_, node)) = deepest else {
         return "source does not parse".to_owned();
     };
@@ -464,7 +456,11 @@ fn ending_fallthrough(clause: Node) -> Option<Node> {
     let body = clause
         .children(&mut clause.walk())
         .find(|child| child.kind() == "statement_list")?;
-    let last = body.named_child(body.named_child_count().checked_sub(1)?)?;
+    // A clause has a statement list only when it holds a statement: one of
+    // nothing, or of comments, has none.
+    let last = body
+        .named_child(body.named_child_count() - 1)
+        .expect("a statement list holds a statement");
     (last.kind() == "fallthrough_statement").then_some(last)
 }
 
@@ -483,24 +479,21 @@ fn is_range_loop(node: Node) -> bool {
 
 /// Whether the function holding `node` has a `goto` anywhere in it.
 fn in_function_with_goto(node: Node) -> bool {
-    let mut function = node;
-    while !matches!(
-        function.kind(),
-        "function_declaration" | "method_declaration" | "func_literal" | "source_file"
-    ) {
-        match function.parent() {
-            Some(parent) => function = parent,
-            None => break,
-        }
-    }
+    let function = std::iter::successors(Some(node), Node::parent)
+        .find(|ancestor| {
+            matches!(
+                ancestor.kind(),
+                "function_declaration" | "method_declaration" | "func_literal" | "source_file"
+            )
+        })
+        .expect("the source file holds every node");
     let mut stack = vec![function];
-    while let Some(next) = stack.pop() {
-        if next.kind() == "goto_statement" {
-            return true;
-        }
+    std::iter::from_fn(|| {
+        let next = stack.pop()?;
         stack.extend(next.children(&mut next.walk()));
-    }
-    false
+        Some(next)
+    })
+    .any(|next| next.kind() == "goto_statement")
 }
 
 /// The condition a `for` loop tests: written alone (`for x < n {`), which
@@ -678,7 +671,8 @@ impl<'a> Collector<'a> {
         // which conditions were evaluated and what the decision came to, so a
         // probe beside it would store the same fact twice and charge for it on
         // every evaluation.
-        for (index, leaf) in leaves.iter().enumerate() {
+        // A decision has a condition at least.
+        leaves.iter().enumerate().for_each(|(index, leaf)| {
             // Wrapping an operand keeps short-circuiting intact: Go evaluates a
             // call argument only when the call is reached, so the right-hand
             // wrapper runs exactly when the unwrapped operand would have.
@@ -697,7 +691,7 @@ impl<'a> Collector<'a> {
             };
             self.edit(leaf.start_byte(), 20, open);
             self.edit(leaf.end_byte(), 20, close.to_owned());
-        }
+        });
         self.decisions.push(DecisionMeta {
             id,
             file: self.file.to_owned(),
@@ -808,8 +802,9 @@ impl<'a> Collector<'a> {
                 let mut cases = Vec::new();
                 let mut has_default = false;
                 let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    match child.kind() {
+                // Its keyword at least.
+                node.children(&mut cursor)
+                    .for_each(|child| match child.kind() {
                         "expression_case" | "type_case" | "communication_case" => {
                             cases.push((self.text(child), Some(child)))
                         }
@@ -818,8 +813,7 @@ impl<'a> Collector<'a> {
                             cases.push(("default".to_owned(), Some(child)));
                         }
                         _ => {}
-                    }
-                }
+                    });
                 // A switch with no default can match nothing, which is an
                 // outcome a reader has to see, and synthesising the clause is
                 // the only way to observe it: an added `default` holding
@@ -860,9 +854,9 @@ impl<'a> Collector<'a> {
                         .filter(|parent| parent.kind() == "labeled_statement")
                         .unwrap_or(node);
                     self.edit(statement.start_byte(), 90, format!("var {flag} bool; "));
-                    for fallthrough in fallthroughs.iter().flatten() {
+                    fallthroughs.iter().flatten().for_each(|fallthrough| {
                         self.call_before(fallthrough.start_byte(), format!("{flag} = true"));
-                    }
+                    });
                 }
                 for (index, (probe, (_, clause))) in probes.iter().zip(cases.iter()).enumerate() {
                     match clause {
@@ -993,11 +987,13 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
             out.push(node);
         }
         "parenthesized_expression" => {
+            // A tree with no error holds an expression in parentheses.
             let mut cursor = node.walk();
-            match node.children(&mut cursor).find(|child| child.is_named()) {
-                Some(inner) => condition_nodes(inner, source, out),
-                None => out.push(node),
-            }
+            let inner = node
+                .children(&mut cursor)
+                .find(|child| child.is_named())
+                .expect("parentheses hold an expression");
+            condition_nodes(inner, source, out);
         }
         _ => out.push(node),
     }
@@ -1028,7 +1024,7 @@ fn logical_parent(node: Node, source: &str) -> bool {
 /// `for` its body, a binary expression both sides.
 fn field<'t>(node: Node<'t>, name: &str) -> Node<'t> {
     node.child_by_field_name(name)
-        .unwrap_or_else(|| panic!("the Go grammar gives every {} a {name}", node.kind()))
+        .expect("the Go grammar gives an accepted tree's node every field it requires")
 }
 
 fn unparenthesized(node: Node) -> Node {
@@ -1036,7 +1032,7 @@ fn unparenthesized(node: Node) -> Node {
         // The one expression the parentheses hold, in an accepted tree.
         let inner = node
             .named_child(0)
-            .unwrap_or_else(|| panic!("the Go grammar puts an expression in parentheses"));
+            .expect("the Go grammar puts an expression in parentheses");
         return unparenthesized(inner);
     }
     node
@@ -1137,7 +1133,8 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
 /// rejects an unused import, so this is only added to a file that gained at
 /// least one probe.
 pub fn import_edit(source: &str, alias: &str, path: &str) -> Option<GoEdit> {
-    let tree = parse(source).ok()?;
+    // The source was read to instrument it, so it parses.
+    let tree = parse(source).expect("an instrumented file parses");
     let mut cursor = tree.root_node().walk();
     let package = tree
         .root_node()
@@ -1732,6 +1729,23 @@ func classify(a int, b bool) string {
         );
     }
 
+    /// A function declared without a body, its code written in assembly
+    /// beside it, has nowhere to be observed and is no obligation.
+    #[test]
+    fn a_function_without_a_body_is_no_obligation() {
+        let go = obligations(
+            "package fast\n\nfunc add(a, b int) int\n\nfunc twice(a int) int {\n\treturn add(a, a)\n}\n",
+        );
+        let functions = go
+            .manifest
+            .points
+            .iter()
+            .filter(|p| p.kind == PointKind::Function)
+            .filter_map(|p| p.label.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(functions, ["twice"]);
+    }
+
     #[test]
     fn every_obligation_has_a_probe_and_malformed_source_is_refused() {
         let go = obligations(SAMPLE);
@@ -2181,6 +2195,39 @@ func classify(a int, b bool) string {
         };
         assert_eq!(limitation["kind"], "value-decision-before-generics");
         assert_eq!(limitation["line"], 7);
+    }
+
+    /// An empty file, a select with no case, and the scan's helpers at the
+    /// ends of what they are given.
+    #[test]
+    fn nothing_to_read_is_read_as_nothing() {
+        let (mut next, mut decisions) = (0, 0);
+        let empty = build_go_obligations("m.go", "", &mut next, &mut decisions).expect("go");
+        assert!(empty.edits.is_empty());
+        let blocking = "package p\n\nfunc f() {\n\tselect {}\n}\n";
+        let obligations =
+            build_go_obligations("m.go", blocking, &mut next, &mut decisions).expect("go");
+        assert!(
+            obligations
+                .edits
+                .iter()
+                .all(|edit| !edit.text.contains("default")),
+            "{:?}",
+            obligations.edits
+        );
+        assert_eq!(stand_in_for_new_values(""), None);
+        assert_eq!(closing_parenthesis(b"(", 1), None);
+        assert!(!in_function_body(parse("package p\n").unwrap().root_node()));
+        // A constant holds no call, so its logical value is no decision.
+        let constant = "package p\n\nconst c = true && false\n";
+        let obligations =
+            build_go_obligations("m.go", constant, &mut next, &mut decisions).expect("go");
+        assert!(
+            obligations
+                .edits
+                .iter()
+                .all(|edit| !edit.text.contains(".CV("))
+        );
     }
 
     #[test]

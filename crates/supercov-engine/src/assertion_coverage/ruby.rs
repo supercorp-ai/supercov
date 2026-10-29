@@ -146,11 +146,12 @@ impl Collector<'_> {
 impl<'pr> Visit<'pr> for Collector<'_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         if !self.lists.contains(&node.location().start_offset()) {
-            for statement in node.body().iter() {
+            // Prism gives a statements node a statement at least.
+            node.body().iter().for_each(|statement| {
                 let change = self.change(&statement);
                 let l = statement.location();
                 self.push(l.start_offset(), l.end_offset(), change);
-            }
+            });
         }
         ruby_prism::visit_statements_node(self, node);
     }
@@ -349,7 +350,8 @@ fn rspec(source: &str, ids: &[usize]) -> Option<Located> {
         loops: 0,
     };
     specs.visit(&parsed.node());
-    let mut level = specs.stack.pop()?;
+    // The visit pushes and pops each group: the file's own level is left.
+    let mut level = specs.stack.pop().expect("the file's level is left");
     let mut context = Vec::new();
     let mut found: Option<(usize, usize)> = None;
     for &id in ids {
@@ -513,9 +515,10 @@ pub(super) fn helpers(root: &Path, from: &str, text: &str) -> Vec<String> {
         let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
             continue;
         };
-        let Some(name) = rest[1..].split(q).next() else {
-            continue;
-        };
+        let name = rest[1..]
+            .split(q)
+            .next()
+            .expect("a split yields a part at least");
         let name = name.strip_suffix(".rb").unwrap_or(name);
         let bases: Vec<std::path::PathBuf> = if relative {
             vec![here.to_path_buf()]
@@ -525,13 +528,12 @@ pub(super) fn helpers(root: &Path, from: &str, text: &str) -> Vec<String> {
                 .map(Into::into)
                 .collect()
         };
-        for base in bases {
-            let path = super::normalize(&base.join(format!("{name}.rb")));
-            if root.join(&path).is_file() {
-                out.push(path);
-                break;
-            }
-        }
+        out.extend(
+            bases
+                .iter()
+                .map(|base| super::normalize(&base.join(format!("{name}.rb"))))
+                .find(|path| root.join(path).is_file()),
+        );
     }
     out
 }
@@ -563,15 +565,15 @@ pub(super) fn support_files(root: &Path, text: &str) -> Vec<String> {
             .build()
             .filter_map(Result::ok)
             .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_owned));
-        for relative in relatives {
-            if relative.extension().and_then(|x| x.to_str()) != Some("rb") {
-                continue;
-            }
-            let stem = relative.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if names.contains(stem) {
-                out.push(relative.to_string_lossy().replace('\\', "/"));
-            }
-        }
+        // The walk yields `base` itself first.
+        out.extend(
+            relatives
+                .filter(|relative| relative.extension().and_then(|x| x.to_str()) == Some("rb"))
+                .filter(|relative| {
+                    names.contains(relative.file_stem().and_then(|s| s.to_str()).unwrap_or(""))
+                })
+                .map(|relative| relative.to_string_lossy().replace('\\', "/")),
+        );
     }
     out.sort();
     out
@@ -580,7 +582,8 @@ pub(super) fn support_files(root: &Path, text: &str) -> Vec<String> {
 /// `CamelizeLower` -> `camelize_lower`
 fn snake(name: &str) -> String {
     let mut out = String::new();
-    for (i, c) in name.chars().enumerate() {
+    // A name starts with its capital.
+    name.chars().enumerate().for_each(|(i, c)| {
         if c.is_ascii_uppercase() {
             if i > 0 {
                 out.push('_');
@@ -589,7 +592,7 @@ fn snake(name: &str) -> String {
         } else {
             out.push(c);
         }
-    }
+    });
     out
 }
 
@@ -658,6 +661,22 @@ mod tests {
         assert_eq!(at("1:3"), (8, 9));
     }
 
+    /// A lambda's last statement is its value, as a method's is.
+    #[test]
+    fn a_lambda_s_last_statement_is_its_value() {
+        let source = "handler = ->(x) do\n  y = x + 1\n  y * 2\nend\n";
+        let starts = statement_starts(source);
+        let rb = Language::Ruby;
+        assert_eq!(
+            change_at(&starts, 2, "y = x + 1", rb),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 3, "y * 2", rb),
+            Some(Change::ReturnUndefined)
+        );
+    }
+
     /// A ternary that is not a method's value is skipped; empty parentheses
     /// and an empty interpolation hold no statement of their own.
     #[test]
@@ -689,6 +708,8 @@ mod tests {
         assert_eq!(at("1:9"), Some((4, 12)));
         assert_eq!(at("2"), None);
         assert!(locate(spec, &lines, "rspec", "no brackets").is_none());
+        // Brackets that number nothing name no example.
+        assert!(locate(spec, &lines, "rspec", "spec/a_spec.rb[]").is_none());
     }
 
     #[test]
@@ -789,6 +810,17 @@ mod tests {
         );
         let last = locate(feature, &lines, "cucumber", "features/cart.feature:8").unwrap();
         assert_eq!((last.start, last.end), (7, lines.len() - 1));
+        // A name with no line, line 0, or a line past the file's end.
+        for name in [
+            "features/cart",
+            "features/cart.feature:0",
+            "features/cart.feature:99",
+        ] {
+            assert!(
+                locate(feature, &lines, "cucumber", name).is_none(),
+                "{name}"
+            );
+        }
         // Rails' `test "adds numbers"`, minitest/spec's numbered `it`, and a
         // method named for a word the description starts with.
         let tests = "class CartTest < ActiveSupport::TestCase\n  test \"adds numbers\" do\n    assert true\n  end\nend\ndescribe Cart do\n  it 'removes items' do\n    assert true\n  end\nend\nclass Plain < Minitest::Test\n  def test_adds_more; assert true; end\n  def test_adds\n    assert true\n  end\nend\n";

@@ -1,8 +1,9 @@
 //! Runner/build/project discovery for zero-configuration JavaScript suites.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -115,6 +116,7 @@ impl std::fmt::Display for ProjectDiscoveryError {
 
 impl std::error::Error for ProjectDiscoveryError {}
 
+#[track_caller]
 fn package_json(root: &Path) -> Value {
     fs::read(root.join("package.json"))
         .ok()
@@ -126,6 +128,7 @@ fn script<'a>(manifest: &'a Value, name: &str) -> Option<&'a str> {
     manifest.get("scripts")?.get(name)?.as_str()
 }
 
+#[track_caller]
 fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_file())
@@ -146,6 +149,7 @@ fn source_file(path: &Path) -> bool {
     .any(|extension| lower.ends_with(extension))
 }
 
+#[track_caller]
 fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, ProjectDiscoveryError> {
     let mut entries = fs::read_dir(path)
         .map_err(|source| ProjectDiscoveryError::Io {
@@ -251,12 +255,11 @@ fn test_api_candidates(directory: &Path, output: &mut Vec<TestApiCandidate>) {
             continue;
         }
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+        // A link is not followed, and an entry whose type cannot be read is
+        // passed over as one.
+        let Some(file_type) = entry.file_type().ok().filter(|kind| !kind.is_symlink()) else {
             continue;
         };
-        if file_type.is_symlink() {
-            continue;
-        }
         if file_type.is_dir() {
             test_api_candidates(&path, output);
         } else if file_type.is_file()
@@ -287,9 +290,7 @@ fn discover_playwright_adapter(root: &Path) -> PlaywrightAdapter {
     let module = scores
         .into_iter()
         .min_by(|(left_module, left_score), (right_module, right_score)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_module.cmp(right_module))
+            (right_score, left_module).cmp(&(left_score, right_module))
         })
         .map(|(module, _)| module)
         .unwrap_or_else(|| "@playwright/test".into());
@@ -336,12 +337,11 @@ fn nested_playwright_configs(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
+            // A link is not followed, and an entry whose type cannot be read is
+            // passed over as one.
+            let Some(file_type) = entry.file_type().ok().filter(|kind| !kind.is_symlink()) else {
                 continue;
             };
-            if file_type.is_symlink() {
-                continue;
-            }
             if file_type.is_dir() {
                 visit(&path, depth + 1, found);
             } else if file_type.is_file() && playwright_config_name(name) {
@@ -609,12 +609,11 @@ fn tests_require_build_output(root: &Path, manifest: &Value) -> bool {
                 continue;
             }
             let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
+            // A link is not followed, and an entry whose type cannot be read is
+            // passed over as one.
+            let Some(file_type) = entry.file_type().ok().filter(|kind| !kind.is_symlink()) else {
                 continue;
             };
-            if file_type.is_symlink() {
-                continue;
-            }
             if file_type.is_dir() && visit(&path, build_output_scripts) {
                 return true;
             }
@@ -783,13 +782,14 @@ pub fn no_source_error(
     root: &Path,
     environment: &BTreeMap<String, String>,
 ) -> ProjectDiscoveryError {
-    match crate::source_discovery::ExplicitSourceRoots::from_environment(root, environment) {
-        Ok(Some(explicit)) => match explicit.refuse_if_empty(0, "JavaScript or TypeScript") {
-            Err(message) => ProjectDiscoveryError::RootsLeftNothing(message),
-            Ok(()) => ProjectDiscoveryError::NoSourceFiles,
-        },
-        Ok(None) => ProjectDiscoveryError::NoSourceFiles,
-        Err(error) => ProjectDiscoveryError::Source(error),
+    // Discovery read the same roots first, and refused any it could not.
+    match crate::source_discovery::ExplicitSourceRoots::from_environment(root, environment)
+        .expect("roots discovery accepted resolve")
+    {
+        Some(explicit) => ProjectDiscoveryError::RootsLeftNothing(
+            explicit.nothing_left("JavaScript or TypeScript"),
+        ),
+        None => ProjectDiscoveryError::NoSourceFiles,
     }
 }
 
@@ -926,6 +926,17 @@ mod tests {
     /// A Playwright configuration is a source file named `playwright` then
     /// plain characters then `.config.`, found under the test directories to
     /// four levels, past hidden directories, `node_modules` and links.
+    /// A file named as source the parser has no grammar for parses to
+    /// nothing, and adds no test API.
+    #[test]
+    fn a_source_name_the_parser_does_not_know_parses_to_nothing() {
+        assert!(source_file(Path::new("t.mjsx")));
+        let allocator = Allocator::default();
+        assert!(parse_program(&allocator, Path::new("t.mjsx"), "export const t = 1;\n").is_none());
+        assert!(parse_program(&allocator, Path::new("t.mjs"), "export const t = 1;\n").is_some());
+        assert!(imported_test_apis(Path::new("t.mjsx"), "export const t = 1;\n").is_empty());
+    }
+
     #[test]
     fn nested_playwright_configurations_are_found_by_name_and_depth() {
         for (name, config) in [
@@ -956,6 +967,7 @@ mod tests {
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("tests/a"), root.join("tests/linked")).unwrap();
+        std::fs::create_dir(root.join("tests/empty")).unwrap();
         let found = nested_playwright_configs(&root)
             .into_iter()
             .map(|path| {
@@ -1291,6 +1303,44 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A script named by a variable is no script the discovery can name, so
+    /// no build is named for it.
+    #[test]
+    fn a_package_script_named_by_a_variable_names_no_build() {
+        let root = project(
+            "spawned-variable-script",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","start":"node dist/index.js","test":"node --test tests/*.test.ts"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                (
+                    "tests/index.test.ts",
+                    "import { spawn } from 'node:child_process';\nconst script = 'start';\nspawn('npm', ['run', script]);\n",
+                ),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert!(
+            discovered.unrun_build.is_empty(),
+            "{:?}",
+            discovered.unrun_build
+        );
+        // A directory the walk cannot list, or an entry of it, fails it.
+        for fault in ["fs.read_dir", "fs.read_dir entry"] {
+            assert!(
+                crate::fault::during(fault, || {
+                    discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"]))
+                })
+                .is_err(),
+                "{fault}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn names_the_build_when_tests_exec_a_compiled_package_script_as_one_string() {
         // `execSync("npm run start")` hands the shell a single string. It is
@@ -1392,6 +1442,7 @@ mod tests {
         assert_eq!(candidates[0].module, "my-playwright-kit");
         assert_eq!(candidates[0].score, 8 + 10 + 5);
         assert_eq!(candidates[0].test_export, None);
+        assert!(imported_test_apis(Path::new("empty.spec.ts"), "").is_empty());
         let root = project(
             "apis",
             &[
@@ -1407,6 +1458,7 @@ mod tests {
         );
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("results"), root.join("linked")).unwrap();
+        fs::create_dir(root.join("e2e/empty")).unwrap();
         let mut found = Vec::new();
         test_api_candidates(&root, &mut found);
         assert_eq!(
@@ -1448,6 +1500,7 @@ mod tests {
             ],
         );
         fs::write(root.join("test/latin1.test.js"), b"// caf\xe9\n").unwrap();
+        fs::create_dir(root.join("test/empty")).unwrap();
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(
@@ -1533,6 +1586,9 @@ mod tests {
         );
         // `npm run` alone names no script.
         assert_eq!(script_command(&root, &command(&["npm", "run"])), None);
+        // Nor does a program with no name, or no program.
+        assert_eq!(script_command(&root, &command(&[".."])), None);
+        assert_eq!(script_command(&root, &[]), None);
         let environment = BTreeMap::from([(
             "SUPERCOV_PLAYWRIGHT_MODULE".to_owned(),
             "./fixtures/playwright.js".to_owned(),
@@ -1581,5 +1637,31 @@ mod tests {
         assert_eq!(discovered.playwright_test_export, "scenario");
         assert_eq!(discovered.playwright_exports, ["scenario", "expect"]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_project_discovery_error_says_what_failed() {
+        use super::ProjectDiscoveryError as E;
+        let messages = [
+            E::from(crate::source_discovery::SourceDiscoveryError::InvalidRoot(
+                std::path::PathBuf::from("src"),
+            )),
+            E::Io {
+                path: std::path::PathBuf::from("a"),
+                source: std::io::Error::other("disk full"),
+            },
+            E::NoSourceFiles,
+            E::RootsLeftNothing("nothing left".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "source root is not a regular file or directory: src",
+                "a: disk full",
+                "No application source files were discovered. If your sources live somewhere unusual, set SUPERCOV_SOURCE_ROOTS=src,app. Alternatively, Supercov may not support your project layout or test framework yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+                "nothing left",
+            ]
+        );
     }
 }

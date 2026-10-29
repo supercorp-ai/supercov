@@ -27,6 +27,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use supercov_engine::fault_process::Launch;
 
 use serde::Deserialize;
 
@@ -489,13 +490,15 @@ fn python_parse_with(source: &str, pyenv_version: Option<&str>) -> Option<Option
     if let Some(version) = pyenv_version {
         command.env("PYENV_VERSION", version);
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = command.launch().ok()?;
     let _ = child
         .stdin
         .take()
         .expect("stdin is piped")
         .write_all(source.as_bytes());
-    let output = child.wait_with_output().ok()?;
+    let output = child
+        .wait_with_output()
+        .expect("waiting on a child this process started");
     if !output.status.success() {
         return None;
     }
@@ -547,20 +550,27 @@ pub fn resolve_import(root: &Path, from: &str, specifier: &str) -> Option<String
     // Lexical normalisation: `app/./x` and `app/a/../x` both read `app/x`,
     // without touching the filesystem, so a resolved path matches the way
     // discovery names the same file.
+    // (`Path::components` already drops the `.`.)
     let relative = |p: &Path| {
         let mut parts: Vec<String> = Vec::new();
-        for component in p.strip_prefix(root).ok()?.components() {
-            match component.as_os_str().to_string_lossy().as_ref() {
-                "." => {}
-                ".." => {
-                    parts.pop();
-                }
-                other => parts.push(other.to_owned()),
-            }
-        }
+        p.strip_prefix(root)
+            .ok()?
+            .components()
+            .for_each(
+                |component| match component.as_os_str().to_string_lossy().as_ref() {
+                    ".." => {
+                        parts.pop();
+                    }
+                    other => parts.push(other.to_owned()),
+                },
+            );
         Some(parts.join("/"))
     };
-    let base = root.join(from).parent()?.to_path_buf();
+    let base = root
+        .join(from)
+        .parent()
+        .expect("a file in the root has a directory")
+        .to_path_buf();
     if from.ends_with(".py") {
         let dots = specifier.chars().take_while(|c| *c == '.').count();
         let module = &specifier[dots..];
@@ -784,28 +794,21 @@ pub fn candidates(source: &str) -> Vec<Candidate> {
     if all.len() <= MAX_CANDIDATES {
         return all;
     }
+    // More than the cap: some.
     let mut by_check: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
-    for candidate in all {
+    all.into_iter().for_each(|candidate| {
         by_check
             .entry(candidate.check.clone())
             .or_default()
             .push(candidate);
-    }
+    });
     // Round by round, one of each check: there are more candidates than
     // the cap, so the cap is reached before every list runs out.
-    let mut picked = Vec::new();
-    let mut round = 0;
-    while picked.len() < MAX_CANDIDATES {
-        for list in by_check.values() {
-            if let Some(candidate) = list.get(round) {
-                picked.push(candidate.clone());
-                if picked.len() == MAX_CANDIDATES {
-                    break;
-                }
-            }
-        }
-        round += 1;
-    }
+    let mut picked = (0..)
+        .flat_map(|round| by_check.values().filter_map(move |list| list.get(round)))
+        .take(MAX_CANDIDATES)
+        .cloned()
+        .collect::<Vec<_>>();
     picked.sort();
     picked
 }
@@ -815,6 +818,13 @@ mod tests {
     /// Each pattern check is listed once and is neither of the checks
     /// matched apart from the patterns, so a line is never a candidate for
     /// one check twice.
+    /// An empty file has no line to be a candidate.
+    #[test]
+    fn an_empty_file_has_no_candidate() {
+        assert!(super::from_patterns("").is_empty());
+        assert!(super::template_or_config_nodes(std::path::Path::new("a.html"), "").is_empty());
+    }
+
     #[test]
     fn no_line_is_a_pattern_candidate_for_one_check_twice() {
         let mut checks = super::PATTERNS
@@ -888,12 +898,30 @@ mod tests {
             Some("app/__init__.py")
         );
         assert_eq!(resolve_import(&temp, "app/views.py", "os"), None);
+        // A relative import of the package itself names no module, and a
+        // JavaScript path that climbs is read lexically.
+        assert_eq!(resolve_import(&temp, "app/views.py", "."), None);
+        std::fs::create_dir_all(temp.join("app/sub")).unwrap();
+        std::fs::write(temp.join("app/shared.js"), "").unwrap();
+        assert_eq!(
+            resolve_import(&temp, "app/sub/page.js", "../shared").as_deref(),
+            Some("app/shared.js")
+        );
+        assert_eq!(
+            resolve_import(&temp, "app/sub/page.js", "./.././../app/shared").as_deref(),
+            Some("app/shared.js")
+        );
         // A module importing itself, and one above the root, resolve to
         // nothing.
         assert_eq!(resolve_import(&temp, "app/views.py", ".views"), None);
         std::fs::write(temp.join("outside.py"), "").unwrap();
         assert_eq!(
             resolve_import(&temp.join("app"), "views.py", "..outside"),
+            None
+        );
+        // Nor does one climbing past the top of the filesystem.
+        assert_eq!(
+            resolve_import(&temp, "app/views.py", &".".repeat(200)),
             None
         );
         std::fs::write(temp.join("app/routes.ts"), "").unwrap();

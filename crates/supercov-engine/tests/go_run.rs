@@ -610,6 +610,41 @@ fn a_run_that_observed_no_test_at_all_is_refused() {
     std::fs::remove_dir_all(root).ok();
 }
 
+#[test]
+fn a_package_whose_evidence_is_cut_short_fails_the_run_naming_it() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("cut-short");
+    fixture(root.as_path());
+    let evidence = root.join(".supercov/work/run-go-cut-short/go/evidence");
+    let request = DirectGoRunRequest {
+        root: root.to_path_buf(),
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "\"$0\" test ./... && for file in '{}'/*; do printf x > \"$file\"; done",
+                evidence.display()
+            ),
+            go.display().to_string(),
+        ],
+        run_id: "run-go-cut-short".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let error = run_direct_go(&request, &mut diagnostics).expect_err("evidence cut short");
+    assert!(error.contains("ended in the middle of its"), "{error}");
+    // Named by its file, whose separators differ by platform.
+    assert!(
+        error.contains("run-go-cut-short") && error.contains(".bin"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Go 1.26 let `new` take a value. tree-sitter-go cannot express that, so
 /// every source file holding one was dropped from the denominator with a
 /// single warning — and the run then reported success over the files that were

@@ -17,10 +17,10 @@
 //!   than one that took longer. The run adds `-count=1` when the command does
 //!   not already say otherwise, and says so.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,
@@ -177,6 +177,7 @@ fn package_name(source: &str) -> Option<String> {
     None
 }
 
+#[track_caller]
 fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -228,6 +229,7 @@ fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
 
 const LINE_DIRECTIVE: &str = "/*line ";
 
+#[track_caller]
 fn write(path: &Path, contents: &str) -> Result<(), String> {
     // Every path written is a name joined onto a directory.
     let parent = path.parent().unwrap_or(path);
@@ -291,7 +293,8 @@ fn instrument_sources(
         members.into_iter().collect::<Vec<_>>()
     };
     let mut runtimes: Vec<(String, String)> = Vec::new();
-    for directory in &directories {
+    // The root at least.
+    directories.iter().try_for_each(|directory| -> Result<(), String> {
         let at = workspace.join(directory);
         let module = module_path(&at).ok_or_else(|| {
             format!(
@@ -308,7 +311,8 @@ fn instrument_sources(
             RUNTIME_VALUES_SOURCE,
         )?;
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
-    }
+        Ok(())
+    })?;
     // Longest first, so a nested module wins over the root it sits under.
     runtimes.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
     let mut sources = InstrumentedSources {
@@ -369,20 +373,26 @@ fn instrument_sources(
         .into_iter()
         .filter(|(directory, _)| measured.contains(directory))
         .map(|(directory, names)| {
-            let mut counts: Vec<(usize, String)> = Vec::new();
-            for name in names {
-                match counts.iter_mut().find(|(_, seen)| *seen == name) {
-                    Some((count, _)) => *count += 1,
-                    None => counts.push((1, name)),
-                }
-            }
+            let mut counts =
+                names
+                    .into_iter()
+                    .fold(Vec::<(usize, String)>::new(), |mut counts, name| {
+                        match counts.iter_mut().find(|(_, seen)| *seen == name) {
+                            Some((count, _)) => *count += 1,
+                            None => counts.push((1, name)),
+                        }
+                        counts
+                    });
             // The first of the most declared, so a tie goes to the tests.
-            let mut best = 0;
-            for (index, (count, _)) in counts.iter().enumerate() {
-                if *count > counts[best].0 {
-                    best = index;
-                }
-            }
+            let best = counts
+                .iter()
+                .enumerate()
+                .fold(
+                    0,
+                    |best, (index, (count, _))| {
+                        if *count > counts[best].0 { index } else { best }
+                    },
+                );
             (directory, counts.swap_remove(best).1)
         })
         .collect();
@@ -436,21 +446,28 @@ fn instrument_workspace(
         // can hold both `foo` and `foo_test` files; the internal one wins,
         // because that is where the instrumented sources are.
         let mut harness_package: Option<String> = None;
-        for relative in tests {
-            let path = workspace.join(relative);
-            let source = read(&path)?;
-            let Some(name) = package_name(&source) else {
-                continue;
-            };
-            // The package a harness joins is read from the text, so it is
-            // known whether or not the file parses -- and a package whose only
-            // test file is unreadable still needs one.
-            let internal = source_packages.get(&directory) == Some(&name);
-            if internal || harness_package.is_none() {
-                harness_package = Some(name);
-            }
-            let file =
-                match instrument_test_file(&source, RUNTIME_ALIAS, &evidence_literal, serialised) {
+        // Grouped from the tests, so a directory has one at least.
+        tests
+            .into_iter()
+            .try_for_each(|relative| -> Result<(), String> {
+                let path = workspace.join(relative);
+                let source = read(&path)?;
+                let Some(name) = package_name(&source) else {
+                    return Ok(());
+                };
+                // The package a harness joins is read from the text, so it is
+                // known whether or not the file parses -- and a package whose only
+                // test file is unreadable still needs one.
+                let internal = source_packages.get(&directory) == Some(&name);
+                if internal || harness_package.is_none() {
+                    harness_package = Some(name);
+                }
+                let file = match instrument_test_file(
+                    &source,
+                    RUNTIME_ALIAS,
+                    &evidence_literal,
+                    serialised,
+                ) {
                     Ok(file) => file,
                     Err(error) => {
                         // Taking the run down with it is the reflex a source file
@@ -470,24 +487,26 @@ fn instrument_workspace(
                         // for rather than parsed for, which is the one question
                         // that cannot go unanswered.
                         declares_test_main |= declares_test_main_textually(&source);
-                        continue;
+                        return Ok(());
                     }
                 };
-            declares_test_main |= file.declares_test_main;
-            for test in &file.tests {
-                declared_in.insert(test.clone(), relative.clone());
-            }
-            unattributed.extend(file.unattributed.iter().cloned());
-            // Written also when nothing in it changed, for its name.
-            write(
-                &path,
-                &named_for_the_project(
-                    project_root,
-                    relative,
-                    &rewrite(&source, &file.edits).replace(RUNTIME_IMPORT, import_for(relative)),
-                ),
-            )?;
-        }
+                declares_test_main |= file.declares_test_main;
+                for test in &file.tests {
+                    declared_in.insert(test.clone(), relative.clone());
+                }
+                unattributed.extend(file.unattributed.iter().cloned());
+                // Written also when nothing in it changed, for its name.
+                write(
+                    &path,
+                    &named_for_the_project(
+                        project_root,
+                        relative,
+                        &rewrite(&source, &file.edits)
+                            .replace(RUNTIME_IMPORT, import_for(relative)),
+                    ),
+                )?;
+                Ok(())
+            })?;
         let Some(package) = harness_package else {
             continue;
         };
@@ -621,12 +640,11 @@ pub fn run_direct_go(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let adapter_started = Instant::now();
@@ -676,27 +694,24 @@ pub fn run_direct_go(
         )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] detected Go; instrumenting {} source file(s) across {} test package(s) in isolated workspace {}",
             instrumented.project.instrumented.len(),
             instrumented.packages.len(),
             workspace.display()
-        )
-        .map_err(|error| error.to_string())?;
+        );
         for (file, reason) in &instrumented.project.unparseable {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         for (file, reason) in &instrumented.unparseable_tests {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; the tests it declares run unattributed and what they reach counts run-wide"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if instrumented.packages.is_empty() {
             return Err(
@@ -727,53 +742,39 @@ pub fn run_direct_go(
         }
 
         if serialised {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added -parallel=1 for --exact-attribution: a test that calls t.Parallel() can only be credited with what it reached when nothing else is running. Your suite runs in order, which is slower."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if forced_fresh {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added -count=1: `go test` caches passing packages, and a cached package does not run, so it would record no coverage"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         let test_started = Instant::now();
-        let replaced = go_flags.is_some();
-        let plan =
-            ExecutionPlan {
-                preparation: Vec::new(),
-                test: ExecutionPhase {
-                    name: "test".into(),
-                    kind: PhaseKind::Test,
-                    command: CommandSpec {
-                        program: command[0].clone().into(),
-                        arguments: command[1..].iter().map(OsString::from).collect(),
-                        cwd: workspace.clone(),
-                        // The run's id, for a test that wants to know it is
-                        // measured; and Go's flags where Supercov added any.
-                        environment: Some(
-                            std::env::vars_os()
-                                .filter(|(name, _)| {
-                                    name != crate::rust_runtime::RUN_ID_ENV
-                                        && (!replaced || name != "GOFLAGS")
-                                })
-                                .chain(go_flags.map(|flags| {
-                                    (OsString::from("GOFLAGS"), OsString::from(flags))
-                                }))
-                                .chain([(
-                                    OsString::from(crate::rust_runtime::RUN_ID_ENV),
-                                    OsString::from(&request.run_id),
-                                )])
-                                .collect(),
-                        ),
-                        captured_output: None,
-                        console: Some(crate::workspace::console_names(&root, &workspace)),
-                    },
+        let plan = ExecutionPlan {
+            preparation: Vec::new(),
+            test: ExecutionPhase {
+                name: "test".into(),
+                kind: PhaseKind::Test,
+                command: CommandSpec {
+                    program: command[0].clone().into(),
+                    arguments: command[1..].iter().map(OsString::from).collect(),
+                    cwd: workspace.clone(),
+                    // The run's id, for a test that wants to know it is
+                    // measured; and Go's flags where Supercov added any.
+                    environment: Some(crate::rust_runtime::measured_environment(
+                        std::env::vars_os(),
+                        go_flags.map(|value| ("GOFLAGS", value)),
+                        &request.run_id,
+                    )),
+                    captured_output: None,
+                    console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
-            };
+            },
+        };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
@@ -803,7 +804,7 @@ pub fn run_direct_go(
         )
         .map_err(|error| error.to_string())?;
         for line in crate::workspace::describe_command_outputs(&outputs) {
-            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "{line}");
         }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
@@ -817,33 +818,37 @@ pub fn run_direct_go(
         let mut parts = Vec::new();
         let mut outcomes = Vec::new();
         let mut silent = Vec::new();
-        for package in &instrumented.packages {
-            let Ok(bytes) = fs::read(&package.evidence) else {
-                silent.push(package.directory.clone());
-                continue;
-            };
-            let evidence = read_evidence(&bytes)
-                .map_err(|error| format!("{}: {error}", package.evidence.display()))?;
-            for test in &evidence.tests {
-                outcomes.push(OwnedTestOutcome {
-                    name: test.name.clone(),
-                    runner: test.runner.clone(),
-                    package: package.directory.clone(),
-                    file: package.declared_in.get(&test.name).cloned(),
-                    status: test.status.clone(),
-                    attributed: !test.unattributed,
-                });
-            }
-            parts.push(evidence);
-        }
+        // There are test packages: a run with none was refused above.
+        instrumented
+            .packages
+            .iter()
+            .try_for_each(|package| -> Result<(), String> {
+                let Ok(bytes) = fs::read(&package.evidence) else {
+                    silent.push(package.directory.clone());
+                    return Ok(());
+                };
+                let evidence = read_evidence(&bytes)
+                    .map_err(|error| format!("{}: {error}", package.evidence.display()))?;
+                for test in &evidence.tests {
+                    outcomes.push(OwnedTestOutcome {
+                        name: test.name.clone(),
+                        runner: test.runner.clone(),
+                        package: package.directory.clone(),
+                        file: package.declared_in.get(&test.name).cloned(),
+                        status: test.status.clone(),
+                        attributed: !test.unattributed,
+                    });
+                }
+                parts.push(evidence);
+                Ok(())
+            })?;
         if !silent.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} test package(s) wrote no evidence and are absent from this run: {}",
                 silent.len(),
                 silent.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         let evidence = merge_evidence(parts);
         let unattributed = instrumented
@@ -882,8 +887,7 @@ pub fn run_direct_go(
             generated_at: &request.started_at,
             test_exit_code: exit_code,
             coverage_model: go_coverage_model(),
-        })
-        .map_err(|error| error.to_string())?;
+        });
         // Before anything is written: a run that cannot be read back is not a
         // run, and finding that out at publication is far better than finding
         // it out when someone asks for the report.
@@ -891,10 +895,7 @@ pub fn run_direct_go(
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                &source_inputs,
-            )?,
+            crate::source_capture::append(run.archive_entries(), &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
@@ -1020,6 +1021,12 @@ impl GoServer {
         ) else {
             return Ok(None);
         };
+        if roots
+            .as_ref()
+            .is_some_and(|roots| !files.sources.iter().any(|file| roots.contains(file)))
+        {
+            return Ok(None);
+        }
         let source_roots = crate::source_discovery::configured_source_roots(&ambient);
         let mut integrity_inputs = go_integrity_inputs(&files, command);
         crate::source_discovery::fold_roots_into_configuration(
@@ -1042,12 +1049,16 @@ impl GoServer {
             .map(u8::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let mut mains = 0;
-        for (directory, package) in &sources.source_packages {
-            if package != "main" {
-                continue;
-            }
-            mains += 1;
+        let mains = sources
+            .source_packages
+            .iter()
+            .filter(|(_, package)| *package == "main")
+            .collect::<Vec<_>>();
+        // A directory has a package only for a file instrumented in it.
+        if mains.is_empty() {
+            return Ok(None);
+        }
+        mains.into_iter().try_for_each(|(directory, _)| {
             write(
                 &workspace.join(directory).join(SERVER_FILE),
                 &format!(
@@ -1055,12 +1066,8 @@ impl GoServer {
                     sources.import_for(&format!("{directory}/x.go")),
                     sources.probe_count,
                 ),
-            )?;
-        }
-        // A directory has a package only for a file instrumented in it.
-        if mains == 0 {
-            return Ok(None);
-        }
+            )
+        })?;
         let directory = root.join(".supercov/work").join(run_id).join("go");
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         Ok(Some(Self {
@@ -1137,6 +1144,15 @@ impl GoServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file that does not parse is named for the project as it stands.
+    #[test]
+    fn a_file_that_does_not_parse_is_left_as_written() {
+        assert_eq!(
+            named_for_the_project(Path::new("/shop"), "a.go", "package (\n"),
+            "package (\n"
+        );
+    }
 
     #[test]
     fn the_package_clause_is_found_past_whatever_precedes_it() {

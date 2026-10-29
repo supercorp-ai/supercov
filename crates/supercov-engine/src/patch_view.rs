@@ -122,10 +122,7 @@ pub fn build(view: &RunView, changed: &ChangedLines) -> PatchView {
                 .iter()
                 .copied()
                 .collect::<BTreeSet<_>>();
-            let eligible = file
-                .metric(Metric::Lines)
-                .map(|metric| metric.eligible)
-                .unwrap_or(0);
+            let eligible = file.metric(Metric::Lines).eligible;
             (file.file.as_str(), (uncovered, eligible))
         })
         .collect::<BTreeMap<_, _>>();
@@ -312,9 +309,12 @@ mod tests {
 --- a/src/b.ts
 +++ b/src/b.ts
 @@ -7 +7 @@
+@@ -9 @@
+@@ -10 +x,2 @@
 ";
         let changed = changed_lines(diff);
         assert_eq!(changed["src/a.ts"], BTreeSet::from([1, 2, 3]));
+        // A hunk with no new side, or one that names no line, adds none.
         assert_eq!(changed["src/b.ts"], BTreeSet::from([7]));
         assert!(!changed.contains_key("/dev/null"));
         assert!(!changed.contains_key("src/gone.ts"));

@@ -23,13 +23,13 @@ pub fn decode(condition_count: usize, encoded: u64, outcome: bool) -> Option<Dec
     let mut remaining = encoded;
     let mut values = Vec::with_capacity(condition_count);
     for _ in 0..condition_count {
-        let digit = remaining % u64::from(PROBE_V2_RADIX);
-        values.push(match digit {
-            0 => ConditionValue::Unreached,
-            1 => ConditionValue::False,
-            2 => ConditionValue::True,
-            _ => unreachable!("a radix-3 remainder is always 0, 1, or 2"),
-        });
+        // A radix-3 remainder is always 0, 1 or 2.
+        const DIGITS: [ConditionValue; 3] = [
+            ConditionValue::Unreached,
+            ConditionValue::False,
+            ConditionValue::True,
+        ];
+        values.push(DIGITS[(remaining % u64::from(PROBE_V2_RADIX)) as usize]);
         remaining /= u64::from(PROBE_V2_RADIX);
     }
     (remaining == 0).then_some(DecisionVector { values, outcome })
@@ -84,6 +84,14 @@ mod tests {
     #[test]
     fn rejects_width_and_high_digits_instead_of_aliasing() {
         assert_eq!(decode(33, 0, false), None);
+        // A decision of no condition is its outcome alone.
+        assert_eq!(
+            decode(0, 0, true),
+            Some(DecisionVector {
+                values: Vec::new(),
+                outcome: true
+            })
+        );
         assert_eq!(decode(2, 9, false), None);
     }
 }

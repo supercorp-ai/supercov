@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use supercov_engine::fault_process::Launch;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -150,11 +151,59 @@ fn only_a_snapshot_id_names_a_saved_snapshot() {
     let _ = store::write(&temp.0, "quality", "../outside", &json!({}), &json!({}));
 }
 
+/// Each step of saving a snapshot that fails leaves it unsaved, and says so;
+/// a snapshot missing its file record, or a store that cannot be listed,
+/// cannot be read. A file written outside `.supercov` needs no ignore file.
+#[test]
+fn each_step_of_the_snapshot_store_that_fails_says_so() {
+    use supercov_engine::fault::during;
+    let temp = Temp::new();
+    let files = json!({"files": []});
+    for fault in [
+        "fs.create_dir_all",
+        "fs.create_dir",
+        "fs.open_with",
+        "fs.write_all",
+        "fs.sync_all",
+        // The ignore file there by now: the temporary file's open.
+        "fs.open_with@2",
+    ] {
+        let (id, _) = store::identity();
+        let refused = during(fault, || {
+            store::write(&temp.0, "quality", &id, &json!({}), &files)
+        });
+        assert!(
+            refused.is_err_and(|error| error.contains("injected")),
+            "{fault}"
+        );
+    }
+    assert!(store::write_atomic(Path::new(""), b"x").is_err());
+    store::write_atomic(&temp.0.join("plain.txt"), b"x").unwrap();
+    assert!(!temp.0.join(".gitignore").exists());
+    let (id, _) = store::identity();
+    store::write(&temp.0, "quality", &id, &json!({}), &files).unwrap();
+    std::fs::remove_file(
+        store::snapshots(&temp.0, "quality")
+            .join(&id)
+            .join("files.json"),
+    )
+    .unwrap();
+    assert!(store::read(&temp.0, "quality", &id).is_err());
+    for fault in ["fs.read_dir", "fs.read_dir entry"] {
+        assert!(
+            during(fault, || store::list(&temp.0, "quality")).is_err(),
+            "{fault}"
+        );
+    }
+    std::fs::remove_file(store::snapshots(&temp.0, "quality").join("latest")).unwrap();
+    assert!(during("fs.read_dir", || store::resolve(&temp.0, "quality", None)).is_err());
+}
+
 #[test]
 fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
     let temp = Temp::new();
     let files = json!({"files": []});
-    let (first, _) = store::identity().unwrap();
+    let (first, _) = store::identity();
     store::write(
         &temp.0,
         "quality",
@@ -175,7 +224,7 @@ fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
         .unwrap_err()
         .contains("already exists")
     );
-    let (second, _) = store::identity().unwrap();
+    let (second, _) = store::identity();
     assert_ne!(first, second);
     store::write(
         &temp.0,
@@ -479,7 +528,7 @@ fn git_in(root: &Path, arguments: &[&str]) {
     let status = std::process::Command::new("git")
         .current_dir(root)
         .args(arguments)
-        .output()
+        .launch_output()
         .expect("git runs in tests");
     assert!(
         status.status.success(),
@@ -571,7 +620,7 @@ fn a_base_that_moved_on_is_not_this_branch_s_obligation() {
         std::process::Command::new("git")
             .current_dir(&temp.0)
             .args(["rev-parse", "HEAD~1"])
-            .output()
+            .launch_output()
             .unwrap()
             .stdout,
     )
@@ -2354,6 +2403,18 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
         .unwrap()
         .is_none()
     );
+
+    // An answer the request no longer validates is refused, never served.
+    let mut stale = entry;
+    stale.response.answers.clear();
+    save(&path, &stale).unwrap();
+    let refused = cached(&path, "quality", &hash, &moved).err().unwrap();
+    assert!(refused.ends_with(" in cache; use --refresh"), "{refused}");
+    // Asked afresh, with no key, nothing is sent.
+    let refused = resolve(&temp.0, "quality", &client(), None, true, &moved, &hash)
+        .err()
+        .unwrap();
+    assert!(refused.starts_with("set TYPESAFE_API_KEY"), "{refused}");
 }
 
 #[test]
@@ -2625,7 +2686,7 @@ fn the_security_report_names_what_fired_and_where_tests_never_went() {
 #[test]
 fn security_snapshots_live_in_their_own_lane_and_read_back_as_security() {
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     let manifest = json!({
         "created_at": "2026-09-20T00-00-00-000000Z", "instrument": "security",
         "catalog_version": "security-v3", "model": "jev-1.13.0",
@@ -2654,7 +2715,7 @@ fn a_file_view_reports_what_the_summary_flagged() {
     // confirmed line 322 at 0.64, and the summary flagged it. The file view
     // said `no 0.31`, judged on the file question alone.
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     let manifest = json!({
         "created_at": "2026-10-02T00-00-00-000000Z", "instrument": "security",
         "catalog_version": "security-v3", "model": "jev-1.13.0",
@@ -2689,7 +2750,7 @@ fn an_older_security_snapshot_judges_each_check_at_its_own_cut() {
     // Snapshots from before the assessment recorded what fired keep no
     // `present` list; each check is judged at the security cut it has.
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     let manifest = json!({
         "created_at": "2026-09-01T00-00-00-000000Z", "instrument": "security",
         "catalog_version": "security-v3", "model": "jev-1.13.0",
@@ -2714,7 +2775,7 @@ fn an_assessment_takes_a_run_to_cross_with() {
 #[test]
 fn cleaning_an_assessment_lane_preserves_the_other_lane() {
     let temp = Temp::new();
-    let (id, _) = store::identity().unwrap();
+    let (id, _) = store::identity();
     for lane in ["quality", "security"] {
         store::write(
             &temp.0,
@@ -2731,6 +2792,15 @@ fn cleaning_an_assessment_lane_preserves_the_other_lane() {
     clean(&temp.0, "security", 0, false).unwrap();
     assert!(store::list(&temp.0, "security").unwrap().is_empty());
     assert_eq!(store::list(&temp.0, "quality").unwrap().len(), 1);
+    // Snapshots that cannot be listed cannot be cleaned.
+    let snapshots = store::snapshots(&temp.0, "security");
+    fs::remove_dir_all(&snapshots).unwrap();
+    fs::write(&snapshots, "not a directory").unwrap();
+    let refused = clean(&temp.0, "security", 0, true).unwrap_err();
+    assert!(
+        refused.starts_with("cannot read security snapshots:"),
+        "{refused}"
+    );
 }
 
 #[test]
@@ -3153,7 +3223,6 @@ fn a_dense_run_counts_a_token_a_byte_and_an_oversized_declaration_splits_at_its_
 fn line_windows_cut_a_long_declaration_and_merge_what_fits() {
     let ranges = |source: &str| {
         line_windows("src/a.js", source)
-            .unwrap()
             .into_iter()
             .map(|(window, _)| (window.start_line, window.end_line))
             .collect::<Vec<_>>()
@@ -3376,4 +3445,360 @@ fn a_file_too_near_the_budget_for_its_line_questions_is_windowed() {
     assert!(!fits(&with_room(confirm / 2)));
     // A file question over the budget.
     assert!(!fits(&with_room(0).repeat(2)));
+}
+
+/// Every option each subcommand reads, and each mistake named by what it is.
+#[test]
+fn each_option_is_read_and_each_mistake_named() {
+    let words = |text: &str| {
+        text.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let refused = |text: &str| match parse(words(text)) {
+        Err(error) => error,
+        Ok(_) => panic!("{text} was accepted"),
+    };
+    assert!(matches!(
+        parse(words(
+            "patch --annotate github --json --refresh --all --run latest --limit 5 --staged src"
+        )),
+        Ok(Command::Patch {
+            json: true,
+            refresh: true,
+            all: true,
+            annotate: true,
+            limit: 5,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse(words("patch --cached")),
+        Ok(Command::Patch { range: Some(_), .. })
+    ));
+    for (text, said) in [
+        ("patch --staged --unstaged", "pick one change range"),
+        ("patch --unstaged --cached", "pick one change range"),
+        ("patch --annotate", "--annotate needs a format"),
+        ("patch --annotate gitlab", "--annotate does not know gitlab"),
+        ("patch --limit", "--limit needs a number"),
+        ("patch --limit many", "--limit needs a number"),
+        ("patch --base", "--base needs a commit"),
+        ("patch --run", "--run needs a run id"),
+        ("patch --nope", "unknown option --nope for quality patch"),
+        ("scan --run", "--run requires a run id"),
+        ("scan --run a --run b", "--run may only be specified once"),
+        ("scan --context", "--context requires a file"),
+        (
+            "scan --context a --context b",
+            "--context may only be specified once",
+        ),
+        ("scan --nope", "unknown quality option: --nope"),
+        ("file --limit 2 a.rs", "takes no --limit"),
+        ("file", "quality file requires a file path"),
+        ("diff one", "quality diff requires a second snapshot"),
+        ("diff", "quality diff requires two snapshots"),
+        (
+            "snapshots --limit 1 --limit 2",
+            "--limit may only be specified once",
+        ),
+        ("snapshots --limit", "--limit requires a row count"),
+        ("show -x", "unknown quality show option: -x"),
+        ("clean --keep", "--keep requires a count"),
+        (
+            "clean --keep 1 --keep 1",
+            "--keep may only be specified once",
+        ),
+        ("clean --nope", "unknown quality clean option: --nope"),
+    ] {
+        let error = refused(text);
+        assert!(error.contains(said), "{text}: {error}");
+    }
+    assert!(matches!(
+        parse(words(
+            "scan --json --dry-run --refresh --all --run latest --context notes.md -- --odd"
+        )),
+        Ok(Command::Health(Options {
+            json: true,
+            dry_run: true,
+            refresh: true,
+            all: true,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        parse(words("gaps --json --limit 3 -- snap")),
+        Ok(Command::Gaps {
+            json: true,
+            limit: 3,
+            snapshot: Some(_)
+        })
+    ));
+    assert!(matches!(parse(words("scope")), Ok(Command::Scope { .. })));
+    assert!(matches!(
+        parse(words("diff a b --json")),
+        Ok(Command::Diff { json: true, .. })
+    ));
+    assert!(matches!(
+        parse(words("clean --keep 2 --dry-run --json")),
+        Ok(Command::Clean {
+            keep: 2,
+            dry_run: true,
+            json: true
+        })
+    ));
+}
+
+/// Each refused status names its likeliest cause.
+#[test]
+fn a_refused_request_is_named_by_its_status() {
+    for (status, cause) in [
+        (400, "larger than"),
+        (413, "larger than"),
+        (401, "the key was refused"),
+        (403, "the key was refused"),
+        (402, "out of quota"),
+        (429, "out of quota"),
+        (500, "the request failed"),
+    ] {
+        let said = http_failure("api.example", status);
+        assert!(
+            said.starts_with(&format!("api.example HTTP {status}: ")),
+            "{said}"
+        );
+        assert!(said.contains(cause), "{status}: {said}");
+    }
+}
+
+/// Nothing to look at, a directory read as a file, a directory no one may
+/// list, and an answer to no questions.
+#[test]
+fn discovery_and_reading_refuse_what_they_cannot_read() {
+    let temp = Temp::new();
+    assert_eq!(
+        discover(&temp.0, &[]).unwrap_err(),
+        "no supported source files found"
+    );
+    temp.write("src/a.js", "export const a = 1;\n");
+    assert!(read_text(&temp.0.join("src")).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.write("locked/b.js", "export const b = 1;\n");
+        let locked = temp.0.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // A root user reads it anyway; the walk refuses for anyone else.
+        let refused = discover(&temp.0, &[PathBuf::from(".")]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if !running_as_root() {
+            assert!(refused.is_err(), "{refused:?}");
+        }
+    }
+    let response: ApiResponse = serde_json::from_value(serde_json::json!({
+        "model": "m", "answers": {}, "usage": {"input_tokens": 1, "output_tokens": 1}
+    }))
+    .unwrap();
+    assert!(
+        validate(
+            &response,
+            &serde_json::json!({"model": "m", "questions": {}})
+        )
+        .is_ok()
+    );
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .launch_output()
+        .is_ok_and(|output| output.stdout.starts_with(b"0"))
+}
+
+/// The renderers read a saved report as it is: one with nothing in it, one
+/// whose entries lack what a newer report carries, and one with more than a
+/// page shows, each rendered without failing.
+#[test]
+fn reports_render_whatever_they_hold() {
+    let empty = serde_json::json!({});
+    let bare = serde_json::json!({
+        "files": [{}, {"path": "src/a.js"}, {"path": "src/b.js", "present": []}],
+        "paths": [], "counts": {}, "not_asked": []
+    });
+    let finding = |check: &str| serde_json::json!({"check": check, "value": 0.9, "lines": []});
+    let full = serde_json::json!({
+        "health": 4.0,
+        "counts": {"assessed": 2, "flagged": 2, "line_confirmed": 1},
+        "by_check": {"injection_sink": 2},
+        "run": "run_1",
+        "files": [
+            {"path": "src/a.js", "status": "failed", "error": "HTTP 400", "present": [finding("injection_sink")]},
+            {"path": "src/b.js", "present": [finding("a"), finding("b"), finding("c"), finding("d")],
+             "assertions": {"lines_credited": 0}, "flagged_and_unasserted": true, "unchecked_lines": 2},
+            {"path": "src/c.js", "present": [finding("e")], "assertions": {"lines_credited": 1}},
+            {"path": "src/clean.js", "present": []}
+        ],
+        "paths": [{"value": 0.9, "check": "injection_sink",
+                   "caller": {"file": "a.js", "line": 1, "function": "f"},
+                   "callee": {"file": "b.js", "line": 2, "function": "g"}}],
+        "not_asked": [{"reason": "three per function",
+                       "caller": {"file": "a.js", "line": 1, "function": "f"},
+                       "callee": {"file": "b.js", "line": 2, "function": "g"}}]
+    });
+    for report in [&empty, &bare, &full] {
+        human_quality(report);
+        human_security(report);
+        for limit in [0, 1] {
+            human_patch(report, limit);
+        }
+    }
+    // Annotations are only ever made of the review just run, never a saved one.
+    annotations(&empty);
+    annotations(&full);
+    // A review of changed files, some reviewed, one failed, one refused.
+    for patch in [
+        serde_json::json!({"reviewed_files": 2, "introduced": 1, "files": []}),
+        serde_json::json!({
+            "reviewed_files": 1, "introduced": 0, "skipped": [{}],
+            "files": [
+                {"status": "failed", "path": "a.js", "error": "HTTP 400"},
+                {"path": "b.js", "present": []},
+                {"path": "c.js", "present": [finding("x")], "basis": "the new version only",
+                 "untested_and_changed": true, "coverage": {"uncovered_lines": 3}},
+                {"path": "d.js", "present": [finding("y")]}
+            ]
+        }),
+    ] {
+        for limit in [0, 2] {
+            human_patch(&patch, limit);
+        }
+    }
+    let security = human_security(&full);
+    assert!(
+        security.contains("2 line(s) not checked one by one"),
+        "{security}"
+    );
+    assert!(
+        security.contains("Cross-file paths confirmed: 1"),
+        "{security}"
+    );
+    assert!(annotations(&full).contains("src/b.js"));
+    assert!(top_findings(&[]).is_empty());
+    assert_eq!(
+        top_findings(&[finding("a"), finding("b"), finding("c"), finding("d")]),
+        "a 0.90, b 0.90, c 0.90, +1 more"
+    );
+}
+
+/// What an answer carries is read as far as it goes: a line asked as a
+/// Choice and answered otherwise is no classification, a label without its
+/// sink kind reaches none, and a report without its usage says nothing spent.
+#[test]
+fn an_answer_is_read_as_far_as_it_goes() {
+    let choice = |choice: &str, confidence| Answer::Choice {
+        choice: choice.into(),
+        probabilities: BTreeMap::new(),
+        confidence,
+    };
+    let response = |answers: Vec<(&str, Answer)>| ApiResponse {
+        model: MODEL.to_owned(),
+        answers: answers
+            .into_iter()
+            .map(|(id, answer)| (id.to_owned(), answer))
+            .collect(),
+        usage: Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+    };
+    let classified = classifications(&response(vec![
+        ("n0", Answer::Noul { noul: 0.9 }),
+        ("n1", choice("injection_sink", 0.9)),
+        ("n2", choice("none", 0.9)),
+        ("n3", choice("injection_sink", 0.1)),
+    ]));
+    assert_eq!(
+        classified,
+        BTreeMap::from([(1, "injection_sink".to_owned())])
+    );
+    let labels = function_labels(&response(vec![(
+        "f0_takes_outside",
+        Answer::Noul { noul: 0.8 },
+    )]));
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].sink_kind, "none");
+    assert_eq!(labels[0].sanitises, 1.0);
+    assert_eq!(spent_line(&json!({}), Instrument::Catalog), None);
+    let none =
+        json!({"usage_this_run": {"input_tokens": 0}, "usage_from_cache": {"input_tokens": 0}});
+    assert_eq!(spent_line(&none, Instrument::Catalog), None);
+    let some =
+        json!({"usage_this_run": {"input_tokens": 10}, "usage_from_cache": {"input_tokens": 5}});
+    assert!(
+        spent_line(&some, Instrument::Security)
+            .unwrap()
+            .contains("10 input tokens this run")
+    );
+}
+
+/// Every view renders when it holds nothing, and a view of no known kind
+/// says so; a health is banded as it prints.
+#[test]
+fn every_quality_view_renders_with_nothing_in_it() {
+    for view in [
+        "quality-diff",
+        "scope",
+        "quality",
+        "security",
+        "gaps",
+        "file",
+        "snapshots",
+        "quality.clean",
+        "security.clean",
+    ] {
+        let text = query::render(&serde_json::json!({ "view": view }));
+        assert!(!text.is_empty(), "{view}");
+    }
+    assert_eq!(
+        query::render(&serde_json::json!({ "view": "odd" })),
+        "unknown quality view: odd\n"
+    );
+}
+
+/// Each security check is described in a line, and a check of no known
+/// kind in none.
+#[test]
+fn each_security_check_has_a_short_description() {
+    assert!(catalog::security::short("insecure_configuration").contains("TLS verification"));
+    assert_eq!(catalog::security::short("no_such_check"), "");
+}
+
+/// From a directory below the repository's root, a change is named as that
+/// directory names it, and a file beside it is not one of its changes.
+#[test]
+fn a_directory_below_the_root_names_its_changes_as_it_names_them() {
+    let temp = repository();
+    temp.write("pkg/a.rs", "fn a() {}\n");
+    temp.write("other.rs", "fn o() {}\n");
+    git_in(&temp.0, &["add", "-A"]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("pkg/a.rs", "fn a() { let x = 1; }\n");
+    temp.write("other.rs", "fn o() { let y = 2; }\n");
+    let found = changes::collect(&temp.0.join("pkg"), &changes::Range::Unstaged, &[]).unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.rs"]
+    );
+    assert_eq!(found[0].before, "fn a() {}\n");
+}
+
+/// What an assessment was charged is said only where both of its counts
+/// are there.
+#[test]
+fn what_was_spent_is_said_only_with_both_counts() {
+    let report = serde_json::json!({"usage_this_run": {"input_tokens": 3}});
+    assert_eq!(spent_line(&report, Instrument::Catalog), None);
 }

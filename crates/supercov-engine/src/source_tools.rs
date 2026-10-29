@@ -23,9 +23,10 @@
 //! read it, the tests run the copy that is measured, and when the command
 //! ends the change is the project's, as the command meant it to be.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -148,14 +149,14 @@ fn launcher_on(
 
 /// This binary, by a path a shell and `cmd.exe` can both be given.
 pub fn launching_binary() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
+    crate::fault::or("current-exe", || None, || std::env::current_exe().ok())
         .map(crate::workspace::simplified)
 }
 
 /// Write a launcher where `path` is, replacing what is there. Never through
 /// it: in a workspace whose dependencies are hard links, the file there is
 /// the project's own.
+#[track_caller]
 pub fn write_launcher(path: &Path, text: &str) -> io::Result<()> {
     remove(path)?;
     fs::write(path, text)?;
@@ -171,6 +172,15 @@ pub fn write_launcher(path: &Path, text: &str) -> io::Result<()> {
 /// own, which is how a workspace package's dependencies are laid out: for
 /// each source tool the project's `.bin` at `tools` has, in place of the
 /// entry the copy at `to` has for it.
+/// A directory's entries in name order: what a walk does is the same on
+/// every file system, whatever order it lists them in.
+#[track_caller]
+fn sorted_entries(directory: &Path) -> io::Result<Vec<fs::DirEntry>> {
+    let mut entries = fs::read_dir(directory)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    Ok(entries)
+}
+
 pub fn place_launchers(tools: &Path, to: &Path) -> io::Result<()> {
     let judges = source_tools();
     let (Some(binary), Ok(entries)) = (launching_binary(), fs::read_dir(tools)) else {
@@ -206,7 +216,8 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
     #[cfg(not(windows))]
     let forms: &[&str] = &[""];
     let mut found = false;
-    for name in source_tools() {
+    // Never empty: `SOURCE_TOOLS` names five.
+    source_tools().into_iter().try_for_each(|name| {
         let Some(tool) = std::env::split_paths(&path)
             .flat_map(|directory| {
                 forms
@@ -216,7 +227,7 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
             })
             .find(|candidate| executable(candidate))
         else {
-            continue;
+            return Some(());
         };
         fs::create_dir_all(&directory).ok()?;
         #[cfg(windows)]
@@ -228,7 +239,8 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
         #[cfg(not(windows))]
         write_launcher(&directory.join(&name), &launcher(&binary, &tool)).ok()?;
         found = true;
-    }
+        Some(())
+    })?;
     if !found {
         return None;
     }
@@ -236,6 +248,7 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
 }
 
 #[cfg(unix)]
+#[track_caller]
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path)
@@ -243,6 +256,7 @@ fn executable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
+#[track_caller]
 fn executable(path: &Path) -> bool {
     path.is_file()
 }
@@ -251,7 +265,7 @@ fn executable(path: &Path) -> bool {
 /// holds the workspaces, under the same name.
 pub fn source_view_path(workspace: &Path) -> Option<PathBuf> {
     let name = workspace.file_name()?;
-    let kind = workspace.parent()?;
+    let kind = workspace.parent().expect("a path with a name has a parent");
     let container = kind.parent()?;
     // `workspace` has its view in `source`, and `workspace-2` in `source-2`.
     let kind = kind.file_name()?.to_str()?;
@@ -312,6 +326,7 @@ fn link_to(target: &Path, link: &Path) -> io::Result<()> {
     crate::workspace::create_link(target, link, target.is_dir())
 }
 
+#[track_caller]
 fn remove(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(path),
@@ -323,6 +338,7 @@ fn remove(path: &Path) -> io::Result<()> {
 }
 
 /// Make `link` a symbolic link to `target`, whatever it was.
+#[track_caller]
 fn point(link: &Path, target: &Path) -> io::Result<()> {
     if fs::read_link(link).is_ok_and(|current| current == target) {
         return Ok(());
@@ -384,15 +400,14 @@ fn refresh_directory(
     state: &mut View,
 ) -> io::Result<()> {
     let mut present = BTreeSet::new();
-    for entry in fs::read_dir(workspace.join(local))? {
-        let entry = entry?;
+    for entry in sorted_entries(&workspace.join(local))? {
         let name = entry.file_name();
         if name == ".supercov" {
             continue;
         }
         let path = local.join(&name);
         let (from, to) = (workspace.join(&path), view.join(&path));
-        let file_type = entry.file_type()?;
+        let file_type = fs::file_type(&entry)?;
         present.insert(name.clone());
         if name == "node_modules" {
             let target = if local.as_os_str().is_empty() && dependencies.is_dir() {
@@ -425,8 +440,7 @@ fn refresh_directory(
         remove(&view.join(BOUNDARY))?;
         fs::create_dir(view.join(BOUNDARY))?;
     }
-    for entry in fs::read_dir(view.join(local))? {
-        let entry = entry?;
+    for entry in sorted_entries(&view.join(local))? {
         let kept =
             present.contains(&entry.file_name()) || (boundary && entry.file_name() == BOUNDARY);
         if !kept {
@@ -476,11 +490,10 @@ fn reconcile_directory(
     local: &Path,
     state: &View,
 ) -> io::Result<()> {
-    for entry in fs::read_dir(view.join(local))? {
-        let entry = entry?;
+    for entry in sorted_entries(&view.join(local))? {
         let path = local.join(entry.file_name());
         let (from, to) = (view.join(&path), workspace.join(&path));
-        let file_type = entry.file_type()?;
+        let file_type = fs::file_type(&entry)?;
         if path == Path::new(BOUNDARY) && fs::symlink_metadata(&to).is_err() {
             continue;
         }
@@ -522,7 +535,7 @@ fn in_view(value: &OsStr, workspace: &[&Path], view: &Path) -> OsString {
 }
 
 fn status(command: &mut Command) -> i32 {
-    match command.status() {
+    match command.launch_status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(error) => {
             eprintln!(
@@ -576,7 +589,7 @@ fn run_source_tool_in(
     };
     let dependencies = variable("SUPERCOV_SOURCE_PROJECT_ROOT")
         .map(|root| PathBuf::from(root).join("node_modules"))
-        .unwrap_or_else(|| workspace.join("node_modules"));
+        .unwrap_or(workspace.join("node_modules"));
     let state = match refresh(&workspace, &view, &dependencies) {
         Ok(state) => state,
         Err(error) => {
@@ -660,35 +673,186 @@ fn apply_directory(
     local: &Path,
     changes: &mut SourceChanges,
 ) -> io::Result<()> {
-    for entry in fs::read_dir(directory.join(local))? {
-        let entry = entry?;
-        let path = local.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            apply_directory(root, workspace, directory, &path, changes)?;
-            continue;
-        }
-        let text = fs::read(entry.path())?;
-        let started_from = fs::read(authored_path(workspace, &path)).ok();
-        // A tool that writes every file it formats, changed or not.
-        if started_from.as_ref() == Some(&text) {
-            continue;
-        }
-        let project = root.join(&path);
-        if started_from.is_some() && fs::read(&project).ok() == started_from {
-            // Written in place, as a formatter writes it: the file keeps its
-            // mode and whatever links to it.
-            fs::write(&project, text)?;
-            changes.applied.push(path);
-        } else {
-            changes.kept_back.push(path);
-        }
-    }
-    Ok(())
+    // The tree holds the files the tools wrote, so each of its directories
+    // holds one at least.
+    sorted_entries(&directory.join(local))?
+        .into_iter()
+        .try_for_each(|entry| {
+            let path = local.join(entry.file_name());
+            if fs::file_type(&entry)?.is_dir() {
+                return apply_directory(root, workspace, directory, &path, changes);
+            }
+            let text = fs::read(entry.path())?;
+            let started_from = fs::read(authored_path(workspace, &path)).ok();
+            // A tool that writes every file it formats, changed or not.
+            if started_from.as_ref() == Some(&text) {
+                return Ok(());
+            }
+            let project = root.join(&path);
+            if started_from.is_some() && fs::read(&project).ok() == started_from {
+                // Written in place, as a formatter writes it: the file keeps
+                // its mode and whatever links to it.
+                fs::write(&project, text)?;
+                changes.applied.push(path);
+            } else {
+                changes.kept_back.push(path);
+            }
+            Ok(())
+        })
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A view laid out, laid out again, its launchers placed, and the changes
+    /// a tool made applied back: each refuses the step that fails, at each
+    /// place it makes one. The fault names the call: the operation, and
+    /// which of its calls in the scenario it is.
+    #[test]
+    fn a_view_and_its_launchers_refuse_each_step_that_fails() {
+        let applied_changes = |root: &Path, workspace: &Path| {
+            for (file, project, written) in [
+                ("src/a.js", "const a = 1;\n", "const a = 1\n"),
+                ("lib/nested/b.js", "const b = 2;\n", "const b = 2\n"),
+            ] {
+                std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+                std::fs::write(root.join(file), project).unwrap();
+                let changed = changed_path(workspace, Path::new(file));
+                std::fs::create_dir_all(changed.parent().unwrap()).unwrap();
+                std::fs::write(changed, written).unwrap();
+            }
+        };
+        let cases = [
+            // Laid out, then what a tool did in it brought back.
+            ("view", "fs.symlink_metadata@1"),
+            ("view", "fs.metadata@1"),
+            ("view", "fs.symlink_metadata@3"),
+            ("view", "fs.read@2"),
+            ("view", "fs.symlink_metadata@9"),
+            ("view", "fs.write@1"),
+            ("view", "fs.create_dir_all@1"),
+            ("view", "fs.read_dir@1"),
+            ("view", "fs.file_type@1"),
+            ("view", "fs.read_link@1"),
+            ("view", "fs.symlink_metadata@7"),
+            ("view", "fs.create_dir@1"),
+            ("view", "fs.create_dir@4"),
+            ("view", "fs.read_dir@4"),
+            ("view", "fs.create_dir_all@2"),
+            ("view", "fs.write@3"),
+            ("view", "fs.read_dir@9"),
+            ("view", "fs.file_type@10"),
+            ("view", "fs.remove_file@1"),
+            ("view", "fs.create_dir@5"),
+            ("view", "fs.symlink@1"),
+            // The project's dependencies, and the boundary, not laid in.
+            ("view", "fs.symlink_metadata#source_tools.rs:418"),
+            ("view", "fs.symlink_metadata#source_tools.rs:440"),
+            // What a tool did, brought back alone: a file linked in, one in
+            // a directory it made, a link it made.
+            ("reconcile", "fs.metadata@1"),
+            ("reconcile", "fs.metadata@2"),
+            ("reconcile", "fs.metadata@3"),
+            ("reconcile", "fs.symlink@1"),
+            // Laid out over one an earlier run left.
+            ("again", "fs.remove_file@1"),
+            ("again", "fs.symlink_metadata@7"),
+            // Launchers for the tools that judge source.
+            ("launchers", "fs.symlink_metadata@2"),
+            ("launchers", "fs.write@1"),
+            ("launchers", "fs.set_permissions@1"),
+            // Changes a tool made, applied to the project.
+            ("applied", "fs.symlink_metadata@1"),
+            ("applied", "fs.remove_dir_all@1"),
+            ("applied", "fs.read_dir@1"),
+            ("applied", "fs.file_type@1"),
+            ("applied", "fs.read@1"),
+            ("applied", "fs.write@1"),
+        ];
+        for (scenario, fault) in cases {
+            let (workspace, view, dependencies) = deeper_workspace();
+            let root = dependencies.parent().unwrap().to_path_buf();
+            match scenario {
+                "again" => {
+                    refresh(&workspace, &view, &dependencies).unwrap();
+                    std::fs::write(view.join("left-behind.txt"), "x").unwrap();
+                }
+                "launchers" => {
+                    std::fs::create_dir_all(workspace.join("tools/.bin")).unwrap();
+                    for tool in ["biome", "cspell", "knip"] {
+                        let path = workspace.join("node_modules/.bin").join(tool);
+                        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+                        std::fs::set_permissions(
+                            &path,
+                            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                        )
+                        .unwrap();
+                    }
+                }
+                "applied" => applied_changes(&root, &workspace),
+                _ => {}
+            }
+            let laid_out = (scenario == "reconcile").then(|| {
+                let state = refresh(&workspace, &view, &dependencies).unwrap();
+                std::fs::create_dir_all(view.join("reports/deep")).unwrap();
+                std::fs::write(view.join("reports/deep/out.json"), "[]").unwrap();
+                std::fs::write(view.join("new.txt"), "new").unwrap();
+                std::os::unix::fs::symlink("new.txt", view.join("new.link")).unwrap();
+                state
+            });
+            let result = crate::fault::during(fault, || -> std::io::Result<()> {
+                match scenario {
+                    "reconcile" => {
+                        reconcile(&workspace, &view, laid_out.as_ref().unwrap()).map(drop)
+                    }
+                    "view" => {
+                        let state = refresh(&workspace, &view, &dependencies)?;
+                        // What a tool does in the view, written past the fault.
+                        let _ = std::fs::write(view.join("src/a.js"), "const a = 9\n");
+                        let _ = std::fs::create_dir_all(view.join("reports/deep"));
+                        let _ = std::fs::write(view.join("reports/deep/out.json"), "[]");
+                        let _ = std::fs::remove_file(view.join("README.md"));
+                        let _ = std::fs::create_dir(view.join("README.md"));
+                        reconcile(&workspace, &view, &state).map(drop)
+                    }
+                    "again" => refresh(&workspace, &view, &dependencies).map(drop),
+                    "launchers" => place_launchers(
+                        &workspace.join("node_modules/.bin"),
+                        &workspace.join("tools/.bin"),
+                    ),
+                    _ => apply_source_changes(&root, &workspace)
+                        .map(drop)
+                        .map_err(std::io::Error::other),
+                }
+            });
+            assert!(result.is_err(), "{scenario} {fault}");
+            std::fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+        }
+    }
+
+    /// The workspace laid out deeper: a nested authored source, and links to
+    /// a directory and to a file.
+    fn deeper_workspace() -> (PathBuf, PathBuf, PathBuf) {
+        let (workspace, view, dependencies) = workspace();
+        std::fs::create_dir_all(workspace.join("lib/nested")).unwrap();
+        std::fs::write(workspace.join("lib/nested/b.js"), "probe(); const b = 2;\n").unwrap();
+        std::fs::create_dir_all(workspace.join(".supercov/node_modules/.authored/lib/nested"))
+            .unwrap();
+        std::fs::write(
+            workspace.join(".supercov/node_modules/.authored/lib/nested/b.js"),
+            "const b = 2;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".supercov/node_modules/authored-sources.json"),
+            "[\"src/a.js\",\"lib/nested/b.js\"]",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("src", workspace.join("source")).unwrap();
+        std::os::unix::fs::symlink("README.md", workspace.join("READ.md")).unwrap();
+        (workspace, view, dependencies)
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A workspace's source view is beside it under `source`, numbered as
@@ -781,7 +945,10 @@ mod tests {
     #[test]
     fn a_view_holds_each_file_as_its_author_wrote_it() {
         let (workspace, view, dependencies) = workspace();
+        // An empty directory is an empty directory in the view.
+        fs::create_dir(workspace.join("empty")).unwrap();
         let state = refresh(&workspace, &view, &dependencies).unwrap();
+        assert!(view.join("empty").is_dir());
         assert_eq!(
             fs::read_to_string(view.join("src/a.js")).unwrap(),
             "const a = 1;\n"
@@ -854,6 +1021,26 @@ mod tests {
         fs::remove_file(view.join("README.md")).unwrap();
         reconcile(&workspace, &view, &state).unwrap();
         assert!(!workspace.join("README.md").exists());
+
+        // A source the tool deleted keeps what was instrumented, and nothing
+        // is kept beside it; a deleted file that cannot be removed from the
+        // workspace fails the reconciling.
+        let state = refresh(&workspace, &view, &dependencies).unwrap();
+        fs::remove_file(view.join("src/a.js")).unwrap();
+        assert_eq!(reconcile(&workspace, &view, &state).unwrap(), 0);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/a.js")).unwrap(),
+            "probe(); const a = 1;\n"
+        );
+        fs::write(workspace.join("NOTES.md"), "notes\n").unwrap();
+        let state = refresh(&workspace, &view, &dependencies).unwrap();
+        fs::remove_file(view.join("NOTES.md")).unwrap();
+        assert!(
+            crate::fault::during("fs.remove_file", || reconcile(&workspace, &view, &state))
+                .is_err()
+        );
+        // A view of nothing linked and nothing authored changes nothing.
+        assert_eq!(reconcile(&workspace, &view, &View::default()).unwrap(), 0);
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
@@ -890,6 +1077,54 @@ mod tests {
             fs::read_to_string(source_view_path(&workspace).unwrap().join("src/a.js")).unwrap(),
             "const a = 2\n"
         );
+        fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+    }
+
+    /// A tool is run as it is, in the directory it was started in, where
+    /// there is no workspace to lay a view out for, the workspace or the
+    /// directory cannot be found, the directory is outside it, or the view
+    /// cannot be laid out; and one that cannot start says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_runs_as_it_is_where_no_view_can_be_laid_out() {
+        let (workspace, _, _) = workspace();
+        let exit = |root: Option<&Path>, directory: io::Result<PathBuf>| {
+            let root = root.map(|root| root.as_os_str().to_owned());
+            run_source_tool_in(
+                Path::new("/bin/sh"),
+                &["-c".into(), "exit 4".into()],
+                directory,
+                |name| {
+                    (name == "SUPERCOV_PROJECT_ROOT")
+                        .then(|| root.clone())
+                        .flatten()
+                },
+                Vec::new(),
+            )
+        };
+        assert_eq!(exit(None, Ok(workspace.clone())), 4);
+        assert_eq!(
+            exit(Some(Path::new("/no/such/workspace")), Ok(workspace.clone())),
+            4
+        );
+        assert_eq!(exit(Some(&workspace), Err(io::Error::other("gone"))), 4);
+        assert_eq!(exit(Some(&workspace), Ok(std::env::temp_dir())), 4);
+        // Where the view goes is a file.
+        let view = source_view_path(&workspace).unwrap();
+        fs::create_dir_all(view.parent().unwrap()).unwrap();
+        let _ = fs::remove_dir_all(&view);
+        fs::write(&view, "").unwrap();
+        assert_eq!(exit(Some(&workspace), Ok(workspace.clone())), 4);
+        assert_eq!(status(&mut Command::new("/no/such/tool")), 127);
+        // Paths a view cannot be told from.
+        use std::os::unix::ffi::OsStrExt;
+        for path in [
+            Path::new("/"),
+            Path::new("/w/../proj"),
+            Path::new(std::ffi::OsStr::from_bytes(b"/p/\xff/proj")),
+        ] {
+            assert_eq!(source_view_path(path), None, "{path:?}");
+        }
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
@@ -1023,6 +1258,10 @@ mod tests {
         fs::hard_link(tools.join("jest"), copy.join("jest")).unwrap();
 
         place_launchers(&tools, &copy).unwrap();
+        // An empty `.bin` gets none.
+        let empty = dependencies.join("empty");
+        fs::create_dir(&empty).unwrap();
+        place_launchers(&empty, &copy).unwrap();
 
         assert!(
             fs::read_to_string(copy.join("oxlint"))
@@ -1037,6 +1276,20 @@ mod tests {
             fs::read_to_string(copy.join("jest")).unwrap(),
             "runs code\n"
         );
+        // An entry of the `.bin` that cannot be listed fails the placing.
+        assert!(
+            crate::fault::during("fs.read_dir entry", || place_launchers(&tools, &copy)).is_err()
+        );
+        // A name that is no text names no tool, where the system allows one.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::OsStr::from_bytes(b"\xff");
+            assert_eq!(
+                launcher_on(false, &source_tools(), Path::new("/s"), &tools, name),
+                None
+            );
+        }
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
@@ -1048,6 +1301,8 @@ mod tests {
             Path::new("/w/workspaces/source/p"),
         );
         assert_eq!(translated, "--config=/w/workspaces/source/p/biome.json");
+        // No workspace, nothing to translate.
+        assert_eq!(in_view(OsStr::new("x"), &[], Path::new("/v")), "x");
         // A workspace whose path is no text is mentioned in no text.
         use std::os::unix::ffi::OsStrExt;
         let unnamed = Path::new(OsStr::from_bytes(b"/w/\xff/p"));
@@ -1059,6 +1314,9 @@ mod tests {
             ),
             "--config=/w/p/biome.json"
         );
+        // An argument that is no text is passed on as it is.
+        let unread = OsStr::from_bytes(b"--config=\xff");
+        assert_eq!(in_view(unread, &[Path::new("/w")], Path::new("/v")), unread);
     }
 
     #[test]

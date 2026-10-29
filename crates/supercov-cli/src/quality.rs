@@ -9,12 +9,12 @@
 //! of its constructs more than real fixes did.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Read,
     path::{Path, PathBuf},
     process::ExitCode,
     time::{Duration, Instant},
 };
+use supercov_engine::fault_fs as fs;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -584,13 +584,13 @@ fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
             snapshot: positional.next(),
             json,
         },
-        "diff" => Command::Diff {
+        // `diff`: the last of the views `parse` sends here.
+        _ => Command::Diff {
             from: required("two snapshots to compare")?,
             to: required("a second snapshot to compare")?,
             json,
             limit,
         },
-        other => return Err(format!("unknown quality view: {other}")),
     })
 }
 
@@ -1098,7 +1098,7 @@ fn discover_for(
                 path.display()
             ));
         }
-        let canonical = input.canonicalize().map_err(|e| e.to_string())?;
+        let canonical = fs::canonicalize(&input).map_err(|e| e.to_string())?;
         if !canonical.starts_with(root) {
             return Err(format!(
                 "quality target is outside current directory: {}",
@@ -1159,15 +1159,16 @@ fn discover_for(
                     }
                 }
             }
-            let walker = builder.build();
-            for entry in walker {
+            // The walk yields at least the directory it starts from.
+            builder.build().try_for_each(|entry| {
                 let entry = entry.map_err(|e| e.to_string())?;
                 if entry.file_type().is_some_and(|t| t.is_file())
                     && is_assessable(&inside(entry.path()), instrument)
                 {
                     files.insert(entry.into_path());
                 }
-            }
+                Ok::<_, String>(())
+            })?;
         } else {
             return Err(format!(
                 "not a regular file or directory: {}",
@@ -1182,7 +1183,7 @@ fn discover_for(
 }
 
 fn read_text(path: &Path) -> Result<String, String> {
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let file = fs::open(path).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     file.take(MAX_SOURCE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -1278,7 +1279,7 @@ fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
 }
 
 /// A validated Noul answer, or `None` when this question set did not ask it.
-fn noul(response: &ApiResponse, id: &str) -> Option<f64> {
+pub(crate) fn noul(response: &ApiResponse, id: &str) -> Option<f64> {
     match response.answers.get(id) {
         Some(Answer::Noul { noul }) => Some(*noul),
         _ => None,
@@ -1348,7 +1349,8 @@ pub(crate) fn evaluate(
     request: &Value,
 ) -> Result<ApiResponse, String> {
     let host = host(endpoint);
-    for attempt in 0..4 {
+    let mut attempt = 0;
+    loop {
         wait_out_any_pause();
         let mut response = agent
             .post(endpoint)
@@ -1376,6 +1378,7 @@ pub(crate) fn evaluate(
                 ));
             }
             pause_for(Duration::from_secs(delay) + jitter());
+            attempt += 1;
             continue;
         }
         if !(200..300).contains(&status) {
@@ -1396,7 +1399,6 @@ pub(crate) fn evaluate(
         validate(&parsed, request)?;
         return Ok(parsed);
     }
-    unreachable!("last attempt returns")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1432,7 +1434,10 @@ fn cached(
 }
 
 fn save(path: &Path, entry: &CacheEntry) -> Result<(), String> {
-    store::write_atomic(path, &serde_json::to_vec(entry).map_err(|e| e.to_string())?)
+    store::write_atomic(
+        path,
+        &serde_json::to_vec(entry).expect("a cache entry serializes"),
+    )
 }
 
 /// One request answered: from the cache when this exact request was answered
@@ -1454,7 +1459,8 @@ fn resolve(
         .filter(|s| !s.trim().is_empty())
         .ok_or("set TYPESAFE_API_KEY for uncached assessments, or use --dry-run")?;
     let started = Instant::now();
-    let response = evaluate(agent, endpoint()?, key, request)?;
+    let endpoint = endpoint().expect("each pass that asks checks the endpoint first");
+    let response = evaluate(agent, endpoint, key, request)?;
     let entry = CacheEntry {
         request_hash: hash.to_owned(),
         response,
@@ -1599,55 +1605,73 @@ fn catalog_windows(
         within_budget(&instrument.file_request(path, text)).is_some()
     };
     let mut pieces: Vec<Window> = Vec::new();
-    for candidate in window_candidates(path, source, &starts) {
-        if fits(&candidate) {
-            pieces.push(candidate);
-            continue;
-        }
-        for line in candidate.start_line..=candidate.end_line {
-            let piece = Window {
+    // There is always a window: the whole file, when nothing divides it.
+    window_candidates(path, source, &starts)
+        .into_iter()
+        .try_for_each(|candidate| {
+            if fits(&candidate) {
+                pieces.push(candidate);
+                return Ok(());
+            }
+            // A window has at least its first line.
+            (candidate.start_line..=candidate.end_line).try_for_each(|line| {
+                let piece = Window {
+                    index: 0,
+                    of: 0,
+                    start_line: line,
+                    end_line: line,
+                    declarations: candidate.declarations.clone(),
+                };
+                if !fits(&piece) {
+                    return Err(format!(
+                        "file is over the request budget and line {line} alone is too; \
+                     it is probably minified or embeds data"
+                    ));
+                }
+                pieces.push(piece);
+                Ok(())
+            })
+        })?;
+    Ok(merged_windows(pieces, source, &starts, fits))
+}
+
+/// `pieces` merged in turn while the merged window `fits`, then numbered,
+/// each with its text.
+fn merged_windows(
+    pieces: Vec<Window>,
+    source: &str,
+    starts: &[usize],
+    fits: impl Fn(&Window) -> bool,
+) -> Vec<(Window, String)> {
+    let planned = pieces
+        .into_iter()
+        .fold(Vec::<Window>::new(), |mut planned, candidate| {
+            let merged = planned.last().map(|open| Window {
                 index: 0,
                 of: 0,
-                start_line: line,
-                end_line: line,
-                declarations: candidate.declarations.clone(),
-            };
-            if !fits(&piece) {
-                return Err(format!(
-                    "file is over the request budget and line {line} alone is too; \
-                     it is probably minified or embeds data"
-                ));
+                start_line: open.start_line,
+                end_line: candidate.end_line,
+                declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
+            });
+            match merged {
+                Some(merged) if fits(&merged) => {
+                    *planned.last_mut().expect("a window to merge into") = merged;
+                }
+                _ => planned.push(candidate),
             }
-            pieces.push(piece);
-        }
-    }
-    let mut planned: Vec<Window> = Vec::new();
-    for candidate in pieces {
-        let merged = planned.last().map(|open| Window {
-            index: open.index,
-            of: open.of,
-            start_line: open.start_line,
-            end_line: candidate.end_line,
-            declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
+            planned
         });
-        match merged {
-            Some(merged) if fits(&merged) => {
-                *planned.last_mut().expect("a window to merge into") = merged;
-            }
-            _ => planned.push(candidate),
-        }
-    }
     let total = planned.len();
-    Ok(planned
+    planned
         .into_iter()
         .enumerate()
         .map(|(index, mut window)| {
             window.index = index + 1;
             window.of = total;
-            let text = window_source(source, &starts, &window).to_owned();
+            let text = window_source(source, starts, &window).to_owned();
             (window, text)
         })
-        .collect())
+        .collect()
 }
 
 /// One subject to ask the smell catalog about: a file as it stands, or a file
@@ -1934,10 +1958,11 @@ fn combine_windows(answered: Vec<Answers>) -> Vec<Answers> {
                 into.windows += 1;
                 match (&mut into.values, answer.values) {
                     (Some(kept), Some(next)) => {
-                        for (check, value) in next {
+                        // A validated answer holds every check it was asked.
+                        next.into_iter().for_each(|(check, value)| {
                             let slot = kept.entry(check).or_insert(value);
                             *slot = slot.max(value);
-                        }
+                        });
                     }
                     (slot @ None, next) => *slot = next,
                     (Some(_), None) => {}
@@ -1996,10 +2021,7 @@ fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View>
             structure,
         }];
     }
-    let Ok(windows) = line_windows(path, source) else {
-        return Vec::new();
-    };
-    windows
+    line_windows(path, source)
         .into_iter()
         .map(|(window, text)| {
             let offset = window.start_line - 1;
@@ -2042,19 +2064,21 @@ fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View>
 /// 2,342-line Express file that left room for four Choices per request, and
 /// seventy-five requests for one file. A single declaration over the half
 /// budget is cut every two hundred lines.
-fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, String> {
+fn line_windows(path: &str, source: &str) -> Vec<(Window, String)> {
     let starts = line_starts(source);
     let declared = window_candidates(path, source, &starts);
     let half = MAX_REQUEST_TOKENS * BYTES_PER_TOKEN / 2;
     let bytes = |window: &Window| window_source(source, &starts, window).len();
     let mut cut: Vec<Window> = Vec::new();
-    for window in declared {
+    declared.into_iter().for_each(|window| {
         if bytes(&window) <= half || window.end_line - window.start_line < 200 {
             cut.push(window);
-            continue;
+            return;
         }
+        // Over two hundred lines: cut every two hundred, the last cut
+        // ending where the window does.
         let mut start = window.start_line;
-        while start <= window.end_line {
+        loop {
             let end = (start + 199).min(window.end_line);
             cut.push(Window {
                 index: 0,
@@ -2063,36 +2087,13 @@ fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, Strin
                 end_line: end,
                 declarations: window.declarations.clone(),
             });
+            if end == window.end_line {
+                break;
+            }
             start = end + 1;
         }
-    }
-    let mut planned: Vec<Window> = Vec::new();
-    for candidate in cut {
-        let merged = planned.last().map(|open| Window {
-            index: 0,
-            of: 0,
-            start_line: open.start_line,
-            end_line: candidate.end_line,
-            declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
-        });
-        match merged {
-            Some(merged) if bytes(&merged) <= half => {
-                *planned.last_mut().expect("a window to merge into") = merged;
-            }
-            _ => planned.push(candidate),
-        }
-    }
-    let total = planned.len();
-    Ok(planned
-        .into_iter()
-        .enumerate()
-        .map(|(i, mut window)| {
-            window.index = i + 1;
-            window.of = total;
-            let text = window_source(source, &starts, &window).to_string();
-            (window, text)
-        })
-        .collect())
+    });
+    merged_windows(cut, source, &starts, |window| bytes(window) <= half)
 }
 
 fn ask_lines(
@@ -2113,17 +2114,18 @@ fn ask_lines(
     // candidates and skip to round two.
     let mut views_by_index: BTreeMap<usize, Vec<View>> = BTreeMap::new();
     let mut pairs: BTreeMap<usize, Vec<candidates::Candidate>> = BTreeMap::new();
-    // Each pending request names its job: which file and which view.
-    let mut jobs: Vec<(usize, usize)> = Vec::new();
+    // Each pending request names its job: which file, which view and how
+    // many of its lines.
+    let mut jobs: Vec<(usize, usize, usize)> = Vec::new();
     let mut pending = Vec::new();
     let mut unchecked: BTreeMap<usize, usize> = BTreeMap::new();
     for (index, answer) in answers.iter().enumerate() {
         if answer.values.is_none() {
             continue;
         }
-        let Ok(source) = read_text(&root.join(&answer.path)) else {
-            continue;
-        };
+        // Read for its answer moments ago; a file gone since has no lines to
+        // ask about.
+        let source = read_text(&root.join(&answer.path)).unwrap_or_default();
         let path = Path::new(&answer.path);
         match candidates::nodes(path, &source) {
             Some(nodes) if !nodes.is_empty() => {
@@ -2142,7 +2144,9 @@ fn ask_lines(
                     continue;
                 }
                 let views = line_views(&answer.path, &source, &nodes);
-                for (v, view) in views.iter().enumerate() {
+                // One view of the whole file, or one per window; a window
+                // may hold none of the file's lines.
+                views.iter().enumerate().for_each(|(v, view)| {
                     let mut offset = 0;
                     while offset < view.nodes.len() {
                         let left = view.nodes.len() - offset;
@@ -2168,7 +2172,7 @@ fn ask_lines(
                                 || None,
                                 || within_budget(&request),
                             ) {
-                                jobs.push((index, v));
+                                jobs.push((index, v, take));
                                 pending.push(((index, Some(jobs.len() - 1)), request, bytes));
                                 took = take;
                                 break;
@@ -2180,7 +2184,7 @@ fn ask_lines(
                         }
                         offset += took;
                     }
-                }
+                });
                 views_by_index.insert(index, views);
             }
             Some(_) => continue,
@@ -2214,21 +2218,22 @@ fn ask_lines(
             &pending,
             pending.len() > 4,
         );
-        for ((index, slot), result) in answered {
+        answered.into_iter().for_each(|((index, slot), result)| {
+            let (_, v, lines) = jobs[slot.expect("each classification names its job")];
             let entry = match result {
                 Ok((_, entry, hit, _)) => {
                     let counted = if hit { &mut reused } else { &mut usage };
                     counted.input_tokens += entry.response.usage.input_tokens;
                     entry
                 }
-                Err(_) => continue,
+                // The lines it asked about are not checked, and the report
+                // says so rather than reading as nothing found.
+                Err(_) => {
+                    answers[index].unchecked_lines += lines;
+                    return;
+                }
             };
-            let Some(view) = slot
-                .and_then(|k| jobs.get(k))
-                .and_then(|(_, v)| views_by_index.get(&index).and_then(|views| views.get(*v)))
-            else {
-                continue;
-            };
+            let view = &views_by_index[&index][v];
             let classified = classifications(&entry.response);
             for (i, check) in classified {
                 // A validated answer has the request's ids alone, and the
@@ -2240,7 +2245,7 @@ fn ask_lines(
                     text: node.text.clone(),
                 });
             }
-        }
+        });
     }
     // Round two: the check's own question and the triage question on every
     // classified line. Authorisation stays file-level: at a line it confirmed
@@ -2261,10 +2266,9 @@ fn ask_lines(
         if found.is_empty() {
             continue;
         }
-        let Some(views) = views_by_index.get(index) else {
-            continue;
-        };
-        for (v, view) in views.iter().enumerate() {
+        // A file has lines classified only through its views.
+        let views = &views_by_index[index];
+        views.iter().enumerate().for_each(|(v, view)| {
             let last = view.offset + view.text.lines().count();
             let mine: Vec<candidates::Candidate> = found
                 .iter()
@@ -2272,7 +2276,7 @@ fn ask_lines(
                 .cloned()
                 .collect();
             if mine.is_empty() {
-                continue;
+                return;
             }
             let local: Vec<candidates::Candidate> = mine
                 .iter()
@@ -2282,8 +2286,9 @@ fn ask_lines(
                     text: c.text.clone(),
                 })
                 .collect();
+            // Chunk by chunk, each a request that fits: there is at least one.
             let mut offset = 0;
-            while offset < local.len() {
+            loop {
                 let left = local.len() - offset;
                 let mut took = 0;
                 for take in [left, 16, 8, 4, 2, 1] {
@@ -2308,8 +2313,11 @@ fn ask_lines(
                     took = 1;
                 }
                 offset += took;
+                if offset == local.len() {
+                    break;
+                }
             }
-        }
+        });
     }
     for (index, lines) in unchecked {
         answers[index].unchecked_lines += lines;
@@ -2328,28 +2336,27 @@ fn ask_lines(
     );
     let mut confirmed = 0usize;
     let mut lines_by_index: BTreeMap<usize, Vec<ConfirmedLine>> = BTreeMap::new();
-    for ((index, slot), result) in answered {
+    answered.into_iter().for_each(|((index, slot), result)| {
+        let (_, v, chunk) = &jobs[slot.expect("each confirmation names its job")];
         let entry = match result {
             Ok((_, entry, hit, _)) => {
                 let counted = if hit { &mut reused } else { &mut usage };
                 counted.input_tokens += entry.response.usage.input_tokens;
                 entry
             }
-            Err(_) => continue,
+            // As with a classification that failed: its lines are unchecked.
+            Err(_) => {
+                answers[index].unchecked_lines += chunk.len();
+                return;
+            }
         };
-        let Some((_, v, chunk)) = slot.and_then(|k| jobs.get(k)) else {
-            continue;
-        };
-        let offset = views_by_index
-            .get(&index)
-            .and_then(|views| views.get(*v))
-            .map(|view| view.offset)
-            .unwrap_or(0);
+        let offset = views_by_index[&index][*v].offset;
         let lines = lines_by_index.entry(index).or_default();
-        for (i, candidate) in chunk.iter().enumerate() {
-            let Some(value) = noul(&entry.response, &format!("c{i}")) else {
-                break;
-            };
+        // The answer's values in order, up to the first it lacks.
+        let valued = chunk.iter().enumerate().map_while(|(i, candidate)| {
+            noul(&entry.response, &format!("c{i}")).map(|value| (i, candidate, value))
+        });
+        valued.for_each(|(i, candidate, value)| {
             let dismissed = noul(&entry.response, &format!("t{i}")).unwrap_or(0.0);
             if value >= catalog::security::cut_for(&candidate.check)
                 && dismissed < catalog::security::DISMISS_AT
@@ -2365,8 +2372,8 @@ fn ask_lines(
                     enters_at,
                 });
             }
-        }
-    }
+        });
+    });
     // One finding per check per ten lines: three `eval` calls in a row are
     // one thing to fix, and are counted as one. The strongest line of the
     // window is the one shown, so a handler's `def` line at 0.62 does not
@@ -2427,24 +2434,12 @@ fn confirm_paths(
 ) -> (Vec<Value>, Vec<Value>, Usage, Usage) {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
-    let body = |source: &str, f: &candidates::FunctionSpan| -> String {
-        source
-            .lines()
-            .skip(f.start.saturating_sub(1))
-            .take(f.end.saturating_sub(f.start) + 1)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .take(40_000)
-            .collect()
-    };
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
     let mut unasked = Vec::new();
+    // Each file with a structure was asked, and so has an answer.
     for (file, (structure, source)) in structures {
-        let Some(answer) = by_path.get(file.as_str()) else {
-            continue;
-        };
+        let answer = by_path[file.as_str()];
         if answer.labels.is_empty() {
             continue;
         }
@@ -2455,19 +2450,18 @@ fn confirm_paths(
             let Some((callee_structure, callee_source)) = structures.get(&target) else {
                 continue;
             };
-            let Some(callee_answer) = by_path.get(target.as_str()) else {
-                continue;
-            };
-            for (i, caller) in structure
+            let callee_answer = by_path[target.as_str()];
+            // A file with labels has a function for each.
+            let callers = structure
                 .functions
                 .iter()
                 .enumerate()
-                .take(answer.labels.len())
-            {
+                .take(answer.labels.len());
+            callers.for_each(|(i, caller)| {
                 if answer.labels[i].takes_outside < cut {
-                    continue;
+                    return;
                 }
-                let caller_body = body(source, caller);
+                let caller_body = function_body(source, caller);
                 for (j, callee) in callee_structure
                     .functions
                     .iter()
@@ -2514,7 +2508,7 @@ fn confirm_paths(
                             file: target.clone(),
                             function: callee.name.clone(),
                             line: callee.start,
-                            source: body(callee_source, callee),
+                            source: function_body(callee_source, callee),
                         },
                         &label.sink_kind,
                     );
@@ -2534,7 +2528,7 @@ fn confirm_paths(
                         None => unasked.push(too_large_to_ask(ends)),
                     }
                 }
-            }
+            });
         }
     }
     let (paths, usage, reused) = confirm_pending(root, key, refresh, pending, candidates_found);
@@ -2582,9 +2576,9 @@ fn confirm_pending(
         pending.len() > 4,
     );
     let mut confirmed = Vec::new();
-    for ((index, _), result) in answered {
+    answered.into_iter().for_each(|((index, _), result)| {
         let Ok((_, entry, hit, _)) = result else {
-            continue;
+            return;
         };
         let counted = if hit { &mut reused } else { &mut usage };
         counted.input_tokens += entry.response.usage.input_tokens;
@@ -2594,7 +2588,7 @@ fn confirm_pending(
             path["value"] = json!(value);
             confirmed.push(path);
         }
-    }
+    });
     confirmed.sort_by(|a, b| {
         b["value"]
             .as_f64()
@@ -2602,6 +2596,52 @@ fn confirm_pending(
             .total_cmp(&a["value"].as_f64().unwrap_or(0.0))
     });
     (confirmed, usage, reused)
+}
+
+/// What each test ran: test, then file, then the lines executed. A run's
+/// points are the lines its tests ran, each with the tests that ran it.
+fn lines_by_test(
+    points: &[(String, usize, Vec<String>)],
+) -> BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> {
+    points
+        .iter()
+        .flat_map(|(file, line, tests)| tests.iter().map(move |test| (test, file, *line)))
+        .fold(BTreeMap::new(), |mut by_test, (test, file, line)| {
+            by_test
+                .entry(test.as_str())
+                .or_insert_with(BTreeMap::new)
+                .entry(file.as_str())
+                .or_insert_with(BTreeSet::new)
+                .insert(line);
+            by_test
+        })
+}
+
+/// Each labelled function of the files with an answer: its file, its span,
+/// its label and its file's source.
+fn labelled_functions<'a>(
+    structures: &'a BTreeMap<String, (candidates::Structure, String)>,
+    by_path: &'a BTreeMap<&str, &Answers>,
+) -> impl Iterator<
+    Item = (
+        &'a String,
+        &'a candidates::FunctionSpan,
+        &'a FunctionLabel,
+        &'a str,
+    ),
+> {
+    structures
+        .iter()
+        .flat_map(move |(file, (structure, source))| {
+            let labels = by_path
+                .get(file.as_str())
+                .map_or(&[][..], |answer| &answer.labels[..]);
+            structure
+                .functions
+                .iter()
+                .zip(labels)
+                .map(move |(function, label)| (file, function, label, source.as_str()))
+        })
 }
 
 fn run_paths(
@@ -2615,154 +2655,123 @@ fn run_paths(
 ) -> (Vec<Value>, Vec<Value>, Usage, Usage) {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
-    // test -> file -> executed lines
-    let mut by_test: BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> = BTreeMap::new();
-    for (file, line, tests) in points {
-        for test in tests {
-            by_test
-                .entry(test.as_str())
-                .or_default()
-                .entry(file.as_str())
-                .or_default()
-                .insert(*line);
-        }
-    }
-    let body = |source: &str, f: &candidates::FunctionSpan| -> String {
-        source
-            .lines()
-            .skip(f.start.saturating_sub(1))
-            .take(f.end.saturating_sub(f.start) + 1)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .take(40_000)
-            .collect()
+    let by_test = lines_by_test(points);
+    // The paths the imports found, which a run does not ask again: each was
+    // written with both ends named.
+    let end = |path: &Value, side: &str| {
+        format!(
+            "{}#{}",
+            path[side]["file"].as_str().unwrap_or_default(),
+            path[side]["function"].as_str().unwrap_or_default()
+        )
     };
     let known: BTreeSet<(String, String)> = already
         .iter()
-        .filter_map(|p| {
-            Some((
-                format!(
-                    "{}#{}",
-                    p["caller"]["file"].as_str()?,
-                    p["caller"]["function"].as_str()?
-                ),
-                format!(
-                    "{}#{}",
-                    p["callee"]["file"].as_str()?,
-                    p["callee"]["function"].as_str()?
-                ),
-            ))
-        })
+        .map(|path| (end(path, "caller"), end(path, "callee")))
         .collect();
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut unasked = Vec::new();
     let mut pending = Vec::new();
     let mut candidates_found: Vec<Value> = Vec::new();
-    for (callee_file, (callee_structure, callee_source)) in structures {
-        let Some(callee_answer) = by_path.get(callee_file.as_str()) else {
-            continue;
-        };
-        for (j, callee) in callee_structure
-            .functions
+    let sinks = labelled_functions(structures, &by_path).filter(|(_, _, label, _)| {
+        label.reaches_sink >= cut && label.sanitises < cut && label.sink_kind != "none"
+    });
+    for (callee_file, callee, label, callee_source) in sinks {
+        // Tests that executed a line of this function.
+        let tests: Vec<&str> = by_test
             .iter()
-            .enumerate()
-            .take(callee_answer.labels.len())
-        {
-            let label = &callee_answer.labels[j];
-            if label.reaches_sink < cut || label.sanitises >= cut || label.sink_kind == "none" {
-                continue;
-            }
-            // Tests that executed a line of this function.
-            let tests: Vec<&str> = by_test
-                .iter()
-                .filter(|(_, files)| {
-                    files.get(callee_file.as_str()).is_some_and(|lines| {
-                        lines.range(callee.start..=callee.end).next().is_some()
-                    })
-                })
-                .map(|(t, _)| *t)
-                .collect();
-            let mut callers = 0;
-            for test in tests {
-                for (caller_file, lines) in &by_test[test] {
-                    if *caller_file == callee_file.as_str() {
+            .filter(|(_, files)| {
+                files
+                    .get(callee_file.as_str())
+                    .is_some_and(|lines| lines.range(callee.start..=callee.end).next().is_some())
+            })
+            .map(|(t, _)| *t)
+            .collect();
+        let mut callers = 0;
+        for test in tests {
+            // Every test ran a line of some file.
+            by_test[test].iter().for_each(|(caller_file, lines)| {
+                if *caller_file == callee_file.as_str() {
+                    return;
+                }
+                let Some((caller_structure, caller_source)) = structures.get(*caller_file) else {
+                    return;
+                };
+                let caller_answer = by_path[caller_file];
+                for (caller, caller_label) in caller_structure.functions.iter().zip(&caller_answer.labels) {
+                    if caller_label.takes_outside < cut
+                        || lines.range(caller.start..=caller.end).next().is_none()
+                    {
                         continue;
                     }
-                    let Some((caller_structure, caller_source)) = structures.get(*caller_file)
-                    else {
+                    let pair = (
+                        format!("{caller_file}#{}", caller.name),
+                        format!("{callee_file}#{}", callee.name),
+                    );
+                    if known.contains(&pair) || !seen.insert(pair) {
                         continue;
-                    };
-                    let Some(caller_answer) = by_path.get(caller_file) else {
-                        continue;
-                    };
-                    for (i, caller) in caller_structure
-                        .functions
-                        .iter()
-                        .enumerate()
-                        .take(caller_answer.labels.len())
-                    {
-                        if caller_answer.labels[i].takes_outside < cut
-                            || lines.range(caller.start..=caller.end).next().is_none()
-                        {
-                            continue;
-                        }
-                        let pair = (
-                            format!("{caller_file}#{}", caller.name),
-                            format!("{callee_file}#{}", callee.name),
-                        );
-                        if known.contains(&pair) || !seen.insert(pair) {
-                            continue;
-                        }
-                        // Three callers a function are asked about; the rest
-                        // are named, not dropped.
-                        if callers >= 3 {
-                            unasked.push(json!({
-                                "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
-                                "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
-                                "reason": "three per function",
-                            }));
-                            continue;
-                        }
-                        callers += 1;
-                        let request = catalog::security::path_request(
-                            &catalog::security::PathEnd {
-                                file: (*caller_file).to_owned(),
-                                function: caller.name.clone(),
-                                line: caller.start,
-                                source: body(caller_source, caller),
-                            },
-                            &catalog::security::PathEnd {
-                                file: callee_file.clone(),
-                                function: callee.name.clone(),
-                                line: callee.start,
-                                source: body(callee_source, callee),
-                            },
-                            &label.sink_kind,
-                        );
-                        let ends = json!({
+                    }
+                    // Three callers a function are asked about; the rest
+                    // are named, not dropped.
+                    if callers >= 3 {
+                        unasked.push(json!({
                             "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
                             "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
-                        });
-                        match within_budget(&request) {
-                            Some(bytes) => {
-                                let index = candidates_found.len();
-                                let mut found = ends;
-                                found["check"] = json!(label.sink_kind);
-                                found["via"] = json!("run");
-                                found["test"] = json!(test);
-                                candidates_found.push(found);
-                                pending.push(((index, None), request, bytes));
-                            }
-                            None => unasked.push(too_large_to_ask(ends)),
+                            "reason": "three per function",
+                        }));
+                        continue;
+                    }
+                    callers += 1;
+                    let request = catalog::security::path_request(
+                        &catalog::security::PathEnd {
+                            file: (*caller_file).to_owned(),
+                            function: caller.name.clone(),
+                            line: caller.start,
+                            source: function_body(caller_source, caller),
+                        },
+                        &catalog::security::PathEnd {
+                            file: callee_file.clone(),
+                            function: callee.name.clone(),
+                            line: callee.start,
+                            source: function_body(callee_source, callee),
+                        },
+                        &label.sink_kind,
+                    );
+                    let ends = json!({
+                        "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
+                        "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
+                    });
+                    match within_budget(&request) {
+                        Some(bytes) => {
+                            let index = candidates_found.len();
+                            let mut found = ends;
+                            found["check"] = json!(label.sink_kind);
+                            found["via"] = json!("run");
+                            found["test"] = json!(test);
+                            candidates_found.push(found);
+                            pending.push(((index, None), request, bytes));
                         }
+                        None => unasked.push(too_large_to_ask(ends)),
                     }
                 }
-            }
+            });
         }
     }
     let (paths, usage, reused) = confirm_pending(root, key, refresh, pending, candidates_found);
     (paths, unasked, usage, reused)
+}
+
+/// A function's lines, as much of them as one request holds.
+fn function_body(source: &str, f: &candidates::FunctionSpan) -> String {
+    source
+        .lines()
+        .skip(f.start.saturating_sub(1))
+        .take(f.end.saturating_sub(f.start) + 1)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(40_000)
+        .collect()
 }
 
 /// Guards a run observed. For every function that takes outside data, the
@@ -2779,34 +2788,12 @@ fn run_guards(
 ) -> BTreeMap<String, Vec<Value>> {
     let cut = catalog::PRESENT_AT;
     let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
-    let mut by_test: BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> = BTreeMap::new();
-    for (file, line, tests) in points {
-        for test in tests {
-            by_test
-                .entry(test.as_str())
-                .or_default()
-                .entry(file.as_str())
-                .or_default()
-                .insert(*line);
-        }
-    }
+    let by_test = lines_by_test(points);
     // Guard functions: every labelled function that sanitises or authorises.
-    let mut guards: Vec<(&str, &candidates::FunctionSpan)> = Vec::new();
-    for (file, (structure, _)) in structures {
-        let Some(answer) = by_path.get(file.as_str()) else {
-            continue;
-        };
-        for (i, f) in structure
-            .functions
-            .iter()
-            .enumerate()
-            .take(answer.labels.len())
-        {
-            if answer.labels[i].sanitises >= cut {
-                guards.push((file.as_str(), f));
-            }
-        }
-    }
+    let guards: Vec<(&str, &candidates::FunctionSpan)> = labelled_functions(structures, &by_path)
+        .filter(|(_, _, label, _)| label.sanitises >= cut)
+        .map(|(file, f, _, _)| (file.as_str(), f))
+        .collect();
     let guard_ran = |files: &BTreeMap<&str, BTreeSet<usize>>| -> Option<String> {
         guards.iter().find_map(|(file, f)| {
             files
@@ -2816,43 +2803,30 @@ fn run_guards(
         })
     };
     let mut out: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for (file, (structure, _)) in structures {
-        let Some(answer) = by_path.get(file.as_str()) else {
+    let handlers = labelled_functions(structures, &by_path)
+        .filter(|(_, _, label, _)| label.takes_outside >= cut);
+    for (file, handler, _, _) in handlers {
+        let mut guarded = Vec::new();
+        let mut unguarded = Vec::new();
+        // The tests that ran the handler, with a guard or without.
+        let ran = by_test.iter().filter(|(_, files)| {
+            files
+                .get(file.as_str())
+                .is_some_and(|lines| lines.range(handler.start..=handler.end).next().is_some())
+        });
+        ran.for_each(|(test, files)| match guard_ran(files) {
+            Some(guard) => guarded.push(json!({ "test": test, "guard": guard })),
+            None => unguarded.push(json!(test)),
+        });
+        if guarded.is_empty() && unguarded.is_empty() {
             continue;
-        };
-        for (i, handler) in structure
-            .functions
-            .iter()
-            .enumerate()
-            .take(answer.labels.len())
-        {
-            if answer.labels[i].takes_outside < cut {
-                continue;
-            }
-            let mut guarded = Vec::new();
-            let mut unguarded = Vec::new();
-            for (test, files) in &by_test {
-                let ran = files
-                    .get(file.as_str())
-                    .is_some_and(|lines| lines.range(handler.start..=handler.end).next().is_some());
-                if !ran {
-                    continue;
-                }
-                match guard_ran(files) {
-                    Some(guard) => guarded.push(json!({ "test": test, "guard": guard })),
-                    None => unguarded.push(json!(test)),
-                }
-            }
-            if guarded.is_empty() && unguarded.is_empty() {
-                continue;
-            }
-            out.entry(file.clone()).or_default().push(json!({
-                "function": handler.name, "line": handler.start,
-                "tests_with_a_guard": guarded.len(), "tests_without": unguarded.len(),
-                "guard_example": guarded.first().map(|g| g["guard"].clone()),
-                "unguarded_tests": unguarded.iter().take(3).collect::<Vec<_>>(),
-            }));
         }
+        out.entry(file.clone()).or_default().push(json!({
+            "function": handler.name, "line": handler.start,
+            "tests_with_a_guard": guarded.len(), "tests_without": unguarded.len(),
+            "guard_example": guarded.first().map(|g| g["guard"].clone()),
+            "unguarded_tests": unguarded.iter().take(3).collect::<Vec<_>>(),
+        }));
     }
     out
 }
@@ -3015,7 +2989,8 @@ fn resolve_ambiguity(
         .entries
         .iter_mut()
         .filter(|e| e.status == scope::Status::Ambiguous);
-    for (index, found) in ambiguous.enumerate() {
+    // There are some: none, and nothing was asked.
+    ambiguous.enumerate().for_each(|(index, found)| {
         let value = noul(&entry.response, &format!("f{index}"))
             .expect("validated: each ambiguous path is asked as a noul");
         if value >= catalog::PRESENT_AT {
@@ -3026,7 +3001,7 @@ fn resolve_ambiguity(
             found.status = scope::Status::Excluded;
             found.reason = "the model reads it as not part of the product".into();
         }
-    }
+    });
     Some(json!({
         "asked": asking.len(), "ships": ships, "does_not": asking.len() - ships,
         "basis": "paths and the whole tree, no file contents",
@@ -3137,7 +3112,7 @@ fn run_health(
                     None => match catalog_windows(&relative, &source, instrument) {
                         Ok(windows) => {
                             let count = windows.len();
-                            for (window, text) in windows {
+                            windows.into_iter().for_each(|(window, text)| {
                                 subjects.push(Subject {
                                     bytes: text.len() as u64,
                                     request: instrument.file_request(&relative, &text),
@@ -3151,7 +3126,7 @@ fn run_health(
                                         window.index, window.of
                                     )),
                                 });
-                            }
+                            });
                         }
                         Err(e) => unreadable.push(json!({
                             "path": relative, "status": "failed", "error": e
@@ -3242,15 +3217,15 @@ fn run_health(
             let health =
                 catalog::health(values).expect("a validated answer has every file question");
             weighted.push((answer.bytes, health));
-            // Every ancestor directory, so a tree can be read at any depth.
-            let mut directory = Path::new(&answer.path).parent();
-            while let Some(current) = directory {
+            // Every ancestor directory, so a tree can be read at any depth:
+            // a file at the top has the root, `""`.
+            let ancestors = std::iter::successors(Path::new(&answer.path).parent(), |d| d.parent());
+            ancestors.for_each(|directory| {
                 by_directory
-                    .entry(current.to_string_lossy().replace('\\', "/"))
+                    .entry(directory.to_string_lossy().replace('\\', "/"))
                     .or_default()
                     .push((answer.bytes, health));
-                directory = current.parent();
-            }
+            });
         }
         let mut record = scored(answer, instrument);
         if let Some(handlers) = handlers_by_file.get(&answer.path) {
@@ -3314,7 +3289,7 @@ fn run_health(
     let assessed_files = assessed.len();
     let assessed_fingerprint = supercov_engine::integrity::digest_source_files(root, assessed).ok();
 
-    let (id, created_at) = store::identity()?;
+    let (id, created_at) = store::identity();
     let mut manifest = json!({
         "schema_version": 4, "id": id, "created_at": created_at, "parent": Value::Null,
         // Null when a file moved or became unreadable between the assessment and
@@ -3727,38 +3702,43 @@ fn human_security(report: &Value) -> String {
         out.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
         if let Some(lines) = file["unchecked_lines"].as_u64().filter(|lines| *lines > 0) {
             out.push_str(&format!(
-                "    {lines} line(s) not checked one by one: their questions do not fit in a request beside the code they are asked of\n"
+                "    {lines} line(s) not checked one by one: a request asking about them did not fit beside the code, or was refused\n"
             ));
         }
-        for finding in file["present"].as_array().unwrap_or(&empty) {
-            out.push_str(&format!(
-                "    {:.2}  {}{}\n",
-                finding["value"].as_f64().unwrap_or(0.0),
-                finding["check"].as_str().unwrap_or("?"),
-                if finding["tier"] == "line" {
-                    ""
-                } else {
-                    "  (file-level only)"
-                }
-            ));
-            for line in finding["lines"].as_array().unwrap_or(&empty).iter().take(3) {
+        // A file is shown only with findings.
+        file["present"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .for_each(|finding| {
                 out.push_str(&format!(
-                    "          line {}  {:.2}  {}{}\n",
-                    line["line"].as_u64().unwrap_or(0),
-                    line["value"].as_f64().unwrap_or(0.0),
-                    line["text"]
-                        .as_str()
-                        .unwrap_or("")
-                        .chars()
-                        .take(70)
-                        .collect::<String>(),
-                    match line["enters_at"].as_u64() {
-                        Some(n) => format!("  (enters at line {n})"),
-                        None => String::new(),
+                    "    {:.2}  {}{}\n",
+                    finding["value"].as_f64().unwrap_or(0.0),
+                    finding["check"].as_str().unwrap_or("?"),
+                    if finding["tier"] == "line" {
+                        ""
+                    } else {
+                        "  (file-level only)"
                     }
                 ));
-            }
-        }
+                for line in finding["lines"].as_array().unwrap_or(&empty).iter().take(3) {
+                    out.push_str(&format!(
+                        "          line {}  {:.2}  {}{}\n",
+                        line["line"].as_u64().unwrap_or(0),
+                        line["value"].as_f64().unwrap_or(0.0),
+                        line["text"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(70)
+                            .collect::<String>(),
+                        match line["enters_at"].as_u64() {
+                            Some(n) => format!("  (enters at line {n})"),
+                            None => String::new(),
+                        }
+                    ));
+                }
+            });
         if file["flagged_and_untested"] == true {
             out.push_str(&format!(
                 "    and {} of its measured lines are not covered by the run\n",
@@ -3792,7 +3772,9 @@ fn human_security(report: &Value) -> String {
             out.push_str(&format!(
                 "    {credited} of its lines are asserted (a test is judged to catch a change to them)\n"
             ));
-            for finding in file["present"].as_array().unwrap_or(&empty) {
+            // A flagged file: it has findings.
+            let present = file["present"].as_array().unwrap_or(&empty);
+            present.iter().for_each(|finding| {
                 for line in finding["lines"].as_array().unwrap_or(&empty) {
                     if line["asserted"] == true {
                         out.push_str(&format!(
@@ -3801,7 +3783,7 @@ fn human_security(report: &Value) -> String {
                         ));
                     }
                 }
-            }
+            });
         }
     }
     if flagged as usize > shown.len() {
@@ -3813,7 +3795,8 @@ fn human_security(report: &Value) -> String {
     let paths = report["paths"].as_array().unwrap_or(&empty);
     if !paths.is_empty() {
         out.push_str(&format!("\nCross-file paths confirmed: {}\n", paths.len()));
-        for path in paths.iter().take(10) {
+        // Only where there are paths.
+        paths.iter().take(10).for_each(|path| {
             out.push_str(&format!(
                 "  {:.2}  {}{}  {}:{} {} -> {}:{} {}\n",
                 path["value"].as_f64().unwrap_or(0.0),
@@ -3830,7 +3813,7 @@ fn human_security(report: &Value) -> String {
                 path["callee"]["line"].as_u64().unwrap_or(0),
                 path["callee"]["function"].as_str().unwrap_or("?"),
             ));
-        }
+        });
         if paths.len() > 10 {
             out.push_str(&format!("  ... and {} more\n", paths.len() - 10));
         }
@@ -3855,7 +3838,8 @@ fn human_security(report: &Value) -> String {
             continue;
         }
         out.push_str(&format!("{} {heading}:\n", not_asked.len()));
-        for path in not_asked.iter().take(5) {
+        // Only where some were not asked.
+        not_asked.iter().take(5).for_each(|path| {
             out.push_str(&format!(
                 "  {}:{} {} -> {}:{} {}\n",
                 path["caller"]["file"].as_str().unwrap_or("?"),
@@ -3865,7 +3849,7 @@ fn human_security(report: &Value) -> String {
                 path["callee"]["line"].as_u64().unwrap_or(0),
                 path["callee"]["function"].as_str().unwrap_or("?"),
             ));
-        }
+        });
         if not_asked.len() > 5 {
             out.push_str(&format!("  ... and {} more\n", not_asked.len() - 5));
         }
@@ -3943,13 +3927,14 @@ fn human_patch(report: &Value, limit: usize) -> String {
         if basis != "both versions" {
             out.push_str(&format!("  ({basis})\n"));
         }
-        for finding in fired {
+        // Only a file where something fired is shown.
+        fired.iter().for_each(|finding| {
             out.push_str(&format!(
                 "  {:.2}  {}\n",
                 finding["value"].as_f64().unwrap_or(0.0),
                 finding["check"].as_str().unwrap_or("?")
             ));
-        }
+        });
         out.push('\n');
     }
     if files.len() > shown {
@@ -3983,17 +3968,9 @@ struct RunCoverage {
 /// it: a change review already says what appeared and where tests do not go.
 /// A run whose assertions were not assessed has no third shelf: no test was
 /// asked, which is not a judgment that the tests catch nothing.
-fn load_run_coverage(selector: &str, security: bool) -> Result<RunCoverage, String> {
+fn load_run_coverage(root: &Path, selector: &str, security: bool) -> Result<RunCoverage, String> {
     let selector = (selector != "latest").then_some(selector);
-    let view = crate::load_run_view(selector)?;
-    let (asserted, points) = if security {
-        (
-            crate::load_asserted_lines(selector)?,
-            crate::load_point_tests(selector)?,
-        )
-    } else {
-        (None, Vec::new())
-    };
+    let (view, asserted, points) = crate::load_run_coverage(root, selector, security)?;
     Ok(RunCoverage {
         view,
         asserted,
@@ -4022,9 +3999,10 @@ fn cross_with_coverage(report: &mut Value, run: &RunCoverage, file_flag: &str, t
     let crossed: Vec<Value> = files
         .into_iter()
         .map(|mut file| {
-            let Some(path) = file["path"].as_str().map(str::to_owned) else {
-                return file;
-            };
+            let path = file["path"]
+                .as_str()
+                .expect("each file a report lists has its path")
+                .to_owned();
             let introduced = file["present"]
                 .as_array()
                 .is_some_and(|present| !present.is_empty());
@@ -4050,9 +4028,10 @@ fn cross_with_coverage(report: &mut Value, run: &RunCoverage, file_flag: &str, t
                             unasserted += 1;
                             file["flagged_and_unasserted"] = json!(true);
                         }
-                        // Per confirmed line: whether a test is judged to catch it.
+                        // Per confirmed line: whether a test is judged to catch
+                        // it. What it introduced is some.
                         let findings = file["present"].as_array_mut().into_iter().flatten();
-                        for finding in findings {
+                        findings.for_each(|finding| {
                             let lines = finding["lines"].as_array_mut().into_iter().flatten();
                             for line in lines {
                                 let number = line["line"].as_u64().unwrap_or(0);
@@ -4060,7 +4039,7 @@ fn cross_with_coverage(report: &mut Value, run: &RunCoverage, file_flag: &str, t
                                     line["asserted"] = json!(true);
                                 }
                             }
-                        }
+                        });
                     }
                 }
                 None => {
@@ -4106,14 +4085,14 @@ fn annotations(report: &Value) -> String {
     };
     let mut out = String::new();
     for file in report["files"].as_array().unwrap_or(&empty) {
-        let Some(path) = file["path"].as_str() else {
-            continue;
-        };
+        let path = file["path"]
+            .as_str()
+            .expect("each file a report lists has its path");
         let line = file["line"].as_u64().unwrap_or(1).max(1);
         for finding in file["present"].as_array().unwrap_or(&empty) {
-            let Some(check) = finding["check"].as_str() else {
-                continue;
-            };
+            let check = finding["check"]
+                .as_str()
+                .expect("each finding a report lists names its check");
             let value = finding["value"].as_f64().unwrap_or(0.0);
             out.push_str(&format!(
                 "::warning file={path},line={line},title=quality: {check}::{}\n",
@@ -4131,7 +4110,7 @@ fn present(view: Value, json: bool) -> Result<bool, String> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&view).map_err(|e| e.to_string())?
+            serde_json::to_string_pretty(&view).expect("a JSON value serializes")
         );
     } else {
         print!("{}", query::render(&view));
@@ -4238,6 +4217,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
                 let run = match options.run.as_deref().filter(|_| !options.dry_run) {
                     Some(selector) => Some(load_run_coverage(
+                        &root,
                         selector,
                         instrument == Instrument::Security,
                     )?),
@@ -4256,7 +4236,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 if options.json || options.dry_run {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                        serde_json::to_string_pretty(&report).expect("a JSON value serializes")
                     );
                 } else {
                     if instrument.scores() {
@@ -4296,7 +4276,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 }
                 let range = range.unwrap_or_else(|| changes::automatic(&root));
                 let run = match run.as_deref() {
-                    Some(selector) => Some(load_run_coverage(selector, false)?),
+                    Some(selector) => Some(load_run_coverage(&root, selector, false)?),
                     None => None,
                 };
                 let (mut report, failed) = run_patch(
@@ -4319,7 +4299,7 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                        serde_json::to_string_pretty(&report).expect("a JSON value serializes")
                     );
                 } else {
                     print!("{}", human_patch(&report, limit));

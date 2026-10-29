@@ -149,7 +149,7 @@ pub struct PythonFrontendImport {
 }
 
 impl PythonFrontendImport {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
@@ -161,24 +161,30 @@ impl PythonFrontendImport {
                             .expect("Python imports always declare a coverage model"),
                     )
                     .expect("Python coverage model is contract-valid"),
-                )?,
+                )
+                .expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&self.declaration)?,
+                contents: serde_json::to_vec(&self.declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
-                contents: serde_json::to_vec(&self.request.manifest)?,
+                contents: serde_json::to_vec(&self.request.manifest)
+                    .expect("plain data serializes"),
             },
         ];
-        for (index, result) in self.request.raw_results.iter().enumerate() {
-            entries.push(EvidenceArchiveEntry {
-                path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result)?,
-            });
-        }
-        Ok(entries)
+        entries.extend(
+            self.request
+                .raw_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| EvidenceArchiveEntry {
+                    path: format!("results/{index:08}/mcdc.json"),
+                    contents: serde_json::to_vec(result).expect("plain data serializes"),
+                }),
+        );
+        entries
     }
 }
 
@@ -558,14 +564,15 @@ pub fn import_python_coverage_json(
         })
         .collect::<Vec<_>>();
     let mut arcs_by_line = BTreeMap::<(String, i64), BTreeSet<i64>>::new();
-    for file in &export.files {
+    // A valid export measured a file at least.
+    export.files.iter().for_each(|file| {
         for [from, to] in file.executed_branches.iter().chain(&file.missing_branches) {
             arcs_by_line
                 .entry((file.path.clone(), *from))
                 .or_default()
                 .insert(*to);
         }
-    }
+    });
     let branch_alternatives = arcs_by_line
         .iter()
         .flat_map(|((file, from), destinations)| {
@@ -792,25 +799,30 @@ pub fn import_python_coverage_json(
         .flat_map(|snapshot| snapshot.hits.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
-    for file in &export.files {
-        for line in &file.executed_lines {
-            if !observed_hits.contains(&line_id(&file.path, *line)) {
-                return Err(PythonFrontendError::UnattributedExecutedLine(
-                    file.path.clone(),
-                    *line,
-                ));
+    // A valid export measured a file at least.
+    export
+        .files
+        .iter()
+        .try_for_each(|file| -> Result<(), PythonFrontendError> {
+            for line in &file.executed_lines {
+                if !observed_hits.contains(&line_id(&file.path, *line)) {
+                    return Err(PythonFrontendError::UnattributedExecutedLine(
+                        file.path.clone(),
+                        *line,
+                    ));
+                }
             }
-        }
-        for [from, to] in &file.executed_branches {
-            if !observed_hits.contains(&alternative_id(&file.path, *from, *to)) {
-                return Err(PythonFrontendError::UnattributedExecutedBranch(
-                    file.path.clone(),
-                    *from,
-                    *to,
-                ));
+            for [from, to] in &file.executed_branches {
+                if !observed_hits.contains(&alternative_id(&file.path, *from, *to)) {
+                    return Err(PythonFrontendError::UnattributedExecutedBranch(
+                        file.path.clone(),
+                        *from,
+                        *to,
+                    ));
+                }
             }
-        }
-    }
+            Ok(())
+        })?;
 
     let declaration = FrontendRunDeclaration {
         protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -898,6 +910,68 @@ mod tests {
     const PATHS_GOLDEN: &[u8] =
         include_bytes!("../test-assets/python-coverage-v1/pytest-paths.json");
 
+    /// An export whose lists are empty -- a context that saw no line of a
+    /// file, a file nothing ran, and then no context and no outcome at all --
+    /// is read as having nothing there.
+    #[test]
+    fn an_export_of_empty_lists_is_read_as_nothing_there() {
+        use serde_json::{Value, json};
+        let import = |export: &Value| {
+            import_python_coverage_json(
+                export.to_string().as_bytes(),
+                "python-tier-a-ctrace",
+                "2026-08-25T00:00:00.000Z",
+                Some(0),
+            )
+            .unwrap()
+        };
+        let mut export: Value = serde_json::from_slice(GOLDEN).unwrap();
+        let empty = json!({
+            "path": "src/empty.py",
+            "statements": [1],
+            "executedLines": [],
+            "missingLines": [1],
+            "excludedLines": [],
+            "executedBranches": [],
+            "missingBranches": [],
+            "sourceLines": [{"line": 1, "source": "x = 1"}],
+        });
+        export["files"].as_array_mut().unwrap().push(empty.clone());
+        export["contexts"].as_array_mut().unwrap().push(json!({
+            "kind": "background",
+            "workerId": "main",
+            "files": [{"path": "src/empty.py", "lines": [], "arcs": []}],
+        }));
+        let imported = import(&export);
+        let points = &imported.request.manifest.points;
+        assert_eq!(
+            points
+                .iter()
+                .filter(|point| point.file == "src/empty.py")
+                .count(),
+            1,
+            "{points:?}"
+        );
+        let branches = &imported.request.manifest.branches;
+        assert!(branches.iter().all(|branch| branch.file != "src/empty.py"));
+        export["files"] = json!([empty]);
+        export["contexts"] = json!([]);
+        export["outcomes"] = json!([]);
+        let alone = import(&export);
+        assert!(
+            alone
+                .request
+                .raw_results
+                .iter()
+                .all(|raw| raw.role != "test")
+        );
+        // A context that saw no file.
+        export["contexts"] = json!([{"kind": "background", "workerId": "main", "files": []}]);
+        let unseen = import(&export);
+        assert_eq!(unseen.request.manifest.points.len(), 1);
+        assert_ne!(stable_id("p", &[]), stable_id("q", &[]));
+    }
+
     /// The oracle importer refuses an export that breaks any one of its
     /// rules, each for that rule.
     #[test]
@@ -918,6 +992,11 @@ mod tests {
             }
         };
         assert_eq!(import(&|_| {}), "accepted");
+        // Bytes that are no JSON are refused before any rule.
+        assert!(matches!(
+            import_python_coverage_json(b"not json", "run", "now", Some(0)),
+            Err(PythonFrontendError::Json(_))
+        ));
         type Edit = Box<dyn Fn(&mut Value)>;
         let cases: Vec<(&str, Edit)> = vec![
             (
@@ -1555,7 +1634,7 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let archive = root.join("evidence.raw.gz");
-        write_archive(imported.archive_entries().unwrap(), &archive).unwrap();
+        write_archive(imported.archive_entries(), &archive).unwrap();
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,
             run_id: "python-tier-a-ctrace".into(),
@@ -1578,7 +1657,7 @@ mod tests {
         assert!(!report.view.summary.coverage_complete);
 
         let invalid_archive = root.join("invalid-evidence.raw.gz");
-        let mut invalid_entries = imported.archive_entries().unwrap();
+        let mut invalid_entries = imported.archive_entries();
         let model = invalid_entries
             .iter_mut()
             .find(|entry| entry.path == "coverage-model.json")
@@ -1627,5 +1706,48 @@ mod tests {
             ),
             Err(PythonFrontendError::InvalidContext(_))
         ));
+    }
+
+    #[test]
+    fn each_python_frontend_error_says_what_failed() {
+        use super::PythonFrontendError as E;
+        let messages = [
+            E::Json("eof".into()),
+            E::UnsupportedSchema(9),
+            E::InvalidProducer,
+            E::UnsupportedCollectorCore("pytracer".into()),
+            E::BranchMeasurementRequired,
+            E::InvalidRoot,
+            E::InvalidRunner,
+            E::InvalidPath("../a.py".into()),
+            E::DuplicateFile("a.py".into()),
+            E::InvalidFile("a.py".into()),
+            E::InvalidContext("empty".into()),
+            E::InvalidOutcome("odd".into()),
+            E::RunMismatch("other".into()),
+            E::UnattributedExecutedLine("a.py".into(), 3),
+            E::UnattributedExecutedBranch("a.py".into(), 3, -1),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "invalid Python coverage export: eof",
+                "unsupported Python coverage export schema: 9",
+                "Python coverage producer must be coverage.py",
+                "coverage.py collector core \"pytracer\" cannot claim exact contexts",
+                "coverage.py branch mode is required",
+                "Python coverage export root must be '.'",
+                "Python Tier-A import currently requires pytest",
+                "invalid Python source path: ../a.py",
+                "duplicate Python source file: a.py",
+                "inconsistent Python coverage facts: a.py",
+                "invalid Python coverage context: empty",
+                "invalid pytest outcome: odd",
+                "Python evidence belongs to run other",
+                "executed Python line has no context: a.py:3",
+                "executed Python branch has no context: a.py:3->-1",
+            ]
+        );
     }
 }

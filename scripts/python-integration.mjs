@@ -189,6 +189,17 @@ try {
     environment,
   );
   assertFixtureTotals(query(project, ['runs', 'latest'], environment), FIXTURE_TOTALS.core);
+  // A run that cannot be moved into the store is said, and none is published.
+  {
+    const unpublished = spawnSync(
+      binary,
+      ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests', '--ignore=tests/test_patterns.py'],
+      { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1125' }, encoding: 'utf8' },
+    );
+    assert.notEqual(unpublished.status, 0, unpublished.stderr);
+    assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1125/u, unpublished.stderr);
+    assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
+  }
   // A command that fails before any test runs keeps its own status:
   // pytest's 5 when nothing is selected, 4 for a path that is not there.
   for (const [extra, status] of [[['-k', 'no_such_test_name'], 5], [['tests/no_such_file.py'], 4]]) {

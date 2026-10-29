@@ -259,14 +259,18 @@ fn require_exact_identities(
         })
         .collect::<BTreeMap<_, _>>();
     for start in causes.keys() {
+        // Followed cause by cause until one has no cause, or one repeats.
         let mut visited = BTreeSet::new();
         let mut current = *start;
-        while let Some(next) = causes.get(current) {
+        loop {
             if !visited.insert(current) {
                 return Err(FrontendProtocolError::CyclicPhaseReference(
                     (*start).to_owned(),
                 ));
             }
+            let Some(next) = causes.get(current) else {
+                break;
+            };
             current = next;
         }
     }
@@ -292,6 +296,11 @@ pub fn validate_frontend_report_request(
     declaration: &FrontendRunDeclaration,
     request: &CoverageReportRequest,
 ) -> Result<(), FrontendProtocolError> {
+    // A report Supercov built breaks a rule only through a defect of its
+    // own; the site lets a test take each caller's way out.
+    if crate::fault::injected("report-request") {
+        return Err(FrontendProtocolError::InvalidManifestLimitation);
+    }
     validate_frontend_run_declaration(declaration)?;
     let manifest = manifest_limitation_ids(request)?;
     let declared = declaration
@@ -323,14 +332,15 @@ pub fn validate_frontend_report_request(
     }
     // A run in which no test ran -- a filter that matched none -- names the
     // runner it asked, and nothing was observed of it or of any other.
-    for runner in runners.keys() {
-        if !observed.contains(runner) && !request.raw_results.is_empty() {
-            return Err(FrontendProtocolError::UnobservedRunner(
-                (*runner).to_owned(),
-            ));
-        }
+    match runners
+        .keys()
+        .find(|runner| !observed.contains(*runner) && !request.raw_results.is_empty())
+    {
+        Some(runner) => Err(FrontendProtocolError::UnobservedRunner(
+            (*runner).to_owned(),
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 pub fn analyze_frontend_results(
@@ -520,6 +530,21 @@ mod tests {
             validate_frontend_report_request(&declaration(), &cyclic_phase),
             Err(FrontendProtocolError::CyclicPhaseReference(id)) if id == "assertion"
         ));
+        // A manifest limitation with no id; a declaration of another
+        // protocol; and either one refused before any analysis.
+        let mut unnamed = request();
+        unnamed.manifest.limitations.push(serde_json::json!({}));
+        assert!(matches!(
+            validate_frontend_report_request(&declaration(), &unnamed),
+            Err(FrontendProtocolError::InvalidManifestLimitation)
+        ));
+        let mut other_protocol = declaration();
+        other_protocol.protocol_version += 1;
+        assert!(matches!(
+            validate_frontend_report_request(&other_protocol, &request()),
+            Err(FrontendProtocolError::Declaration(_))
+        ));
+        assert!(analyze_frontend_results(&other_protocol, &request()).is_err());
     }
 
     #[test]
@@ -712,6 +737,24 @@ mod tests {
                 "UnknownPhaseReference",
                 Box::new(|_, r| r.raw_results[0].runtime[0].phase_id = Some(" ".into())),
             ),
+            // An event, or a server's record, naming a phase there is not.
+            (
+                "UnknownPhaseReference",
+                Box::new(|_, r| {
+                    r.raw_results[0].runtime[0].events[0].phase_id = Some("missing".into())
+                }),
+            ),
+            (
+                "UnknownPhaseReference",
+                Box::new(|_, r| {
+                    r.raw_results[0].server.push(
+                        serde_json::from_value(
+                            serde_json::json!({"type": "hit", "id": "s1", "phaseId": "missing"}),
+                        )
+                        .unwrap(),
+                    )
+                }),
+            ),
             // An event alone is an observation an unstarted test cannot have.
             (
                 "InvalidUnstartedResult",
@@ -744,5 +787,63 @@ mod tests {
             let said = check(edit);
             assert!(said.starts_with(expected), "{expected}: {said}");
         }
+    }
+
+    #[test]
+    fn each_protocol_error_says_what_failed() {
+        use super::FrontendProtocolError as E;
+        let messages = [
+            E::from(supercov_contracts::FrontendDeclarationError::NoRunners),
+            E::InvalidManifestLimitation,
+            E::DuplicateManifestLimitation("l".into()),
+            E::StructuralLimitationMismatch {
+                declared: vec!["a".into()],
+                manifest: vec![],
+            },
+            E::UndeclaredRunner("jest".into()),
+            E::UnobservedRunner("jest".into()),
+            E::MissingExactIdentity {
+                runner: "jest".into(),
+                axis: "test",
+            },
+            E::ScopeRunMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            E::RetryMismatch {
+                runner: "jest".into(),
+                result: 1,
+                scope: 2,
+            },
+            E::InvalidUnstartedResult("time".into()),
+            E::InvalidPhaseKind("odd".into()),
+            E::DuplicatePhase("p".into()),
+            E::UnknownPhaseReference("p".into()),
+            E::CyclicPhaseReference("p".into()),
+            E::Analysis(crate::coverage_report::ReportError::InvalidArchive(
+                "x".into(),
+            )),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "frontend declaration has no runners",
+                "frontend manifest contains a limitation without an ID",
+                "duplicate frontend manifest limitation: l",
+                "frontend structural limitation references differ: declared=[\"a\"] manifest=[]",
+                "frontend evidence uses undeclared runner: jest",
+                "frontend declares an unobserved runner: jest",
+                "frontend runner jest is missing exact test identity",
+                "frontend evidence run identity differs: expected=a actual=b",
+                "frontend runner jest retry identity differs: result=1 scope=2",
+                "invalid selected-but-unstarted test record: time",
+                "unsupported frontend phase kind: odd",
+                "duplicate frontend phase ID: p",
+                "unknown frontend phase reference: p",
+                "cyclic frontend phase causality at: p",
+                "InvalidArchive(\"x\")",
+            ]
+        );
     }
 }

@@ -20,10 +20,10 @@
 //! notices and says so — but the better outcome is that it never happens, and
 //! Supercov owns the workspace, so it can simply make sure of it.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,
@@ -303,6 +303,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
+#[track_caller]
 fn write(path: &Path, contents: &str) -> Result<(), String> {
     // Every path written is a name joined onto a directory.
     let parent = path.parent().unwrap_or(path);
@@ -489,8 +490,8 @@ fn platform_of_jupiter(text: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
         .collect::<String>();
-    let mut parts = version.splitn(3, '.');
-    let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
+    let (major, rest) = version.split_once('.')?;
+    let (minor, patch) = rest.split_once('.')?;
     if minor.is_empty() || patch.is_empty() || !minor.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -510,6 +511,11 @@ fn platform_of_jupiter(text: &str) -> Option<String> {
 /// pom looks unversioned, and the launcher added for it disagreed with the
 /// engine the build actually resolved: JUnit refused to discover a single test.
 fn maven_effective(directory: &Path, pom: &str) -> String {
+    maven_effective_in(directory, pom, local_repository().as_deref())
+}
+
+/// [`maven_effective`], reading parents missing on disk from `repository`.
+fn maven_effective_in(directory: &Path, pom: &str, repository: Option<&Path>) -> String {
     let mut chain = vec![pom.to_owned()];
     let mut here = directory.to_path_buf();
     let mut current = pom.to_owned();
@@ -530,16 +536,16 @@ fn maven_effective(directory: &Path, pom: &str) -> String {
         let local = fs::read_to_string(&on_disk)
             .ok()
             .filter(|text| xml_block(text, "artifactId").is_some_and(|a| a.trim() == artifact));
-        let (text, next) = match local {
-            Some(text) => (text, on_disk.parent().map(Path::to_path_buf)),
-            None => match local_repository().map(|repo| {
+        let (text, found) = match local {
+            Some(text) => (text, on_disk),
+            None => match repository.map(|repo| {
                 repo.join(group.replace('.', "/"))
                     .join(&artifact)
                     .join(&version)
                     .join(format!("{artifact}-{version}.pom"))
             }) {
                 Some(path) => match fs::read_to_string(&path) {
-                    Ok(text) => (text, path.parent().map(Path::to_path_buf)),
+                    Ok(text) => (text, path),
                     Err(_) => break,
                 },
                 None => break,
@@ -547,26 +553,23 @@ fn maven_effective(directory: &Path, pom: &str) -> String {
         };
         chain.push(text.clone());
         current = text;
-        match next {
-            Some(next) => here = next,
-            None => break,
-        }
+        // A file's directory: the parent's own `relativePath` is from there.
+        here = found.parent().unwrap_or(&here).to_path_buf();
     }
     let mut properties = BTreeMap::new();
-    for text in &chain {
+    // The pom and each parent read, the nearest first.
+    chain.iter().for_each(|text| {
         if let Some(block) = xml_block(text, "properties") {
             for (name, value) in xml_children(&block) {
                 properties.entry(name).or_insert(value);
             }
         }
-        for (name, value) in [("project.version", xml_block(text, "version"))] {
-            if let Some(value) = value {
-                properties
-                    .entry(name.to_owned())
-                    .or_insert(value.trim().to_owned());
-            }
+        if let Some(value) = xml_block(text, "version") {
+            properties
+                .entry("project.version".to_owned())
+                .or_insert(value.trim().to_owned());
         }
-    }
+    });
     let mut out = chain.join("\n");
     for _ in 0..3 {
         for (name, value) in &properties {
@@ -610,8 +613,12 @@ fn xml_children(block: &str) -> Vec<(String, String)> {
 /// Maven's local repository: `settings.xml`'s `localRepository`, else
 /// `~/.m2/repository`.
 fn local_repository() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let m2 = PathBuf::from(home).join(".m2");
+    local_repository_of(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")))
+}
+
+/// [`local_repository`] for the home directory `home`; none without one.
+fn local_repository_of(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let m2 = PathBuf::from(home?).join(".m2");
     let configured = fs::read_to_string(m2.join("settings.xml"))
         .ok()
         .and_then(|text| xml_block(&text, "localRepository"))
@@ -1161,12 +1168,12 @@ fn instrument_workspace(
             .iter()
             .find_map(|name| fs::read_to_string(workspace.join(name)).ok())
             .unwrap_or_default();
-        for name in names {
-            if let Ok(own) = fs::read_to_string(workspace.join(directory).join(name)) {
-                text.push('\n');
-                text.push_str(&own);
-                break;
-            }
+        let own = names
+            .iter()
+            .find_map(|name| fs::read_to_string(workspace.join(directory).join(name)).ok());
+        if let Some(own) = own {
+            text.push('\n');
+            text.push_str(&own);
         }
         frameworks(&with_catalog(&text, &catalog))
     };
@@ -1190,11 +1197,12 @@ fn instrument_workspace(
     // nothing at all.
     // `prepare_jvm_project` refuses a project with neither, so there is at
     // least one module.
-    for module in modules.keys().cloned().collect::<Vec<_>>() {
+    let listed = modules.keys().cloned().collect::<Vec<_>>();
+    listed.into_iter().for_each(|module| {
         if workspace.join(&module).join("src/test").is_dir() {
             modules.insert(module, true);
         }
-    }
+    });
 
     let modules = modules
         .into_iter()
@@ -1210,68 +1218,72 @@ fn instrument_workspace(
         })
         .collect::<Vec<_>>();
 
-    for module in &modules {
-        let frameworks = frameworks_of(&module.directory);
-        let at = |source_set: &str| {
-            workspace
-                .join(&module.directory)
-                .join(source_root(source_set))
-                .join(PACKAGE_DIRECTORY)
-        };
-        // The runtime goes in every module's main source set: instrumented
-        // product code stores into its array, and a module compiles only its
-        // own sources. The class is identical everywhere, and each module's
-        // tests fork a JVM that loads exactly one of them.
-        write(
-            &at("main").join("Supercov.java"),
-            &runtime_source(probe_count),
-        )?;
-        if !module.has_tests {
-            continue;
-        }
-        if frameworks.junit4 && build == JvmBuild::Plain {
-            // Maven's and Gradle's copies get Vintage added below; a plain
-            // tree has no build to add it to, so the module keeps its probes
-            // and gets no listener, because attributing it is impossible and
-            // trying would break it.
-            unmeasurable.push(module.directory.clone());
-            continue;
-        }
-        // A test source set with a module-info.java is a named JPMS module,
-        // and a named module is closed: every package it holds is its own and
-        // every dependency has to be declared in that file. A listener written
-        // into it imports org.junit.platform, which the module does not
-        // require, and reads the runtime from a package its main module does
-        // not export -- so the module stops compiling and takes the build with
-        // it. gson's test-jpms is exactly this, and it tests module boundaries
-        // rather than product logic, so leaving it alone costs the report
-        // nothing it could have had.
-        if workspace
-            .join(&module.directory)
-            .join(source_root("test"))
-            .join("module-info.java")
-            .exists()
-        {
-            modular.push(module.directory.clone());
-            continue;
-        }
-        // The listeners and their configuration go in the test source set,
-        // because only the test classpath has the frameworks to listen to.
-        let test = at("test");
-        write(
-            &test.join("SupercovConfig.java"),
-            &configuration(probe_count, &project.decision_widths, &module.evidence),
-        )?;
-        if frameworks.platform || frameworks.junit4 {
-            write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
-        }
-        if frameworks.testng {
+    // There is at least one module.
+    modules
+        .iter()
+        .try_for_each(|module| -> Result<(), String> {
+            let frameworks = frameworks_of(&module.directory);
+            let at = |source_set: &str| {
+                workspace
+                    .join(&module.directory)
+                    .join(source_root(source_set))
+                    .join(PACKAGE_DIRECTORY)
+            };
+            // The runtime goes in every module's main source set: instrumented
+            // product code stores into its array, and a module compiles only its
+            // own sources. The class is identical everywhere, and each module's
+            // tests fork a JVM that loads exactly one of them.
             write(
-                &test.join("SupercovTestNGListener.java"),
-                TESTNG_LISTENER_SOURCE,
+                &at("main").join("Supercov.java"),
+                &runtime_source(probe_count),
             )?;
-        }
-    }
+            if !module.has_tests {
+                return Ok(());
+            }
+            if frameworks.junit4 && build == JvmBuild::Plain {
+                // Maven's and Gradle's copies get Vintage added below; a plain
+                // tree has no build to add it to, so the module keeps its probes
+                // and gets no listener, because attributing it is impossible and
+                // trying would break it.
+                unmeasurable.push(module.directory.clone());
+                return Ok(());
+            }
+            // A test source set with a module-info.java is a named JPMS module,
+            // and a named module is closed: every package it holds is its own and
+            // every dependency has to be declared in that file. A listener written
+            // into it imports org.junit.platform, which the module does not
+            // require, and reads the runtime from a package its main module does
+            // not export -- so the module stops compiling and takes the build with
+            // it. gson's test-jpms is exactly this, and it tests module boundaries
+            // rather than product logic, so leaving it alone costs the report
+            // nothing it could have had.
+            if workspace
+                .join(&module.directory)
+                .join(source_root("test"))
+                .join("module-info.java")
+                .exists()
+            {
+                modular.push(module.directory.clone());
+                return Ok(());
+            }
+            // The listeners and their configuration go in the test source set,
+            // because only the test classpath has the frameworks to listen to.
+            let test = at("test");
+            write(
+                &test.join("SupercovConfig.java"),
+                &configuration(probe_count, &project.decision_widths, &module.evidence),
+            )?;
+            if frameworks.platform || frameworks.junit4 {
+                write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
+            }
+            if frameworks.testng {
+                write(
+                    &test.join("SupercovTestNGListener.java"),
+                    TESTNG_LISTENER_SOURCE,
+                )?;
+            }
+            Ok(())
+        })?;
 
     // A project's warning policy applies to code it wrote. The copy holds code
     // it did not.
@@ -1528,12 +1540,11 @@ pub fn run_direct_jvm(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let adapter_started = Instant::now();
@@ -1574,7 +1585,7 @@ pub fn run_direct_jvm(
         )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] detected {}; instrumenting {} source file(s) in isolated workspace {}",
             match instrumented.build {
@@ -1584,17 +1595,15 @@ pub fn run_direct_jvm(
             },
             instrumented.project.instrumented.len(),
             workspace.display()
-        )
-        .map_err(|error| error.to_string())?;
+        );
         if let Some(build_file) = instrumented.added_launcher {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added a test-scoped {LAUNCHER_ARTIFACT} to the workspace's {build_file}: per-test attribution comes from a JUnit Platform listener, and the API it implements is on the test runtime classpath but not the compile one. Your own {build_file} is untouched."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.serialised.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] turned JUnit's parallel execution off in the workspace copy ({}): attribution is a sweep of one shared probe array at each test boundary, so two tests running at once cannot both be credited with what they reached. Your suite runs in order here and your own configuration is untouched.",
                 // A module is the directory `module_of` names: `.` for the
@@ -1605,11 +1614,10 @@ pub fn run_direct_jvm(
                     .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.concurrent.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] JUnit runs this suite's tests at once ({}), so what they reach while they overlap is recorded against the run rather than against a test. `--exact-attribution` credits each of them instead, by running the suite in order.",
                 instrumented
@@ -1618,48 +1626,42 @@ pub fn run_direct_jvm(
                     .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.relaxed.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] in the workspace copy only: {}. The copy holds instrumented code your project never wrote a policy for, and a rule about the shape of a method is one no instrumentation can satisfy. Warnings are still reported, your build file is untouched, and your own build still runs every check in full.",
                 instrumented.relaxed.join("; ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if instrumented.added_vintage {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added junit-vintage-engine to the workspace copy: JUnit 4 is not a JUnit Platform engine, and Vintage is the platform's own way of running exactly these tests through the lifecycle Supercov listens to. Your own build still runs JUnit 4 as it did."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.modular.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} module(s) declare their tests as a Java module and are not attributed: {}. A named module names every package it holds and every dependency it may use, in its own module-info.java, so a listener added to it would not compile -- and neither would the module. Supercov leaves those tests to run exactly as they did.",
                 instrumented.modular.len(),
                 instrumented.modular.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if !instrumented.unmeasurable.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} module(s) run JUnit 4, which is not a JUnit Platform engine, so they are not attributed: {}. Supercov listens through the platform's own lifecycle, and putting the platform on a JUnit 4 classpath makes the build choose a provider that finds no engine -- so it leaves those modules alone rather than break them. Adding junit-vintage-engine runs the same tests on the platform, and Supercov measures them.",
                 instrumented.unmeasurable.len(),
                 instrumented.unmeasurable.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         for (file, reason) in &instrumented.project.unparseable {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let (mut command, note) = command_with_fresh_results(instrumented.build, &request.command);
@@ -1676,49 +1678,36 @@ pub fn run_direct_jvm(
                 RatSkip::Argument => command.push("-Drat.skip=true".into()),
                 RatSkip::MavenOpts(opts) => maven_opts = Some(opts),
             }
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] added -Drat.skip=true: Apache RAT checks every file in the build for a license header, and the workspace copy holds Supercov's own runtime and listeners, which carry none. Your own build still runs the check."
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if let Some(note) = note {
-            writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "[supercov] {note}");
         }
         let test_started = Instant::now();
-        let replaced = maven_opts.is_some();
-        let plan =
-            ExecutionPlan {
-                preparation: Vec::new(),
-                test: ExecutionPhase {
-                    name: "test".into(),
-                    kind: PhaseKind::Test,
-                    command: CommandSpec {
-                        program: command[0].clone().into(),
-                        arguments: command[1..].iter().map(OsString::from).collect(),
-                        cwd: workspace.clone(),
-                        // The run's id, for a test that wants to know it is
-                        // measured; and Maven's options where Supercov added any.
-                        environment: Some(
-                            std::env::vars_os()
-                                .filter(|(name, _)| {
-                                    name != crate::rust_runtime::RUN_ID_ENV
-                                        && (!replaced || name != "MAVEN_OPTS")
-                                })
-                                .chain(maven_opts.map(|opts| {
-                                    (OsString::from("MAVEN_OPTS"), OsString::from(opts))
-                                }))
-                                .chain([(
-                                    OsString::from(crate::rust_runtime::RUN_ID_ENV),
-                                    OsString::from(&request.run_id),
-                                )])
-                                .collect(),
-                        ),
-                        captured_output: None,
-                        console: Some(crate::workspace::console_names(&root, &workspace)),
-                    },
+        let plan = ExecutionPlan {
+            preparation: Vec::new(),
+            test: ExecutionPhase {
+                name: "test".into(),
+                kind: PhaseKind::Test,
+                command: CommandSpec {
+                    program: command[0].clone().into(),
+                    arguments: command[1..].iter().map(OsString::from).collect(),
+                    cwd: workspace.clone(),
+                    // The run's id, for a test that wants to know it is
+                    // measured; and Maven's options where Supercov added any.
+                    environment: Some(crate::rust_runtime::measured_environment(
+                        std::env::vars_os(),
+                        maven_opts.map(|value| ("MAVEN_OPTS", value)),
+                        &request.run_id,
+                    )),
+                    captured_output: None,
+                    console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
-            };
+            },
+        };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
         // What is in the copy now is Supercov's; what the command adds to
         // it or changes is the command's, and belongs in the project.
@@ -1753,7 +1742,7 @@ pub fn run_direct_jvm(
             .into_iter()
             .filter(|line| !line.contains("stayed in the isolated workspace"))
         {
-            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "{line}");
         }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
@@ -1796,18 +1785,17 @@ pub fn run_direct_jvm(
                 }
                 continue;
             }
-            let mut forked = Vec::new();
-            for path in &written {
-                let bytes =
-                    fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-                forked.push(
-                    read_evidence(&bytes)
-                        .map_err(|error| format!("{}: {error}", path.display()))?,
-                );
-            }
+            let forked = written
+                .iter()
+                .map(|path| {
+                    let bytes =
+                        fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+                    read_evidence(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let evidence = merge_evidence(forked);
-            for test in &evidence.tests {
-                outcomes.push(OwnedTestOutcome {
+            outcomes.extend(evidence.tests.iter().map(|test| {
+                OwnedTestOutcome {
                     name: test.name.clone(),
                     runner: test.runner.clone(),
                     // The module is the unit that forked a JVM of its own, so
@@ -1823,18 +1811,17 @@ pub fn run_direct_jvm(
                     // per record, and a test that overlapped is credited with
                     // nothing rather than with a neighbour's work.
                     attributed: !test.unattributed,
-                });
-            }
+                }
+            }));
             parts.push(evidence);
         }
         if !silent.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} module(s) wrote no evidence and are absent from this run: {}",
                 silent.len(),
                 silent.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         if outcomes.is_empty() {
             return Err(format!(
@@ -1854,16 +1841,12 @@ pub fn run_direct_jvm(
             generated_at: &request.started_at,
             test_exit_code: exit_code,
             coverage_model: jvm_coverage_model(),
-        })
-        .map_err(|error| error.to_string())?;
+        });
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                &source_inputs,
-            )?,
+            crate::source_capture::append(run.archive_entries(), &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
@@ -1992,6 +1975,12 @@ impl JvmServer {
         ) else {
             return Ok(None);
         };
+        if roots
+            .as_ref()
+            .is_some_and(|roots| !files.sources.iter().any(|(file, _)| roots.contains(file)))
+        {
+            return Ok(None);
+        }
         let source_roots = crate::source_discovery::configured_source_roots(&ambient);
         let mut integrity_inputs = jvm_integrity_inputs(&files, command);
         crate::source_discovery::fold_roots_into_configuration(
@@ -2010,9 +1999,12 @@ impl JvmServer {
         if project.instrumented.is_empty() {
             return Ok(None);
         }
-        for (relative, instrumented) in &project.instrumented {
-            write(&workspace.join(relative), instrumented)?;
-        }
+        project
+            .instrumented
+            .iter()
+            .try_for_each(|(relative, instrumented)| {
+                write(&workspace.join(relative), instrumented)
+            })?;
         let probe_count = project
             .probes
             .keys()
@@ -2025,7 +2017,8 @@ impl JvmServer {
             .iter()
             .map(|(relative, _)| module_of(relative))
             .collect::<BTreeSet<_>>();
-        for module in &modules {
+        // A source instrumented above is in a module.
+        modules.iter().try_for_each(|module| {
             write(
                 &workspace
                     .join(module)
@@ -2033,8 +2026,8 @@ impl JvmServer {
                     .join(PACKAGE_DIRECTORY)
                     .join("Supercov.java"),
                 &runtime,
-            )?;
-        }
+            )
+        })?;
         let directory = root.join(".supercov/work").join(run_id).join("jvm");
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         Ok(Some(Self {
@@ -2336,6 +2329,18 @@ mod tests {
             updated.contains("junit-platform-launcher:1.11.3"),
             "{updated}"
         );
+        // Under the BOM, the launcher takes the version the BOM gives it.
+        let bom = gradle_with_launcher(
+            "dependencies { testImplementation(platform('org.junit:junit-bom:5.11.3')) }\n",
+            false,
+            "",
+            &[],
+        )
+        .unwrap();
+        assert!(
+            bom.contains("'org.junit.platform:junit-platform-launcher'"),
+            "{bom}"
+        );
 
         // A parent on disk that imports the BOM, and one that sets a property.
         let root = std::env::temp_dir().join(format!(
@@ -2549,6 +2554,10 @@ mod tests {
             None
         );
         assert_eq!(named_modules(JvmBuild::Maven, &words("mvn test")), None);
+        // A build tool alone runs everything; a module list it was not given
+        // names none.
+        assert_eq!(named_modules(JvmBuild::Gradle, &words("gradle")), None);
+        assert_eq!(named_modules(JvmBuild::Maven, &words("mvn -pl")), None);
         assert_eq!(
             named_modules(JvmBuild::Maven, &words("mvn --projects ./core test")),
             Some(BTreeSet::from(["core".to_owned()]))
@@ -2612,6 +2621,8 @@ mod tests {
             Some("1.10.0-M1")
         );
         assert_eq!(platform_of_jupiter("6.0.1").as_deref(), Some("6.0.1"));
+        assert_eq!(platform_of_jupiter("5"), None);
+        assert_eq!(platform_of_jupiter("5.1"), None);
         for unknown in [
             "${junit.version}",
             "5.10",
@@ -2987,10 +2998,28 @@ mod tests {
         )
         .unwrap();
         assert!(version_catalog(&root).is_empty());
+        // Entries naming no module, and catalogs empty or broken, resolve
+        // nothing; a bundle that is no list is no bundle.
+        for catalog in [
+            "[libraries]\nversioned = { version = \"1\" }\nhalf = { group = \"g\" }\nnumber = 1\n[bundles]\nnot-a-list = \"x\"\n",
+            "[libraries]\n[bundles]\n",
+            "[libraries",
+        ] {
+            write(&root.join("gradle/libs.versions.toml"), catalog).unwrap();
+            assert!(version_catalog(&root).is_empty(), "{catalog}");
+        }
         fs::remove_dir_all(&root).ok();
+        assert_eq!(java_literal("a\"b\\c\nd\re"), "\"a\\\"b\\\\c\\nd\\re\"");
+        assert_eq!(java_literal(""), "\"\"");
         // A self-closing section holds no `<dependencies>` of its own.
         let pom = "<project><build/><dependencies></dependencies></project>";
         assert_eq!(project_dependencies_end(pom), pom.find("</dependencies>"));
+        // Nothing, or a tag never closed, holds no dependencies.
+        assert_eq!(project_dependencies_end(""), None);
+        assert_eq!(project_dependencies_end("<project"), None);
+        // An analyser argument never closed is left as written.
+        let open = "<arg>-Xplugin:ErrorProne";
+        assert_eq!(without_error_prone(open), open);
         // A file whose name merely ends in the class's does not declare it.
         let only = BTreeMap::from([("Baz".to_owned(), "src/MyBar.java".to_owned())]);
         assert_eq!(declaring_file(&only, "Bar"), None);
@@ -3024,6 +3053,88 @@ mod tests {
             maven_launcher_version(&module, child).as_deref(),
             Some(DEFAULT_LAUNCHER_VERSION)
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Maven's local repository: the one `settings.xml` names, else the
+    /// one beside it; none without a home directory.
+    #[test]
+    fn the_local_repository_is_the_one_settings_name_else_beside_them() {
+        let home = std::env::temp_dir().join(format!(
+            "supercov-m2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(home.join(".m2")).unwrap();
+        let home = crate::test_directory::TestDirectory::adopt(home);
+        assert_eq!(local_repository_of(None), None);
+        assert_eq!(
+            local_repository_of(Some(home.as_os_str().to_owned())),
+            Some(home.join(".m2/repository"))
+        );
+        std::fs::write(
+            home.join(".m2/settings.xml"),
+            "<settings><localRepository> /srv/maven </localRepository></settings>",
+        )
+        .unwrap();
+        assert_eq!(
+            local_repository_of(Some(home.as_os_str().to_owned())),
+            Some(PathBuf::from("/srv/maven"))
+        );
+    }
+
+    /// A parent missing on disk is read from the local repository, its
+    /// properties filling the child's; a repository that lacks it, no
+    /// repository at all, or a parent naming no version, ends the chain.
+    #[test]
+    fn a_parent_missing_on_disk_is_read_from_the_local_repository() {
+        let root = temporary_root("parent-repository");
+        let repository = root.join("repository");
+        write(
+            &repository.join("org/example/base/1/base-1.pom"),
+            "<project><artifactId>base</artifactId><version>1</version><properties><junit.version>5.11.0</junit.version><empty></empty></properties></project>",
+        )
+        .unwrap();
+        let child = "<project><parent><groupId>org.example</groupId><artifactId>base</artifactId><version>1</version></parent><dependency>${junit.version}</dependency></project>";
+        let effective = maven_effective_in(&root, child, Some(&repository));
+        assert!(
+            effective.contains("<dependency>5.11.0</dependency>"),
+            "{effective}"
+        );
+        let other = child.replace("<version>1</version>", "<version>2</version>");
+        // A pom whose properties block is empty names nothing to fill.
+        let bare =
+            "<project><properties></properties><dependency>${junit.version}</dependency></project>";
+        assert!(maven_effective_in(&root, bare, None).contains("${junit.version}"));
+        for read in [
+            maven_effective_in(&root, &other, Some(&repository)),
+            maven_effective_in(&root, child, None),
+            maven_effective_in(
+                &root,
+                &child.replace("<version>1</version>", ""),
+                Some(&repository),
+            ),
+        ] {
+            assert!(read.contains("${junit.version}"), "{read}");
+        }
+        assert_eq!(xml_block("<a>open", "a"), None);
+        assert!(xml_children("").is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A tree with no test source set gets no listener anywhere, and still
+    /// has its sources instrumented.
+    #[test]
+    fn a_tree_without_tests_gets_no_listener() {
+        let root = temporary_root("no-tests");
+        java_module(&root, "docs", false);
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        assert!(instrumented.modules.iter().all(|module| !module.has_tests));
+        assert!(!root.join("docs/src/test").exists());
         fs::remove_dir_all(&root).ok();
     }
 
@@ -3094,6 +3205,64 @@ mod tests {
             instrumented.declared_in.keys().collect::<Vec<_>>(),
             ["ApiTest", "module-info"]
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Each file the copy gains or has changed -- a build that no longer
+    /// fails on warnings, a TestNG listener and its service entry, the
+    /// launcher, a module's sequential properties -- that cannot be written
+    /// stops the instrumentation.
+    #[test]
+    fn each_file_the_instrumentation_writes_that_fails_stops_it() {
+        let make = || {
+            let root = temporary_root("gradle-writes");
+            write(
+                &root.join("build.gradle"),
+                "plugins { id 'java' }\noptions.compilerArgs << '-Werror'\n",
+            )
+            .unwrap();
+            let junit4 = "dependencies { testImplementation 'junit:junit:4.13.2' }\n";
+            java_module(&root, "both", true);
+            write(
+                &root.join("both/build.gradle"),
+                &format!(
+                    "{junit4}dependencies {{ testImplementation 'org.testng:testng:7.10.2' }}\n"
+                ),
+            )
+            .unwrap();
+            java_module(&root, "plain", true);
+            write(&root.join("plain/build.gradle"), junit4).unwrap();
+            root
+        };
+        let root = make();
+        instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        fs::remove_dir_all(&root).ok();
+        for line in [1280, 1300, 1389, 1425, 1436] {
+            let root = make();
+            let fault = format!("fs.write#jvm_run.rs:{line}");
+            let failed = crate::fault::during(&fault, || {
+                instrument_workspace(&root, &root.join("evidence"), true, None)
+            });
+            assert!(failed.is_err(), "{fault}");
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// A build of tests alone has no source to rewrite, and its tests are
+    /// still listened to.
+    #[test]
+    fn a_build_of_tests_alone_rewrites_no_source() {
+        let root = temporary_root("tests-only");
+        write(&root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        write(
+            &root.join("app/src/test/java/app/ApiTest.java"),
+            "package app;\nclass ApiTest { void t() {} }\n",
+        )
+        .unwrap();
+        let instrumented =
+            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert!(instrumented.project.instrumented.is_empty());
+        assert!(instrumented.modules.iter().any(|module| module.has_tests));
         fs::remove_dir_all(&root).ok();
     }
 
@@ -3217,8 +3386,12 @@ mod tests {
         }
         java_module(&root, "core", false);
         java_module(&root, "app", true);
+        // A module of the tree with no build file of its own takes the
+        // root's frameworks and has nothing to add the launcher to.
+        java_module(&root, "loose", true);
         let instrumented =
             instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        assert!(!root.join("loose/pom.xml").exists());
         assert_eq!(instrumented.added_launcher, Some("pom.xml"));
         assert!(
             fs::read_to_string(root.join("app/pom.xml"))
@@ -3305,6 +3478,17 @@ mod tests {
         let diagnostics = String::from_utf8(diagnostics).unwrap();
         assert!(error.contains("wrote no coverage evidence"), "{error}");
         assert!(!diagnostics.contains("wrote no evidence"), "{diagnostics}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_tree_with_no_tests_wrote_no_evidence() {
+        let root = temporary_root("jvm-no-tests");
+        write(&root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        java_module(&root, ".", false);
+        let mut diagnostics = Vec::new();
+        let error = run_direct_jvm(&jvm_request(&root, &["true"]), &mut diagnostics).unwrap_err();
+        assert!(error.contains("wrote no coverage evidence"), "{error}");
         fs::remove_dir_all(&root).ok();
     }
 

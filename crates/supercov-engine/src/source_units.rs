@@ -226,10 +226,10 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     {
         return None;
     }
-    let source_type =
-        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
-    let allocator = oxc_allocator::Allocator::default();
     // `code` read the same source with the same parser: it parses cleanly.
+    let source_type = crate::js_instrumenter::project_source_type(std::path::Path::new(path))
+        .expect("`code` read this path as JavaScript");
+    let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     // Names a statement binds, where all it does is define functions.
     fn functions(declaration: &Declaration<'_>) -> Option<Vec<String>> {
@@ -237,7 +237,15 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
             Declaration::FunctionDeclaration(function)
                 if !function.declare && function.body.is_some() =>
             {
-                Some(vec![function.id.as_ref()?.name.to_string()])
+                // Only `export default` declares a function without a name.
+                Some(vec![
+                    function
+                        .id
+                        .as_ref()
+                        .expect("a statement names its function")
+                        .name
+                        .to_string(),
+                ])
             }
             Declaration::VariableDeclaration(variables) if !variables.declare => variables
                 .declarations
@@ -269,7 +277,8 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
         .collect::<BTreeSet<_>>();
     let mut names = BTreeSet::new();
     let mut cuts = Vec::new();
-    for statement in &parsed.program.body {
+    // A file that gained a function has a statement at least.
+    parsed.program.body.iter().for_each(|statement| {
         let bound = match statement {
             Statement::FunctionDeclaration(_) | Statement::VariableDeclaration(_) => {
                 statement.as_declaration().and_then(functions)
@@ -292,7 +301,7 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
             }
             _ => None,
         };
-        let Some(bound) = bound else { continue };
+        let Some(bound) = bound else { return };
         if bound.iter().all(|name| top.contains(name)) {
             names.extend(bound);
             cuts.push((
@@ -301,7 +310,7 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
                 String::new(),
             ));
         }
-    }
+    });
     // Every added unit is one of those functions or inside one.
     let inside = |index: usize| {
         after.ancestors(index).any(|unit| {
@@ -322,37 +331,39 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
         }
     }
     let mut remaining = Names(BTreeSet::new());
-    for statement in &parsed.program.body {
-        let span = statement.span();
-        if !cuts
-            .iter()
-            .any(|(start, _, _)| *start == span.start as usize)
-        {
-            remaining.visit_statement(statement);
-        }
-    }
+    parsed
+        .program
+        .body
+        .iter()
+        .filter(|statement| {
+            !cuts
+                .iter()
+                .any(|(start, _, _)| *start == statement.span().start as usize)
+        })
+        .for_each(|statement| remaining.visit_statement(statement));
     if names.iter().any(|name| remaining.0.contains(name)) {
         return None;
     }
     // Import names that only the additions use. A whole declaration goes
     // only where it brings in types or a package; a first-party module newly
     // imported runs its top level, which no earlier test did.
-    for statement in &parsed.program.body {
+    // A file that gained a function has a statement at least.
+    parsed.program.body.iter().try_for_each(|statement| {
         let Statement::ImportDeclaration(import) = statement else {
-            continue;
+            return Some(());
         };
         let Some(specifiers) = &import.specifiers else {
-            continue;
+            return Some(());
         };
         if specifiers.is_empty() {
-            continue;
+            return Some(());
         }
         let unused = specifiers
             .iter()
             .map(|specifier| !remaining.0.contains(specifier.local().name.as_str()))
             .collect::<Vec<_>>();
         if !unused.contains(&true) {
-            continue;
+            return Some(());
         }
         let span = (import.span.start as usize, import.span.end as usize);
         if unused.iter().all(|unused| *unused) {
@@ -360,7 +371,7 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
             let package = !module.starts_with('.') && !module.starts_with('/');
             if import.import_kind.is_type() || package {
                 cuts.push((span.0, span.1, String::new()));
-                continue;
+                return Some(());
             }
             return None;
         }
@@ -393,19 +404,10 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
                 &source[last.end as usize..span.1]
             ),
         ));
-    }
+        Some(())
+    })?;
     cuts.sort_by_key(|(start, _, _)| *start);
-    let mut earlier = String::with_capacity(source.len());
-    let mut cursor = 0;
-    // Each cut is a whole statement of the top level, so none overlaps the
-    // next.
-    for (start, end, replacement) in cuts {
-        earlier.push_str(&source[cursor..start]);
-        earlier.push_str(&replacement);
-        cursor = end;
-    }
-    earlier.push_str(&source[cursor..]);
-    let then = code(path, &earlier)?;
+    let then = code(path, &cut_out(source, cuts))?;
     let digests = |code: &Code| {
         code.units
             .iter()
@@ -441,7 +443,8 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
     {
         return None;
     }
-    let parsed = ruff_python_parser::parse_module(source).ok()?;
+    let parsed =
+        ruff_python_parser::parse_module(source).expect("`code` parsed this source as Python");
     let body = &parsed.syntax().body;
     let top = added
         .iter()
@@ -450,7 +453,8 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
         .collect::<BTreeSet<_>>();
     let mut names = BTreeSet::new();
     let mut cuts = Vec::new();
-    for statement in body {
+    // A file that gained a function has a statement at least.
+    body.iter().for_each(|statement| {
         if let Stmt::FunctionDef(function) = statement
             && function.decorator_list.is_empty()
             && top.contains(function.name.as_str())
@@ -462,7 +466,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
                 String::new(),
             ));
         }
-    }
+    });
     let inside = |index: usize| {
         after.ancestors(index).any(|unit| {
             after.units[unit].parent == Some(0) && names.contains(&after.units[unit].path)
@@ -489,13 +493,13 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
         cuts.iter()
             .any(|(start, _, _)| *start == statement.range().start().to_usize())
     };
-    for statement in body {
+    body.iter().for_each(|statement| {
         if cut(statement, &cuts) {
             used.visit_stmt(statement);
         } else {
             remaining.visit_stmt(statement);
         }
-    }
+    });
     // `__all__` lists names as strings.
     let exported = body
         .iter()
@@ -513,11 +517,11 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
     }
     // Import names only the additions use; one nothing uses was there
     // before or is a change.
-    for statement in body {
+    body.iter().try_for_each(|statement| {
         let (aliases, relative) = match statement {
             Stmt::Import(import) => (&import.names, false),
             Stmt::ImportFrom(import) => (&import.names, import.level > 0),
-            _ => continue,
+            _ => return Some(()),
         };
         let bound = |alias: &ruff_python_ast::Alias| {
             alias.asname.as_ref().map_or_else(
@@ -534,7 +538,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
             )
         };
         if aliases.iter().any(|alias| alias.name.as_str() == "*") {
-            continue;
+            return Some(());
         }
         let unused = aliases
             .iter()
@@ -544,7 +548,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
             })
             .collect::<Vec<_>>();
         if !unused.contains(&true) {
-            continue;
+            return Some(());
         }
         let range = statement.range();
         let span = (range.start().to_usize(), range.end().to_usize());
@@ -553,7 +557,7 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
                 return None;
             }
             cuts.push((span.0, span.1, String::new()));
-            continue;
+            return Some(());
         }
         // Some names stay: the statement as it read with only those.
         let first = aliases[0].range();
@@ -577,19 +581,10 @@ fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<Stri
                 &source[last.end().to_usize()..span.1]
             ),
         ));
-    }
+        Some(())
+    })?;
     cuts.sort_by_key(|(start, _, _)| *start);
-    let mut earlier = String::with_capacity(source.len());
-    let mut cursor = 0;
-    // Each cut is a whole statement of the top level, so none overlaps the
-    // next.
-    for (start, end, replacement) in cuts {
-        earlier.push_str(&source[cursor..start]);
-        earlier.push_str(&replacement);
-        cursor = end;
-    }
-    earlier.push_str(&source[cursor..]);
-    let then = code(path, &earlier)?;
+    let then = code(path, &cut_out(source, cuts))?;
     let digests = |code: &Code| {
         code.units
             .iter()
@@ -617,6 +612,21 @@ struct Outline {
 
 /// The parser's view of a file, or `None` when Supercov has no parser for it
 /// or the file does not parse. A file without a view is compared by its bytes.
+/// `source` with each cut's span replaced by its text. Each cut is a whole
+/// statement of the top level, in order, so none overlaps the next.
+fn cut_out(source: &str, cuts: Vec<(usize, usize, String)>) -> String {
+    let mut earlier = String::with_capacity(source.len());
+    let cursor = cuts
+        .into_iter()
+        .fold(0, |cursor, (start, end, replacement)| {
+            earlier.push_str(&source[cursor..start]);
+            earlier.push_str(&replacement);
+            end
+        });
+    earlier.push_str(&source[cursor..]);
+    earlier
+}
+
 pub fn code(path: &str, source: &str) -> Option<Code> {
     let extension = path.rsplit_once('.').map_or("", |(_, e)| e);
     let outline = match extension {
@@ -700,9 +710,7 @@ fn build(source: &str, outline: Outline) -> Code {
         }
         stripped.push_str(&source[cursor..start]);
         let base = stripped.len() - (start - cursor);
-        for (i, slot) in map[cursor..start].iter_mut().enumerate() {
-            *slot = base + i;
-        }
+        number_from(&mut map[cursor..start], base);
         let here = stripped.len();
         stripped.push_str(replacement);
         map[start..stop].fill(here);
@@ -710,9 +718,7 @@ fn build(source: &str, outline: Outline) -> Code {
     }
     stripped.push_str(&source[cursor..]);
     let base = stripped.len() - (source.len() - cursor);
-    for (i, slot) in map[cursor..=source.len()].iter_mut().enumerate() {
-        *slot = base + i;
-    }
+    number_from(&mut map[cursor..=source.len()], base);
     // Then blank lines and trailing whitespace, outside string literals.
     let mut strings = outline
         .strings
@@ -722,9 +728,8 @@ fn build(source: &str, outline: Outline) -> Code {
         .collect::<Vec<_>>();
     strings.sort_unstable();
     let (stripped, remap) = erase_blank(&stripped, &strings);
-    for slot in &mut map {
-        *slot = remap[*slot];
-    }
+    // One slot past the source's end at least.
+    map.iter_mut().for_each(|slot| *slot = remap[*slot]);
 
     let mut declarations = outline.declarations;
     declarations.retain(|d| d.start < d.end && d.end <= source.len());
@@ -798,40 +803,43 @@ fn build(source: &str, outline: Outline) -> Code {
         stack.push(index);
     }
 
-    let mut units = Vec::with_capacity(built.len());
-    for unit in &built {
-        let mut text = String::new();
-        let mut cursor = map[unit.start];
-        for child in unit.children.iter().map(|c| &built[*c]) {
-            let (start, end) = (map[child.start], map[child.end]);
-            if start < cursor {
-                continue;
+    // The file's own unit at least.
+    let units = built
+        .iter()
+        .map(|unit| {
+            let mut text = String::new();
+            let mut cursor = map[unit.start];
+            for child in unit.children.iter().map(|c| &built[*c]) {
+                let (start, end) = (map[child.start], map[child.end]);
+                if start < cursor {
+                    continue;
+                }
+                text.push_str(&stripped[cursor..start]);
+                // An inert declaration leaves no mark: adding a type alias next to
+                // a function does not change what the function's file does.
+                if child.inert {
+                    cursor = line_end_after(&stripped, end);
+                } else {
+                    text.push('\u{0}');
+                    cursor = end;
+                }
             }
-            text.push_str(&stripped[cursor..start]);
-            // An inert declaration leaves no mark: adding a type alias next to
-            // a function does not change what the function's file does.
-            if child.inert {
-                cursor = line_end_after(&stripped, end);
-            } else {
-                text.push('\u{0}');
-                cursor = end;
+            text.push_str(&stripped[cursor..map[unit.end]]);
+            let (line, column) = position(unit.start);
+            let (end_line, end_column) = position(unit.end);
+            Unit {
+                path: unit.path.clone(),
+                kind: unit.kind.to_owned(),
+                line,
+                column,
+                end_line,
+                end_column,
+                digest: short_digest(&text),
+                parent: unit.parent,
+                inert: unit.inert,
             }
-        }
-        text.push_str(&stripped[cursor..map[unit.end]]);
-        let (line, column) = position(unit.start);
-        let (end_line, end_column) = position(unit.end);
-        units.push(Unit {
-            path: unit.path.clone(),
-            kind: unit.kind.to_owned(),
-            line,
-            column,
-            end_line,
-            end_column,
-            digest: short_digest(&text),
-            parent: unit.parent,
-            inert: unit.inert,
-        });
-    }
+        })
+        .collect::<Vec<_>>();
 
     let mut semantic = String::with_capacity(stripped.len());
     let mut cursor = 0;
@@ -919,18 +927,14 @@ fn erase_blank(text: &str, strings: &[(usize, usize)]) -> (String, Vec<usize>) {
         let keep_until = if dropping { drop_start } else { next };
         out.push_str(&text[cursor..keep_until]);
         let base = out.len() - (keep_until - cursor);
-        for (i, slot) in map[cursor..keep_until].iter_mut().enumerate() {
-            *slot = base + i;
-        }
+        number_from(&mut map[cursor..keep_until], base);
         if dropping {
             map[drop_start..drop_end].fill(out.len());
             if drop_end < next {
                 // A trailing-whitespace drop keeps the newline.
                 out.push_str(&text[drop_end..next]);
                 let base = out.len() - (next - drop_end);
-                for (i, slot) in map[drop_end..next].iter_mut().enumerate() {
-                    *slot = base + i;
-                }
+                number_from(&mut map[drop_end..next], base);
             }
         }
         cursor = next;
@@ -941,6 +945,14 @@ fn erase_blank(text: &str, strings: &[(usize, usize)]) -> (String, Vec<usize>) {
     }
     map[text.len()] = out.len();
     (out, map)
+}
+
+/// Each slot numbered on from `base`, one apart.
+fn number_from(slots: &mut [usize], base: usize) {
+    slots
+        .iter_mut()
+        .zip(base..)
+        .for_each(|(slot, number)| *slot = number);
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
@@ -960,8 +972,9 @@ fn javascript(path: &str, source: &str) -> Option<Outline> {
     use oxc_ast_visit::{Visit, walk};
     use oxc_span::GetSpan;
 
-    let source_type =
-        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
+    // `code` sends only the extensions oxc reads.
+    let source_type = crate::js_instrumenter::project_source_type(std::path::Path::new(path))
+        .expect("a JavaScript or TypeScript extension");
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
@@ -1248,12 +1261,8 @@ fn python(source: &str) -> Option<Outline> {
         fn visit_stmt(&mut self, stmt: &'a Stmt) {
             match stmt {
                 Stmt::FunctionDef(def) => {
-                    let start = def
-                        .decorator_list
-                        .iter()
-                        .map(|d| d.range().start())
-                        .min()
-                        .map_or(def.range().start(), |s| s.min(def.range().start()));
+                    // Ruff's range starts at the first decorator.
+                    let start = def.range().start();
                     self.0.push(Item {
                         name: def.name.to_string(),
                         kind: "function",
@@ -1263,12 +1272,8 @@ fn python(source: &str) -> Option<Outline> {
                     });
                 }
                 Stmt::ClassDef(def) => {
-                    let start = def
-                        .decorator_list
-                        .iter()
-                        .map(|d| d.range().start())
-                        .min()
-                        .map_or(def.range().start(), |s| s.min(def.range().start()));
+                    // Ruff's range starts at the first decorator.
+                    let start = def.range().start();
                     self.0.push(Item {
                         name: def.name.to_string(),
                         kind: "class",
@@ -1318,7 +1323,8 @@ fn rust(source: &str) -> Option<Outline> {
         }
         block.clear();
     };
-    for element in root.syntax().descendants_with_tokens() {
+    // The root node at least.
+    root.syntax().descendants_with_tokens().for_each(|element| {
         match element {
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
                 let text = token.text();
@@ -1328,7 +1334,7 @@ fn rust(source: &str) -> Option<Outline> {
                     u32::from(range.end()) as usize,
                 );
                 if universally_significant(text) {
-                    continue;
+                    return;
                 }
                 let doc = ast::Comment::cast(token.clone()).is_some_and(|c| c.kind().doc.is_some());
                 if doc {
@@ -1419,7 +1425,7 @@ fn rust(source: &str) -> Option<Outline> {
                 declarations.extend(declaration);
             }
         }
-    }
+    });
     flush(&mut doc_block, &mut comments);
     Some(Outline {
         comments,
@@ -1479,11 +1485,11 @@ fn ruby(source: &str) -> Option<Outline> {
         /// A heredoc's node is its opener; its body sits lines below, so the
         /// literal spans from the first of its parts to the last.
         fn literal<'pr>(&mut self, parts: impl IntoIterator<Item = Option<Location<'pr>>>) {
-            let mut span: Option<(usize, usize)> = None;
-            for part in parts.into_iter().flatten() {
-                let (s, e) = (part.start_offset(), part.end_offset());
-                span = Some(span.map_or((s, e), |(a, b)| (a.min(s), b.max(e))));
-            }
+            let span = parts
+                .into_iter()
+                .flatten()
+                .map(|part| (part.start_offset(), part.end_offset()))
+                .reduce(|(a, b), (s, e)| (a.min(s), b.max(e)));
             self.strings.extend(span);
         }
         fn record(&mut self, name: String, kind: &'static str, location: ruby_prism::Location<'_>) {
@@ -1592,15 +1598,15 @@ fn ruby(source: &str) -> Option<Outline> {
 
 /// Every node of a tree-sitter tree, in source order.
 fn tree_nodes(tree: &tree_sitter::Tree) -> Vec<tree_sitter::Node<'_>> {
-    let mut out = Vec::new();
     let mut stack = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        out.push(node);
+    std::iter::from_fn(|| {
+        let node = stack.pop()?;
         let mut cursor = node.walk();
         let children = node.children(&mut cursor).collect::<Vec<_>>();
         stack.extend(children.into_iter().rev());
-    }
-    out
+        Some(node)
+    })
+    .collect()
 }
 
 fn field_text<'t>(node: tree_sitter::Node<'t>, field: &str, source: &str) -> Option<String> {
@@ -1629,7 +1635,8 @@ fn go(source: &str) -> Option<Outline> {
     let mut comments = Vec::new();
     let mut strings = Vec::new();
     let mut declarations = Vec::new();
-    for node in tree_nodes(&tree) {
+    // The root at least.
+    tree_nodes(&tree).into_iter().for_each(|node| {
         let text = &source[node.byte_range()];
         match node.kind() {
             "interpreted_string_literal" | "raw_string_literal" | "rune_literal" => {
@@ -1690,7 +1697,7 @@ fn go(source: &str) -> Option<Outline> {
             }),
             _ => {}
         }
-    }
+    });
     Some(Outline {
         comments,
         strings,
@@ -1701,14 +1708,7 @@ fn go(source: &str) -> Option<Outline> {
 
 /// `name(Type, Type)`: overloads are different declarations and are told
 /// apart by what they take, not by the order they appear in.
-fn with_parameters(
-    name: String,
-    parameters: Option<tree_sitter::Node<'_>>,
-    source: &str,
-) -> String {
-    let Some(parameters) = parameters else {
-        return name;
-    };
+fn with_parameters(name: String, parameters: tree_sitter::Node<'_>, source: &str) -> String {
     let mut cursor = parameters.walk();
     let types = parameters
         .named_children(&mut cursor)
@@ -1746,17 +1746,18 @@ fn java(source: &str) -> Option<Outline> {
     let mut comments = Vec::new();
     let mut strings = Vec::new();
     let mut declarations = Vec::new();
-    for node in tree_nodes(&tree) {
+    // The root at least.
+    tree_nodes(&tree).into_iter().for_each(|node| {
         let kind = match node.kind() {
             "string_literal" | "character_literal" => {
                 strings.push((node.start_byte(), node.end_byte()));
-                continue;
+                return;
             }
             "line_comment" | "block_comment" => {
                 if !universally_significant(&source[node.byte_range()]) {
                     comments.push((node.start_byte(), node.end_byte()));
                 }
-                continue;
+                return;
             }
             "class_declaration" => "class",
             "interface_declaration" => "interface",
@@ -1765,13 +1766,16 @@ fn java(source: &str) -> Option<Outline> {
             "annotation_type_declaration" => "annotation",
             "method_declaration" => "method",
             "constructor_declaration" => "constructor",
-            _ => continue,
+            _ => return,
         };
-        let Some(name) = field_text(node, "name", source) else {
-            continue;
-        };
+        // A declaration that parses names itself, and a method its
+        // parameters: a file that does not parse has no outline.
+        let name = field_text(node, "name", source).expect("a Java declaration names itself");
         let name = if matches!(kind, "method" | "constructor") {
-            with_parameters(name, node.child_by_field_name("parameters"), source)
+            let parameters = node
+                .child_by_field_name("parameters")
+                .expect("a Java method has its parameters");
+            with_parameters(name, parameters, source)
         } else {
             name
         };
@@ -1782,7 +1786,7 @@ fn java(source: &str) -> Option<Outline> {
             end: node.end_byte(),
             inert: false,
         });
-    }
+    });
     Some(Outline {
         comments,
         strings,
@@ -1797,17 +1801,18 @@ fn kotlin(source: &str) -> Option<Outline> {
     let mut comments = Vec::new();
     let mut strings = Vec::new();
     let mut declarations = Vec::new();
-    for node in tree_nodes(&tree) {
+    // The root at least.
+    tree_nodes(&tree).into_iter().for_each(|node| {
         let (name, kind, inert) = match node.kind() {
             "string_literal" | "multiline_string_literal" | "character_literal" => {
                 strings.push((node.start_byte(), node.end_byte()));
-                continue;
+                return;
             }
             "line_comment" | "block_comment" | "multiline_comment" => {
                 if !universally_significant(&source[node.byte_range()]) {
                     comments.push((node.start_byte(), node.end_byte()));
                 }
-                continue;
+                return;
             }
             "class_declaration" => (field_text(node, "name", source), "class", false),
             "object_declaration" => (field_text(node, "name", source), "object", false),
@@ -1820,7 +1825,8 @@ fn kotlin(source: &str) -> Option<Outline> {
                 field_text(node, "name", source).map(|n| {
                     with_parameters(
                         n,
-                        first_child_of_kind(node, "function_value_parameters"),
+                        first_child_of_kind(node, "function_value_parameters")
+                            .expect("a Kotlin function has its parameters"),
                         source,
                     )
                 }),
@@ -1830,7 +1836,8 @@ fn kotlin(source: &str) -> Option<Outline> {
             "secondary_constructor" => (
                 Some(with_parameters(
                     "constructor".to_owned(),
-                    first_child_of_kind(node, "function_value_parameters"),
+                    first_child_of_kind(node, "function_value_parameters")
+                        .expect("a Kotlin constructor has its parameters"),
                     source,
                 )),
                 "constructor",
@@ -1850,10 +1857,10 @@ fn kotlin(source: &str) -> Option<Outline> {
                 "type",
                 true,
             ),
-            _ => continue,
+            _ => return,
         };
         let Some(name) = name else {
-            continue;
+            return;
         };
         declarations.push(Item {
             name,
@@ -1862,7 +1869,7 @@ fn kotlin(source: &str) -> Option<Outline> {
             end: node.end_byte(),
             inert,
         });
-    }
+    });
     Some(Outline {
         comments,
         strings,
@@ -1873,6 +1880,27 @@ fn kotlin(source: &str) -> Option<Outline> {
 
 #[cfg(test)]
 mod tests {
+    /// An empty file of each language holds no unit but itself, one that does not
+    /// parse is no code at all, and nothing is said to be only added to it.
+    #[test]
+    fn an_empty_or_unparsable_file_of_each_language_holds_nothing() {
+        for (path, broken) in [
+            ("a.ts", "export const = ;"),
+            ("a.py", "def (:\n"),
+            ("a.rs", "fn {"),
+            ("a.rb", "def ("),
+            ("a.go", "package a\nfunc {"),
+            ("a.java", "class {"),
+            ("a.kt", "fun {"),
+        ] {
+            let empty = super::code(path, "").unwrap_or_else(|| panic!("{path}"));
+            assert!(empty.units.len() <= 1, "{path}: {}", empty.units.len());
+            assert!(super::code(path, broken).is_none(), "{path}");
+            assert_eq!(super::only_added(&empty, path, broken), None, "{path}");
+        }
+        assert!(super::code("notes.txt", "").is_none());
+    }
+
     /// `tests affected` compares these digests across runs. If this fails, a
     /// change made declaration digests different, so every stored run will
     /// read every declaration as changed until it is rerun: make sure that is
@@ -2394,6 +2422,23 @@ mod tests {
         assert_eq!(overlapping.units[0].digest, alone.units[0].digest);
     }
 
+    /// A Python decorator is part of the function or class it decorates.
+    #[test]
+    fn a_python_decorator_starts_its_declaration() {
+        let code = code(
+            "a.py",
+            "x = 1\n@cache\ndef f():\n    pass\n@dataclass\nclass C:\n    pass\n",
+        )
+        .unwrap();
+        let starts = code
+            .units
+            .iter()
+            .skip(1)
+            .map(|unit| (unit.path.as_str(), unit.line, unit.column))
+            .collect::<Vec<_>>();
+        assert_eq!(starts, [("f", 2, 1), ("C", 5, 1)]);
+    }
+
     #[test]
     fn decorators_belong_to_what_they_decorate() {
         let py = code("d.py", "@app.route('/x')\ndef handler():\n    return 1\n").unwrap();
@@ -2560,6 +2605,9 @@ mod tests {
             ]
         );
         assert!(unit(&kotlin, "Alias").inert);
+        // A property destructured into several names is no one declaration.
+        let destructured = code("D.kt", "class C {\n    val (a, b) = 1 to 2\n}\n").unwrap();
+        assert_eq!(paths(&destructured), [("class", "C")]);
     }
 
     #[test]
@@ -2575,6 +2623,8 @@ mod tests {
         assert_eq!(x.units[x.unit_at(1, 1)].path, "");
         assert_eq!(x.units[x.unit_at(2, 1)].path, "C");
         assert_eq!(x.units[x.unit_at(4, 5)].path, "C.a");
+        // Past the file's end, nothing holds it but the file's own unit.
+        assert_eq!(x.unit_at(99, 1), 0);
         assert_eq!(
             x.units[x.unit_at(6, 1)].path,
             "C",
@@ -2726,6 +2776,27 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A file whose addition, taken out, no longer parses -- a line the
+    /// function stood before now continues the statement above it -- is a
+    /// change, not an addition.
+    #[test]
+    fn an_addition_whose_removal_joins_two_statements_is_a_change() {
+        let before = code("h.js", "const a = b;\n/re/.test(a);\n").unwrap();
+        let added = "const a = b\nfunction added() {\n  return 1;\n}\n/re/.test(a)\n";
+        assert!(code("h.js", added).is_some());
+        assert_eq!(only_added(&before, "h.js", added), None);
+    }
+
+    /// So is a Python file whose import, taken out with the function that
+    /// alone used it, leaves the statement beside it on its line.
+    #[test]
+    fn a_python_addition_whose_import_shares_a_line_is_a_change() {
+        let before = code("h.py", "x = 1\n").unwrap();
+        let added = "import os; x = 1\n\n\ndef added():\n    return os.sep\n";
+        assert!(code("h.py", added).is_some());
+        assert_eq!(only_added(&before, "h.py", added), None);
     }
 
     #[test]
@@ -2902,6 +2973,39 @@ mod tests {
         ] {
             assert_eq!(only_added(&python, "t/h.py", &after), expected, "{after}");
         }
+    }
+
+    /// A component's markup names what it renders: an import only an added
+    /// component renders comes out with it, and one a kept component renders
+    /// stays.
+    #[test]
+    fn an_added_component_s_imports_are_judged_by_the_markup_that_names_them() {
+        let before = code(
+            "h.tsx",
+            "import { Button } from 'pkg';\n\nexport function Page() {\n  return <Button />;\n}\n",
+        )
+        .unwrap();
+        let added = "import { Button } from 'pkg';\nimport { Icon } from 'icons';\n\nexport function Page() {\n  return <Button />;\n}\n\nexport function More() {\n  return <Icon><Button /></Icon>;\n}\n";
+        assert_eq!(
+            only_added(&before, "h.tsx", added),
+            Some(vec!["More".to_owned()])
+        );
+        let shared = "import { Button } from 'pkg';\nimport { Icon } from 'icons';\n\nexport function Page() {\n  return <Icon><Button /></Icon>;\n}\n\nexport function More() {\n  return <Icon />;\n}\n";
+        assert_eq!(only_added(&before, "h.tsx", shared), None);
+        // Markup elsewhere naming the addition in lower case reads it too.
+        let tag = code("t.tsx", "export function Page() {\n  return <row />;\n}\n").unwrap();
+        let named = "export function Page() {\n  return <row />;\n}\n\nexport function row() {\n  return 1;\n}\n";
+        assert_eq!(only_added(&tag, "t.tsx", named), None);
+        // An import kept only for what loading it does stays as it was.
+        let loads = code("l.ts", "import './setup';\n\nexport function a() {}\n").unwrap();
+        assert_eq!(
+            only_added(
+                &loads,
+                "l.ts",
+                "import './setup';\n\nexport function a() {}\n\nexport function b() {}\n"
+            ),
+            Some(vec!["b".to_owned()])
+        );
     }
 
     /// A Python helper is only added to where nothing else moved: a
@@ -3430,5 +3534,87 @@ mod edge_unit_tests {
                 .semantic
         };
         assert_eq!(plain("one"), plain("two"));
+    }
+
+    /// The declarations each language's rarer shapes make: JSX, template
+    /// literal types, `declare global`, accessors, Ruby's commands and
+    /// interpolated symbols, Java's interfaces, enums and annotations, and
+    /// Kotlin's objects and properties.
+    #[test]
+    fn each_language_s_rarer_declarations_are_units() {
+        let units = |path: &str, source: &str| {
+            code(path, source)
+                .unwrap_or_else(|| panic!("{path} did not read"))
+                .units
+                .iter()
+                .skip(1)
+                .map(|u| (u.kind.clone(), u.path.clone()))
+                .collect::<Vec<_>>()
+        };
+        let pairs = |list: &[(&str, &str)]| {
+            list.iter()
+                .map(|(kind, path)| ((*kind).to_owned(), (*path).to_owned()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            units(
+                "v.tsx",
+                "export const V = () => <Box.Item x={1} />;\ntype T = `a-${string}`;\ndeclare global {\n  interface W { x: number }\n}\nnamespace N { export const y = 1; }\nexport class C {\n  get a() { return 1; }\n  set a(v: number) {}\n}\n"
+            ),
+            pairs(&[
+                ("function", "V"),
+                ("type", "T"),
+                ("namespace", "global"),
+                ("interface", "global.W"),
+                ("namespace", "N"),
+                ("class", "C"),
+                ("get", "C.a"),
+                ("set", "C.a#2")
+            ])
+        );
+        assert_eq!(
+            units("a.rb", "def f(x)\n  `ls`\n  `ls #{x}`\n  :\"s#{x}\"\nend\n"),
+            pairs(&[("method", "f")])
+        );
+        assert_eq!(
+            units(
+                "A.java",
+                "interface I {}\nenum E { A }\n@interface Ann {}\nclass C { void m() {} }\n"
+            ),
+            pairs(&[
+                ("interface", "I"),
+                ("enum", "E"),
+                ("annotation", "Ann"),
+                ("class", "C"),
+                ("method", "C.m()")
+            ])
+        );
+        assert_eq!(
+            units(
+                "a.kt",
+                "package a\n\ninterface K {\n    fun k(): Int\n}\n\nobject O {\n    val v = 1\n}\n\nclass C {\n    fun f(): Int = 1\n}\n\nfun top(): Int = 2\n"
+            ),
+            pairs(&[
+                ("class", "K"),
+                ("function", "K.k()"),
+                ("object", "O"),
+                ("property", "O.v"),
+                ("class", "C"),
+                ("function", "C.f()"),
+                ("function", "top()")
+            ])
+        );
+        assert_eq!(
+            units("a.py", "@decorate\ndef f():\n    return 1\n"),
+            pairs(&[("function", "f")])
+        );
+        let java = code("A.java", "interface I {}\nenum E { A }\n@interface Ann {}\nclass C { void m() {} }\nclass D {}\nclass F {}\n").unwrap();
+        assert_eq!(named(&java.units[1..1]), "nothing");
+        assert_eq!(named(&java.units[1..3]).matches(", ").count(), 1);
+        assert!(
+            named(&java.units[1..]).ends_with("and 4 more"),
+            "{}",
+            named(&java.units[1..])
+        );
     }
 }

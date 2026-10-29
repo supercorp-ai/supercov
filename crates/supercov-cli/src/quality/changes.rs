@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use supercov_engine::fault_process::Launch;
 
 /// Where the two versions of each file come from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,7 +78,7 @@ fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .current_dir(root)
         .args(arguments)
-        .output()
+        .launch_output()
         .map_err(|e| format!("cannot run git: {e}"))?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);
@@ -207,15 +208,9 @@ fn selector<'a>(range: &'a Range, resolved: &'a str) -> Vec<&'a str> {
 /// subdirectory means the paths they can see, so paths are translated rather
 /// than matched by basename, which would attribute one `index.ts` to another.
 fn prefix(root: &Path) -> Option<String> {
-    let top = text(root, &["rev-parse", "--show-toplevel"]).ok()?;
-    let top = std::fs::canonicalize(top.trim()).ok()?;
-    let here = std::fs::canonicalize(root).ok()?;
-    let rest = here
-        .strip_prefix(&top)
-        .ok()?
-        .to_string_lossy()
-        .replace('\\', "/");
-    (!rest.is_empty()).then(|| format!("{rest}/"))
+    let rest = text(root, &["rev-parse", "--show-prefix"]).ok()?;
+    let rest = rest.trim();
+    (!rest.is_empty()).then(|| rest.to_owned())
 }
 
 fn patch(root: &Path, range: &Range, resolved: &str, path: &str) -> String {
@@ -340,13 +335,17 @@ pub fn collect(root: &Path, range: &Range, only: &[PathBuf]) -> Result<Vec<Chang
 /// anchors a finding at the start of the change instead of pretending to know
 /// which line caused it.
 pub fn first_added_line(patch: &str) -> Option<u32> {
-    for line in patch.lines() {
-        let Some(rest) = line.strip_prefix("@@ ") else {
-            continue;
-        };
-        let after = rest.split(" +").nth(1)?;
-        let number = after.split([',', ' ', '@']).next()?.parse::<u32>().ok()?;
-        return Some(number.max(1));
-    }
-    None
+    let header = patch.lines().find_map(|line| line.strip_prefix("@@ "))?;
+    // Git writes each hunk header as `@@ -a,b +c,d @@`.
+    let after = header
+        .split(" +")
+        .nth(1)
+        .expect("a hunk header names the lines it adds");
+    let number = after
+        .split([',', ' ', '@'])
+        .next()
+        .unwrap_or_default()
+        .parse::<u32>()
+        .expect("a hunk header numbers the lines it adds");
+    Some(number.max(1))
 }

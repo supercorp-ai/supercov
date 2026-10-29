@@ -4,8 +4,8 @@
 //! run, and never silently treats malformed metadata as a valid run. Callers
 //! receive accepted runs and rejected-entry diagnostics independently.
 
+use crate::fault_fs as fs;
 use std::{
-    fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
@@ -173,7 +173,17 @@ pub struct CompanionRun {
 
 #[cfg(test)]
 pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, None)
+    create_analyzable_run(root, id, None, Vec::new())
+}
+
+/// The same run with more entries in its archive.
+#[cfg(test)]
+pub(crate) fn create_analyzable_test_run_with(
+    root: &Path,
+    id: &str,
+    more: Vec<crate::evidence_archive::EvidenceArchiveEntry>,
+) -> PathBuf {
+    create_analyzable_run(root, id, None, more)
 }
 
 /// The same run as a suite that ran its tests at once: the coverage sits in
@@ -182,7 +192,12 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
 /// package whose tests all call `t.Parallel()`.
 #[cfg(test)]
 pub(crate) fn create_run_wide_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE))
+    create_analyzable_run(
+        root,
+        id,
+        Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE),
+        Vec::new(),
+    )
 }
 
 /// The same run as a Ruby suite: the test keeps the coverage it was credited
@@ -190,11 +205,21 @@ pub(crate) fn create_run_wide_test_run(root: &Path, id: &str) -> PathBuf {
 /// ran. What its own record proves, it still proves.
 #[cfg(test)]
 pub(crate) fn create_partial_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_PARTIAL))
+    create_analyzable_run(
+        root,
+        id,
+        Some(crate::coverage_report::ATTRIBUTION_PARTIAL),
+        Vec::new(),
+    )
 }
 
 #[cfg(test)]
-fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> PathBuf {
+fn create_analyzable_run(
+    root: &Path,
+    id: &str,
+    attribution: Option<&str>,
+    more: Vec<crate::evidence_archive::EvidenceArchiveEntry>,
+) -> PathBuf {
     use crate::{
         coverage_analysis::{McdcVector, PointKind},
         coverage_report::{
@@ -394,6 +419,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
             contents: serde_json::to_vec(result).unwrap(),
         });
     }
+    entries.extend(more);
     let archive = write_archive(entries, &directory.join("evidence.raw.gz")).unwrap();
     let digest = |character: char| std::iter::repeat_n(character, 64).collect::<String>();
     let metadata = RunMetadata {
@@ -502,6 +528,7 @@ impl std::fmt::Display for RunStoreError {
 
 impl std::error::Error for RunStoreError {}
 
+#[track_caller]
 fn regular_file(path: &Path) -> Result<fs::Metadata, RunStoreError> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
@@ -562,12 +589,12 @@ fn read_metadata(path: &Path) -> Result<RunMetadata, RunStoreError> {
     if metadata.len() > MAX_RUN_METADATA_BYTES {
         return Err(RunStoreError::InvalidRun("run metadata is too large"));
     }
-    let capacity =
-        usize::try_from(metadata.len()).map_err(|_| RunStoreError::InvalidRun("metadata size"))?;
-    let mut bytes = Vec::with_capacity(capacity);
-    File::open(path)?
-        .take(MAX_RUN_METADATA_BYTES + 1)
-        .read_to_end(&mut bytes)?;
+    // Below the limit just checked, so within what a usize holds.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::read_to_end_from(
+        &mut fs::open(path)?.take(MAX_RUN_METADATA_BYTES + 1),
+        &mut bytes,
+    )?;
     let metadata: RunMetadata = serde_json::from_slice(&bytes)
         .map_err(|_| RunStoreError::InvalidRun("run metadata JSON"))?;
     validate_integrity(&metadata.integrity)?;
@@ -773,13 +800,14 @@ fn compare_run_integrity_to(
     }
 }
 
+#[track_caller]
 pub(crate) fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError> {
     let metadata = regular_file(path)?;
-    let mut file = File::open(path)?;
+    let mut file = fs::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = fs::read_from(&mut file, &mut buffer)?;
         if read == 0 {
             break;
         }
@@ -841,6 +869,7 @@ fn identity_with(
 /// moves the status-change time, which no tool can set back, so a file with
 /// the same stamp holds the same bytes. `None` where there is no such time.
 #[cfg(unix)]
+#[track_caller]
 fn change_stamp(path: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     fs::symlink_metadata(path).ok().and_then(|metadata| {
@@ -867,6 +896,7 @@ fn stamp(file: [u64; 3], modified: (i64, i64), changed: (i64, i64)) -> Option<St
 }
 
 #[cfg(not(unix))]
+#[track_caller]
 fn change_stamp(_: &Path) -> Option<String> {
     None
 }
@@ -884,6 +914,7 @@ fn verified_record(index: &Path) -> PathBuf {
 /// evidence's stamp is taken before it was read, so a change while it was
 /// read is one the next open sees. A record that cannot be written costs
 /// the next open its full check, nothing more.
+#[track_caller]
 fn record_verified(index: &Path, evidence: Option<&str>) {
     let record = evidence
         .zip(change_stamp(index))
@@ -1053,7 +1084,10 @@ fn open_written_query_index(
 }
 
 /// Open an existing valid index without triggering analysis or publication.
-pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, RunIndexError> {
+#[cfg(test)]
+pub(crate) fn open_existing_query_index(
+    run: &StoredRun,
+) -> Result<Option<QueryIndex>, RunIndexError> {
     match fs::symlink_metadata(&run.query_index_path) {
         Ok(_) => {
             open_validated_query_index(&run.query_index_path, &query_index_identity(run)?).map(Some)
@@ -1078,7 +1112,9 @@ pub fn analyze_stored_run_filtered(
         archive_path: run.evidence_path.clone(),
         run_id: run.id.clone(),
         generated_at: run.metadata.started_at.clone(),
-        integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+        integrity: Some(
+            serde_json::to_value(&run.metadata.integrity).expect("plain data serializes"),
+        ),
         test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
         test_filter: filter.cloned(),
     })?)
@@ -1102,7 +1138,9 @@ fn index_sections(
             archive_path: run.evidence_path.clone(),
             run_id: run.id.clone(),
             generated_at: run.metadata.started_at.clone(),
-            integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+            integrity: Some(
+                serde_json::to_value(&run.metadata.integrity).expect("plain data serializes"),
+            ),
             test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
             test_filter: filter.cloned(),
         })?;
@@ -1159,7 +1197,8 @@ fn filter_digest(filter: &crate::coverage_report::TestFilter) -> [u8; 32] {
         "supercov-test-filter",
         QUERY_INDEX_SCHEMA_VERSION,
     ));
-    for part in &mut parts {
+    // Three parts, whatever the filter names.
+    parts.iter_mut().for_each(|part| {
         part.sort();
         part.dedup();
         for value in part.iter() {
@@ -1167,7 +1206,7 @@ fn filter_digest(filter: &crate::coverage_report::TestFilter) -> [u8; 32] {
             hash.update([0]);
         }
         hash.update([1]);
-    }
+    });
     hash.finalize().into()
 }
 
@@ -1204,9 +1243,9 @@ fn touch(path: &Path) {
 
 /// Remove all but the most recently used filtered indexes beside `kept`.
 fn prune_filtered_indexes(kept: &Path) {
-    let Some(directory) = kept.parent() else {
-        return;
-    };
+    let directory = kept
+        .parent()
+        .expect("a filtered index lies in its run's directory");
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
@@ -1217,7 +1256,12 @@ fn prune_filtered_indexes(kept: &Path) {
             let name = name.to_string_lossy();
             name.starts_with("filtered-") && name.ends_with(".index")
         })
-        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        // One gone since it was listed is no longer there to prune.
+        .filter_map(|entry| {
+            let path = entry.path();
+            let modified = fs::metadata(&path).and_then(|metadata| metadata.modified());
+            Some((modified.ok()?, path))
+        })
         .collect::<Vec<_>>();
     filtered.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     for (_, path) in filtered.into_iter().skip(KEPT_FILTERED_INDEXES) {
@@ -1261,7 +1305,7 @@ pub fn read_statement_spans(run: &StoredRun) -> Option<Vec<serde_json::Value>> {
 }
 
 pub(crate) fn write_statement_spans(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
-    let bytes = serde_json::to_vec(&statement_spans(report)).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(&statement_spans(report)).expect("plain data serializes");
     fs::write(run.directory.join(STATEMENT_SPANS_FILE), bytes)
 }
 
@@ -1269,16 +1313,19 @@ pub(crate) fn write_statement_spans(run: &StoredRun, report: &CoverageReport) ->
 pub fn read_assessment_input(
     run: &StoredRun,
 ) -> Option<crate::assertion_coverage::AssessmentInput> {
-    let file = fs::File::open(run.directory.join(ASSESSMENT_INPUT_FILE)).ok()?;
+    let file = fs::open(run.directory.join(ASSESSMENT_INPUT_FILE)).ok()?;
     serde_json::from_reader(flate2::read::GzDecoder::new(io::BufReader::new(file))).ok()
 }
 
 pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
     let bytes = serde_json::to_vec(&crate::assertion_coverage::assessment_input(report))
-        .map_err(io::Error::other)?;
+        .expect("plain data serializes");
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(&bytes)?;
-    fs::write(run.directory.join(ASSESSMENT_INPUT_FILE), encoder.finish()?)
+    encoder.write_all(&bytes).expect("writing to memory");
+    fs::write(
+        run.directory.join(ASSESSMENT_INPUT_FILE),
+        encoder.finish().expect("writing to memory"),
+    )
 }
 
 pub(crate) fn write_query_index_from(
@@ -1305,6 +1352,15 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_that_does_not_parse_is_a_metadata_error() {
+        let error = serde_json::from_str::<u8>("x").unwrap_err();
+        assert!(matches!(
+            RunIndexError::from(error),
+            RunIndexError::Metadata(_)
+        ));
+    }
+
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -1313,6 +1369,31 @@ mod tests {
     use crate::evidence_archive::{EvidenceArchiveEntry, read_archive, write_archive};
 
     use super::*;
+
+    #[test]
+    fn each_run_index_error_says_what_failed() {
+        let said = [
+            RunIndexError::RunStore(RunStoreError::InvalidRun("run metadata JSON")),
+            RunIndexError::Report(ReportError::NoEvidence("x".into())),
+            RunIndexError::Report(ReportError::NoTestMatches("--title x".into())),
+            RunIndexError::Report(ReportError::InvalidArchive("x".into())),
+            RunIndexError::Metadata(serde_json::from_str::<u8>("x").unwrap_err()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(said[1], "no coverage evidence was published");
+        assert_eq!(said[2], "no test of the run matches --title x");
+        assert!(
+            said[3].starts_with("coverage analysis failed: InvalidArchive"),
+            "{}",
+            said[3]
+        );
+        assert!(
+            said[4].starts_with("run integrity is invalid: "),
+            "{}",
+            said[4]
+        );
+        assert!(!said[0].is_empty());
+    }
 
     /// A stored run is refused for metadata too large to be one, a
     /// directory name no run has, and evidence metadata that does not
@@ -1340,10 +1421,15 @@ mod tests {
             ("run-files", &|v: &mut serde_json::Value| {
                 v["rawEvidence"]["files"] = 0.into()
             }),
+            ("run-fingerprint", &|v: &mut serde_json::Value| {
+                v["integrity"]["fingerprint"]["algorithm"] = "md5".into()
+            }),
         ] {
             create_analyzable_test_run(&root, id);
             edit(id, change);
         }
+        create_analyzable_test_run(&root, "run-json");
+        fs::write(root.join(".supercov/runs/run-json/run.json"), "{").unwrap();
         create_analyzable_test_run(&root, "run-large");
         fs::write(
             root.join(".supercov/runs/run-large/run.json"),
@@ -1368,6 +1454,8 @@ mod tests {
             ("run-file", "raw evidence metadata"),
             ("run-files", "raw evidence metadata"),
             ("run-large", "run metadata is too large"),
+            ("run-json", "run metadata JSON"),
+            ("run-fingerprint", "integrity fingerprint"),
             ("bad\u{1}id", "run directory name"),
         ] {
             if id.starts_with("bad") && !bad_name {
@@ -1568,6 +1656,14 @@ mod tests {
             write(&format!("filtered-{n:02}.index"), n);
         }
         write("filtered-notes.txt", 0);
+        // A directory that cannot be listed is pruned of nothing.
+        crate::fault::during("fs.read_dir#run_store.rs:1249", || {
+            prune_filtered_indexes(&kept)
+        });
+        assert!(root.join("filtered-01.index").exists());
+        // Indexes whose times cannot be read are left where they are.
+        crate::fault::during("fs.metadata", || prune_filtered_indexes(&kept));
+        assert!(root.join("filtered-01.index").exists());
         prune_filtered_indexes(&kept);
         let mut left = fs::read_dir(&root)
             .unwrap()
@@ -1826,11 +1922,30 @@ mod tests {
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
         metadata["rawEvidence"]["schemaVersion"] = 2.into();
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        // As long as the metadata says, and no archive.
+        let unreadable = create_run(&root, "not-an-archive");
+        let length = fs::metadata(unreadable.join("evidence.raw.gz"))
+            .unwrap()
+            .len();
+        fs::write(
+            unreadable.join("evidence.raw.gz"),
+            vec![0_u8; length as usize],
+        )
+        .unwrap();
 
         let inventory = discover_runs(&root).unwrap();
         assert_eq!(inventory.runs.len(), 1);
         assert_eq!(inventory.runs[0].id, "valid");
-        assert_eq!(inventory.rejected.len(), 3);
+        assert_eq!(inventory.rejected.len(), 4);
+        assert!(
+            inventory
+                .rejected
+                .iter()
+                .any(|run| run.reason.contains("raw evidence archive"))
+        );
+        // A run whose evidence is gone has no index identity.
+        fs::remove_file(inventory.runs[0].evidence_path.clone()).unwrap();
+        assert!(query_index_identity(&inventory.runs[0]).is_err());
         assert!(inventory.rejected[0].reason.contains("metadata ID"));
         assert!(
             inventory
@@ -2120,5 +2235,27 @@ mod tests {
             });
             validate_integrity(&with_git).unwrap();
         }
+    }
+
+    #[test]
+    fn each_run_store_error_says_what_failed() {
+        let messages = [
+            RunStoreError::from(io::Error::other("disk full")),
+            RunStoreError::UnsafeStore(PathBuf::from(".supercov/runs")),
+            RunStoreError::NoRuns,
+            RunStoreError::RunNotFound("latest".into()),
+            RunStoreError::InvalidRun("run metadata JSON"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "disk full",
+                "unsafe run-store path: .supercov/runs",
+                "no local coverage runs",
+                "coverage run not found: latest",
+                "invalid coverage run: run metadata JSON",
+            ]
+        );
     }
 }

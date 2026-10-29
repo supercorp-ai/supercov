@@ -134,20 +134,21 @@ pub fn coverage_minimize_query(
         .selected
         .iter()
         .map(|id| {
+            // The solver chose among the view's own tests.
             let test = view
                 .tests
                 .iter()
                 .find(|test| test.id == *id)
-                .ok_or(QueryError::InvalidRecordSelection)?;
-            Ok(CoverageMinimizedTest {
+                .expect("a selected test is one of the view's");
+            CoverageMinimizedTest {
                 id: id.clone(),
                 name: test.name.clone(),
                 file: test.file.clone(),
                 runner: test.provenance.runner.clone(),
                 kind: test.provenance.kind.clone(),
-            })
+            }
         })
-        .collect::<Result<Vec<_>, QueryError>>()?;
+        .collect::<Vec<_>>();
     let total = selected_details.len();
     let tests = selected_details
         .iter()
@@ -222,7 +223,6 @@ pub enum QueryError {
         selector: String,
         matches: Vec<String>,
     },
-    InvalidRecordSelection,
     ScopeUnavailable,
 }
 
@@ -433,8 +433,8 @@ fn scope_status_rank(status: &str) -> u8 {
     match status {
         "ambiguous" => 0,
         "included" => 1,
-        "excluded" => 2,
-        _ => 3,
+        // `excluded`: the index holds no other status.
+        _ => 2,
     }
 }
 
@@ -466,12 +466,14 @@ pub fn scope_groups(entries: &[IndexedScopeEntry]) -> Vec<ScopeGroup> {
             )
         })
         .collect::<Vec<_>>();
+    // By rank, then the most files first, then directory and reason.
     groups.sort_by(|(left_rank, left), (right_rank, right)| {
-        left_rank
-            .cmp(right_rank)
-            .then_with(|| right.files.cmp(&left.files))
-            .then_with(|| left.directory.cmp(&right.directory))
-            .then_with(|| left.reason.cmp(&right.reason))
+        (left_rank, &right.files, &left.directory, &left.reason).cmp(&(
+            right_rank,
+            &left.files,
+            &right.directory,
+            &right.reason,
+        ))
     });
     groups.into_iter().map(|(_, group)| group).collect()
 }
@@ -512,11 +514,12 @@ pub fn unclassified_source(
     });
     named.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     let mut all = roots.to_vec();
-    for (root, _) in named {
+    // Named with each place, so not empty either.
+    named.into_iter().for_each(|(root, _)| {
         if !all.contains(&root) {
             all.push(root);
         }
-    }
+    });
     Some(UnclassifiedSource {
         directories,
         roots: all,
@@ -706,40 +709,47 @@ fn query_filters(
     runner: Option<&str>,
 ) -> CoverageQueryFilters {
     CoverageQueryFilters {
-        outcome: match view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: view.name().into(),
         kind: kind.map(str::to_owned),
         runner: runner.map(str::to_owned),
     }
 }
 
+/// The tests a kind or runner selects, or None when neither is given.
+fn tests_selected(
+    tests: &[IndexedTestSummary],
+    kind: Option<&str>,
+    runner: Option<&str>,
+) -> Option<BTreeSet<String>> {
+    if kind.is_none() && runner.is_none() {
+        return None;
+    }
+    Some(
+        tests
+            .iter()
+            .filter(|test| {
+                kind.is_none_or(|kind| test.provenance.kind == kind)
+                    && runner.is_none_or(|runner| test.provenance.runner == runner)
+            })
+            .map(|test| test.id.clone())
+            .collect(),
+    )
+}
+
+/// [`tests_selected`], refusing a kind or runner no test has.
 fn selected_test_ids(
     tests: &[IndexedTestSummary],
     kind: Option<&str>,
     runner: Option<&str>,
 ) -> Result<Option<BTreeSet<String>>, QueryError> {
-    if kind.is_none() && runner.is_none() {
-        return Ok(None);
-    }
-    let selected = tests
-        .iter()
-        .filter(|test| {
-            kind.is_none_or(|kind| test.provenance.kind == kind)
-                && runner.is_none_or(|runner| test.provenance.runner == runner)
-        })
-        .map(|test| test.id.clone())
-        .collect::<BTreeSet<_>>();
-    if selected.is_empty() {
+    let selected = tests_selected(tests, kind, runner);
+    if selected.as_ref().is_some_and(BTreeSet::is_empty) {
         return Err(QueryError::TestFilterEmpty {
             kind: kind.map(str::to_owned),
             runner: runner.map(str::to_owned),
         });
     }
-    Ok(Some(selected))
+    Ok(selected)
 }
 
 /// What the lines of one call share: the run's tests, phases and
@@ -849,7 +859,9 @@ pub fn coverage_covers_query_cached(
     cache.fill(index, &options)?;
     let cache = &*cache;
     let tests = &cache.tests;
-    let selected = selected_test_ids(tests, options.kind, options.runner)?;
+    // The file's detail the cache was filled from refused a kind or runner
+    // no test has.
+    let selected = tests_selected(tests, options.kind, options.runner);
     let selected_includes = |id: &str| selected.as_ref().is_none_or(|ids| ids.contains(id));
     let filters = query_filters(options.view, options.kind, options.runner);
     let location = CoverageLocation {
@@ -1289,6 +1301,8 @@ pub struct CoverageTestQueryOptions<'a> {
     pub limit: usize,
 }
 
+/// A test's hit as the view describes it. A record may name a hit the
+/// manifest does not hold, and the run keeps it: such a hit is unknown.
 fn hit_detail(id: &str, metadata: Option<&IndexedHitMetadata>) -> CoverageHitDetail {
     match metadata {
         Some(metadata) => CoverageHitDetail {
@@ -1441,17 +1455,13 @@ pub fn coverage_test_query(
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|decision| {
-            Ok(CoverageTestDecision {
-                id: decision.id.clone(),
-                vectors: decision.vectors.clone(),
-                meta: decisions
-                    .get(&decision.id)
-                    .cloned()
-                    .ok_or(QueryError::InvalidRecordSelection)?,
-            })
+        // Every decision a test observed is one of the view's.
+        .map(|decision| CoverageTestDecision {
+            id: decision.id.clone(),
+            vectors: decision.vectors.clone(),
+            meta: decisions[&decision.id].clone(),
         })
-        .collect::<Result<Vec<_>, QueryError>>()?;
+        .collect::<Vec<_>>();
     let phases = all_phases
         .into_iter()
         .skip(options.offset)
@@ -2047,23 +2057,14 @@ fn needed(
     use crate::coverage_analysis::{McdcVector, find_witnesses_for_conditions};
     let condition = sources.get(index).copied().unwrap_or("the condition");
     let describe = |vector: &McdcVector| {
-        let mut values = String::new();
-        let mut words = Vec::new();
-        for (position, value) in vector.values.iter().enumerate() {
-            values.push(match value {
-                None => '-',
-                Some(false) => 'F',
-                Some(true) => 'T',
-            });
-            if let (Some(value), Some(source)) = (value, sources.get(position)) {
-                words.push(format!("`{source}` {value}"));
-            }
-        }
-        words.push(format!("decision {}", vector.outcome));
-        (
-            format!("{values} -> {}", if vector.outcome { 'T' } else { 'F' }),
-            words.join(", "),
-        )
+        let words = vector
+            .values
+            .iter()
+            .zip(sources)
+            .filter_map(|(value, source)| value.map(|value| format!("`{source}` {value}")))
+            .chain([format!("decision {}", vector.outcome)])
+            .collect::<Vec<_>>();
+        (vector_text(vector), words.join(", "))
     };
     let Some(possible) = crate::decision_shape::possible_vectors(decision, sources) else {
         // A decision whose source is not conditions and operators: what to
@@ -2114,22 +2115,30 @@ fn needed(
     }
     // No run alone does it: no test evaluated the condition, so both of a
     // pair are needed.
-    for (position, first) in unseen.iter().enumerate() {
-        for second in &unseen[position + 1..] {
-            if shows(&[first, second]).is_some() {
-                let (first_values, first_words) = describe(first);
-                let (second_values, second_words) = describe(second);
-                return (
-                    Some(format!("{first_values} and {second_values}")),
-                    format!("{first_words}; and {second_words}"),
-                );
-            }
+    let pair = unseen
+        .iter()
+        .enumerate()
+        .flat_map(|(position, first)| {
+            unseen[position + 1..]
+                .iter()
+                .map(move |second| (first, second))
+        })
+        .find(|(first, second)| shows(&[first, second]).is_some());
+    match pair {
+        Some((first, second)) => {
+            let (first_values, first_words) = describe(first);
+            let (second_values, second_words) = describe(second);
+            (
+                Some(format!("{first_values} and {second_values}")),
+                format!("{first_words}; and {second_words}"),
+            )
         }
+        // Only for a condition the decision's source does not name.
+        None => (
+            None,
+            format!("`{condition}` cannot decide the result on its own"),
+        ),
     }
-    (
-        None,
-        format!("`{condition}` cannot decide the result on its own"),
-    )
 }
 
 fn vector_text(vector: &crate::coverage_analysis::McdcVector) -> String {
@@ -2600,10 +2609,7 @@ pub fn coverage_file_detail_from(
         })
         .collect::<Vec<_>>();
     limitations.sort_by(|left, right| {
-        left.line
-            .cmp(&right.line)
-            .then_with(|| left.column.cmp(&right.column))
-            .then_with(|| left.id.cmp(&right.id))
+        (left.line, left.column, &left.id).cmp(&(right.line, right.column, &right.id))
     });
     let total_tests = read
         .tests_by_file
@@ -2854,10 +2860,11 @@ fn diff_snapshot(
             metadata.obligation == "branch" && !metadata.tests.is_empty() && picks(&metadata.tests)
         })
         .map(|metadata| {
+            // The index Supercov wrote names each branch outcome's branch.
             let parent = metadata
                 .parent_id
-                .ok_or(QueryError::InvalidRecordSelection)?;
-            Ok((
+                .expect("a branch outcome names its branch");
+            (
                 format!("{parent}:{}", metadata.id),
                 format!(
                     "{}:{} {}",
@@ -2865,9 +2872,9 @@ fn diff_snapshot(
                     metadata.line,
                     metadata.alternative.unwrap_or_default()
                 ),
-            ))
+            )
         })
-        .collect::<Result<HashMap<_, _>, QueryError>>()?;
+        .collect::<HashMap<_, _>>();
     let mcdc = index
         .decision_details(view)?
         .into_iter()
@@ -2939,14 +2946,10 @@ pub fn coverage_diff_query(
     }
     // Each run picks its own tests; a filter neither run has a test for is
     // refused, and one only a run has compares that run with nothing.
-    let select = |index: &CoverageIndex<'_>| match selected_test_ids(
-        &index.test_summaries(options.view)?,
-        options.kind,
-        options.runner,
-    ) {
-        Ok(selected) => Ok(Some(selected)),
-        Err(QueryError::TestFilterEmpty { .. }) => Ok(None),
-        Err(error) => Err(error),
+    // A filter that names no test is the one thing selecting refuses.
+    let select = |index: &CoverageIndex<'_>| {
+        let tests = index.test_summaries(options.view)?;
+        Ok::<_, QueryError>(selected_test_ids(&tests, options.kind, options.runner).ok())
     };
     let (older_selected, newer_selected) = (select(older)?, select(newer)?);
     if older_selected.is_none() && newer_selected.is_none() {
@@ -3174,12 +3177,7 @@ pub fn coverage_scope_query(
         CoverageScopeData {
             run: options.run.into(),
             filters: CoverageQueryFilters {
-                outcome: match options.view {
-                    CoverageViewId::All => "all",
-                    CoverageViewId::Passed => "passed",
-                    CoverageViewId::Failed => "failed",
-                }
-                .into(),
+                outcome: options.view.name().into(),
                 kind: options.kind.map(str::to_owned),
                 runner: options.runner.map(str::to_owned),
             },
@@ -3304,18 +3302,22 @@ pub fn coverage_summary_query(
             mcdc_conditions: 0,
         };
         let mut uncovered_everywhere = covered_elsewhere.clone();
-        for gap in index.file_gaps(options.view, Some("e2e"), None)? {
-            covered_elsewhere.lines += gap.covered_by_other_tests.lines;
-            covered_elsewhere.statements += gap.covered_by_other_tests.statements;
-            covered_elsewhere.functions += gap.covered_by_other_tests.functions;
-            covered_elsewhere.branches += gap.covered_by_other_tests.branches;
-            covered_elsewhere.mcdc_conditions += gap.covered_by_other_tests.mcdc_conditions;
-            uncovered_everywhere.lines += gap.uncovered_everywhere.lines;
-            uncovered_everywhere.statements += gap.uncovered_everywhere.statements;
-            uncovered_everywhere.functions += gap.uncovered_everywhere.functions;
-            uncovered_everywhere.branches += gap.uncovered_everywhere.branches;
-            uncovered_everywhere.mcdc_conditions += gap.uncovered_everywhere.mcdc_conditions;
-        }
+        // A file the end-to-end tests ran whole has no gap to add.
+        index
+            .file_gaps(options.view, Some("e2e"), None)?
+            .iter()
+            .for_each(|gap| {
+                covered_elsewhere.lines += gap.covered_by_other_tests.lines;
+                covered_elsewhere.statements += gap.covered_by_other_tests.statements;
+                covered_elsewhere.functions += gap.covered_by_other_tests.functions;
+                covered_elsewhere.branches += gap.covered_by_other_tests.branches;
+                covered_elsewhere.mcdc_conditions += gap.covered_by_other_tests.mcdc_conditions;
+                uncovered_everywhere.lines += gap.uncovered_everywhere.lines;
+                uncovered_everywhere.statements += gap.uncovered_everywhere.statements;
+                uncovered_everywhere.functions += gap.uncovered_everywhere.functions;
+                uncovered_everywhere.branches += gap.uncovered_everywhere.branches;
+                uncovered_everywhere.mcdc_conditions += gap.uncovered_everywhere.mcdc_conditions;
+            });
         Some(CoverageKindGapContext {
             kind: "e2e".into(),
             other_kinds: other_e2e_kinds,
@@ -3326,12 +3328,7 @@ pub fn coverage_summary_query(
         None
     };
     let filters = CoverageQueryFilters {
-        outcome: match options.view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: options.view.name().into(),
         kind: options.kind.map(str::to_owned),
         runner: options.runner.map(str::to_owned),
     };
@@ -3563,10 +3560,11 @@ pub fn coverage_areas_query(
     if !kinds.is_empty() {
         let tested = index.file_gaps(options.view, Some(crate::coverage_index::ALL_TESTS), None)?;
         if !tested.is_empty() {
-            for area in areas.values_mut() {
+            // A tested file is in an area, so there are some.
+            areas.values_mut().for_each(|area| {
                 area.covered_by_tests = Some(NO_DIMENSIONS);
-            }
-            for file in tested {
+            });
+            tested.into_iter().for_each(|file| {
                 let area = areas
                     .get_mut(&area_directory(&file.file, options.depth))
                     .expect("the tested files are among every file's");
@@ -3574,14 +3572,20 @@ pub fn coverage_areas_query(
                     area.covered_by_tests.get_or_insert(NO_DIMENSIONS),
                     &file.covered,
                 );
-            }
+            });
         }
     }
     let mut areas = areas.into_values().collect::<Vec<_>>();
+    // The best covered first, then by directory.
     areas.sort_by(|left, right| {
-        dimension_for_metric(&right.totals, options.metric)
-            .cmp(&dimension_for_metric(&left.totals, options.metric))
-            .then_with(|| left.directory.cmp(&right.directory))
+        (
+            dimension_for_metric(&right.totals, options.metric),
+            &left.directory,
+        )
+            .cmp(&(
+                dimension_for_metric(&left.totals, options.metric),
+                &right.directory,
+            ))
     });
     let total = areas.len();
     let page = areas
@@ -3594,12 +3598,7 @@ pub fn coverage_areas_query(
         CoverageAreasData {
             run: options.run.into(),
             filters: CoverageQueryFilters {
-                outcome: match options.view {
-                    CoverageViewId::All => "all",
-                    CoverageViewId::Passed => "passed",
-                    CoverageViewId::Failed => "failed",
-                }
-                .into(),
+                outcome: options.view.name().into(),
                 kind: options.kind.map(str::to_owned),
                 runner: options.runner.map(str::to_owned),
             },
@@ -3707,12 +3706,7 @@ pub fn tests_without_evidence_query(
         TestsWithoutEvidenceData {
             run: options.run.into(),
             filters: CoverageQueryFilters {
-                outcome: match options.view {
-                    CoverageViewId::All => "all",
-                    CoverageViewId::Passed => "passed",
-                    CoverageViewId::Failed => "failed",
-                }
-                .into(),
+                outcome: options.view.name().into(),
                 kind: options.kind.map(str::to_owned),
                 runner: options.runner.map(str::to_owned),
             },
@@ -3986,16 +3980,15 @@ pub fn coverage_file_decisions_query(
         .filter(|decision| decision.missing_conditions > 0)
         .collect::<Vec<_>>();
     missing.sort_by(|left, right| match options.sort {
-        DecisionSort::Missing => right
-            .missing_conditions
-            .cmp(&left.missing_conditions)
-            .then_with(|| left.line.cmp(&right.line))
-            .then_with(|| left.column.cmp(&right.column)),
-        DecisionSort::Location => left
-            .line
-            .cmp(&right.line)
-            .then_with(|| left.column.cmp(&right.column))
-            .then_with(|| left.id.cmp(&right.id)),
+        // The most conditions missing first, then by place.
+        DecisionSort::Missing => (right.missing_conditions, left.line, left.column).cmp(&(
+            left.missing_conditions,
+            right.line,
+            right.column,
+        )),
+        DecisionSort::Location => {
+            (left.line, left.column, &left.id).cmp(&(right.line, right.column, &right.id))
+        }
     });
     let total = missing.len();
     let rows = missing
@@ -4007,11 +4000,12 @@ pub fn coverage_file_decisions_query(
     // filters see them: a count of missing conditions does not say which
     // test to write.
     let selected = if options.kind.is_some() || options.runner.is_some() {
-        selected_test_ids(
+        // A kind or runner no test has made no decision gaps, refused above.
+        tests_selected(
             &index.test_summaries(options.view)?,
             options.kind,
             options.runner,
-        )?
+        )
     } else {
         None
     };
@@ -4060,12 +4054,7 @@ pub fn coverage_file_decisions_query(
         .collect::<Vec<_>>();
     let returned = rows.len();
     let filters = CoverageQueryFilters {
-        outcome: match options.view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: options.view.name().into(),
         kind: options.kind.map(str::to_owned),
         runner: options.runner.map(str::to_owned),
     };
@@ -4128,12 +4117,7 @@ pub fn coverage_file_query(
         .collect::<Vec<_>>();
     let page_info = pagination(offset, limit, page.len(), total);
     let filters = CoverageQueryFilters {
-        outcome: match view {
-            CoverageViewId::All => "all",
-            CoverageViewId::Passed => "passed",
-            CoverageViewId::Failed => "failed",
-        }
-        .into(),
+        outcome: view.name().into(),
         kind: kind.map(str::to_owned),
         runner: runner.map(str::to_owned),
     };
@@ -4329,16 +4313,15 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
         });
     }
     for branch in &view.branches {
-        for alternative in &branch.alternatives {
-            obligations.push(Obligation {
-                id: format!("branch:{}:{}", branch.meta.id, alternative.id),
-                metric: ObligationMetric::Branches,
-                options: choices(&alternative.tests),
-            });
-        }
+        obligations.extend(branch.alternatives.iter().map(|alternative| Obligation {
+            id: format!("branch:{}:{}", branch.meta.id, alternative.id),
+            metric: ObligationMetric::Branches,
+            options: choices(&alternative.tests),
+        }));
     }
     for decision in &view.decisions {
-        for condition in 0..decision.meta.conditions.len() {
+        // A decision has a condition at least.
+        (0..decision.meta.conditions.len()).for_each(|condition| {
             let mut options = Vec::new();
             for left in 0..decision.vector_observations.len() {
                 for right in (left + 1)..decision.vector_observations.len() {
@@ -4347,13 +4330,14 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
                     if !is_independence_pair(&first.vector, &second.vector, condition) {
                         continue;
                     }
-                    for first_choice in choices(&first.tests) {
-                        for second_choice in choices(&second.tests) {
+                    let seconds = choices(&second.tests);
+                    options.extend(choices(&first.tests).into_iter().flat_map(|first_choice| {
+                        seconds.iter().map(move |second_choice| {
                             let mut combined = first_choice.clone();
-                            combined.extend(second_choice);
-                            options.push(combined);
-                        }
-                    }
+                            combined.extend(second_choice.iter().cloned());
+                            combined
+                        })
+                    }));
                 }
             }
             obligations.push(Obligation {
@@ -4361,7 +4345,7 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
                 metric: ObligationMetric::Mcdc,
                 options: deduplicate_options(options),
             });
-        }
+        });
     }
     ObligationModel {
         obligations,
@@ -4541,9 +4525,9 @@ pub fn minimum_test_set(
         .cloned()
         .collect::<Vec<_>>();
     let mut totals = BTreeMap::<ObligationMetric, usize>::new();
-    for obligation in &obligations {
-        *totals.entry(obligation.metric).or_default() += 1;
-    }
+    obligations
+        .iter()
+        .for_each(|obligation| *totals.entry(obligation.metric).or_default() += 1);
     let metrics = [
         ObligationMetric::Lines,
         ObligationMetric::Statements,
@@ -4577,16 +4561,18 @@ pub fn minimum_test_set(
         .collect::<BTreeMap<_, _>>();
     if let Some(target) = target {
         let full_expanded = model.expand(&candidate_tests);
-        let full_summary = coverage_summary_for_tests(view, &full_expanded)?;
-        for selected_metric in &metrics {
-            let reachable = percentage(*selected_metric, &full_summary);
-            if reachable + 1e-9 < target {
-                return Err(QueryError::TargetUnreachable {
-                    metric: selected_metric.public(),
-                    target,
-                    reachable,
-                });
-            }
+        let full_summary = coverage_summary_for_tests(view, &full_expanded)
+            .expect("a view analysed whole summarises for any of its tests");
+        if let Some((selected_metric, reachable)) = metrics
+            .iter()
+            .map(|selected_metric| (selected_metric, percentage(*selected_metric, &full_summary)))
+            .find(|(_, reachable)| reachable + 1e-9 < target)
+        {
+            return Err(QueryError::TargetUnreachable {
+                metric: selected_metric.public(),
+                target,
+                reachable,
+            });
         }
     }
     let mut search = Search {
@@ -4602,7 +4588,8 @@ pub fn minimum_test_set(
     };
     search.visit(BTreeSet::new(), BTreeSet::new(), BTreeMap::new())?;
     let expanded = model.expand(&search.best);
-    let summary = coverage_summary_for_tests(view, &expanded)?;
+    let summary = coverage_summary_for_tests(view, &expanded)
+        .expect("a view analysed whole summarises for any of its tests");
     Ok(MinimumTestSetResult {
         optimal: true,
         target,
@@ -4616,6 +4603,12 @@ pub fn minimum_test_set(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_report_error_is_a_query_s_analysis_error() {
+        let error = ReportError::InvalidEvent("e".into());
+        assert!(matches!(QueryError::from(error), QueryError::Analysis(_)));
+    }
+
     use crate::{
         coverage_analysis::McdcVector,
         coverage_report::{
@@ -4639,6 +4632,59 @@ mod tests {
             package_root: package.map(str::to_owned),
             measurement_limitations: 0,
             limitation_kinds: Vec::new(),
+        }
+    }
+
+    /// Each metric reads its own count, of a file's gap and of a place's
+    /// dimensions, and an obligation's metric is the public one of its name.
+    #[test]
+    fn each_metric_reads_its_own_count() {
+        let dimensions = IndexedGapDimensions {
+            lines: 1,
+            statements: 2,
+            functions: 3,
+            branches: 4,
+            mcdc_conditions: 5,
+        };
+        let gap = IndexedFileGap {
+            view: CoverageViewId::All,
+            file: "f".into(),
+            uncovered_lines: 1,
+            uncovered_statements: 2,
+            uncovered_functions: 3,
+            missing_branches: 4,
+            missing_mcdc_conditions: 5,
+            measurement_limitations: 0,
+            limitation_kinds: Vec::new(),
+            covered_by_other_tests: NO_DIMENSIONS,
+            uncovered_everywhere: NO_DIMENSIONS,
+            totals: NO_DIMENSIONS,
+            covered: NO_DIMENSIONS,
+            score: 6,
+        };
+        for (metric, dimension, value) in [
+            (MinimizeMetric::All, 1, 6),
+            (MinimizeMetric::Lines, 1, 1),
+            (MinimizeMetric::Statements, 2, 2),
+            (MinimizeMetric::Functions, 3, 3),
+            (MinimizeMetric::Branches, 4, 4),
+            (MinimizeMetric::Mcdc, 5, 5),
+        ] {
+            assert_eq!(
+                dimension_for_metric(&dimensions, metric),
+                dimension,
+                "{metric:?}"
+            );
+            assert_eq!(gap_metric_value(&gap, metric), value, "{metric:?}");
+        }
+        for (obligation, metric) in [
+            (ObligationMetric::Lines, MinimizeMetric::Lines),
+            (ObligationMetric::Statements, MinimizeMetric::Statements),
+            (ObligationMetric::Functions, MinimizeMetric::Functions),
+            (ObligationMetric::Branches, MinimizeMetric::Branches),
+            (ObligationMetric::Mcdc, MinimizeMetric::Mcdc),
+        ] {
+            assert_eq!(obligation.public(), metric);
         }
     }
 
@@ -4684,6 +4730,24 @@ mod tests {
         let (values, words) = needed(1, &observed, &["a", "b"], "pick(a, b)");
         assert_eq!(values, None);
         assert_eq!(words, "no test evaluated `b`");
+        // A condition past those the source names decides nothing.
+        let (values, words) = needed(2, &observed, &["a", "b"], "a || b");
+        assert_eq!(values, None);
+        assert_eq!(words, "`the condition` cannot decide the result on its own");
+        // A condition seen both ways that never decided alone, one never
+        // false, and one never evaluated.
+        assert_eq!(
+            missing_outcome_words("a", &[]),
+            "`a` was seen both ways but never deciding the result alone"
+        );
+        assert_eq!(
+            missing_outcome_words("a", &["false".into()]),
+            "`a` was never false"
+        );
+        assert_eq!(
+            missing_outcome_words("a", &["true".into(), "false".into()]),
+            "`a` was never evaluated"
+        );
     }
 
     #[test]
@@ -4724,6 +4788,7 @@ mod tests {
                 Some("packages/ui"),
             ),
         ];
+        assert!(scope_groups(&[]).is_empty());
         let groups = scope_groups(&entries)
             .into_iter()
             .map(|group| (group.files, group.status, group.directory))
@@ -5580,6 +5645,29 @@ mod tests {
             Err(QueryError::TestFilterEmpty { .. })
         ));
 
+        // The tests together, under a kind filter, are the kind's tests.
+        let (together, _) = coverage_dimension_query(
+            &index,
+            CoverageDimensionQueryOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                dimension: CoverageDimension::Tests,
+                filters: CoverageQueryFilters {
+                    outcome: "all".into(),
+                    kind: Some("e2e".into()),
+                    runner: None,
+                },
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        let CoverageDimensionQueryData::Kinds(together) = together else {
+            panic!("{together:?}");
+        };
+        assert_eq!(together.kinds.len(), 1, "{:?}", together.kinds);
+        assert_eq!(together.kinds[0].tests, 1);
+
         let without = |kind, runner| {
             tests_without_evidence_query(
                 &index,
@@ -5693,6 +5781,34 @@ mod tests {
             detail("one.js", 0),
             Err(QueryError::InvalidPagination)
         ));
+        // Narrowed to one runner, a line only another runner's test ran is a
+        // gap that names where it was covered.
+        let narrowed = coverage_file_detail_from(
+            &FileDetailSource::read(&index, CoverageViewId::All).unwrap(),
+            CoverageFileDetailOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                kind: None,
+                runner: Some("node:test"),
+                selector: "two.js",
+                metric: MinimizeMetric::All,
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap()
+        .0;
+        let elsewhere = serde_json::to_value(&narrowed.gap_lines)
+            .unwrap()
+            .to_string();
+        for said in [
+            r#""coveredElsewhere":true"#,
+            r#""kinds":["e2e"]"#,
+            r#""runners":["playwright"]"#,
+            "e2e-b",
+        ] {
+            assert!(elsewhere.contains(said), "{said}: {elsewhere}");
+        }
     }
 
     /// A run is complete only as the passing view of a current, valid run
@@ -5977,6 +6093,71 @@ mod tests {
         ));
     }
 
+    /// A record may name a hit the manifest does not hold, and the run keeps
+    /// it: the test's details read it as unknown.
+    #[test]
+    fn a_hit_the_manifest_does_not_hold_reads_as_unknown() {
+        let mut report = report(vec![result(
+            "admin",
+            McdcVector {
+                values: vec![Some(true), None],
+                outcome: true,
+            },
+        )]);
+        report.view.tests[0].hits.push("unknown-hit".into());
+        let root = crate::test_directory::TestDirectory::adopt({
+            let root = std::env::temp_dir().join(format!(
+                "supercov-unknown-hit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            root
+        });
+        let path = root.join("query-index.v1.bin");
+        let identity = crate::query_index::QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        crate::query_index::write_query_index(
+            &crate::coverage_index::coverage_index_sections(&report).unwrap(),
+            &identity,
+            &path,
+        )
+        .unwrap();
+        let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let (data, _) = coverage_test_query(
+            &index,
+            CoverageTestQueryOptions {
+                run: "r",
+                view: CoverageViewId::All,
+                kind: None,
+                runner: None,
+                selector: "admin",
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        let CoverageTestData::Detail(detail) = data else {
+            panic!("{data:?}");
+        };
+        let unknown = detail.tests[0]
+            .hit_details
+            .iter()
+            .find(|hit| hit.id == "unknown-hit")
+            .expect("the unknown hit is listed");
+        assert_eq!(unknown.obligation, "unknown");
+        assert_eq!(unknown.file, None);
+    }
+
     #[test]
     fn bounds_the_exact_search() {
         let report = report(vec![
@@ -6006,6 +6187,14 @@ mod tests {
             minimum_test_set(&report.view, Some(100.0), MinimizeMetric::Mcdc, 1),
             Err(QueryError::ComplexityLimit { .. })
         ));
+        // A target below the whole lets the search skip obligations, and the
+        // bound holds there too.
+        for max_states in 1..=40 {
+            assert!(matches!(
+                minimum_test_set(&report.view, Some(50.0), MinimizeMetric::Mcdc, max_states),
+                Ok(_) | Err(QueryError::ComplexityLimit { .. })
+            ));
+        }
     }
 
     fn summary_of(
@@ -6350,5 +6539,239 @@ mod tests {
         )
         .unwrap();
         assert!(data.areas.is_empty(), "{data:?}");
+    }
+
+    /// Every query over an index, each asking for a real page; what each
+    /// returned, as an error or nothing.
+    fn every_query(index: &CoverageIndex<'_>) -> Vec<Result<(), QueryError>> {
+        let view = CoverageViewId::All;
+        let mut results = vec![
+            coverage_covers_query(
+                index,
+                CoverageCoversQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    file: "src/a.js",
+                    line: 1,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_test_query(
+                index,
+                CoverageTestQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "admin",
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_decision_query(
+                index,
+                CoverageDecisionQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "src/a.js:1",
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_file_detail_query(
+                index,
+                CoverageFileDetailOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    selector: "src/a.js",
+                    metric: MinimizeMetric::All,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_diff_query(
+                index,
+                index,
+                CoverageDiffQueryOptions {
+                    older_run: "a",
+                    newer_run: "b",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 10,
+                    gained_only: false,
+                },
+            )
+            .map(drop),
+            coverage_scope_query(
+                index,
+                CoverageScopeQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_summary_query(
+                index,
+                CoverageSummaryQueryOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    valid: true,
+                    test_exit_code: Some(0),
+                    stale: false,
+                    stale_reasons: Vec::new(),
+                },
+            )
+            .map(drop),
+            coverage_areas_query(
+                index,
+                CoverageAreasQueryOptions {
+                    run: "r",
+                    view,
+                    metric: MinimizeMetric::All,
+                    kind: None,
+                    runner: None,
+                    depth: 1,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            tests_without_evidence_query(
+                index,
+                TestsWithoutEvidenceOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+            coverage_file_decisions_query(
+                index,
+                CoverageFileDecisionsOptions {
+                    run: "r",
+                    view,
+                    kind: None,
+                    runner: None,
+                    file: "src/a.js",
+                    sort: DecisionSort::Location,
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .map(drop),
+        ];
+        for dimension in [
+            CoverageDimension::Kind,
+            CoverageDimension::Runner,
+            CoverageDimension::Tests,
+        ] {
+            results.push(
+                coverage_dimension_query(
+                    index,
+                    CoverageDimensionQueryOptions {
+                        run: "r",
+                        view,
+                        dimension,
+                        filters: query_filters(view, None, None),
+                        offset: 0,
+                        limit: 10,
+                    },
+                )
+                .map(drop),
+            );
+        }
+        for gaps_only in [true, false] {
+            results.push(
+                coverage_file_query(
+                    index,
+                    CoverageFileQueryOptions {
+                        run: "r",
+                        view,
+                        metric: MinimizeMetric::All,
+                        gaps_only,
+                        kind: None,
+                        runner: None,
+                        offset: 0,
+                        limit: 10,
+                    },
+                )
+                .map(drop),
+            );
+        }
+        results
+    }
+
+    /// An index damaged on disk in any one section after it was signed
+    /// makes each query that reads that section return an error, never
+    /// panic: pages are checked as they are read.
+    #[test]
+    fn every_query_refuses_an_index_damaged_in_any_section() {
+        let reports = [
+            report(vec![result(
+                "admin",
+                McdcVector {
+                    values: vec![Some(true), None],
+                    outcome: true,
+                },
+            )]),
+            two_runner_report(),
+        ];
+        for report in reports {
+            let (root, container) = index_of(&report);
+            let pristine_answers = every_query(&CoverageIndex::new(&container).unwrap());
+            let descriptors = crate::coverage_index::coverage_index_sections(&report)
+                .unwrap()
+                .iter()
+                .map(|section| container.descriptor(section.kind).unwrap())
+                .filter(|descriptor| descriptor.length > 0)
+                .collect::<Vec<_>>();
+            drop(container);
+            let path = root.join("query-index.v1.bin");
+            let pristine = std::fs::read(&path).unwrap();
+            let identity = crate::query_index::QueryIndexIdentity {
+                evidence_sha256: [1; 32],
+                evidence_bytes: 100,
+                analysis_sha256: [2; 32],
+                producer_sha256: [3; 32],
+                archive_schema_version: 2,
+            };
+            let mut refused = 0;
+            for descriptor in descriptors {
+                let mut bytes = pristine.clone();
+                bytes[usize::try_from(descriptor.offset).unwrap()] ^= 0xff;
+                std::fs::write(&path, &bytes).unwrap();
+                let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+                let Ok(index) = CoverageIndex::new(&container) else {
+                    refused += 1;
+                    continue;
+                };
+                for (damaged, pristine) in every_query(&index).iter().zip(&pristine_answers) {
+                    refused += usize::from(damaged.is_err() && pristine.is_ok());
+                }
+            }
+            assert!(refused > 0);
+        }
     }
 }

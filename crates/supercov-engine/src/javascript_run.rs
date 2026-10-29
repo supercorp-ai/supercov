@@ -261,17 +261,17 @@ fn javascript_archive_entries(
         };
         entries.push(EvidenceArchiveEntry {
             path: "results/command/mcdc.json".into(),
-            contents: serde_json::to_vec(&command_result).map_err(|error| error.to_string())?,
+            contents: serde_json::to_vec(&command_result).expect("plain data serializes"),
         });
         results.push(command_result);
     }
     let mut by_runner = BTreeMap::<String, Vec<&RawTestResult>>::new();
-    for result in &results {
+    results.iter().for_each(|result| {
         by_runner
             .entry(result.provenance.runner.clone())
             .or_default()
             .push(result);
-    }
+    });
     if entries
         .iter()
         .any(|entry| entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl"))
@@ -300,11 +300,11 @@ fn javascript_archive_entries(
             &PersistedCoverageModel::from_declaration(&javascript_coverage_model())
                 .expect("JavaScript coverage model is contract-valid"),
         )
-        .map_err(|error| error.to_string())?,
+        .expect("plain data serializes"),
     });
     entries.push(EvidenceArchiveEntry {
         path: "frontend.json".into(),
-        contents: serde_json::to_vec(&declaration).map_err(|error| error.to_string())?,
+        contents: serde_json::to_vec(&declaration).expect("plain data serializes"),
     });
     Ok(entries)
 }
@@ -424,10 +424,10 @@ fn remove_derived_pnpm_config(environment: &mut BTreeMap<OsString, OsString>) {
 fn environment_with(values: BTreeMap<String, String>) -> Vec<(OsString, OsString)> {
     let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
     remove_derived_pnpm_config(&mut environment);
-    for (key, value) in values {
+    values.into_iter().for_each(|(key, value)| {
         environment.retain(|existing, _| !existing.to_string_lossy().eq_ignore_ascii_case(&key));
         environment.insert(key.into(), value.into());
-    }
+    });
     environment.into_iter().collect()
 }
 
@@ -516,14 +516,11 @@ pub fn run_direct_javascript(
     let root = crate::workspace::canonicalize_simplified(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
     let nonce = now_nonce();
-    let run_id = request
-        .run_id
-        .clone()
-        .unwrap_or_else(|| format!("rust-{nonce}"));
+    let run_id = request.run_id.clone().unwrap_or(format!("rust-{nonce}"));
     let started_at = request
         .started_at
         .clone()
-        .unwrap_or_else(|| format!("unix-ms-{nonce}"));
+        .unwrap_or(format!("unix-ms-{nonce}"));
     let lock =
         ProjectLock::acquire(&root, &run_id, &started_at).map_err(|error| error.to_string())?;
     let mut cleanup = RunCleanup {
@@ -538,12 +535,11 @@ pub fn run_direct_javascript(
     let recovered_runs =
         recover_abandoned_runs(&root, &started_at).map_err(|error| error.to_string())?;
     if !recovered_runs.is_empty() {
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] recovered abandoned run(s): {}",
             recovered_runs.join(", ")
-        )
-        .map_err(|error| error.to_string())?;
+        );
     }
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let source_roots = crate::source_discovery::configured_source_roots(&environment);
@@ -613,8 +609,7 @@ pub fn run_direct_javascript(
         crate::source_manifest::digest(&project.root.to_string_lossy()),
         crate::source_manifest::digest(&(&project.source_files, &source_roots))
     );
-    let prior_workspace =
-        cached_workspace_path(&root, cleanup.lock()).map_err(|error| error.to_string())?;
+    let prior_workspace = cached_workspace_path(&root, cleanup.lock());
     let reusable_frontend = read_javascript_frontend_cache(&prior_workspace, &frontend_cache_key);
     let cached_paths = reusable_frontend
         .as_ref()
@@ -666,12 +661,11 @@ pub fn run_direct_javascript(
         eprintln!("[supercov] the workspace has no git repository of its own: {error}");
     }
     let workspace_preparation_ms = elapsed_ms(workspace_started);
-    writeln!(
+    let _ = writeln!(
         diagnostics,
         "[supercov] instrumenting isolated workspace {}",
         workspace.display()
-    )
-    .map_err(|error| error.to_string())?;
+    );
     cleanup.mark_state_written();
     write_run_state(
         &root,
@@ -711,12 +705,12 @@ pub fn run_direct_javascript(
     drop(instrumentation_progress);
     let adapter_setup_ms = elapsed_ms(adapter_started);
     if let Some(detail) = crate::javascript_frontend::setup_timing_detail() {
-        writeln!(diagnostics, "[supercov] {detail}").map_err(|error| error.to_string())?;
+        let _ = writeln!(diagnostics, "[supercov] {detail}");
     }
 
     let mut servers = preparing_servers
         .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+        .unwrap_or_else(crate::threads::rethrow)?;
     // Prepared for where the workspace was to be; one moved since is
     // prepared again for where it is.
     if workspace != prepared_for && !servers.is_empty() {
@@ -771,13 +765,12 @@ pub fn run_direct_javascript(
         );
     }
     for server in &servers {
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] measuring {} {language} source file(s) in any {language} server the tests start",
             server.source_files(),
             language = server.language(),
-        )
-        .map_err(|error| error.to_string())?;
+        );
     }
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");
@@ -892,7 +885,7 @@ pub fn run_direct_javascript(
         );
     }
     for server in &servers {
-        for (name, value) in server.environment() {
+        server.environment().into_iter().for_each(|(name, value)| {
             // A server's preload joins the suite's own.
             let value = if name == "NODE_OPTIONS" {
                 overrides
@@ -902,7 +895,7 @@ pub fn run_direct_javascript(
                 value
             };
             overrides.insert(name, value);
-        }
+        });
     }
     // `uv run` syncs the environment before it runs, and the copy's is the
     // project's own, linked in: a sync rewrote the project's editable install
@@ -947,7 +940,7 @@ pub fn run_direct_javascript(
         &environment,
         &mut overrides,
         diagnostics,
-    )?;
+    );
     // What bootstrap.cjs installs in a process that runs the workspace without
     // these settings: one started in a container or VM the workspace is
     // mounted into. It moves `root` to where it sees the workspace from.
@@ -959,9 +952,9 @@ pub fn run_direct_javascript(
             .collect::<BTreeMap<_, _>>(),
     });
     let settings_path = frontend.preload_path.with_file_name("run.json");
-    std::fs::write(
+    crate::fault_fs::write(
         &settings_path,
-        serde_json::to_vec(&settings).map_err(|error| error.to_string())?,
+        serde_json::to_vec(&settings).expect("plain data serializes"),
     )
     .map_err(|error| format!("{}: {error}", settings_path.display()))?;
     // What the tools of a command before this one changed in the source has
@@ -1067,7 +1060,7 @@ pub fn run_direct_javascript(
     if let Some(proxy) = docker_proxy.take() {
         proxy.finish();
         for note in crate::docker_proxy::notes(&docker_state.join("containers.jsonl")) {
-            writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
+            let _ = writeln!(diagnostics, "[supercov] {note}");
         }
     }
     let test_command_ms = execution
@@ -1236,7 +1229,8 @@ pub fn run_direct_javascript(
         // latest` reads, and the rest under ids that sort after it.
         let mut built = Vec::new();
         let mut failure = None;
-        for server in servers {
+        // Never empty: a project with no source and no server was refused.
+        servers.into_iter().for_each(|server| {
             let language = server.language();
             let prepared = crate::fault::or(
                 "server-unpublished",
@@ -1260,7 +1254,7 @@ pub fn run_direct_javascript(
                     failure.get_or_insert(error);
                 }
             }
-        }
+        });
         let named = built
             .iter()
             .enumerate()
@@ -1393,7 +1387,7 @@ pub fn run_direct_javascript(
     if let Some(support) = &support {
         entries.push(EvidenceArchiveEntry {
             path: crate::support_reach::ARCHIVE_PATH.into(),
-            contents: serde_json::to_vec(support).map_err(|error| error.to_string())?,
+            contents: serde_json::to_vec(support).expect("plain data serializes"),
         });
     }
     // The files the run's servers loaded and read are recorded with the
@@ -1413,11 +1407,11 @@ pub fn run_direct_javascript(
             },
         )
     {
-        for (file, text) in reached.files {
+        reached.files.into_iter().for_each(|(file, text)| {
             recorded_inputs.files.entry(file).or_insert(text);
-        }
+        });
     }
-    let entries = crate::source_capture::append(entries, &recorded_inputs)?;
+    let entries = crate::source_capture::append(entries, &recorded_inputs);
     let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;
@@ -1582,10 +1576,8 @@ fn start_docker_relay(
     environment: &BTreeMap<String, String>,
     overrides: &mut BTreeMap<String, String>,
     diagnostics: &mut dyn std::io::Write,
-) -> Result<Option<crate::docker_proxy::DockerProxy>, String> {
-    let Some(upstream) = crate::docker_proxy::upstream_socket(environment) else {
-        return Ok(None);
-    };
+) -> Option<crate::docker_proxy::DockerProxy> {
+    let upstream = crate::docker_proxy::upstream_socket(environment)?;
     let mut names = overrides
         .keys()
         .filter(|name| name.starts_with("SUPERCOV_"))
@@ -1599,9 +1591,11 @@ fn start_docker_relay(
     let settings = crate::docker_proxy::ProxySettings {
         copy: workspace.to_owned(),
         mount: root.join(".supercov"),
-        environment: names
+        // Each server's settings went into the overrides as it was prepared.
+        environment: overrides
             .iter()
-            .filter_map(|name| Some((name.clone(), overrides.get(name)?.clone())))
+            .filter(|(name, _)| names.contains(*name))
+            .map(|(name, value)| (name.clone(), value.clone()))
             .collect(),
         fingerprint: servers
             .iter()
@@ -1616,15 +1610,14 @@ fn start_docker_relay(
     {
         Ok(proxy) => {
             overrides.extend(proxy.environment(environment));
-            Ok(Some(proxy))
+            Some(proxy)
         }
         Err(error) => {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] containers the tests start are not measured: the Docker relay could not start ({error})"
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(None)
+            );
+            None
         }
     }
 }
@@ -1844,6 +1837,24 @@ mod environment_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_interrupted_run_says_by_what() {
+        let interrupted = DirectJavascriptRunError::Interrupted {
+            signal: crate::process_supervision::ForwardedSignal::Sigterm,
+            exit_code: 143,
+            timings: RunTimings {
+                initialization_ms: 0.0,
+                workspace_preparation_ms: 0.0,
+                adapter_setup_ms: 0.0,
+                instrumented_build_ms: 0.0,
+                test_command_ms: 0.0,
+                evidence_publication_ms: 0.0,
+            },
+            total_ms: 0.0,
+        };
+        assert_eq!(interrupted.to_string(), "interrupted by SIGTERM");
+    }
+
     use super::*;
     use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
 

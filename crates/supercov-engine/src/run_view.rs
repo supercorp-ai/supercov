@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::coverage_analysis::CoverageSummary;
-use crate::coverage_report::{CoverageView, ReportError, coverage_summary_for_file};
+use crate::coverage_report::{CoverageView, coverage_summary_for_file};
 
 pub const RUN_VIEW_SCHEMA_VERSION: u32 = 1;
 
@@ -98,6 +98,11 @@ pub struct MetricView {
 }
 
 impl MetricView {
+    /// Covered and eligible, in that order.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.covered, self.eligible)
+    }
+
     /// Exact comparison against a floor in parts per million of a percentage.
     ///
     /// The counts are compared directly, never a formatted percentage: a run
@@ -219,8 +224,11 @@ pub struct FileView {
 }
 
 impl FileView {
-    pub fn metric(&self, metric: Metric) -> Option<&MetricView> {
-        self.metrics.iter().find(|view| view.metric == metric)
+    pub fn metric(&self, metric: Metric) -> &MetricView {
+        self.metrics
+            .iter()
+            .find(|view| view.metric == metric)
+            .expect("a file view counts every metric")
     }
 
     /// Every measured line paired with whether a selected test reached it.
@@ -348,7 +356,7 @@ pub fn build(
     suite_passed: bool,
     stale: bool,
     stale_reasons: Vec<String>,
-) -> Result<RunView, ReportError> {
+) -> RunView {
     let mut files = BTreeMap::<String, FileView>::new();
     for line in &view.lines {
         let file = files
@@ -386,8 +394,8 @@ pub fn build(
         // A view folds every point, declined ones too, into its lines, so
         // the point's file is already here.
         files
-            .entry(point.meta.file.clone())
-            .or_insert_with(|| empty_file(&point.meta.file))
+            .get_mut(&point.meta.file)
+            .expect("a view's lines hold every point's file")
             .functions
             .push(FunctionRecord {
                 line: point.meta.line,
@@ -421,7 +429,10 @@ pub fn build(
     }
     let mut built = Vec::new();
     for (path, mut file) in files {
-        file.metrics = metrics_of(&coverage_summary_for_file(view, &path)?);
+        // The view was summarised whole when it was analysed.
+        file.metrics = metrics_of(
+            &coverage_summary_for_file(view, &path).expect("an analysed view summarises by file"),
+        );
         file.measured_lines.sort_unstable();
         file.measured_lines.dedup();
         file.uncovered_lines.sort_unstable();
@@ -441,7 +452,7 @@ pub fn build(
         .iter()
         .filter_map(|file| neighbourhood(&file.file))
         .collect::<BTreeSet<_>>();
-    Ok(RunView {
+    RunView {
         schema_version: RUN_VIEW_SCHEMA_VERSION,
         run: run.to_owned(),
         generated_at: generated_at.to_owned(),
@@ -457,7 +468,7 @@ pub fn build(
         totals: metrics_of(&view.summary),
         files: built,
         source_neighbourhoods,
-    })
+    }
 }
 
 /// A percentage floor, held in parts per million so a fractional target is
@@ -500,7 +511,7 @@ pub fn parse_percentage(value: &str) -> Result<u64, String> {
     } else {
         format!("{fraction:0<4}")
             .parse()
-            .map_err(|_| format!("{value:?} is not a percentage"))?
+            .expect("at most four digits, checked above, are a number")
     };
     let ppm = whole
         .checked_mul(10_000)
@@ -582,8 +593,9 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
         return Outcome::Error { reasons };
     }
 
+    // At least one floor: none is an error above.
     let mut violations = Vec::new();
-    for floor in floors {
+    floors.iter().for_each(|floor| {
         let metric = view.metric(floor.metric);
         if !metric.meets(floor.ppm) {
             violations.push(Violation {
@@ -596,12 +608,10 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
             });
         }
         if !per_file {
-            continue;
+            return;
         }
         for file in &view.files {
-            let Some(counts) = file.metric(floor.metric) else {
-                continue;
-            };
+            let counts = file.metric(floor.metric);
             // A file with nothing eligible for this metric is not a hundred
             // percent and not a violation either; it simply has no obligation.
             if counts.eligible == 0 || counts.meets(floor.ppm) {
@@ -616,7 +626,7 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
                 uncovered_lines: file.uncovered_lines.clone(),
             });
         }
-    }
+    });
     if violations.is_empty() {
         Outcome::Pass
     } else {
@@ -627,6 +637,16 @@ pub fn check(view: &RunView, floors: &[Floor], per_file: bool) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file with no extension has no neighbourhood of measured files.
+    #[test]
+    fn a_name_without_an_extension_has_no_neighbourhood() {
+        assert_eq!(neighbourhood("Makefile"), None);
+        assert_eq!(
+            neighbourhood("src/a.js"),
+            Some(("src".to_owned(), "js".to_owned()))
+        );
+    }
 
     fn metric(covered: usize, eligible: usize) -> MetricView {
         MetricView {
@@ -810,6 +830,79 @@ mod tests {
     /// under their file.
     #[test]
     fn a_declined_line_leaves_the_totals_incomplete() {
+        let coverage = small_coverage(Vec::new());
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
+        let file = built.file("src/a.js").unwrap();
+        assert_eq!(file.measured_lines, [1, 2]);
+        assert_eq!(file.uncovered_lines, [2]);
+        assert_eq!(file.functions.len(), 1);
+        assert_eq!(file.functions[0].name, "total");
+        assert_eq!(
+            file.branches
+                .iter()
+                .map(|branch| branch.taken)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(file.missing_branches.len(), 1);
+        assert_eq!(
+            built.metric(Metric::Lines).applicability,
+            Applicability::Incomplete { unmeasured: 1 }
+        );
+    }
+
+    /// A branch, function or decision whose file has no line of its own
+    /// still gets that file, and a view of nothing builds no file.
+    #[test]
+    fn a_record_in_a_file_with_no_line_still_has_its_file() {
+        let mut coverage = small_coverage(vec![crate::coverage_report::DecisionMeta {
+            id: "d".into(),
+            file: "src/a.js".into(),
+            line: 1,
+            column: 1,
+            source: "x".into(),
+            conditions: vec!["x".into()],
+            kind: "if".into(),
+        }]);
+        coverage.lines.clear();
+        // The decision's outcome is a branch of its own.
+        assert_eq!(coverage.branches.len(), 2);
+        coverage
+            .branches
+            .iter_mut()
+            .for_each(|branch| branch.alternatives.clear());
+        coverage.decisions[0].conditions.clear();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
+        let file = built.file("src/a.js").unwrap();
+        assert!(file.measured_lines.is_empty() && file.branches.is_empty());
+        assert!(file.conditions.is_empty() && file.missing_conditions.is_empty());
+        assert_eq!(file.functions.len(), 1);
+
+        // A decision alone, too.
+        coverage.points.clear();
+        coverage.branches.clear();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
+        assert!(built.file("src/a.js").is_some());
+
+        coverage.decisions.clear();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
+        assert!(built.files.is_empty());
+        // Totals that pass, judged per file over no file, find nothing more.
+        let floors = [Floor {
+            metric: Metric::Lines,
+            ppm: 1_000_000,
+        }];
+        assert_eq!(
+            check(&view(vec![metric(1, 1)], Vec::new()), &floors, true).exit_code(),
+            0
+        );
+    }
+
+    /// A run of one test over one file: a function, three statements (one of
+    /// them declined), a branch and these decisions.
+    fn small_coverage(
+        decisions: Vec<crate::coverage_report::DecisionMeta>,
+    ) -> crate::coverage_report::CoverageView {
         use crate::coverage_analysis::PointKind;
         use crate::coverage_report::{
             BranchAlternativeMeta, BranchMeta, CoverageManifest, PointMeta, RawTestResult,
@@ -826,7 +919,7 @@ mod tests {
         };
         let manifest = CoverageManifest {
             unmeasured: vec!["declined".into()],
-            decisions: Vec::new(),
+            decisions,
             points: vec![
                 point("f", PointKind::Function, 1, Some("total")),
                 point("ran", PointKind::Statement, 1, None),
@@ -886,25 +979,7 @@ mod tests {
             browser: Vec::new(),
             server: Vec::new(),
         };
-        let coverage = create_coverage_view(&manifest, &[raw], "now").unwrap();
-        let built = build("run_1", "now", &coverage, true, false, Vec::new()).unwrap();
-        let file = built.file("src/a.js").unwrap();
-        assert_eq!(file.measured_lines, [1, 2]);
-        assert_eq!(file.uncovered_lines, [2]);
-        assert_eq!(file.functions.len(), 1);
-        assert_eq!(file.functions[0].name, "total");
-        assert_eq!(
-            file.branches
-                .iter()
-                .map(|branch| branch.taken)
-                .collect::<Vec<_>>(),
-            [true, false]
-        );
-        assert_eq!(file.missing_branches.len(), 1);
-        assert_eq!(
-            built.metric(Metric::Lines).applicability,
-            Applicability::Incomplete { unmeasured: 1 }
-        );
+        create_coverage_view(&manifest, &[raw], "now").unwrap()
     }
 
     #[test]
@@ -936,6 +1011,11 @@ mod tests {
         assert_eq!(parse_percentage("100").unwrap(), 1_000_000);
         assert_eq!(parse_percentage("0").unwrap(), 0);
         assert_eq!(parse_percentage(" 87.6543 ").unwrap(), 876_543);
+        // A whole part too large to scale is too large, not some other number.
+        assert_eq!(
+            parse_percentage("18446744073709551615").unwrap_err(),
+            "\"18446744073709551615\" is too large"
+        );
         for refused in ["101", "-1", "abc", "", "1e2", "50.123456", "100.0001"] {
             assert!(parse_percentage(refused).is_err(), "{refused} was accepted");
         }

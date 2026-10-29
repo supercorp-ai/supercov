@@ -23,27 +23,31 @@ pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
     };
     let tree = match crate::jvm_instrumenter::parse(source, language) {
         Ok(tree) => tree,
-        Err(_) => {
-            let Some(tree) = recovered(source, language) else {
-                return out;
-            };
-            tree
-        }
+        Err(_) => recovered(source, language),
     };
     let starts = line_starts(source);
     walk(tree.root_node(), source, &starts, kotlin(file), &mut out);
     out
 }
 
+/// A `catch`, `when` entry or `finally` block lies in the expression it is
+/// part of.
+const OWNED: &str = "a catch, when entry or finally block has its expression";
+
 /// Whatever tree the grammar recovers from a source that does not parse.
-fn recovered(source: &str, language: JvmLanguage) -> Option<Tree> {
+fn recovered(source: &str, language: JvmLanguage) -> Tree {
     let mut parser = Parser::new();
     let grammar = match language {
         JvmLanguage::Kotlin => crate::kotlin_grammar::LANGUAGE.into(),
         JvmLanguage::Java => tree_sitter_java::LANGUAGE.into(),
     };
-    parser.set_language(&grammar).ok()?;
-    parser.parse(source, None)
+    parser
+        .set_language(&grammar)
+        .expect("the JVM grammars are built for this tree-sitter");
+    // With no timeout or cancellation set, a parse always gives a tree.
+    parser
+        .parse(source, None)
+        .expect("tree-sitter recovers a tree from any text")
 }
 
 /// What an `if` tests, out of Java's parentheses.
@@ -51,7 +55,10 @@ fn tested(node: Node) -> Option<Node> {
     if !matches!(node.kind(), "if_statement" | "if_expression") {
         return None;
     }
-    let condition = node.child_by_field_name("condition")?;
+    // Both grammars require it, and recovery puts a missing node there.
+    let condition = node
+        .child_by_field_name("condition")
+        .expect("an if has its condition");
     Some(if condition.kind() == "parenthesized_expression" {
         condition.named_child(0).unwrap_or(condition)
     } else {
@@ -250,10 +257,7 @@ fn on_final_path(node: Node, source: &str) -> bool {
         node = match block.parent() {
             Some(p) if matches!(p.kind(), "if_expression" | "try_expression") => p,
             Some(p) if matches!(p.kind(), "catch_block" | "when_entry" | "finally_block") => {
-                match p.parent() {
-                    Some(owner) => owner,
-                    None => return false,
-                }
+                p.parent().expect(OWNED)
             }
             _ => return false,
         };
@@ -261,11 +265,13 @@ fn on_final_path(node: Node, source: &str) -> bool {
 }
 
 /// Whether a statement is the last in a block whose value is used: a branch
-/// of an `if`, `when` or `try` that is itself a value.
+/// of an `if`, `when` or `try` that is itself a value. Every Kotlin statement
+/// asked about is in a block: the grammar hides the statements of a lambda,
+/// which are never asked about.
 fn yields_value(node: Node) -> bool {
-    let Some(block) = node.parent().filter(|p| p.kind() == "block") else {
-        return false;
-    };
+    let block = node
+        .parent()
+        .expect("a Kotlin statement asked about is in a block");
     let mut cursor = block.walk();
     let last = block
         .named_children(&mut cursor)
@@ -276,10 +282,7 @@ fn yields_value(node: Node) -> bool {
     }
     let owner = match block.parent() {
         Some(p) if matches!(p.kind(), "if_expression" | "try_expression") => p,
-        Some(p) if matches!(p.kind(), "when_entry" | "catch_block") => match p.parent() {
-            Some(owner) => owner,
-            None => return false,
-        },
+        Some(p) if matches!(p.kind(), "when_entry" | "catch_block") => p.parent().expect(OWNED),
         _ => return false,
     };
     used(owner)
@@ -287,18 +290,42 @@ fn yields_value(node: Node) -> bool {
 
 /// Whether an `if`, `when` or `try` is used for its value.
 fn used(expression: Node) -> bool {
-    let Some(parent) = expression.parent() else {
-        return false;
-    };
+    let parent = expression
+        .parent()
+        .expect("an expression is never the tree's root");
     match parent.kind() {
         // A statement of its own, unless it ends a block that is a value.
         "block" => yields_value(expression),
-        "statements" | "source_file" | "class_body" | "lambda_literal" => false,
+        // The lambda's value, when it ends the lambda and the lambda's value
+        // is taken.
+        "lambda_literal" => ends(parent, expression) && lambda_value_used(parent),
         // `else if`: the outer `if` decides.
         "if_expression" => used(parent),
         "when_entry" => parent.parent().is_some_and(used),
         // Assigned, returned, passed, an expression body, an operand.
         _ => true,
+    }
+}
+
+/// Whether `node` is the last of `body`'s statements, comments aside.
+fn ends(body: Node, node: Node) -> bool {
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .filter(|child| !child.kind().contains("comment"))
+        .last()
+        .is_some_and(|last| last.id() == node.id())
+}
+
+/// Whether what a lambda returns is used. A trailing lambda's result is its
+/// call's to use (`val x = run { .. }`, not `run { .. }` on its own); any
+/// other lambda is a value, whose result is taken wherever it is taken.
+fn lambda_value_used(lambda: Node) -> bool {
+    match lambda.parent() {
+        Some(trailing) if trailing.kind() == "annotated_lambda" => trailing
+            .parent()
+            .filter(|call| call.kind() == "call_expression")
+            .is_some_and(used),
+        _ => used(lambda),
     }
 }
 
@@ -410,6 +437,31 @@ mod tests {
     use super::*;
 
     /// `@Nested` classes reuse method names: each test is found in its own.
+    /// Every prefix of a source with conditions, and the source missing any
+    /// one character, is read without a panic: however broken, an `if`
+    /// keeps a condition, if only a missing one.
+    #[test]
+    fn a_broken_source_is_read_without_a_panic() {
+        for (file, source) in [
+            (
+                "A.java",
+                "class A {\n    int f(int x) {\n        if (x > 1 && x < 9) {\n            return 1;\n        } else if (x == 0) {\n            return 2;\n        }\n        return 3;\n    }\n}\n",
+            ),
+            (
+                "A.kt",
+                "fun f(x: Int): Int {\n    val y = if (x > 1) 1 else 2\n    if (x == 0 || y == 1) {\n        return 2\n    }\n    return when { x > 3 -> 1\n else -> 0 }\n}\n",
+            ),
+        ] {
+            for end in 0..=source.len() {
+                let _ = statement_starts(file, &source[..end]);
+            }
+            for at in 0..source.len() {
+                let missing = format!("{}{}", &source[..at], &source[at + 1..]);
+                let _ = statement_starts(file, &missing);
+            }
+        }
+    }
+
     #[test]
     fn a_nested_test_is_found_in_its_own_class() {
         let text = "class CartTest {\n  @Nested\n  class WhenEmpty {\n    @Test\n    void total() {\n      assertEquals(0, cart.total());\n    }\n  }\n\n  @Nested\n  class WithItems {\n    @Test\n    void total() {\n      assertEquals(3, cart.total());\n    }\n  }\n}\n";
@@ -420,6 +472,12 @@ mod tests {
         // Without a nested class, or with an anonymous one, the first.
         assert_eq!(at("app.CartTest#total()"), Some(5));
         assert_eq!(at("app.CartTest$1#total()"), Some(5));
+        // A nested class the file does not declare: the first, as well.
+        assert_eq!(at("app.CartTest$Absent#total()"), Some(5));
+        // A name with no parameter list names its method all the same; one
+        // the class does not declare is not found.
+        assert_eq!(at("app.CartTest$WithItems#total"), Some(13));
+        assert_eq!(at("app.CartTest#missing()"), None);
         let kotlin = "class CartSpec {\n    inner class Empty {\n        @Test\n        fun `has no total`() {}\n    }\n    inner class EmptyOther {\n        @Test\n        fun `has no total`() {}\n    }\n}\n";
         let lines = kotlin.split('\n').collect::<Vec<_>>();
         assert_eq!(
@@ -488,6 +546,40 @@ mod tests {
             Some(Change::ReturnUndefined)
         );
         assert_eq!(change_at(&kotlin, 18, "throw E()", j), Some(Change::Skip));
+    }
+
+    /// A Kotlin `else if` is asked of by itself, as the branch it is; a Java
+    /// `try` that is a switch case's statement or a constructor's ends no
+    /// function with a result, and is skipped.
+    #[test]
+    fn an_else_if_and_a_try_outside_a_block_are_read() {
+        let j = Language::Jvm;
+        let kotlin = statement_starts(
+            "A.kt",
+            "fun f(a: Boolean, b: Boolean) {\n    if (a) {\n        g()\n    } else if (b) {\n        h()\n    }\n}\n",
+        );
+        assert_eq!(
+            change_at(&kotlin, 4, "if (b) {\n        h()\n    }", j),
+            Some(Change::Invert)
+        );
+        // A `throw` in an `if` that ends a lambda nobody takes the value of
+        // ends no function.
+        let lambda = statement_starts(
+            "B.kt",
+            "fun f(c: Boolean) {\n    run {\n        if (c) {\n            throw E()\n        }\n    }\n}\n",
+        );
+        assert_eq!(change_at(&lambda, 4, "throw E()", j), Some(Change::Skip));
+        let java = statement_starts(
+            "A.java",
+            "class A {\n  int f(int x) {\n    switch (x) {\n      case 1:\n        try { g(); } finally { h(); }\n    }\n    return 0;\n  }\n  A() {\n    try { g(); } finally { h(); }\n  }\n}\n",
+        );
+        for line in [5, 10] {
+            assert_eq!(
+                change_at(&java, line, "try { g(); } finally { h(); }", j),
+                Some(Change::Skip),
+                "{line}"
+            );
+        }
     }
 
     /// A class is found by its whole name at the start of a line, and not
@@ -577,6 +669,55 @@ mod tests {
             Some(Change::ValueUndefined)
         );
         assert_eq!(change_at(&starts, 11, "log(z);", j), Some(Change::Skip));
+        // A class declared in a method is no statement to change.
+        let local = "class A {\n    void f() {\n        class L {}\n    }\n}\n";
+        let starts = statement_starts("A.java", local);
+        assert_eq!(change_at(&starts, 3, "class L {}", j), None);
+        // A Kotlin `else if` branch's value is the outer `if`'s; an `if`
+        // ending a lambda whose value nobody takes yields nothing.
+        let kotlin = "fun f(c: Boolean, d: Boolean): Int {\n    val v = if (c) {\n        1\n    } else if (d) {\n        log()\n        2\n    } else {\n        3\n    }\n    run {\n        if (c) {\n            log()\n            4\n        } else {\n            5\n        }\n    }\n    return v\n}\n";
+        let starts = statement_starts("F.kt", kotlin);
+        assert_eq!(change_at(&starts, 6, "2", j), Some(Change::ReturnUndefined));
+        assert_eq!(change_at(&starts, 13, "4", j), Some(Change::Skip));
+        // One whose value is taken, by the call it trails or as the lambda's
+        // own value, is a value; one that does not end its lambda is not.
+        let taken = concat!(
+            "fun g(c: Boolean): Int {\n",
+            "    val x = run {\n",
+            "        if (c) {\n",
+            "            log()\n",
+            "            4\n",
+            "        } else {\n",
+            "            5\n",
+            "        }\n",
+            "    }\n",
+            "    val f: () -> Int = {\n",
+            "        if (c) {\n",
+            "            log()\n",
+            "            6\n",
+            "        } else {\n",
+            "            7\n",
+            "        }\n",
+            "    }\n",
+            "    val y = run {\n",
+            "        if (c) {\n",
+            "            log()\n",
+            "            8\n",
+            "        } else {\n",
+            "            9\n",
+            "        }\n",
+            "        10\n",
+            "    }\n",
+            "    return x + f() + y\n",
+            "}\n",
+        );
+        let starts = statement_starts("G.kt", taken);
+        assert_eq!(change_at(&starts, 5, "4", j), Some(Change::ReturnUndefined));
+        assert_eq!(
+            change_at(&starts, 13, "6", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(change_at(&starts, 21, "8", j), Some(Change::Skip));
     }
 
     /// Forge's `stringBuilder.toString()` ending a `when` branch: the value

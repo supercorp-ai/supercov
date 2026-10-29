@@ -9,9 +9,9 @@
 //! tests: a mock keeps state between tests, so its files are judged whole,
 //! never by route.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 
@@ -179,6 +179,34 @@ fn url_path(rest: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing recorded is no reach: an empty directory, an empty record,
+    /// and a server that loaded no file reach nothing; merging nothing in
+    /// changes nothing.
+    #[test]
+    fn nothing_recorded_reaches_nothing() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-support-empty-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let directory = root.join("support");
+        fs::create_dir_all(&directory).unwrap();
+        assert!(read(&directory, &root, &[]).is_none());
+        fs::write(directory.join("1-a.jsonl"), "").unwrap();
+        assert!(read(&directory, &root, &[]).is_none());
+        fs::write(
+            directory.join("2-b.jsonl"),
+            format!("{}\n", serde_json::json!({ "served": "t-pay" })),
+        )
+        .unwrap();
+        let reach = read(&directory, &root, &[served("t-pay", (0, 10))]).unwrap();
+        assert!(reach.files.is_empty());
+        let mut merged = reach.clone();
+        merged.extend(SupportReach::default());
+        assert_eq!(merged.files, reach.files);
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     fn served(id: &str, window: (i64, i64)) -> ServedTest {
         ServedTest {

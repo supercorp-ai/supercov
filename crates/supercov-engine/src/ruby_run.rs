@@ -6,9 +6,9 @@
 //! it through `RUBYOPT`, supervises the user's command unchanged, and
 //! publishes the joined evidence.
 
+use crate::fault_fs as fs;
 use std::{
     ffi::OsString,
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,
@@ -83,21 +83,22 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
     ]
 }
 
+#[track_caller]
 fn write_runtime(directory: &Path) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
-    for (name, contents) in embedded_runtime_files() {
-        let path = directory.join(name);
-        fs::write(&path, contents).map_err(|error| format!("{}: {error}", path.display()))?;
-    }
-    Ok(())
+    embedded_runtime_files()
+        .into_iter()
+        .try_for_each(|(name, contents)| {
+            let path = directory.join(name);
+            fs::write(&path, contents).map_err(|error| format!("{}: {error}", path.display()))
+        })
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     for entry in fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))? {
         let entry = entry.map_err(|error| error.to_string())?;
         let target = destination.join(entry.file_name());
-        if entry
-            .file_type()
+        if fs::file_type(&entry)
             .map_err(|error| error.to_string())?
             .is_dir()
         {
@@ -234,12 +235,11 @@ fn run_direct_ruby_in(
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] recovered abandoned run(s): {}",
                 recovered_runs.join(", ")
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
 
         let adapter_started = Instant::now();
@@ -275,22 +275,20 @@ fn run_direct_ruby_in(
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
         fs::write(
             &plan_path,
-            ruby_literal(&serde_json::to_value(&project.plan).map_err(|error| error.to_string())?)
+            ruby_literal(&serde_json::to_value(&project.plan).expect("plain data serializes"))
                 .into_bytes(),
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] detected Ruby; measuring {} source file(s) in place through Ruby's Coverage module and load-time probes",
             project.plan.files.len()
-        )
-        .map_err(|error| error.to_string())?;
+        );
         for (file, reason) in &project.unparseable {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         let adapter_setup_ms = elapsed_ms(adapter_started);
 
@@ -377,8 +375,8 @@ fn run_direct_ruby_in(
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
-        let entries = run.archive_entries().map_err(|error| error.to_string())?;
-        let entries = crate::source_capture::append(entries, &source_inputs)?;
+        let entries = run.archive_entries();
+        let entries = crate::source_capture::append(entries, &source_inputs);
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &ruby_directory).map_err(|error| error.to_string())?;
         let evidence_publication_ms = elapsed_ms(publication_started);
@@ -476,12 +474,11 @@ impl RubyServer {
         command: &[String],
     ) -> Result<Option<Self>, String> {
         let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
-        // Roots named for the JavaScript source may hold no Ruby at all.
-        let Ok(roots) =
-            crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
-        else {
-            return Ok(None);
-        };
+        // Roots named for the JavaScript source may hold no Ruby at all. They
+        // resolve: the suite's own discovery read them first and refused any
+        // that did not.
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
+            .expect("roots the suite's discovery accepted resolve");
         let Some(project) = crate::ruby_project::prepare_ruby_server_project(root, roots.as_ref())?
         else {
             return Ok(None);
@@ -509,7 +506,7 @@ impl RubyServer {
         let directory = root.join(".supercov/work").join(run_id).join("ruby");
         write_runtime(&directory.join("runtime"))?;
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
-        let mut plan = serde_json::to_value(&project.plan).map_err(|error| error.to_string())?;
+        let mut plan = serde_json::to_value(&project.plan).expect("plain data serializes");
         plan["root"] = workspace.display().to_string().into();
         let plan_path = directory.join("plan.rb");
         fs::write(&plan_path, ruby_literal(&plan).into_bytes())
@@ -610,11 +607,10 @@ impl RubyServer {
                 raw.role == "test" && raw.runtime.iter().any(|snapshot| !snapshot.hits.is_empty())
             });
             if !answered {
-                writeln!(
+                let _ = writeln!(
                     diagnostics,
                     "[supercov] a Ruby process ran, and no request a test sent reached measured Ruby code; no Ruby run was published"
-                )
-                .map_err(|error| error.to_string())?;
+                );
                 return Ok(None);
             }
             validate_frontend_report_request(&run.declaration, &run.request)
@@ -637,19 +633,16 @@ impl RubyServer {
                     // The evidence was recorded under the browser run's id; a run
                     // published beside it has its own.
                     run.request.run_id = metadata.id.clone();
-                    for scope in run
-                        .request
+                    run.request
                         .raw_results
                         .iter_mut()
                         .filter_map(|raw| raw.scope.as_mut())
-                    {
-                        scope.run_id = metadata.id.clone();
-                    }
+                        .for_each(|scope| scope.run_id = metadata.id.clone());
                     let work = root.join(".supercov/work").join(&metadata.id);
                     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
                     let archive_path = work.join("ruby-evidence.raw.gz");
-                    let entries = run.archive_entries().map_err(|error| error.to_string())?;
-                    let entries = crate::source_capture::append(entries, &self.source_inputs)?;
+                    let entries = run.archive_entries();
+                    let entries = crate::source_capture::append(entries, &self.source_inputs);
                     let raw =
                         write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
                     let tests = run.tests;
@@ -669,12 +662,11 @@ impl RubyServer {
                     };
                     let run_directory = publish_run(root, &metadata, &archive_path)
                         .map_err(|error| error.to_string())?;
-                    writeln!(
+                    let _ = writeln!(
                         diagnostics,
                         "[supercov] Ruby server coverage: {tests} test(s) across {} source file(s)",
                         self.project.plan.files.len()
-                    )
-                    .map_err(|error| error.to_string())?;
+                    );
                     Ok((run_directory, metadata))
                 })();
                 let result = result
@@ -757,9 +749,11 @@ mod tests {
     use super::*;
 
     fn project(name: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
-            "supercov-ruby-run-{}-{}-{name}",
+            "supercov-ruby-run-{}-{}-{}-{name}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -855,7 +849,10 @@ mod tests {
         let root = project("copied");
         let copy = root.with_extension("copy");
         fs::create_dir_all(&copy).unwrap();
+        // An empty directory is copied as one.
+        fs::create_dir_all(root.join("empty")).unwrap();
         copy_tree(&root, &copy).unwrap();
+        assert!(copy.join("empty").is_dir());
         assert_eq!(
             fs::read_to_string(copy.join("lib/m.rb")).unwrap(),
             "def f(a)\n  a ? 1 : 2\nend\n"

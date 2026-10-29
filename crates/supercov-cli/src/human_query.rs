@@ -11,7 +11,7 @@ use supercov_engine::{
     indexed_query::{IndexedQueryData, IndexedQueryOutput, IndexedQueryRequest},
 };
 
-use crate::{PublicQueryOutput, public_query::PublicQueryInvocation};
+use crate::PublicQueryOutput;
 
 const DEFAULT_LIMIT: usize = 20;
 
@@ -63,12 +63,12 @@ fn number(value: f64) -> String {
 fn count(value: usize) -> String {
     let digits = value.to_string();
     let mut output = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
+    digits.chars().enumerate().for_each(|(index, character)| {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
             output.push(',');
         }
         output.push(character);
-    }
+    });
     output
 }
 
@@ -161,15 +161,17 @@ fn diagnostic_lines(diagnostic: &CoverageDiagnostic, list: Option<&str>) -> Vec<
     vec![format!("  {}", diagnostic.message)]
 }
 
-fn metric_name(metric: MinimizeMetric) -> &'static str {
-    match metric {
-        MinimizeMetric::All => "all",
+/// The metric a minimization was asked for by name; none for all of them,
+/// which is what it means unasked.
+fn metric_name(metric: MinimizeMetric) -> Option<&'static str> {
+    Some(match metric {
+        MinimizeMetric::All => return None,
         MinimizeMetric::Lines => "lines",
         MinimizeMetric::Statements => "statements",
         MinimizeMetric::Functions => "functions",
         MinimizeMetric::Branches => "branches",
         MinimizeMetric::Mcdc => "mcdc",
-    }
+    })
 }
 
 fn shell_quote(value: &str) -> String {
@@ -222,8 +224,8 @@ fn coverage_command(run: &str, request: &IndexedQueryRequest, child: &str) -> St
         values.push(format!("--runner {}", shell_quote(runner)));
     }
     values.extend(test_filter_flags(request));
-    if request.metric != MinimizeMetric::All {
-        values.push(format!("--metric {}", metric_name(request.metric)));
+    if let Some(name) = metric_name(request.metric) {
+        values.push(format!("--metric {name}"));
     }
     values.join(" ")
 }
@@ -348,7 +350,8 @@ fn render_areas(
             .chain(["All".to_owned()])
             .collect::<Vec<_>>(),
     ];
-    for area in &data.areas {
+    // Every file is in an area, and a run has a file.
+    data.areas.iter().for_each(|area| {
         let total = dimension_for_metric(&area.totals, metric);
         table.push(
             [area.directory.clone(), count(area.files), count(total)]
@@ -362,7 +365,7 @@ fn render_areas(
                 .chain([percent(dimension_for_metric(&area.covered, metric), total)])
                 .collect(),
         );
-    }
+    });
     let widths = (0..table[0].len())
         .map(|column| {
             table
@@ -760,13 +763,13 @@ fn line_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
         return Vec::new();
     }
     let mut lines = vec![String::new(), "Assertions".into()];
-    for statement in &statements {
+    lines.extend(statements.iter().map(|statement| {
         let test = statement["test"]["name"].as_str().unwrap_or("no test");
         let likely = statement["answer"]
             .as_f64()
             .map(|p| format!(", {:.0}% likely to fail", p * 100.0))
             .unwrap_or_default();
-        lines.push(if statement["asserted"] == true {
+        if statement["asserted"] == true {
             format!(
                 "  Asserted: `{}`; {test} is judged to fail if it changes ({}{likely})",
                 statement["text"].as_str().unwrap_or(""),
@@ -778,8 +781,8 @@ fn line_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
                 statement["text"].as_str().unwrap_or(""),
                 statement["change"].as_str().unwrap_or("")
             )
-        });
-    }
+        }
+    }));
     lines.push(format!(
         "  Inspect: {}",
         a["inspect"].as_str().unwrap_or("")
@@ -931,65 +934,67 @@ fn test_totals(totals: &supercov_engine::coverage_query::CoverageTestTotals) -> 
     )
 }
 
-fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
-    // Several lines: each as one line reads, one after another.
-    if let IndexedQueryData::Lines(data) = &output.data {
-        let answered = data
-            .lines
-            .iter()
-            .zip(&data.pages)
-            .map(|(line, page)| {
-                let location = match line {
-                    supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
-                        &data.location
-                    }
-                    supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
-                        &data.location
-                    }
-                };
-                let mut one = request.clone();
-                one.file = Some(location.file.clone());
-                one.line = Some(location.line);
-                one.more_lines = Vec::new();
-                // A line of several lists a few tests; asked alone it lists
-                // them all, which is the next page here.
-                let mut page = page.clone();
-                let more = page.has_more;
-                page.has_more = false;
-                page.next_offset = None;
-                let mut text = render_coverage(
-                    &one,
-                    &IndexedQueryOutput {
-                        command: "coverage.line",
-                        data: IndexedQueryData::Line(Box::new(line.clone())),
-                        pagination: Some(page),
-                    },
-                );
-                if more {
-                    text.push_str(&format!(
-                        "\nevery test and phase: supercov runs {} line {}",
-                        shell_quote(&request.run_id),
-                        shell_quote(&format!("{}:{}", location.file, location.line))
-                    ));
+/// Several lines: each as one line reads, one after another.
+fn render_lines(
+    request: &IndexedQueryRequest,
+    data: &supercov_engine::indexed_query::CoverageLinesData,
+) -> String {
+    let answered = data
+        .lines
+        .iter()
+        .zip(&data.pages)
+        .map(|(line, page)| {
+            let location = match line {
+                supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                    &data.location
                 }
-                text
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if data.failed.is_empty() {
-            return answered;
-        }
-        let failed = data
-            .failed
-            .iter()
-            .map(|failure| format!("  {}: {}", failure.location, failure.message))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return format!("{answered}\n\nNot answered\n{failed}");
+                supercov_engine::coverage_query::CoverageCoversData::Line(data) => &data.location,
+            };
+            let mut one = request.clone();
+            one.file = Some(location.file.clone());
+            one.line = Some(location.line);
+            one.more_lines = Vec::new();
+            // A line of several lists a few tests; asked alone it lists
+            // them all, which is the next page here.
+            let mut page = page.clone();
+            let more = page.has_more;
+            page.has_more = false;
+            page.next_offset = None;
+            let mut text = render_coverage(
+                &one,
+                &IndexedQueryOutput {
+                    command: "coverage.line",
+                    data: IndexedQueryData::Line(Box::new(line.clone())),
+                    pagination: Some(page),
+                },
+            );
+            if more {
+                text.push_str(&format!(
+                    "\nevery test and phase: supercov runs {} line {}",
+                    shell_quote(&request.run_id),
+                    shell_quote(&format!("{}:{}", location.file, location.line))
+                ));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if data.failed.is_empty() {
+        return answered;
     }
+    let failed = data
+        .failed
+        .iter()
+        .map(|failure| format!("  {}: {}", failure.location, failure.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{answered}\n\nNot answered\n{failed}")
+}
+
+fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
     let page = output.pagination.as_ref();
     match &output.data {
-        IndexedQueryData::Lines(_) => unreachable!("several lines render one by one above"),
+        IndexedQueryData::Lines(data) => render_lines(request, data),
         IndexedQueryData::Summary(data) => {
             let label = filter_label(request);
             let mut first = format!("run {}", data.run);
@@ -1101,28 +1106,31 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             }
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);
-                for kind in data.coverage_by_kind.iter().filter(|kind| kind.tests > 0) {
-                    if kind.attributed == 0 {
-                        lines.push(format!(
+                data.coverage_by_kind
+                    .iter()
+                    .filter(|kind| kind.tests > 0)
+                    .for_each(|kind| {
+                        if kind.attributed == 0 {
+                            lines.push(format!(
                             "  {:<12} {:>4} test(s)  coverage not attributable; counted run-wide",
                             kind.kind.as_deref().unwrap_or("unknown"),
                             kind.tests,
                         ));
-                        continue;
-                    }
-                    lines.push(format!(
-                        "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}{}",
-                        kind.kind.as_deref().unwrap_or("unknown"),
-                        kind.tests,
-                        share(kind.summary.lines.percentage, kind.summary.lines.total),
-                        share(
-                            kind.summary.branches.percentage,
-                            kind.summary.branches.total
-                        ),
-                        share(kind.summary.condition_coverage_pct, kind.summary.conditions),
-                        unattributed_note(kind),
-                    ));
-                }
+                            return;
+                        }
+                        lines.push(format!(
+                            "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}{}",
+                            kind.kind.as_deref().unwrap_or("unknown"),
+                            kind.tests,
+                            share(kind.summary.lines.percentage, kind.summary.lines.total),
+                            share(
+                                kind.summary.branches.percentage,
+                                kind.summary.branches.total
+                            ),
+                            share(kind.summary.condition_coverage_pct, kind.summary.conditions),
+                            unattributed_note(kind),
+                        ));
+                    });
                 // One kind of test at 35.83% under a run total of 41.58%
                 // read as two answers to one question. The rest ran while no
                 // test was running, and the rows now say so.
@@ -1281,7 +1289,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             ]);
             if !data.diagnostics.is_empty() {
                 lines.extend([String::new(), "Warnings".into()]);
-                for diagnostic in &data.diagnostics {
+                data.diagnostics.iter().for_each(|diagnostic| {
                     lines.extend(diagnostic_lines(
                         diagnostic,
                         Some(&coverage_command(
@@ -1290,7 +1298,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             "tests without-evidence",
                         )),
                     ));
-                }
+                });
             }
             if !data.hints.is_empty() {
                 lines.extend([String::new(), "Hints".into()]);
@@ -1441,7 +1449,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ));
                 // Which value each one never took, and the run that would
                 // show it deciding: what a test has to do.
-                for condition in &row.missing {
+                // A decision with a gap misses a condition at least.
+                row.missing.iter().for_each(|condition| {
                     lines.push(format!(
                         "    {}",
                         condition_gap(
@@ -1450,7 +1459,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             &condition.needs
                         )
                     ));
-                }
+                });
             }
             if data.decisions.is_empty() {
                 lines.push(String::new());
@@ -1614,7 +1623,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 }
                 CoverageDecisionData::Detail(data) => {
                     let mut decisions = Vec::new();
-                    for decision in &data.decisions {
+                    // A detail is of one decision: never none.
+                    data.decisions.iter().for_each(|decision| {
                         let mut lines = vec![
                             format!(
                                 "{}  {}:{}:{}",
@@ -1660,7 +1670,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             }));
                         }
                         decisions.push(lines.join("\n"));
-                    }
+                    });
                     let mut output = decisions.join("\n\n");
                     output.push_str(&format!(
                         "\n{} conditions/vectors/tests per decision",
@@ -1727,9 +1737,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     }
                     if !data.anchored.is_empty() {
                         lines.extend([String::new(), "Coverage details".into()]);
-                        for anchor in &data.anchored {
-                            lines.extend(render_anchor(anchor));
-                        }
+                        lines.extend(data.anchored.iter().flat_map(render_anchor));
                     }
                     if !data.limitations.is_empty() {
                         lines.extend([String::new(), "Measurement limits".into()]);
@@ -1810,9 +1818,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     }
                     if !data.anchored.is_empty() {
                         lines.extend([String::new(), "Coverage details".into()]);
-                        for anchor in &data.anchored {
-                            lines.extend(render_anchor(anchor));
-                        }
+                        lines.extend(data.anchored.iter().flat_map(render_anchor));
                     }
                     if !data.limitations.is_empty() {
                         lines.extend([String::new(), "Measurement limits".into()]);
@@ -1990,11 +1996,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
         }
         IndexedQueryData::Minimize(data) => {
             let page = page.expect("minimize is paginated");
-            let target_label = if data.metric == MinimizeMetric::All {
-                "coverage across all measured metrics"
-            } else {
-                metric_name(data.metric)
-            };
+            let target_label =
+                metric_name(data.metric).unwrap_or("coverage across all measured metrics");
             let goal = match data.target {
                 Some(target) => format!("for {}% {target_label}", number(target)),
                 None if data.metric == MinimizeMetric::All => format!(
@@ -2052,7 +2055,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 return lines.join("\n");
             }
             lines.push(String::new());
-            for test in &data.tests {
+            // Some: no test returned above.
+            data.tests.iter().for_each(|test| {
                 // A runner that names a test by its titles alone leaves out
                 // where it is.
                 let place = test
@@ -2078,7 +2082,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ""
                     },
                 ));
-            }
+            });
             lines.push(page_label(page));
             let base = coverage_command(&data.run, request, "tests without-evidence");
             if page.offset + page.returned < page.total {
@@ -2180,7 +2184,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 } else {
                     format!("in {} files, most lost first:", data.files)
                 });
-                for file in data.by_file.iter().take(SHOWN) {
+                // More than one file, so never none: `files` counts `by_file`.
+                data.by_file.iter().take(SHOWN).for_each(|file| {
                     let sides = [
                         ("lost", counted(&file.lost)),
                         ("gained", counted(&file.gained)),
@@ -2191,7 +2196,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     .collect::<Vec<_>>()
                     .join("; ");
                     lines.push(format!("  {}: {sides}", file.file));
-                }
+                });
                 if data.files > SHOWN {
                     lines.push(format!("  ... and {} more files", data.files - SHOWN));
                 }
@@ -2259,12 +2264,13 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
     }
 }
 
-pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutput) -> String {
-    match (invocation, output) {
-        (
-            PublicQueryInvocation::Runs { filter, .. },
-            PublicQueryOutput::Runs { data, pagination },
-        ) => {
+pub fn render_human(output: &PublicQueryOutput) -> String {
+    match output {
+        PublicQueryOutput::Runs {
+            data,
+            pagination,
+            filter,
+        } => {
             let id_width = data
                 .runs
                 .iter()
@@ -2318,11 +2324,9 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
             }
             lines.join("\n")
         }
-        (
-            PublicQueryInvocation::Coverage { request, .. },
-            PublicQueryOutput::Coverage { output, .. },
-        ) => render_coverage(request, output),
-        _ => unreachable!("query execution preserves invocation kind"),
+        PublicQueryOutput::Coverage {
+            output, request, ..
+        } => render_coverage(request, output),
     }
 }
 
@@ -2333,7 +2337,7 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
             value["assess"]
                 .as_str()
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!(
+                .unwrap_or(format!(
                     "{} runs latest assertions assess",
                     crate::launcher_command()
                 ))
@@ -2352,6 +2356,67 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each branch outcome a frontend labels is said as the outcome not
+    /// observed, and each assertion confidence by what it means.
+    #[test]
+    fn every_outcome_label_and_confidence_is_said_plainly() {
+        for (label, said) in [
+            ("default evaluated", "default-value branch not observed"),
+            ("value provided", "explicit-value branch not observed"),
+            ("no matching case", "switch no-match outcome not observed"),
+            (
+                "try completed without catch",
+                "try-success outcome not observed",
+            ),
+            ("catch entered", "catch outcome not observed"),
+            ("zero iterations", "zero-iteration outcome not observed"),
+            (
+                "one or more iterations",
+                "entered-loop outcome not observed",
+            ),
+            (
+                "nullish / short-circuited",
+                "nullish short-circuit outcome not observed",
+            ),
+            (
+                "non-nullish / continued",
+                "non-nullish continuation outcome not observed",
+            ),
+            (
+                "assignment skipped",
+                "assignment-skipped outcome not observed",
+            ),
+            (
+                "right evaluated / assigned",
+                "right-evaluated assignment outcome not observed",
+            ),
+            (
+                "short-circuit / left selected",
+                "left-selected short-circuit outcome not observed",
+            ),
+            (
+                "right evaluated / selected",
+                "right-selected outcome not observed",
+            ),
+            ("true", "decision never true"),
+            ("false", "decision never false"),
+            (
+                "something new",
+                "branch outcome not observed: something new",
+            ),
+        ] {
+            assert_eq!(branch_need(label), said, "{label}");
+        }
+        for (level, said) in [
+            ("action", "linked to a test action"),
+            ("executed", "execution only"),
+            ("unexecuted", "not executed"),
+            ("other", "other"),
+        ] {
+            assert_eq!(confidence_label(level), said);
+        }
+    }
 
     /// A line with nothing on it is not measured; one nothing ran is not
     /// covered; one whose every anchored obligation is complete, with no
@@ -3101,25 +3166,18 @@ mod tests {
             has_more: false,
             next_offset: None,
         };
-        let text = render_human(
-            &PublicQueryInvocation::Runs {
-                filter: "all".into(),
-                offset: 0,
-                limit: DEFAULT_LIMIT,
-                json: false,
-            },
-            &PublicQueryOutput::Runs {
-                data: supercov_engine::run_query::RunListData {
-                    filters: supercov_engine::coverage_query::CoverageQueryFilters {
-                        outcome: "all".into(),
-                        kind: None,
-                        runner: None,
-                    },
-                    runs: vec![entry],
+        let text = render_human(&PublicQueryOutput::Runs {
+            filter: "all".into(),
+            data: supercov_engine::run_query::RunListData {
+                filters: supercov_engine::coverage_query::CoverageQueryFilters {
+                    outcome: "all".into(),
+                    kind: None,
+                    runner: None,
                 },
-                pagination: page,
+                runs: vec![entry],
             },
-        );
+            pagination: page,
+        });
         assert!(
             text.contains("2026-10-16 10:29:02 UTC  INVALID COVERAGE"),
             "{text}"

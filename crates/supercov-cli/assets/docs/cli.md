@@ -926,6 +926,7 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_RUN_ID` | Set by Supercov, not by you: in every process a measured command starts, the run's id, so a test or harness can tell it is measured |
 | `SUPERCOV_RUN_ID_FILE` | A file to write the recorded run's id to, for a script to query that run rather than `latest` |
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
+| `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:
 
@@ -941,6 +942,7 @@ SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 | `0` | The command or query succeeded |
 | Wrapped command's code | The test command failed and Supercov preserved its status |
 | `127`, `126` | The test command could not start: no such program, or one that may not be run, as a shell reports it |
+| `124` | The test command ran past `SUPERCOV_COMMAND_TIMEOUT_MS` and was stopped |
 | `1` | A valid measurement failed a policy you set, such as a coverage floor |
 | `2` | Supercov could not complete the request, or the evidence cannot answer it |
 

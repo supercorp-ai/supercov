@@ -97,7 +97,7 @@ impl Ran {
     /// Which of the two entries a path is, in a run or a merge of runs.
     fn wanted(path: &str, merged: bool) -> Option<&'static str> {
         let name = if merged {
-            path.rsplit('/').next()?
+            path.rsplit('/').next().unwrap_or_default()
         } else {
             path
         };
@@ -472,13 +472,15 @@ pub fn judge(
                 .push(format!("{file} (`{label}` does not load it)"));
             continue;
         }
-        if gone {
+        let Some(is) = now.get(&file) else {
             refuse(&mut judgment, &file, format!("{file} is gone"));
             continue;
-        }
+        };
         let before = recorded.get(&file).and_then(|was| was.code.as_ref());
-        let after = now.get(&file).and_then(|is| is.code.as_ref());
-        if let (Some(before), Some(source)) = (before, text(&file))
+        let after = is.code.as_ref();
+        // Read as the checkout holds it, where that is what `now` recorded.
+        let source = text(&file).filter(|source| FileFingerprint::of(source).sha256 == is.sha256);
+        if let (Some(before), Some(source)) = (before, source)
             && let Some(added) = only_added(before, &file, &source)
         {
             judgment
@@ -537,7 +539,7 @@ pub fn checkout_files(
         .keys()
         .chain(configurations)
         .filter_map(|file| {
-            let text = std::fs::read_to_string(root.join(file)).ok()?;
+            let text = crate::fault_fs::read_to_string(root.join(file)).ok()?;
             Some((file.clone(), FileFingerprint::read(file, &text)))
         })
         .collect()
@@ -571,6 +573,13 @@ mod tests {
     /// What a run's archive says it ran, read from its own entries or, in a
     /// merge, each shard's: a support record of another shape, a declaration
     /// that names no runners and an entry that is not JSON say nothing.
+    #[test]
+    fn an_archive_of_nothing_says_nothing_of_what_ran() {
+        let ran = Ran::from_entries(&[], false);
+        assert!(ran.runners.is_none() && ran.playwright.is_none());
+        assert!(ran.measured.is_none() && ran.support.is_none());
+    }
+
     #[test]
     fn what_a_run_ran_is_read_from_its_entries_or_its_shards() {
         let entry = |path: &str, contents: Value| EvidenceArchiveEntry {

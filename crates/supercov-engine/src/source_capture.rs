@@ -1,6 +1,7 @@
 //! What a run captures of its sources: each file's text at the time of the
 //! run, fingerprinted into the manifest archived with the evidence, and the
 //! check that a later query reads the same bytes.
+use crate::fault_fs as fs;
 use crate::{
     evidence_archive::EvidenceArchiveEntry,
     source_manifest::{FileFingerprint, Files, InputManifest, Inputs, local_path},
@@ -8,7 +9,6 @@ use crate::{
 };
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -62,18 +62,21 @@ pub fn capture(
     Ok(inputs)
 }
 
+/// `entries` with the run's record of its sources added. A run's entries are
+/// built by Supercov, and never hold that record already.
 pub fn append(
     mut entries: Vec<EvidenceArchiveEntry>,
     inputs: &Inputs,
-) -> Result<Vec<EvidenceArchiveEntry>, String> {
-    if entries.iter().any(|e| e.path == ARCHIVE_PATH) {
-        return Err("duplicate source inputs".into());
-    }
+) -> Vec<EvidenceArchiveEntry> {
+    assert!(
+        !entries.iter().any(|e| e.path == ARCHIVE_PATH),
+        "a run's own archive entries never hold its source record"
+    );
     entries.push(EvidenceArchiveEntry {
         path: ARCHIVE_PATH.into(),
-        contents: serde_json::to_vec(&inputs.manifest()).map_err(|e| e.to_string())?,
+        contents: serde_json::to_vec(&inputs.manifest()).expect("plain data serializes"),
     });
-    Ok(entries)
+    entries
 }
 
 /// Read project files only when their exact bytes still match the run manifest.
@@ -159,16 +162,46 @@ mod tests {
         );
     }
 
+    /// Nothing named is nothing captured; a file that is not UTF-8 or no
+    /// longer there is left out; a root that is gone is an error, and so is
+    /// reading the run's files back under it.
     #[test]
+    fn what_cannot_be_captured_is_left_out_or_refused() {
+        let (_base, root) = project("left-out");
+        assert!(
+            capture(&root, "javascript", Vec::<PathBuf>::new())
+                .unwrap()
+                .files
+                .is_empty()
+        );
+        fs::write(root.join("src/binary.js"), [0xff, 0xfe]).unwrap();
+        let captured = capture(
+            &root,
+            "javascript",
+            ["src/a.js", "src/binary.js", "src/gone.js"].map(PathBuf::from),
+        )
+        .unwrap();
+        assert_eq!(captured.files.keys().collect::<Vec<_>>(), ["src/a.js"]);
+        // A file that cannot be resolved is refused.
+        assert!(
+            crate::fault::during("fs.canonicalize#source_capture.rs:45", || {
+                capture(&root, "javascript", [PathBuf::from("src/a.js")])
+            })
+            .is_err()
+        );
+        let gone = root.join("gone");
+        assert!(capture(&gone, "javascript", [PathBuf::from("src/a.js")]).is_err());
+        assert!(current_sources(&gone, &captured.manifest()).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "never hold its source record")]
     fn source_inputs_are_archived_once() {
         let (_base, root) = project("archived");
         let inputs = capture(&root, "javascript", [PathBuf::from("src/a.js")]).unwrap();
-        let entries = append(Vec::new(), &inputs).unwrap();
+        let entries = append(Vec::new(), &inputs);
         assert_eq!(entries[0].path, ARCHIVE_PATH);
-        assert_eq!(
-            append(entries, &inputs).unwrap_err(),
-            "duplicate source inputs"
-        );
+        append(entries, &inputs);
     }
 
     #[test]
@@ -188,6 +221,18 @@ mod tests {
             .files
             .insert("../secret.js".into(), fingerprint.clone());
         assert_eq!(read(&climbing), "Invalid source path: ../secret.js");
+        // A file that cannot be resolved or read now is unavailable.
+        for fault in [
+            "fs.canonicalize#source_capture.rs:103",
+            "fs.read_to_string#source_capture.rs:107",
+        ] {
+            assert!(
+                crate::fault::during(fault, || current_sources(&root, &manifest))
+                    .unwrap_err()
+                    .contains("unavailable: src/a.js"),
+                "{fault}"
+            );
+        }
         let unavailable = |file: &str| {
             format!(
                 "Current source differs from the run or is unavailable: {file}; rerun tests for the current checkout"

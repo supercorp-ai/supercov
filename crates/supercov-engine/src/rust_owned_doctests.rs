@@ -39,9 +39,10 @@
 //! the accounting does not balance the run fails rather than attribute
 //! evidence to a guess.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -354,8 +355,7 @@ pub(crate) fn run_doctests(
             )
             .unwrap_or_else(|_| path_in_package.to_owned());
             if case.status == "failed" && !reported.contains(&case.name) {
-                writeln!(diagnostics, "[supercov] Rust doctest failed: {}", case.name)
-                    .map_err(io_error)?;
+                let _ = writeln!(diagnostics, "[supercov] Rust doctest failed: {}", case.name);
             }
             // A case that never ran has no evidence directory; an empty one
             // yields the empty snapshot the report expects.
@@ -732,23 +732,19 @@ fn listed_names(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[track_caller]
 fn next_sequence(directory: &Path, prefix: &str) -> Result<usize, RustTestRunnerError> {
     fs::create_dir_all(directory).map_err(io_error)?;
-    for candidate in 0..1_000_000_usize {
-        let marker = directory.join(format!("{prefix}{candidate:08}.claim"));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-        {
-            Ok(_) => return Ok(candidate),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io_error(error)),
-        }
-    }
-    Err(RustTestRunnerError::Io(
-        "too many doctest sequence claims".into(),
-    ))
+    (0_usize..)
+        .find_map(|candidate| {
+            let marker = directory.join(format!("{prefix}{candidate:08}.claim"));
+            match fs::open_with(fs::OpenOptions::new().write(true).create_new(true), &marker) {
+                Ok(_) => Some(Ok(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(io_error(error))),
+            }
+        })
+        .expect("claims are tried until one is made or fails")
 }
 
 fn relay(output: &Output) {
@@ -760,9 +756,10 @@ fn relay(output: &Output) {
     let _ = stderr.flush();
 }
 
-/// This program standing in for rustdoc during `cargo test --doc`.
-pub fn rustdoc_wrapper(arguments: Vec<String>) -> i32 {
-    match rustdoc_wrapper_inner(&arguments) {
+/// This program standing in for rustdoc during `cargo test --doc`, its
+/// results under `root` (see [`rustdoc_wrapper_root`]).
+pub fn rustdoc_wrapper(root: PathBuf, arguments: Vec<String>) -> i32 {
+    match rustdoc_wrapper_inner(root, &arguments) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -771,10 +768,7 @@ pub fn rustdoc_wrapper(arguments: Vec<String>) -> i32 {
     }
 }
 
-fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerError> {
-    let root = PathBuf::from(std::env::var_os(WRAPPER_ROOT_ENV).ok_or_else(|| {
-        RustTestRunnerError::Context("the doctest wrapper has no results root".into())
-    })?);
+fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, RustTestRunnerError> {
     let real = PathBuf::from(std::env::var_os(REAL_RUSTDOC_ENV).ok_or_else(|| {
         RustTestRunnerError::Context("the doctest wrapper does not know the real rustdoc".into())
     })?);
@@ -791,7 +785,7 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             .args(arguments)
             .env_remove(WRAPPER_ROOT_ENV)
             .env_remove(REAL_RUSTDOC_ENV)
-            .status()
+            .launch_status()
             .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
         return Ok(status.code().unwrap_or(1));
     }
@@ -799,7 +793,7 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     let package = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "package".into());
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_default();
     let sequence = next_sequence(&root.join("packages"), "")?;
     let package_dir = root.join("packages").join(format!("{sequence:08}"));
     fs::create_dir_all(package_dir.join("invocations")).map_err(io_error)?;
@@ -822,7 +816,7 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             command.env(key, value);
         }
         command
-            .output()
+            .launch_output()
             .map_err(|error| RustTestRunnerError::Launch(error.to_string()))
     };
 
@@ -871,13 +865,13 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     if !selected_merged.is_empty() {
         fs::write(
             package_dir.join("merged-order.json"),
-            serde_json::to_vec(&merged_sorted)?,
+            serde_json::to_vec(&merged_sorted).expect("plain data serializes"),
         )
         .map_err(io_error)?;
         // What a quiet harness leaves unnamed is named from these.
         fs::write(
             package_dir.join("merged-selected.json"),
-            serde_json::to_vec(&selected_merged)?,
+            serde_json::to_vec(&selected_merged).expect("plain data serializes"),
         )
         .map_err(io_error)?;
         fs::write(
@@ -891,31 +885,35 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             exit_code = output.status.code().unwrap_or(1);
         }
         let mut reported = BTreeSet::new();
-        for (_, invocation) in read_invocations(&package_dir)? {
-            if let Invocation::Merged { cases: merged } = invocation {
-                for case in merged {
-                    if !merged_set.contains(&case.name) {
-                        return fail_package(
-                            &package_dir,
-                            format!(
-                                "the merged doctest harness reported a case the listing lacks: {}",
-                                case.name
-                            ),
-                        );
-                    }
-                    if !reported.insert(case.name.clone()) {
-                        return fail_package(
-                            &package_dir,
-                            format!("doctest {} was reported more than once", case.name),
-                        );
-                    }
-                    cases.push(DoctestCase {
-                        name: case.name,
-                        status: case.status,
-                        evidence: case.evidence,
-                    });
-                }
+        // The merged harness's cases, from each record the pass left: the
+        // listing's comes first, and names none.
+        let merged = read_invocations(&package_dir)?
+            .into_iter()
+            .flat_map(|(_, invocation)| match invocation {
+                Invocation::Merged { cases } => cases,
+                _ => Vec::new(),
+            });
+        for case in merged {
+            if !merged_set.contains(&case.name) {
+                return fail_package(
+                    &package_dir,
+                    format!(
+                        "the merged doctest harness reported a case the listing lacks: {}",
+                        case.name
+                    ),
+                );
             }
+            if !reported.insert(case.name.clone()) {
+                return fail_package(
+                    &package_dir,
+                    format!("doctest {} was reported more than once", case.name),
+                );
+            }
+            cases.push(DoctestCase {
+                name: case.name,
+                status: case.status,
+                evidence: case.evidence,
+            });
         }
         // libtest's selection and the wrapper's reading of it must agree, or
         // a doctest could run unattributed; when they differ, say so.
@@ -973,7 +971,7 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
         .min(plans.len().max(1));
     let launch_error = Mutex::new(None::<RustTestRunnerError>);
     std::thread::scope(|scope| {
-        for _ in 0..workers {
+        (0..workers).for_each(|_| {
             scope.spawn(|| {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
@@ -991,7 +989,7 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                     }
                 }
             });
-        }
+        });
     });
     if let Some(error) = launch_error.into_inner().expect("doctest error lock") {
         return Err(error);
@@ -1064,12 +1062,13 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     };
     fs::write(
         root.join("packages").join(format!("{sequence:08}.json")),
-        serde_json::to_vec(&record)?,
+        serde_json::to_vec(&record).expect("plain data serializes"),
     )
     .map_err(io_error)?;
     Ok(exit_code)
 }
 
+#[track_caller]
 fn fail_package(package_dir: &Path, reason: String) -> Result<i32, RustTestRunnerError> {
     let error_path = package_dir.parent().unwrap_or(package_dir).join(format!(
         "{}.error",
@@ -1137,6 +1136,16 @@ pub fn doctest_runtool(arguments: Vec<String>) -> i32 {
     }
 }
 
+/// A runtool invocation's record, written where it is asked for.
+#[track_caller]
+fn write_record(path: &Path, record: &Invocation) -> Result<(), RustTestRunnerError> {
+    fs::write(
+        path,
+        serde_json::to_vec(record).expect("plain data serializes"),
+    )
+    .map_err(io_error)
+}
+
 fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerError> {
     let [package_dir, mode, binary, ..] = arguments else {
         return Err(RustTestRunnerError::UnsupportedCommand(
@@ -1151,9 +1160,6 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     let record_path = package_dir
         .join("invocations")
         .join(format!("{index:08}.json"));
-    let write_record = |record: &Invocation| -> Result<(), RustTestRunnerError> {
-        fs::write(&record_path, serde_json::to_vec(record)?).map_err(io_error)
-    };
 
     match mode.as_str() {
         "list" => {
@@ -1161,7 +1167,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             // its doctest, but the list pass never reaches one: rustdoc lists
             // standalone cases itself and does not invoke the runtool.
             let output = Command::new(&binary)
-                .output()
+                .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
             if !listed_names(&text).is_empty() {
@@ -1170,7 +1176,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                 fs::write(listed.join(format!("{index:08}.txt")), text.as_bytes())
                     .map_err(io_error)?;
             }
-            write_record(&Invocation::Listed)?;
+            write_record(&record_path, &Invocation::Listed)?;
             relay(&output);
             Ok(output.status.code().unwrap_or(1))
         }
@@ -1184,7 +1190,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                 .env(RUSTDOC_BIN_PATH_ENV, &program)
                 .env(CHILD_DIR_ENV, &children)
                 .env(CHILD_BINARY_ENV, &binary)
-                .output()
+                .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
             let lines = harness_lines(&text);
@@ -1215,7 +1221,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                     .unwrap_or_default();
                 let manifest_dir = fs::read_to_string(package_dir.join("manifest-dir"))
                     .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("."));
+                    .unwrap_or_default();
                 let ran = by_index.keys().copied().collect::<BTreeSet<_>>();
                 quiet_cases(&text, &order, &selected, &ran, &manifest_dir).unwrap_or_default()
             } else {
@@ -1238,7 +1244,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                     "merged doctest child {index} ran for a case the harness did not report"
                 )));
             }
-            write_record(&Invocation::Merged { cases })?;
+            write_record(&record_path, &Invocation::Merged { cases })?;
             relay(&output);
             Ok(output.status.code().unwrap_or(1))
         }
@@ -1247,26 +1253,29 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             fs::create_dir_all(&evidence).map_err(io_error)?;
             let output = Command::new(&binary)
                 .envs(instrumented_stack_environment())
-                .envs(evidence_environment(&evidence)?)
-                .output()
+                .envs(evidence_environment(probe_token(), &evidence)?)
+                .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
             let exit = output.status.code().unwrap_or(1);
             // A merged harness that the per-name filter matched nothing in
             // announces itself; anything else is the named doctest.
             if text.contains("running 0 tests") {
-                write_record(&Invocation::EmptyHarness)?;
+                write_record(&record_path, &Invocation::EmptyHarness)?;
             } else {
                 let name = std::env::var(NAME_ENV).map_err(|_| {
                     RustTestRunnerError::Context(
                         "a per-name doctest pass did not name its doctest".into(),
                     )
                 })?;
-                write_record(&Invocation::Standalone {
-                    name,
-                    exit_code: exit,
-                    evidence,
-                })?;
+                write_record(
+                    &record_path,
+                    &Invocation::Standalone {
+                        name,
+                        exit_code: exit,
+                        evidence,
+                    },
+                )?;
             }
             relay(&output);
             Ok(exit)
@@ -1279,20 +1288,28 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
 
 // --------------------------------------------------------------- the child
 
-/// This program as the child a merged harness spawns for one case: run the
-/// harness binary in rustdoc's single-case mode under this case's own
-/// evidence directory, record how it went, and exit as it exited.
 /// A doctest's evidence directory, for the instrumentation the run that
 /// started rustdoc named (see `rust_runtime::evidence_environment`).
-fn evidence_environment(evidence: &Path) -> Result<[(String, PathBuf); 2], RustTestRunnerError> {
-    let token = std::env::var(crate::rust_runtime::PROBE_TOKEN_ENV).map_err(|_| {
+/// `token` is the one this process was given, if any.
+fn evidence_environment(
+    token: Option<String>,
+    evidence: &Path,
+) -> Result<[(String, PathBuf); 2], RustTestRunnerError> {
+    let token = token.ok_or_else(|| {
         RustTestRunnerError::Context("the doctest runner has no instrumentation token".into())
     })?;
     Ok(crate::rust_runtime::evidence_environment(&token, evidence))
 }
 
-pub fn doctest_child() -> i32 {
-    match doctest_child_inner() {
+fn probe_token() -> Option<String> {
+    std::env::var(crate::rust_runtime::PROBE_TOKEN_ENV).ok()
+}
+
+/// The child of a merged harness, its records under `children` (see
+/// [`doctest_child_directory`]).
+pub fn doctest_child(children: PathBuf) -> i32 {
+    let case = ChildCase::from_variables(|name| std::env::var_os(name));
+    match case.and_then(|case| doctest_child_inner(children, case)) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -1301,19 +1318,44 @@ pub fn doctest_child() -> i32 {
     }
 }
 
-fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
-    let index = std::env::var(RUSTDOC_RUN_NB_TEST_ENV)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or_else(|| {
-            RustTestRunnerError::Context("the doctest child has no case index".into())
-        })?;
-    let children = PathBuf::from(std::env::var_os(CHILD_DIR_ENV).ok_or_else(|| {
-        RustTestRunnerError::Context("the doctest child has no record directory".into())
-    })?);
-    let binary = PathBuf::from(std::env::var_os(CHILD_BINARY_ENV).ok_or_else(|| {
-        RustTestRunnerError::Context("the doctest child has no harness binary".into())
-    })?);
+/// What a merged harness's child is told through its environment.
+struct ChildCase {
+    index: usize,
+    binary: PathBuf,
+    token: String,
+}
+
+impl ChildCase {
+    /// The case `variable` names, or what it is missing.
+    fn from_variables(
+        variable: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Self, RustTestRunnerError> {
+        let missing = |what: &str| RustTestRunnerError::Context(format!("the doctest {what}"));
+        let index = variable(RUSTDOC_RUN_NB_TEST_ENV)
+            .and_then(|value| value.to_str()?.parse::<usize>().ok())
+            .ok_or_else(|| missing("child has no case index"))?;
+        let binary =
+            variable(CHILD_BINARY_ENV).ok_or_else(|| missing("child has no harness binary"))?;
+        let token = variable(crate::rust_runtime::PROBE_TOKEN_ENV)
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| missing("runner has no instrumentation token"))?;
+        Ok(Self {
+            index,
+            binary: binary.into(),
+            token,
+        })
+    }
+}
+
+/// This program as the child a merged harness spawns for one case: run the
+/// harness binary in rustdoc's single-case mode under this case's own
+/// evidence directory, record how it went, and exit as it exited.
+fn doctest_child_inner(children: PathBuf, case: ChildCase) -> Result<i32, RustTestRunnerError> {
+    let ChildCase {
+        index,
+        binary,
+        token,
+    } = case;
     let evidence = children.join(format!("{index:08}"));
     fs::create_dir_all(&evidence).map_err(io_error)?;
     // The harness cleared RUSTDOC_DOCTEST_BIN_PATH before spawning us; make
@@ -1323,8 +1365,8 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
         .env_remove(CHILD_DIR_ENV)
         .env_remove(CHILD_BINARY_ENV)
         .envs(instrumented_stack_environment())
-        .envs(evidence_environment(&evidence)?)
-        .output()
+        .envs(crate::rust_runtime::evidence_environment(&token, &evidence))
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
     fs::write(
@@ -1333,29 +1375,99 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
             index,
             exit_code: exit,
             evidence,
-        })?,
+        })
+        .expect("plain data serializes"),
     )
     .map_err(io_error)?;
     relay(&output);
     Ok(exit)
 }
 
-/// Whether this process was started by a merged harness as a case's child.
-pub fn is_doctest_child() -> bool {
-    std::env::var_os(RUSTDOC_RUN_NB_TEST_ENV).is_some() && std::env::var_os(CHILD_DIR_ENV).is_some()
+/// Where a case's child records how it went, when a merged harness started
+/// this process as one.
+pub fn doctest_child_directory() -> Option<PathBuf> {
+    std::env::var_os(RUSTDOC_RUN_NB_TEST_ENV)?;
+    std::env::var_os(CHILD_DIR_ENV).map(PathBuf::from)
 }
 
-/// Whether this process is standing in for rustdoc.
-pub fn is_rustdoc_wrapper(arguments: &[String]) -> bool {
-    std::env::var_os(WRAPPER_ROOT_ENV).is_some()
-        && arguments
-            .first()
-            .is_none_or(|first| first != RUNTOOL_MODE_ARGUMENT)
+/// Where the results go, when this process is standing in for rustdoc.
+pub fn rustdoc_wrapper_root(arguments: &[String]) -> Option<PathBuf> {
+    let root = std::env::var_os(WRAPPER_ROOT_ENV)?;
+    let runtool = arguments
+        .first()
+        .is_some_and(|first| first == RUNTOOL_MODE_ARGUMENT);
+    (!runtool).then(|| PathBuf::from(root))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_doctest_child_names_what_its_environment_lacks() {
+        let told = |unset: &str, value: &str| {
+            ChildCase::from_variables(|name| {
+                (name != unset).then(|| match name {
+                    RUSTDOC_RUN_NB_TEST_ENV => value.into(),
+                    _ => "x".into(),
+                })
+            })
+        };
+        for (unset, value, lack) in [
+            (RUSTDOC_RUN_NB_TEST_ENV, "3", "case index"),
+            ("", "three", "case index"),
+            (CHILD_BINARY_ENV, "3", "harness binary"),
+            (
+                crate::rust_runtime::PROBE_TOKEN_ENV,
+                "3",
+                "instrumentation token",
+            ),
+        ] {
+            let error = told(unset, value).err().unwrap();
+            assert!(error.to_string().contains(lack), "{error}");
+        }
+        let case = told("", "3").unwrap();
+        assert_eq!((case.index, case.token.as_str()), (3, "x"));
+        assert_eq!(case.binary, Path::new("x"));
+        // A value that is not UTF-8 is no index and no token.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            for (odd, lack) in [
+                (RUSTDOC_RUN_NB_TEST_ENV, "case index"),
+                (
+                    crate::rust_runtime::PROBE_TOKEN_ENV,
+                    "instrumentation token",
+                ),
+            ] {
+                let error = ChildCase::from_variables(|name| {
+                    Some(if name == odd {
+                        std::ffi::OsString::from_vec(vec![0xff])
+                    } else if name == RUSTDOC_RUN_NB_TEST_ENV {
+                        "3".into()
+                    } else {
+                        "x".into()
+                    })
+                })
+                .err()
+                .unwrap();
+                assert!(error.to_string().contains(lack), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_doctest_runner_given_no_token_names_no_evidence() {
+        let error = evidence_environment(None, Path::new("e")).unwrap_err();
+        assert!(
+            error.to_string().contains("no instrumentation token"),
+            "{error}"
+        );
+        let [(_, plain), (named, _)] =
+            evidence_environment(Some("t".into()), Path::new("e")).unwrap();
+        assert_eq!(plain, Path::new("e"));
+        assert!(named.ends_with("_t"), "{named}");
+    }
 
     #[test]
     fn isolation_picks_a_filter_and_skips_for_one_doctest() {
@@ -1457,6 +1569,48 @@ mod tests {
         ]);
         assert_eq!(quiet.passthrough, ["--nocapture"]);
         assert!(quiet.filters.is_empty());
+    }
+
+    /// The runtool's records are read in order; one that cannot be read, or
+    /// is not a record, fails the reading, and so does a listing that
+    /// cannot be read. None is no record, and an empty listing no name.
+    #[test]
+    fn the_runtool_records_are_read_in_order_or_refused() {
+        let package = std::env::temp_dir().join(format!(
+            "supercov-doctest-records-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(read_invocations(&package).unwrap().is_empty());
+        assert!(read_listed_names(&package).unwrap().is_empty());
+        fs::create_dir_all(package.join("invocations")).unwrap();
+        fs::create_dir_all(package.join("listed")).unwrap();
+        assert!(read_listed_names(&package).unwrap().is_empty());
+        fs::write(
+            package.join("invocations/00000002.json"),
+            r#"{"kind":"empty-harness"}"#,
+        )
+        .unwrap();
+        fs::write(
+            package.join("invocations/00000001.json"),
+            r#"{"kind":"merged","cases":[]}"#,
+        )
+        .unwrap();
+        fs::write(package.join("invocations/notes.txt"), "not a record").unwrap();
+        let read = read_invocations(&package).unwrap();
+        assert_eq!(
+            read.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(crate::fault::during("fs.read", || read_invocations(&package)).is_err());
+        fs::write(package.join("invocations/00000003.json"), "{").unwrap();
+        assert!(read_invocations(&package).is_err());
+        fs::write(package.join("listed/0"), "a.rs - f (line 1): test\n").unwrap();
+        assert!(crate::fault::during("fs.read_to_string", || read_listed_names(&package)).is_err());
+        fs::remove_dir_all(&package).unwrap();
     }
 
     #[test]
@@ -1857,5 +2011,77 @@ mod tests {
             !diagnostics.contains("[supercov] Rust doctest failed: src/lib.rs - seen"),
             "{diagnostics}"
         );
+        // The empty evidence of a case that never ran, not made.
+        let (results, _, _) =
+            crate::fault::during("fs.create_dir_all#rust_owned_doctests.rs:366", || {
+                doctests_through(
+                    &["test", "--doc"],
+                    &format!("printf '%s' '{record}' > 00000000.json"),
+                    "",
+                    "",
+                    101,
+                )
+            });
+        assert!(
+            matches!(results, Err(RustTestRunnerError::Io(_))),
+            "{results:?}"
+        );
+        // A package's record that is not JSON; a package's error that
+        // cannot be read.
+        let (results, _, _) = doctests_through(
+            &["test", "--doc"],
+            "printf '{' > 00000000.json",
+            "",
+            "",
+            101,
+        );
+        assert!(results.is_err(), "{results:?}");
+        let (results, _, _) =
+            crate::fault::during("fs.read_to_string#rust_owned_doctests.rs:292", || {
+                doctests_through(
+                    &["test", "--doc"],
+                    "printf 'x' > 00000000.error",
+                    "",
+                    "",
+                    101,
+                )
+            });
+        assert!(
+            matches!(results, Err(RustTestRunnerError::Io(_))),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_given_is_nothing_read() {
+        assert_eq!(parse_rustdoc_arguments(&[]), RustdocArguments::default());
+        assert_eq!(isolate("", &[]), None);
+        let order = ["src/lib.rs - a (line 1)".to_owned()];
+        for summary in [
+            "test result: ok. 0 failed; 0 ignored",
+            "test result: ok. 1 passed; 0 ignored",
+            "test result: ok. 1 passed; 0 failed",
+        ] {
+            assert_eq!(
+                quiet_cases(
+                    summary,
+                    &order,
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
+                    Path::new(".")
+                ),
+                None,
+                "{summary}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_with_no_doctest_package_is_no_doctests() {
+        let (results, diagnostics, exit) = doctests_through(&["test", "--doc"], "", "", "", 0);
+        assert!(results.unwrap().is_empty());
+        assert_eq!(exit, 0);
+        assert_eq!(diagnostics, "");
     }
 }

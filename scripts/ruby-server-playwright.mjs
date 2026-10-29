@@ -117,6 +117,10 @@ test('a test that sends nothing', async () => {
   expect(1).toBe(1);
 });
 
+test('a test skipped as it runs', async () => {
+  test.skip(true, 'later');
+});
+
 test('a script the test runs', async () => {
   const graded = spawnSync(${JSON.stringify(ruby)}, ['-e', 'require_relative "app/grades"; puts Grades.grade(70)'], { encoding: 'utf8' });
   expect(graded.stdout.trim()).toBe('pass');
@@ -144,7 +148,7 @@ try {
   for (const server of ['puma', 'webrick']) {
     const measured = run(binary, ['--', 'npx', 'playwright', 'test'], { SERVER: server });
     assert.equal(measured.status, 0, `${server}: ${measured.stdout}${measured.stderr}`);
-    assert.match(measured.stderr, /Ruby server coverage: 6 test\(s\) across 3 source file\(s\)/u, measured.stderr);
+    assert.match(measured.stderr, /Ruby server coverage: 7 test\(s\) across 3 source file\(s\)/u, measured.stderr);
     const id = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0].id;
     const page = (...query) => {
       const result = run(binary, ['runs', id, ...query]);
@@ -156,6 +160,8 @@ try {
     assert.deepEqual(lines('a low score fails'), ['app/grades.rb:2', 'app/grades.rb:3', 'app/grades.rb:4', 'app/grades.rb:6'], server);
     assert.deepEqual(lines('the page asks for the top grade'), ['app/grades.rb:2', 'app/grades.rb:3'], server);
     assert.deepEqual(lines('a test that sends nothing'), [], server);
+    // A test that skipped itself is in the run, skipped.
+    assert.match(page(), /Skipped\s+1\b/u, server);
     // A browser runner's test reaches the app over HTTP: whether its file
     // imports measured source is left unsaid.
     const unlinked = page('tests', 'without-evidence');
@@ -194,6 +200,38 @@ try {
   ],
 };
 `,
+    // Each server alone: the other, prepared in the copy, never starts.
+    'ping.config.js': `export default {
+  testDir: 'ping',
+  workers: 1,
+  reporter: 'line',
+  webServer: [
+    { command: '${python} -m pinger.serve ${ping}', url: 'http://127.0.0.1:${ping}/ready', reuseExistingServer: false },
+  ],
+};
+`,
+    'ping/ping.spec.js': `import { expect, test } from '@playwright/test';
+
+test('the python server alone answers', async ({ request }) => {
+  expect(await (await request.get('http://127.0.0.1:${ping}/ping')).text()).toBe('pong');
+});
+`,
+    'grade.config.js': `export default {
+  testDir: 'grade',
+  workers: 1,
+  reporter: 'line',
+  use: { baseURL: 'http://127.0.0.1:${port}' },
+  webServer: [
+    { command: 'bundle exec puma -b tcp://127.0.0.1:${port} -t 1:4', url: 'http://127.0.0.1:${port}/ready', reuseExistingServer: false },
+  ],
+};
+`,
+    'grade/grade.spec.js': `import { expect, test } from '@playwright/test';
+
+test('the ruby server alone answers', async ({ request }) => {
+  expect(await (await request.get('/grade?score=95')).text()).toBe('A');
+});
+`,
     'both/both.spec.js': `import { expect, test } from '@playwright/test';
 
 test('both servers answer', async ({ page, request }) => {
@@ -228,6 +266,20 @@ test('a test that reaches no server', async () => {
   assert.deepEqual(companionsOf(bothId).map((companion) => [companion.id, companion.role]), [[beside, 'server']]);
   assert.deepEqual(companionsOf(beside).map((companion) => [companion.id, companion.role]), [[bothId, 'server']]);
   assert.match(run(binary, ['runs', bothId]).stdout, new RegExp(`(?:Python|Ruby) server: run ${beside}`, 'u'));
+  // One server started, the other prepared and never started: only the one
+  // that ran publishes a run.
+  for (const [config, ran, idle] of [['ping.config.js', 'Python', 'Ruby'], ['grade.config.js', 'Ruby', 'Python']]) {
+    const alone = run(binary, ['--', 'npx', 'playwright', 'test', '-c', config]);
+    assert.equal(alone.status, 0, `${config}\n${alone.stdout}${alone.stderr}`);
+    assert.match(alone.stderr, new RegExp(`${ran} server coverage: 1 test`, 'u'), `${config}\n${alone.stderr}`);
+    assert.doesNotMatch(alone.stderr, new RegExp(`${idle} server coverage`, 'u'), `${config}\n${alone.stderr}`);
+  }
+  // The Ruby server's evidence that cannot be listed: its run is not
+  // published, its evidence is kept, and the run fails.
+  const unlistedRuby = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'grade.config.js'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#ruby_evidence.rs:329' });
+  assert.notEqual(unlistedRuby.status, 0, unlistedRuby.stdout + unlistedRuby.stderr);
+  assert.ok(unlistedRuby.stderr.includes('test fault at fs (ruby_evidence.rs:329'), unlistedRuby.stderr);
+  assert.match(unlistedRuby.stderr, /their evidence is kept at/u, unlistedRuby.stderr);
   // Failures injected (SUPERCOV_TEST_FAULT): the copy taken by another run
   // after the servers were prepared for it, which prepares them again; a
   // server's run that cannot be published, which fails the run; and a failing
@@ -237,14 +289,56 @@ test('a test that reaches no server', async () => {
   assert.match(moved.stderr, /test fault at copy-moved/u, moved.stderr);
   assert.match(moved.stderr, /Python server coverage: 1 test/u, moved.stderr);
   assert.match(moved.stderr, /Ruby server coverage: 1 test/u, moved.stderr);
+  // Prepared again for the copy that moved, the Python server's plan that
+  // cannot be written ends the run.
+  const reprepared = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'copy-moved,fs.write#python_run.rs:677@2' });
+  assert.notEqual(reprepared.status, 0, reprepared.stdout + reprepared.stderr);
+  assert.ok(reprepared.stderr.includes('test fault at fs (python_run.rs:677'), reprepared.stderr);
   const unpublishable = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'server-publish' });
   assert.notEqual(unpublishable.status, 0, unpublishable.stdout + unpublishable.stderr);
   assert.match(unpublishable.stderr, /test fault at server-publish/u, unpublishable.stderr);
   assert.match(unpublishable.stderr, /server's run could not be published: injected fault at server-publish/u, unpublishable.stderr);
+  // Each server's report refused as one Supercov got wrong: each says so,
+  // and the run fails.
+  const refused = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'report-request' });
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /test fault at report-request/u, refused.stderr);
+  assert.match(refused.stderr, /Python server's run could not be published/u, refused.stderr);
+  assert.match(refused.stderr, /Ruby server's run could not be published/u, refused.stderr);
+  assert.doesNotMatch(refused.stderr, /panicked/u, refused.stderr);
   const unpublished = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given'], { SUPERCOV_TEST_FAULT: 'server-unpublished' });
   assert.notEqual(unpublished.status, 0, unpublished.stdout + unpublished.stderr);
   assert.match(unpublished.stderr, /test fault at server-unpublished/u, unpublished.stderr);
   assert.match(unpublished.stderr, /no run was published/u, unpublished.stderr);
+  // Each step after the servers published -- the second server's run
+  // finished, the evidence cleared, the run's state written, the first run
+  // finished -- that fails ends the run, saying where.
+  for (const [fault, place] of [
+    ['fs.symlink_metadata#javascript_run.rs:1292', 'javascript_run.rs:1292'],
+    ['fs.symlink_metadata#javascript_run.rs:1308', 'javascript_run.rs:1308'],
+    ['fs.symlink_metadata#javascript_run.rs:1310', 'javascript_run.rs:1310'],
+    ['fs.read#javascript_run.rs:1336', 'javascript_run.rs:1336'],
+    ['fs.symlink_metadata#javascript_run.rs:1348', 'javascript_run.rs:1348'],
+  ]) {
+    const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
+    assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
+    assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);
+  }
+  // Each step of a server's own publication that fails -- its work
+  // directory, its archive, its run moved into place -- is said, and never
+  // panics; the first server's failing ends the run.
+  for (const [fault, place] of [
+    ['fs.create_dir_all#python_run.rs:809', 'python_run.rs:809'],
+    ['fs.create_dir_all#ruby_run.rs:642', 'ruby_run.rs:642'],
+    ['fs.rename#evidence_archive.rs:472', 'evidence_archive.rs:472'],
+    ['fs.rename#evidence_archive.rs:472@2', 'evidence_archive.rs:472'],
+    ['fs.rename#lifecycle.rs:1125', 'lifecycle.rs:1125'],
+    ['fs.rename#lifecycle.rs:1125@2', 'lifecycle.rs:1125'],
+  ]) {
+    const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
+    assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);
+    assert.ok(!failed.stderr.includes('panicked'), `${fault}: ${failed.stderr}`);
+  }
   // A failing test still publishes what it reached, and the run says it failed.
   const failing = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'not given']);
   assert.equal(failing.status, 1, failing.stdout + failing.stderr);

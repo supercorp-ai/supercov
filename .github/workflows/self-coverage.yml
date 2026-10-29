@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SLICES: 8
+  SLICES: 10
 
 jobs:
   platforms:
@@ -95,11 +95,11 @@ jobs:
             [ "$attempt" = 3 ] && exit 1
           done
           sudo chown -R "$USER" ~/apt-archives
-      - run: cargo build --release -p supercov
+      - run: cargo build --profile measure -p supercov
       - uses: actions/upload-artifact@v4
         with:
           name: supercov-self-${{ matrix.os }}
-          path: target/release/supercov
+          path: target/measure/supercov
           retention-days: 3
 
   measure:
@@ -188,12 +188,19 @@ jobs:
       - run: npm ci
       # The browsers of every pinned Playwright, kept while no lockfile
       # changes; the system libraries they need are installed each time.
+      # The lockfiles hashed once, before the tests: a cache's post step
+      # evaluates its key again, and `hashFiles('**/...')` then walks
+      # whatever the tests left in the checkout and fails the slice.
+      - name: Hash the lockfiles
+        id: locks
+        run: echo "hash=$(git ls-files -s '*package-lock.json' | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
             ~/Library/Caches/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
+          restore-keys: playwright-${{ runner.os }}-${{ runner.arch }}-
       # The system libraries the browsers need are 142 MB of packages a
       # slice fetched every run; one run's mirror gave them at 74 kB/s, 32
       # minutes. Kept, and apt installs from what is kept.
@@ -201,7 +208,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/apt-archives
-          key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
+          key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
+          restore-keys: apt-playwright-${{ runner.os }}-${{ runner.arch }}-
       # Each fixture pins its own Playwright, and each version launches its
       # own browser builds: install them for every version a lockfile names.
       - name: Install every pinned Playwright's browsers
@@ -246,44 +254,58 @@ jobs:
             | grep -oE '^    [a-z0-9_]+ =>' | awk '{print $1}')
           gates=$(echo "$all" | grep -vxF -f <(echo "$elsewhere" | tr ' ' '\n'))
           slice=${{ matrix.slice }}
-          # The tests a file declares, by name.
-          tests_of() {
-            awk '/^#\[test\]/ { test = 1; next }
-              test && /^fn [a-z0-9_]+\(/ { match($0, /fn [a-z0-9_]+/); print substr($0, RSTART + 3, RLENGTH - 3); test = 0; next }
-              test && !/^#\[/ { test = 0 }' "$1"
-          }
-          # Slice 9's: every second test of the CLI's, and the Maven, Gradle
-          # and overhead tests, the longest test binaries of slice 0.
-          moved="$(tests_of crates/supercov-cli/tests/cli.rs | awk 'NR % 2 == 0')
-          $(for file in jvm_run jvm_frontend jvm_overhead go_overhead; do tests_of "crates/supercov-engine/tests/$file.rs"; done)"
-          if [ "$slice" = 0 ]; then
-            skips=$(printf -- '--skip %s ' $all $tests_elsewhere $moved)
-            echo "command=cargo test --workspace -- --include-ignored --exact $skips" >> "$GITHUB_OUTPUT"
-          elif [ "$slice" = 9 ]; then
-            # The whole workspace builds here too; only these tests run.
-            echo "command=cargo test --workspace -- --include-ignored --exact $(echo $moved)" >> "$GITHUB_OUTPUT"
-          else
-            # Longest first, each to the slice with the least so far, by the
-            # seconds each took (a gate not timed counts as a minute): dealt
-            # in turn, one slice drew 487 s of gates and another 81 s.
-            picked=$(echo "$gates" | awk -v n="$SLICES" -v s="$slice" '
-              FILENAME == ".github/gate-seconds.tsv" { if ($0 !~ /^#/) seconds[$1] = $2; next }
-              { gate[++count] = $1; cost[count] = ($1 in seconds) ? seconds[$1] : 60 }
-              END {
-                for (i = 1; i <= count; i++) order[i] = i
-                for (i = 1; i <= count; i++) for (j = i + 1; j <= count; j++)
-                  if (cost[order[j]] > cost[order[i]] || (cost[order[j]] == cost[order[i]] && gate[order[j]] < gate[order[i]])) { t = order[i]; order[i] = order[j]; order[j] = t }
-                for (i = 1; i <= count; i++) {
-                  best = 1
-                  for (k = 2; k <= n; k++) if (load[k] < load[best]) best = k
-                  load[best] += cost[order[i]]
-                  if (best == s) printf "%s ", gate[order[i]]
-                }
-              }' .github/gate-seconds.tsv -)
-            # The whole workspace builds in every slice, so every run counts
-            # the same files; only the named gates run.
-            echo "command=cargo test --workspace -- --include-ignored --exact $picked" >> "$GITHUB_OUTPUT"
-          fi
+          # The Kotlin corpus test parses projects `kotlin-grammar` checks
+          # out; it measures the vendored C grammar, not Supercov.
+          corpus="every_file_of_the_corpus_parses_or_is_known_not_to"
+          lists="$RUNNER_TEMP/slices"
+          mkdir -p "$lists"
+          echo "$gates" > "$lists/gates"
+          printf '%s\n' $elsewhere $tests_elsewhere $corpus > "$lists/excluded"
+          # Every gate and every test costing two seconds or more, dearest
+          # first, each to the slice with the least so far. A test costs the
+          # larger of the seconds it took in a run and the processor seconds
+          # it and the children it waited for used (test-seconds.tsv; a gate
+          # not timed there costs its CI seconds, or a minute): tests share a
+          # slice's four processors, and dealt by seconds alone, gates heavy
+          # on all four landed together and each ran up to 3.5 times longer
+          # than measured; processor seconds alone miss what a browser or a
+          # container does. Slice 0 starts with the cheaper tests, which only
+          # it runs, each with the fifth of a second Supercov spends between
+          # them, and runs any test no run has timed yet.
+          awk -v n="$SLICES" -v s="$slice" -v lists="$lists" '
+            FILENAME == ".github/gate-seconds.tsv" { if ($0 !~ /^#/ && NF) gate_seconds[$1] = $2; next }
+            FILENAME == ".github/test-seconds.tsv" { if ($0 !~ /^#/ && NF) test_seconds[$1] = $3 > $2 ? $3 : $2; next }
+            FILENAME == lists "/excluded" { if (NF) excluded[$1] = 1; next }
+            FILENAME == lists "/gates" {
+              if (NF) {
+                unit[++count] = $1; gate[$1] = 1
+                cost[count] = ($1 in test_seconds) ? test_seconds[$1] : ($1 in gate_seconds) ? gate_seconds[$1] : 60
+              }
+              next
+            }
+            END {
+              for (name in test_seconds) {
+                if (name in excluded || name in gate) continue
+                if (test_seconds[name] >= 2) { unit[++count] = name; cost[count] = test_seconds[name] }
+                else load[0] += test_seconds[name] + 0.2
+              }
+              for (i = 1; i <= count; i++) order[i] = i
+              for (i = 1; i <= count; i++) for (j = i + 1; j <= count; j++)
+                if (cost[order[j]] > cost[order[i]] || (cost[order[j]] == cost[order[i]] && unit[order[j]] < unit[order[i]])) { t = order[i]; order[i] = order[j]; order[j] = t }
+              for (i = 1; i <= count; i++) {
+                best = 0
+                for (k = 1; k < n; k++) if (load[k] < load[best]) best = k
+                load[best] += cost[order[i]]
+                if (s == 0 && best != 0) print "--skip " unit[order[i]]
+                if (s != 0 && best == s) print unit[order[i]]
+              }
+              if (s == 0) for (name in excluded) print "--skip " name
+            }' .github/gate-seconds.tsv .github/test-seconds.tsv "$lists/excluded" "$lists/gates" > "$lists/picked"
+          # A slice dealt nothing runs nothing: no name at all would be every test.
+          [ -s "$lists/picked" ] || echo "no_test_was_dealt_to_this_slice" > "$lists/picked"
+          # The whole workspace builds in every slice, so every run counts the
+          # same files; only the tests named run, or all but those skipped.
+          echo "command=cargo test --workspace -- --include-ignored --exact $(tr '\n' ' ' < "$lists/picked")" >> "$GITHUB_OUTPUT"
       - name: Measure
         env:
           TEST262_DIR: ${{ runner.temp }}/test262
@@ -293,13 +315,45 @@ jobs:
           SUPERCOV_REQUIRE_RUST_WORKER: "1"
           # Each gate's time, kept with the slice's run.
           SUPERCOV_GATE_TIMINGS: ${{ runner.temp }}/out/gate-timings.tsv
+          # And each test's, and its processor seconds; the merged libtest
+          # report sums only its seconds, per binary.
+          TEST_SECONDS: ${{ runner.temp }}/out/test-seconds.tsv
         run: |
           chmod +x "$RUNNER_TEMP/self/supercov"
           echo "${{ steps.tests.outputs.command }}"
           mkdir -p "$RUNNER_TEMP/out"
           log="$RUNNER_TEMP/out/measure.log"
+          # Supercov runs each test as its binary given `--exact NAME`, through
+          # the target runner a command configures: this one times each.
+          # Given only on the command line, it reaches no project a test
+          # runs Cargo in itself.
+          timer="$RUNNER_TEMP/time-test.sh"
+          cat > "$timer" <<'EOF'
+          #!/usr/bin/env bash
+          name=""; previous=""
+          for argument in "$@"; do
+            [ "$argument" = --list ] && exec "$@"
+            [ "$previous" = --exact ] && name=$argument
+            previous=$argument
+          done
+          [ -n "$name" ] || exec "$@"
+          # Its seconds and the processor seconds it and its children used:
+          # tests run side by side, so what one costs a slice is the latter.
+          TIMEFORMAT='%R %U %S'
+          report=$(mktemp)
+          { time "$@" 2>&3; } 3>&2 2>"$report"
+          status=$?
+          read -r real user system < "$report"
+          rm -f "$report"
+          awk -v name="$name" -v real="$real" -v cpu="$(awk -v u="$user" -v s="$system" 'BEGIN { print u + s }')" \
+            'BEGIN { printf "%s\t%.1f\t%.1f\n", name, real, cpu }' >> "$TEST_SECONDS"
+          exit $status
+          EOF
+          chmod +x "$timer"
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          command="${{ steps.tests.outputs.command }}"
           # A failing test still leaves a run to merge; the merge says it failed.
-          "$RUNNER_TEMP/self/supercov" -- ${{ steps.tests.outputs.command }} 2>&1 | tee "$log"
+          "$RUNNER_TEMP/self/supercov" -- cargo test --config "target.$host.runner=\"$timer\"" ${command#cargo test } 2>&1 | tee "$log"
           echo "exit ${PIPESTATUS[0]}" | tee -a "$log"
       - name: Keep the run
         if: always()

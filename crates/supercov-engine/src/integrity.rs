@@ -4,10 +4,11 @@
 //! Rust engine owns source, test, dependency, configuration and execution
 //! fingerprints for every language.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::BTreeSet,
-    fs,
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -33,18 +34,6 @@ pub struct FrontendIntegrityInputs {
 }
 
 impl FrontendIntegrityInputs {
-    pub fn javascript(root: PathBuf, runtime_files: Vec<PathBuf>) -> Self {
-        Self {
-            language: "javascript".into(),
-            version: "javascript-v1".into(),
-            root,
-            instrumenter_files: runtime_files.clone(),
-            execution_files: runtime_files,
-            engine_instrumenter_sha256: env!("SUPERCOV_JS_FRONTEND_SOURCE_SHA256").into(),
-            engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
-        }
-    }
-
     pub fn embedded_javascript() -> Self {
         Self {
             language: "javascript".into(),
@@ -292,7 +281,8 @@ fn behavioural_manifest(kind: ManifestKind, raw: &[u8]) -> Option<Vec<u8>> {
         }
         ManifestKind::CargoToml | ManifestKind::PyprojectToml => {
             let text = std::str::from_utf8(raw).ok()?;
-            serde_json::to_value(toml::from_str::<toml::Value>(text).ok()?).ok()?
+            serde_json::to_value(toml::from_str::<toml::Value>(text).ok()?)
+                .expect("a TOML value is JSON")
         }
     };
     match kind {
@@ -434,10 +424,9 @@ fn digest_paths(
         if let Some(bytes) = meaning {
             hash.update(&bytes);
         } else {
-            let mut file = fs::File::open(&path).map_err(|source| io_error(&path, source))?;
+            let mut file = fs::open(&path).map_err(|source| io_error(&path, source))?;
             loop {
-                let read = file
-                    .read(&mut buffer)
+                let read = fs::read_from(&mut file, &mut buffer)
                     .map_err(|source| io_error(&path, source))?;
                 if read == 0 {
                     break;
@@ -523,9 +512,7 @@ fn walk_files(
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&path, source))?;
+        let file_type = fs::file_type(&entry).map_err(|source| io_error(&path, source))?;
         if file_type.is_symlink() {
             continue;
         }
@@ -700,12 +687,12 @@ fn git_integrity(root: &Path) -> Option<GitIntegrity> {
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root)
-        .output()
+        .launch_output()
         .ok();
     let status = Command::new("git")
         .args(["status", "--porcelain=v1"])
         .current_dir(root)
-        .output()
+        .launch_output()
         .ok();
     if !revision
         .as_ref()
@@ -720,7 +707,7 @@ fn git_integrity(root: &Path) -> Option<GitIntegrity> {
         branch: Command::new("git")
             .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
             .current_dir(root)
-            .output()
+            .launch_output()
             .ok()
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())
@@ -977,6 +964,19 @@ mod tests {
 
     use super::*;
 
+    /// A path whose name is not UTF-8 is named, not read as some other.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::path::Path::new("/root");
+        let path = root.join(std::ffi::OsStr::from_bytes(b"\xff.js"));
+        assert!(matches!(
+            local_path(root, &path),
+            Err(IntegrityError::NonUtf8Path(named)) if root.join(&named) == path
+        ));
+    }
+
     static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn directory(label: &str) -> PathBuf {
@@ -1166,6 +1166,15 @@ mod tests {
         // understand stays conservative instead of silently hashing nothing.
         assert!(behavioural_manifest(ManifestKind::PackageJson, b"{ not json").is_none());
         assert!(behavioural_manifest(ManifestKind::CargoToml, b"[[[").is_none());
+        // A manifest that is no text, a null kept apart from false, a path
+        // with no name, and a hash of no fields.
+        assert!(behavioural_manifest(ManifestKind::CargoToml, &[0xff, 0xfe]).is_none());
+        assert_ne!(
+            behavioural_manifest(ManifestKind::PackageJson, b"{\"x\": null}"),
+            behavioural_manifest(ManifestKind::PackageJson, b"{\"x\": false}")
+        );
+        assert!(manifest_kind(Path::new("/")).is_none());
+        assert_ne!(domain_hash("a", &[]), domain_hash("b", &[]));
         let root = directory("manifest-fallback");
         write(&root, "package.json", "{ not json");
         let first = digest_manifests(&root, [root.join("package.json")]).unwrap();
@@ -1174,6 +1183,22 @@ mod tests {
             first,
             digest_manifests(&root, [root.join("package.json")]).unwrap()
         );
+        // A `package` that is no table has no release metadata to drop.
+        assert!(behavioural_manifest(ManifestKind::CargoToml, b"package = \"x\"\n").is_some());
+        // A manifest that opens but cannot be read for its meaning is hashed
+        // by its bytes; a path outside the root is refused.
+        write(&root, "Cargo.toml", "[package]\nname = \"x\"\n");
+        let cargo = [root.join("Cargo.toml")];
+        let meant = digest_manifests(&root, cargo.clone()).unwrap();
+        let bytes = crate::fault::during("fs.read", || digest_manifests(&root, cargo.clone()));
+        assert_ne!(bytes.unwrap(), meant);
+        assert!(digest_files(&root, [std::env::temp_dir().join("elsewhere")]).is_err());
+        // A name that is no text is no manifest, where the system allows one.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(manifest_kind(Path::new(std::ffi::OsStr::from_bytes(b"\xff"))).is_none());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1378,6 +1403,70 @@ mod tests {
         create_run_integrity(root, &project, &frontend(shim)).unwrap()
     }
 
+    /// Each input domain's file that cannot be opened fails the fingerprint,
+    /// naming the file: a source, a test, a manifest, the configuration, and
+    /// the frontend's instrumenter and runtime; for a project discovered, and
+    /// for inputs a language names itself.
+    #[cfg(unix)]
+    #[test]
+    fn each_input_domain_that_cannot_be_read_names_its_file() {
+        let (root, shim) = fixture();
+        let project = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        for (n, file) in [
+            "src/index.ts",
+            "tests/index.test.ts",
+            "package-lock.json",
+            "vite.config.ts",
+            "instrumenter.js",
+            "runtime.mjs",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fault = format!("fs.open@{}", n + 1);
+            let refused = crate::fault::during(&fault, || {
+                create_run_integrity(&root, &project, &frontend(&shim))
+            });
+            assert!(
+                refused.is_err_and(|error| error.to_string().contains(file)),
+                "{fault} {file}"
+            );
+        }
+        write(
+            &root,
+            "Cargo.toml",
+            "[package]\nname='fixture'\nversion='0.0.0'\n",
+        );
+        let inputs = ExplicitIntegrityInputs {
+            source_files: vec!["src/index.ts".into()],
+            test_files: vec!["tests/index.test.ts".into()],
+            dependency_files: vec!["package-lock.json".into()],
+            configuration_files: vec!["vite.config.ts".into()],
+            execution_configuration: Vec::new(),
+        };
+        for (n, file) in [
+            "tests/index.test.ts",
+            "package-lock.json",
+            "vite.config.ts",
+            "instrumenter.js",
+            "runtime.mjs",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fault = format!("fs.open@{}", n + 2);
+            let refused = crate::fault::during(&fault, || {
+                create_explicit_run_integrity(&root, &inputs, &frontend(&shim))
+            });
+            assert!(
+                refused.is_err_and(|error| error.to_string().contains(file)),
+                "explicit {fault} {file}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
+    }
+
     #[test]
     fn built_assets_the_command_regenerates_do_not_move_the_source_fingerprint() {
         // A theme extension's Vite build lands hashed bundles in `assets/`
@@ -1483,6 +1572,21 @@ mod tests {
             instrumenter.fingerprint.combined,
             first.fingerprint.combined
         );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
+    }
+
+    /// A directory the test-file walk cannot list, or an entry of it, fails
+    /// the walk.
+    #[test]
+    fn a_walk_that_cannot_list_a_directory_fails() {
+        let (root, shim) = fixture();
+        for fault in ["fs.read_dir", "fs.read_dir entry"] {
+            assert!(
+                crate::fault::during(fault, || test_files(&root)).is_err(),
+                "{fault}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();
     }
@@ -1636,5 +1740,34 @@ mod tests {
         ));
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();
+    }
+
+    #[test]
+    fn each_integrity_error_says_what_failed() {
+        use super::IntegrityError as E;
+        let messages = [
+            E::Io {
+                path: std::path::PathBuf::from("a"),
+                source: std::io::Error::other("disk full"),
+            },
+            E::UnsafeFile(std::path::PathBuf::from("a")),
+            E::NonUtf8Path(std::path::PathBuf::from("a")),
+            E::OutsideRoot {
+                root: std::path::PathBuf::from("r"),
+                path: std::path::PathBuf::from("a"),
+            },
+            E::InvalidEngineDigest("engine"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "a: disk full",
+                "fingerprint input is not a regular file: a",
+                "fingerprint path is not valid UTF-8: a",
+                "fingerprint input a is outside r",
+                "invalid engine SHA-256",
+            ]
+        );
     }
 }

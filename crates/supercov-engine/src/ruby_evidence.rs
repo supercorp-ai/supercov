@@ -8,16 +8,15 @@
 //! kill remain readable while a torn tail stays inert. Rust joins those records
 //! into the shared frontend protocol; the runtime never computes a verdict.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
     path::Path,
 };
 
 use memmap2::MmapOptions;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use supercov_contracts::{
     AttributionPrecision, ExecutionModel, FrontendAttribution, FrontendLimitation,
     FrontendLimitationScope, FrontendRunDeclaration, FrontendRunnerDeclaration,
@@ -249,20 +248,7 @@ impl std::fmt::Display for RubyEvidenceError {
 impl std::error::Error for RubyEvidenceError {}
 
 fn stable_id(prefix: &str, values: &[&str]) -> String {
-    let mut hash = Sha256::new();
-    for value in values {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(prefix.len() + 25);
-    encoded.push_str(prefix);
-    encoded.push(':');
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("string formatting");
-    }
-    encoded
+    crate::stable_ids::prefixed(prefix, values)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -364,11 +350,14 @@ fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, R
             return Err(RubyEvidenceError::UnsafeEntry(name));
         }
         let file =
-            File::open(entry.path()).map_err(|error| RubyEvidenceError::Io(error.to_string()))?;
+            fs::open(entry.path()).map_err(|error| RubyEvidenceError::Io(error.to_string()))?;
         // The file is immutable from Supercov's perspective after the wrapped
         // interpreter has exited. No mutable alias is created while this map
         // is alive.
-        let contents = unsafe { MmapOptions::new().map(&file) }
+        let contents =
+            crate::fault::io("ruby-evidence-map", std::io::ErrorKind::Other, || unsafe {
+                MmapOptions::new().map(&file)
+            })
             .map_err(|error| RubyEvidenceError::Io(error.to_string()))?;
         read_evidence_file(&name, &contents, run_id, &mut evidence)?;
     }
@@ -584,7 +573,7 @@ fn read_evidence_file(
                         at,
                         line_number,
                         name.to_owned(),
-                        process_worker.clone().unwrap_or_else(|| "main".into()),
+                        process_worker.as_deref().unwrap_or("main").to_owned(),
                     ));
                 } else {
                     if identity.phase == "call" {
@@ -646,14 +635,12 @@ fn read_evidence_file(
                 if let Some(title) = title.filter(|title| !title.is_empty()) {
                     evidence.test_titles.entry(key.clone()).or_insert(title);
                 }
-                if !tags.is_empty() {
+                tags.into_iter().for_each(|tag| {
                     let known = evidence.test_tags.entry(key.clone()).or_default();
-                    for tag in tags {
-                        if !known.contains(&tag) {
-                            known.push(tag);
-                        }
+                    if !known.contains(&tag) {
+                        known.push(tag);
                     }
-                }
+                });
                 fold_outcome(
                     evidence.outcomes.entry(key).or_default(),
                     phase,
@@ -729,13 +716,8 @@ fn read_evidence_file(
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
                 if let Some(before) = before_assertion.remove(&ctx) {
-                    let identity = contexts
-                        .get(&ctx)
-                        .ok_or(RubyEvidenceError::UnknownContext {
-                            file: name.into(),
-                            line: line_number,
-                            context: ctx,
-                        })?;
+                    // A call phase's context is known from its phase record.
+                    let identity = &contexts[&ctx];
                     let asserted = evidence
                         .per_identity
                         .entry(Identity {
@@ -941,7 +923,8 @@ fn snapshot(
             return Err(RubyEvidenceError::UnknownObligation(id.clone()));
         };
         let mut observed = Vec::new();
-        for (values, outcome) in vectors {
+        // A decision is observed with a vector at least.
+        vectors.iter().try_for_each(|(values, outcome)| {
             if values.len() != meta.conditions.len() {
                 return Err(RubyEvidenceError::InvalidVector {
                     id: id.clone(),
@@ -963,7 +946,8 @@ fn snapshot(
             });
             clock += 1;
             observed.push(vector);
-        }
+            Ok(())
+        })?;
         decisions.push(DecisionSnapshot {
             meta: (*meta).clone(),
             vectors: observed,
@@ -1033,7 +1017,7 @@ pub struct RubyFrontendRun {
 }
 
 impl RubyFrontendRun {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -1044,24 +1028,29 @@ impl RubyFrontendRun {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&model)?,
+                contents: serde_json::to_vec(&model).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&self.declaration)?,
+                contents: serde_json::to_vec(&self.declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
-                contents: serde_json::to_vec(&self.request.manifest)?,
+                contents: serde_json::to_vec(&self.request.manifest)
+                    .expect("plain data serializes"),
             },
         ];
-        for (index, result) in self.request.raw_results.iter().enumerate() {
-            entries.push(EvidenceArchiveEntry {
-                path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result)?,
-            });
-        }
-        Ok(entries)
+        entries.extend(
+            self.request
+                .raw_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| EvidenceArchiveEntry {
+                    path: format!("results/{index:08}/mcdc.json"),
+                    contents: serde_json::to_vec(result).expect("plain data serializes"),
+                }),
+        );
+        entries
     }
 }
 
@@ -1091,8 +1080,9 @@ pub fn build_ruby_frontend_run(
         test_exit_code,
         root,
     )?;
-    for raw in &mut run.request.raw_results {
-        let Some(scope) = &raw.scope else { continue };
+    // `build_from_evidence` refuses a run with no test outcome.
+    run.request.raw_results.iter_mut().for_each(|raw| {
+        let Some(scope) = &raw.scope else { return };
         let key = (
             scope.worker_id.clone(),
             scope.test_id.clone(),
@@ -1102,7 +1092,7 @@ pub fn build_ruby_frontend_run(
         if by_time.contains(&key) && raw.attribution == crate::coverage_report::ATTRIBUTION_EXACT {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
     Ok(run)
 }
 
@@ -1120,7 +1110,8 @@ pub fn build_ruby_server_run(
 ) -> Result<RubyFrontendRun, RubyEvidenceError> {
     let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
     let mut by_attempt = BTreeMap::new();
-    for test in served {
+    // The caller publishes no server run when no browser test reported.
+    served.iter().for_each(|test| {
         let key = (test.worker.clone(), test.test_id.clone(), test.retry);
         let outcome = match test.status.as_str() {
             "passed" => "passed",
@@ -1136,7 +1127,7 @@ pub fn build_ruby_server_run(
             .runners
             .insert(key.clone(), test.provenance.runner.clone());
         by_attempt.insert(key, test);
-    }
+    });
     let by_time = credit_requests_by_time(&mut evidence, |evidence, transport, at, _| {
         crate::served_tests::owner(served, evidence.served_by.get(transport), at)
             .map(|test| (test.worker.clone(), test.test_id.clone(), test.retry))
@@ -1149,7 +1140,8 @@ pub fn build_ruby_server_run(
         test_exit_code,
         root,
     )?;
-    for raw in &mut run.request.raw_results {
+    // A run with no test outcome is refused before this.
+    run.request.raw_results.iter_mut().for_each(|raw| {
         let Some(test) = raw.scope.as_ref().and_then(|scope| {
             by_attempt.get(&(
                 scope.worker_id.clone(),
@@ -1157,7 +1149,7 @@ pub fn build_ruby_server_run(
                 raw.retry.unwrap_or(0),
             ))
         }) else {
-            continue;
+            return;
         };
         raw.test = test.name.clone();
         raw.title = Some(test.title.clone());
@@ -1171,7 +1163,7 @@ pub fn build_ruby_server_run(
         {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
     run.tests = run
         .request
         .raw_results
@@ -1274,171 +1266,180 @@ fn build_from_evidence(
             .or_default()
             .push((identity, observations));
     }
-    for ((worker, test, retry), mut outcomes) in outcomes {
-        let runner = runners
-            .get(&(worker.clone(), test.clone(), retry))
-            .cloned()
-            .unwrap_or_else(default_runner);
-        let attempt_identities = identities_by_attempt
-            .remove(&(worker.clone(), test.clone(), retry))
-            .unwrap_or_default();
-        observed_runners.insert(runner.clone());
-        outcomes.sort_by_key(|(phase, _, _)| match phase.as_str() {
-            "setup" => 0,
-            "call" => 1,
-            _ => 2,
-        });
-        let mut phases = Vec::new();
-        let mut runtime = Vec::new();
-        let mut observed_phases = BTreeSet::new();
-        for (position, (phase_name, outcome, xfail)) in outcomes.iter().enumerate() {
-            observed_phases.insert(phase_name.clone());
-            let identity = Identity {
-                worker: worker.clone(),
-                test: test.clone(),
-                retry,
-                phase: phase_name.clone(),
-            };
-            let id = phase_id(run_id, &identity);
-            phases.push(CoveragePhase {
-                id: id.clone(),
-                kind: match phase_name.as_str() {
-                    "call" => "test",
-                    value => value,
-                }
-                .into(),
-                operation: format!("{runner} {phase_name}"),
-                source: Some(test.clone()),
-                caused_by_phase_id: None,
-                started_at_ms: position as i64 * 2 + 1,
-                ended_at_ms: Some(position as i64 * 2 + 2),
-                status: Some(match outcome.as_str() {
-                    "rerun" | "error" => "failed".into(),
-                    value => value.into(),
-                }),
-                error: None,
-            });
-            if let Some((_, observations)) = attempt_identities
-                .iter()
-                .find(|(candidate, _)| candidate.phase == phase_name.as_str())
-            {
-                runtime.push(snapshot(&index, observations, &id)?);
-            }
-            if phase_name != "call" {
-                continue;
-            }
-            // What the test recorded before its first assertion is that
-            // assertion's evidence, linked when the phase passed outright:
-            // a failed, skipped or expected-to-fail phase witnessed nothing.
-            if let Some((identity, observations)) = attempt_identities
-                .iter()
-                .find(|(candidate, _)| candidate.phase == "assertion")
-            {
-                observed_phases.insert("assertion".to_owned());
-                let id = phase_id(run_id, identity);
-                phases.push(CoveragePhase {
-                    id: id.clone(),
-                    kind: "assertion".into(),
-                    operation: format!("{runner} assertion"),
-                    source: Some(test.clone()),
-                    caused_by_phase_id: None,
-                    started_at_ms: position as i64 * 2 + 1,
-                    ended_at_ms: Some(position as i64 * 2 + 2),
-                    status: Some(
-                        if outcome == "passed" && !*xfail {
-                            "passed"
-                        } else {
-                            "failed"
-                        }
-                        .into(),
-                    ),
-                    error: None,
-                });
-                runtime.push(snapshot(&index, observations, &id)?);
-            }
-        }
-        // A phase the runtime entered but the runner never reported (the worker
-        // died inside it) is a failed phase with its evidence kept.
-        for (identity, observations) in attempt_identities {
-            if !observed_phases.contains(&identity.phase) {
-                let id = phase_id(run_id, identity);
-                phases.push(CoveragePhase {
-                    id: id.clone(),
-                    kind: match identity.phase.as_str() {
-                        "call" => "test",
-                        value => value,
-                    }
-                    .into(),
-                    operation: format!("{runner} {}", identity.phase),
-                    source: Some(test.clone()),
-                    caused_by_phase_id: None,
-                    started_at_ms: phases.len() as i64 * 2 + 1,
-                    ended_at_ms: None,
-                    status: Some("failed".into()),
-                    error: Some("the phase started but the runner reported no outcome".into()),
-                });
-                runtime.push(snapshot(&index, observations, &id)?);
-            }
-        }
-        let status = if phases.iter().any(|phase| phase.error.is_some()) {
-            "failed".into()
-        } else {
-            attempt_status(&outcomes)
-        };
-        let test_file = test_files
-            .get(&(worker.clone(), test.clone(), retry))
-            .and_then(|path| relative(root, path))
-            .or_else(|| test.split("::").next().map(str::to_owned));
-        raw_results.push(RawTestResult {
-            span: None,
-            test_id: Some(test.clone()),
-            scope: Some(scope(run_id, &worker, &test, retry)),
-            test: test.clone(),
-            // What the runner named, as the project names it. A runner
-            // identity is not a path, so the old derivation stays only as a
-            // fallback for an adapter that cannot name the file.
-            test_file: test_file.clone(),
-            title: test_titles
+    outcomes
+        .into_iter()
+        .try_for_each(|((worker, test, retry), mut outcomes)| {
+            let runner = runners
                 .get(&(worker.clone(), test.clone(), retry))
                 .cloned()
-                .or_else(|| test.rsplit("::").next().map(str::to_owned)),
-            retry: Some(retry),
-            status: Some(status),
-            expected_status: Some(
-                if outcomes.iter().any(|(_, _, xfail)| *xfail) {
-                    "failed"
-                } else {
-                    "passed"
+                .unwrap_or_else(default_runner);
+            let attempt_identities = identities_by_attempt
+                .remove(&(worker.clone(), test.clone(), retry))
+                .unwrap_or_default();
+            observed_runners.insert(runner.clone());
+            outcomes.sort_by_key(|(phase, _, _)| match phase.as_str() {
+                "setup" => 0,
+                "call" => 1,
+                _ => 2,
+            });
+            let mut phases = Vec::new();
+            let mut runtime = Vec::new();
+            let mut observed_phases = BTreeSet::new();
+            outcomes.iter().enumerate().try_for_each(
+                |(position, (phase_name, outcome, xfail))| {
+                    observed_phases.insert(phase_name.clone());
+                    let identity = Identity {
+                        worker: worker.clone(),
+                        test: test.clone(),
+                        retry,
+                        phase: phase_name.clone(),
+                    };
+                    let id = phase_id(run_id, &identity);
+                    phases.push(CoveragePhase {
+                        id: id.clone(),
+                        kind: match phase_name.as_str() {
+                            "call" => "test",
+                            value => value,
+                        }
+                        .into(),
+                        operation: format!("{runner} {phase_name}"),
+                        source: Some(test.clone()),
+                        caused_by_phase_id: None,
+                        started_at_ms: position as i64 * 2 + 1,
+                        ended_at_ms: Some(position as i64 * 2 + 2),
+                        status: Some(match outcome.as_str() {
+                            "rerun" | "error" => "failed".into(),
+                            value => value.into(),
+                        }),
+                        error: None,
+                    });
+                    if let Some((_, observations)) = attempt_identities
+                        .iter()
+                        .find(|(candidate, _)| candidate.phase == phase_name.as_str())
+                    {
+                        runtime.push(snapshot(&index, observations, &id)?);
+                    }
+                    if phase_name != "call" {
+                        return Ok(());
+                    }
+                    // What the test recorded before its first assertion is that
+                    // assertion's evidence, linked when the phase passed outright:
+                    // a failed, skipped or expected-to-fail phase witnessed nothing.
+                    if let Some((identity, observations)) = attempt_identities
+                        .iter()
+                        .find(|(candidate, _)| candidate.phase == "assertion")
+                    {
+                        observed_phases.insert("assertion".to_owned());
+                        let id = phase_id(run_id, identity);
+                        phases.push(CoveragePhase {
+                            id: id.clone(),
+                            kind: "assertion".into(),
+                            operation: format!("{runner} assertion"),
+                            source: Some(test.clone()),
+                            caused_by_phase_id: None,
+                            started_at_ms: position as i64 * 2 + 1,
+                            ended_at_ms: Some(position as i64 * 2 + 2),
+                            status: Some(
+                                if outcome == "passed" && !*xfail {
+                                    "passed"
+                                } else {
+                                    "failed"
+                                }
+                                .into(),
+                            ),
+                            error: None,
+                        });
+                        // Its hits are part of its call phase's, read above.
+                        runtime.push(
+                            snapshot(&index, observations, &id).expect("read with its call phase"),
+                        );
+                    }
+                    Ok::<(), RubyEvidenceError>(())
+                },
+            )?;
+            // A phase the runtime entered but the runner never reported (the worker
+            // died inside it) is a failed phase with its evidence kept.
+            for (identity, observations) in attempt_identities {
+                if !observed_phases.contains(&identity.phase) {
+                    let id = phase_id(run_id, identity);
+                    phases.push(CoveragePhase {
+                        id: id.clone(),
+                        kind: match identity.phase.as_str() {
+                            "call" => "test",
+                            value => value,
+                        }
+                        .into(),
+                        operation: format!("{runner} {}", identity.phase),
+                        source: Some(test.clone()),
+                        caused_by_phase_id: None,
+                        started_at_ms: phases.len() as i64 * 2 + 1,
+                        ended_at_ms: None,
+                        status: Some("failed".into()),
+                        error: Some("the phase started but the runner reported no outcome".into()),
+                    });
+                    runtime.push(snapshot(&index, observations, &id)?);
                 }
-                .into(),
-            ),
-            flaky: false,
-            provenance: {
-                let tags = test_tags
+            }
+            let status = if phases.iter().any(|phase| phase.error.is_some()) {
+                "failed".into()
+            } else {
+                attempt_status(&outcomes)
+            };
+            let test_file = test_files
+                .get(&(worker.clone(), test.clone(), retry))
+                .and_then(|path| relative(root, path))
+                .or_else(|| test.split("::").next().map(str::to_owned));
+            raw_results.push(RawTestResult {
+                span: None,
+                test_id: Some(test.clone()),
+                scope: Some(scope(run_id, &worker, &test, retry)),
+                test: test.clone(),
+                // What the runner named, as the project names it. A runner
+                // identity is not a path, so the old derivation stays only as a
+                // fallback for an adapter that cannot name the file.
+                test_file: test_file.clone(),
+                title: test_titles
                     .get(&(worker.clone(), test.clone(), retry))
                     .cloned()
-                    .unwrap_or_default();
-                TestProvenance {
-                    runner: runner.clone(),
-                    kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
-                    project: None,
-                    source: RUBY_FRONTEND_VERSION.into(),
-                    tags,
-                }
-            },
-            role: "test".into(),
-            // Ruby 3.3+ probes every statement, so what a test is recorded as
-            // reaching is all of it. Unprobed lines come from Coverage's one-shot
-            // lines, which report a line the first time it executes in the
-            // process and never again: the first test to reach a line is
-            // credited with it, and a test's hits are a lower bound.
-            attribution: attribution.into(),
-            phases,
-            runtime,
-            browser: Vec::new(),
-            server: Vec::new(),
-        });
-    }
+                    .or_else(|| test.rsplit("::").next().map(str::to_owned)),
+                retry: Some(retry),
+                status: Some(status),
+                expected_status: Some(
+                    if outcomes.iter().any(|(_, _, xfail)| *xfail) {
+                        "failed"
+                    } else {
+                        "passed"
+                    }
+                    .into(),
+                ),
+                flaky: false,
+                provenance: {
+                    let tags = test_tags
+                        .get(&(worker.clone(), test.clone(), retry))
+                        .cloned()
+                        .unwrap_or_default();
+                    TestProvenance {
+                        runner: runner.clone(),
+                        kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
+                        project: None,
+                        source: RUBY_FRONTEND_VERSION.into(),
+                        tags,
+                    }
+                },
+                role: "test".into(),
+                // Ruby 3.3+ probes every statement, so what a test is recorded as
+                // reaching is all of it. Unprobed lines come from Coverage's one-shot
+                // lines, which report a line the first time it executes in the
+                // process and never again: the first test to reach a line is
+                // credited with it, and a test's hits are a lower bound.
+                attribution: attribution.into(),
+                phases,
+                runtime,
+                browser: Vec::new(),
+                server: Vec::new(),
+            });
+            Ok::<(), RubyEvidenceError>(())
+        })?;
     // Phases with observations whose test never produced any outcome at all
     // (for example a worker killed during its first phase).
     let default_observed = observed_runners
@@ -1450,29 +1451,31 @@ fn build_from_evidence(
         let runner = default_observed.clone();
         let mut phases = Vec::new();
         let mut runtime = Vec::new();
-        for (position, (identity, observations)) in identities.iter().enumerate() {
-            let id = phase_id(run_id, identity);
-            phases.push(CoveragePhase {
-                id: id.clone(),
-                kind: match identity.phase.as_str() {
-                    "call" => "test",
-                    value => value,
-                }
-                .into(),
-                operation: format!("{runner} {}", identity.phase),
-                source: Some(test.clone()),
-                caused_by_phase_id: None,
-                started_at_ms: position as i64 * 2 + 1,
-                ended_at_ms: None,
-                status: Some("failed".into()),
-                error: Some("the phase started but the runner reported no outcome".into()),
-            });
-            runtime.push(snapshot(&index, observations, &id)?);
-        }
-        let test_file = test_files
-            .get(&(worker.clone(), test.clone(), retry))
-            .and_then(|path| relative(root, path))
-            .or_else(|| test.split("::").next().map(str::to_owned));
+        identities
+            .iter()
+            .enumerate()
+            .try_for_each(|(position, (identity, observations))| {
+                let id = phase_id(run_id, identity);
+                phases.push(CoveragePhase {
+                    id: id.clone(),
+                    kind: match identity.phase.as_str() {
+                        "call" => "test",
+                        value => value,
+                    }
+                    .into(),
+                    operation: format!("{runner} {}", identity.phase),
+                    source: Some(test.clone()),
+                    caused_by_phase_id: None,
+                    started_at_ms: position as i64 * 2 + 1,
+                    ended_at_ms: None,
+                    status: Some("failed".into()),
+                    error: Some("the phase started but the runner reported no outcome".into()),
+                });
+                runtime.push(snapshot(&index, observations, &id)?);
+                Ok::<(), RubyEvidenceError>(())
+            })?;
+        // Only an outcome names a test's file, and this test reported none.
+        let test_file = test.split("::").next().map(str::to_owned);
         raw_results.push(RawTestResult {
             span: None,
             test_id: Some(test.clone()),
@@ -1723,6 +1726,25 @@ fn build_from_evidence(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// An attempt reported more than once keeps its worst outcome: a
+    /// failure over a skip, a skip over a pass.
+    #[test]
+    fn outcomes_are_ranked_failure_skip_pass() {
+        use super::outcome_severity;
+        assert!(outcome_severity("error") > outcome_severity("skipped"));
+        assert!(outcome_severity("skipped") > outcome_severity("passed"));
+    }
+
+    /// An outcome written before records named their runner is RSpec's.
+    #[test]
+    fn an_outcome_that_names_no_runner_is_rspecs() {
+        let record = serde_json::from_str::<Record>(
+            r#"{"t":"outcome","worker":"w","test":"t","retry":0,"phase":"call","outcome":"passed","xfail":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(record, Record::Outcome { runner, .. } if runner == RSPEC_RUNNER));
+    }
+
     use super::*;
     use crate::{
         coverage_analysis::PointKind, frontend_protocol::validate_frontend_report_request,
@@ -1774,6 +1796,8 @@ pub(crate) mod tests {
             Err(error) => error.to_string(),
         };
         assert_eq!(read(&valid), "accepted");
+        // A transport its process never wrote to holds its header alone.
+        assert_eq!(read(&transport(&[])), "accepted");
         // The first frame's header is at 64 and its payload at 80.
         let payload_end = 80 + process.to_string().len();
         assert_ne!(payload_end % 8, 0, "the frame has padding to corrupt");
@@ -1914,6 +1938,22 @@ pub(crate) mod tests {
                     json!({"t":"dec","ctx":0,"id":"d","v":"12","o":2}),
                 ],
                 "outcome must be 0 or 1",
+            ),
+            // Hits and decisions in a context no phase opened.
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"ids","first":0,"names":["a"]}),
+                    json!({"t":"hits","ctx":3,"n":[0]}),
+                ],
+                "context 3",
+            ),
+            (
+                vec![
+                    ok.clone(),
+                    json!({"t":"dec","ctx":3,"id":"d","v":"12","o":1}),
+                ],
+                "context 3",
             ),
         ] {
             let got = read(&records);
@@ -2570,6 +2610,8 @@ pub(crate) mod tests {
         let root = Path::new(&project);
         assert_eq!(relative(root, &project), None);
         assert_eq!(relative(root, "../lib/m.rb"), None);
+        let elsewhere = crate::test_directory::native("/elsewhere/m.rb");
+        assert_eq!(relative(root, &elsewhere), None);
         assert_eq!(relative(root, "./lib/m.rb").as_deref(), Some("lib/m.rb"));
         let base = temporary("entries");
         let read = |directory: &Path| match read_evidence_directory(directory, "run-1") {
@@ -2589,7 +2631,172 @@ pub(crate) mod tests {
             }
             assert_eq!(read(&directory), format!("UnsafeEntry({make:?})"));
         }
+        // A transport that cannot be mapped.
+        let directory = base.join("unmapped");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("a.mmap"), b"").unwrap();
+        assert!(crate::fault::during("ruby-evidence-map", || read(&directory)).starts_with("Io"));
+        // macOS names no file that is not UTF-8.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let directory = base.join("bytes");
+            fs::create_dir(&directory).unwrap();
+            fs::write(
+                directory.join(std::ffi::OsStr::from_bytes(b"\xff.mmap")),
+                b"",
+            )
+            .unwrap();
+            assert_eq!(read(&directory), "UnsafeEntry(\"<non-utf8>\")");
+        }
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Every record of a run's evidence with each of its fields gone, null
+    /// or of another kind, and each record gone: the run is built or
+    /// refused, never with a panic.
+    #[test]
+    fn evidence_with_any_field_damaged_is_read_or_refused() {
+        let source = "def f(a, b)\n  return 1 if a && b\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap()
+            .id
+            .clone();
+        let decision = obligations.manifest.decisions[0].id.clone();
+        let test = "spec/m_spec.rb[1:1]";
+        let records = vec![
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"],"lines":"exact"}),
+            serde_json::json!({"t":"lines","mode":"exact"}),
+            serde_json::json!({"t":"ids","first":0,"names":[statement]}),
+            serde_json::json!({"t":"hits","ctx":0,"n":[0]}),
+            serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":test,"retry":0,"phase":"call"}),
+            serde_json::json!({"t":"assert","ctx":1}),
+            serde_json::json!({"t":"hit","ctx":1,"id":statement}),
+            serde_json::json!({"t":"dec","ctx":1,"id":decision,"v":"22","o":1}),
+            serde_json::json!({"t":"limitation","id":"ruby-iseq-unmapped","reason":"no ranges","file":"lib/m.rb"}),
+            serde_json::json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"rspec"}),
+            serde_json::json!({"t":"exit","at":9}),
+        ];
+        let build = |records: &[serde_json::Value]| {
+            let directory = temporary("damaged-fields");
+            fs::write(directory.join("main.7.a.mmap"), transport(records)).unwrap();
+            let built = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            )
+            .is_ok();
+            fs::remove_dir_all(directory).unwrap();
+            built
+        };
+        assert!(build(&records));
+        let mut refused = 0;
+        for (index, record) in records.iter().enumerate() {
+            let mut without = records.clone();
+            without.remove(index);
+            refused += usize::from(!build(&without));
+            for key in record.as_object().unwrap().keys() {
+                let other = match &record[key] {
+                    serde_json::Value::String(_) => serde_json::json!(7),
+                    _ => serde_json::json!("x"),
+                };
+                for damaged in [None, Some(serde_json::json!(null)), Some(other)] {
+                    let mut changed = records.clone();
+                    let fields = changed[index].as_object_mut().unwrap();
+                    match damaged {
+                        None => drop(fields.remove(key)),
+                        Some(value) => drop(fields.insert(key.clone(), value)),
+                    }
+                    refused += usize::from(!build(&changed));
+                }
+            }
+        }
+        assert!(refused > 20, "{refused}");
+    }
+
+    /// An obligation the manifest does not hold, hit in any kind of phase --
+    /// one reported, one left without its outcome, one of a test that
+    /// reported nothing, the load's background -- refuses the run.
+    #[test]
+    fn an_unknown_obligation_in_any_phase_refuses_the_run() {
+        let obligations = build_ruby_obligations("lib/m.rb", b"def f\n  1\nend\n", &mut 0).unwrap();
+        let test = "spec/m_spec.rb[1:1]";
+        let process = serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["rspec"],"lines":"exact"});
+        let phase = |ctx: u64, phase: &str| serde_json::json!({"t":"phase","ctx":ctx,"at":5,"worker":"main","test":test,"retry":0,"phase":phase});
+        let outcome = |phase: &str| serde_json::json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":phase,"outcome":"passed","xfail":false,"runner":"rspec"});
+        let unknown = |ctx: u64| serde_json::json!({"t":"hit","ctx":ctx,"id":"rb:unknown"});
+        let exit = serde_json::json!({"t":"exit","at":9});
+        for (label, records) in [
+            (
+                "reported",
+                vec![
+                    process.clone(),
+                    phase(1, "call"),
+                    unknown(1),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+            ),
+            (
+                "unreported phase",
+                vec![
+                    process.clone(),
+                    phase(1, "setup"),
+                    outcome("setup"),
+                    phase(2, "call"),
+                    unknown(2),
+                    exit.clone(),
+                ],
+            ),
+            (
+                "no outcome",
+                vec![
+                    process.clone(),
+                    phase(1, "call"),
+                    outcome("call"),
+                    serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":"spec/m_spec.rb[1:2]","retry":0,"phase":"call"}),
+                    unknown(2),
+                    exit.clone(),
+                ],
+            ),
+            (
+                "background",
+                vec![
+                    process.clone(),
+                    unknown(0),
+                    phase(1, "call"),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+            ),
+        ] {
+            let directory = temporary("unknown-obligation");
+            fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+            let built = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            );
+            assert!(
+                matches!(built, Err(RubyEvidenceError::UnknownObligation(ref id)) if id == "rb:unknown"),
+                "{label}: {:?}",
+                built.err()
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]
@@ -2760,10 +2967,167 @@ pub(crate) mod tests {
             &[served],
         )
         .unwrap();
-        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
         assert_eq!(
             attribution(&run),
             crate::coverage_report::ATTRIBUTION_PARTIAL
         );
+        // A server that left no interpreter's evidence, or evidence that is
+        // no directory, makes no run.
+        let server_run = |directory: &Path| {
+            build_ruby_server_run(
+                &obligations.manifest,
+                directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+                &[],
+            )
+        };
+        fs::create_dir_all(&directory).unwrap();
+        assert!(matches!(
+            server_run(&directory),
+            Err(RubyEvidenceError::NoInterpreter)
+        ));
+        fs::remove_dir_all(&directory).unwrap();
+        fs::write(&directory, b"x").unwrap();
+        assert!(matches!(
+            server_run(&directory),
+            Err(RubyEvidenceError::Io(_))
+        ));
+        fs::remove_file(directory).unwrap();
+    }
+
+    #[test]
+    fn each_ruby_evidence_error_says_what_failed() {
+        use super::RubyEvidenceError as E;
+        let messages = [
+            E::Io("gone".into()),
+            E::UnsafeEntry("../e".into()),
+            E::InvalidRecord {
+                file: "e".into(),
+                line: 2,
+                reason: "json".into(),
+            },
+            E::InvalidTransport {
+                file: "e".into(),
+                reason: "size".into(),
+            },
+            E::DroppedRecords {
+                file: "e".into(),
+                count: 3,
+            },
+            E::RunMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            E::UnsupportedVersion(9),
+            E::UnknownContext {
+                file: "e".into(),
+                line: 2,
+                context: 7,
+            },
+            E::UnknownObligation("o".into()),
+            E::InvalidVector {
+                id: "d".into(),
+                expected: 2,
+                actual: 3,
+            },
+            E::NoInterpreter,
+            E::NoTests,
+            E::UnsupportedRuby("3.2.0".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "could not read Ruby evidence: gone",
+                "unsafe Ruby evidence entry: ../e",
+                "invalid Ruby evidence record e:2: json",
+                "invalid Ruby evidence transport e: size",
+                "Ruby evidence transport e exhausted its bounded capacity and dropped 3 record(s)",
+                "Ruby evidence belongs to run b, expected a",
+                "unsupported Ruby evidence version 9",
+                "Ruby evidence e:2 references undeclared context 7",
+                "Ruby runtime reported an unknown obligation: o",
+                "Ruby decision d reported 3 condition values, expected 2",
+                "no Supercov-hooked Ruby interpreter ran: the test command did not start Ruby 3.3+ with Supercov's RUBYOPT hook (RUBYOPT may be cleared by the command, or the runner is not Ruby)",
+                "the Ruby run produced no test outcomes; Supercov measures Ruby through RSpec, Minitest, test-unit and Cucumber",
+                "Supercov measures Ruby 3.3 or newer; the test command ran Ruby 3.2.0",
+            ]
+        );
+    }
+
+    /// A phase the runtime entered and the runner never reported failed,
+    /// whichever it was; a worker named after the process record is the
+    /// one its records belong to; skipped and errored outcomes are kept.
+    #[test]
+    fn phases_never_reported_and_outcomes_of_every_kind_are_kept() {
+        use serde_json::json;
+        let source = "def f(a)\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let directory = temporary("unreported-phases");
+        fs::write(
+            directory.join("main.7.a.mmap"),
+            transport(&[
+                json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+                json!({"t":"worker","worker":"w1"}),
+                json!({"t":"phase","ctx":1,"at":1,"worker":"w1","test":"T#test_a","retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":1,"id":statement.id}),
+                json!({"t":"outcome","worker":"w1","test":"T#test_a","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"minitest","tags":[]}),
+                json!({"t":"phase","ctx":2,"at":2,"worker":"w1","test":"T#test_a","retry":0,"phase":"teardown"}),
+                json!({"t":"hit","ctx":2,"id":statement.id}),
+                json!({"t":"phase","ctx":3,"at":3,"worker":"w1","test":"T#test_b","retry":0,"phase":"setup"}),
+                json!({"t":"hit","ctx":3,"id":statement.id}),
+                json!({"t":"outcome","worker":"w1","test":"T#test_c","retry":0,"phase":"call","outcome":"skipped","xfail":false,"runner":"minitest"}),
+                json!({"t":"outcome","worker":"w1","test":"T#test_d","retry":0,"phase":"call","outcome":"error","xfail":false,"runner":"minitest"}),
+                json!({"t":"exit","at":9}),
+            ]),
+        )
+        .unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        let result = |test: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|raw| raw.test == test)
+                .unwrap_or_else(|| panic!("{test}"))
+        };
+        let phase = |test: &str, kind: &str| {
+            result(test)
+                .phases
+                .iter()
+                .find(|phase| phase.kind == kind)
+                .map(|phase| (phase.status.clone(), phase.error.is_some()))
+        };
+        assert_eq!(
+            phase("T#test_a", "teardown"),
+            Some((Some("failed".into()), true))
+        );
+        assert_eq!(
+            phase("T#test_b", "setup"),
+            Some((Some("failed".into()), true))
+        );
+        assert_eq!(result("T#test_c").status.as_deref(), Some("skipped"));
+        assert_eq!(result("T#test_d").status.as_deref(), Some("failed"));
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

@@ -4,9 +4,9 @@
 //! window is credited, by time, to the one browser test whose span it
 //! overlaps. What no single test's window holds is no test's.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -253,10 +253,12 @@ pub fn publish(
         // frontend declares for its own suites.
         let mut declaration = server.declaration;
         declaration.runners.truncate(1);
-        for runner in &mut declaration.runners {
-            runner.runner = "playwright".into();
-            runner.execution_model = supercov_contracts::ExecutionModel::ParallelContextPropagated;
-        }
+        let runner = declaration
+            .runners
+            .first_mut()
+            .expect("a frontend declares a runner");
+        runner.runner = "playwright".into();
+        runner.execution_model = supercov_contracts::ExecutionModel::ParallelContextPropagated;
         let mut run = build_frontend_run(OwnedRunInputs {
             declaration,
             environment: server.environment,
@@ -268,35 +270,31 @@ pub fn publish(
             generated_at: &metadata.started_at,
             test_exit_code: metadata.test_exit_code.unwrap_or_default(),
             coverage_model: server.coverage_model,
-        })
-        .map_err(|error| error.to_string())?;
-        for (raw, (index, test)) in run
-            .request
+        });
+        // Never none: there are tests, and a result for each.
+        run.request
             .raw_results
             .iter_mut()
             .zip(served.iter().enumerate())
-        {
-            raw.title = Some(test.title.clone());
-            raw.expected_status = Some(test.expected_status.clone());
-            raw.status = Some(test.status.clone());
-            raw.provenance = crate::coverage_report::TestProvenance {
-                source: raw.provenance.source.clone(),
-                ..test.provenance.clone()
-            };
-            if credited.contains(&index) {
-                raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
-            }
-        }
+            .for_each(|(raw, (index, test))| {
+                raw.title = Some(test.title.clone());
+                raw.expected_status = Some(test.expected_status.clone());
+                raw.status = Some(test.status.clone());
+                raw.provenance = crate::coverage_report::TestProvenance {
+                    source: raw.provenance.source.clone(),
+                    ..test.provenance.clone()
+                };
+                if credited.contains(&index) {
+                    raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
+                }
+            });
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let work = root.join(".supercov/work").join(&metadata.id);
         fs::create_dir_all(&work).map_err(|error| error.to_string())?;
         let archive_path = work.join(format!("{}-evidence.raw.gz", server.environment));
         let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                server.source_inputs,
-            )?,
+            crate::source_capture::append(run.archive_entries(), server.source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
@@ -315,23 +313,23 @@ pub fn publish(
         };
         let run_directory =
             publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-        writeln!(
+        // The run is published: a line about it that cannot be written takes
+        // nothing from it, as for a Python or Ruby server.
+        let _ = writeln!(
             diagnostics,
             "[supercov] {} server coverage: {} test(s) across {} source file(s), credited by time",
             server.language,
             served.len(),
             server.source_files
-        )
-        .map_err(|error| error.to_string())?;
+        );
         // Parallel workers share one server, and its probes cannot tell
         // their requests apart. Say what it cost, and how to have it all.
         if !overlapped.is_empty() {
-            writeln!(
+            let _ = writeln!(
                 diagnostics,
                 "[supercov] {} of those test(s) had the server's work only while another test ran too, so it is the run's and none of theirs; with `--workers=1` each test's is its own",
                 overlapped.len()
-            )
-            .map_err(|error| error.to_string())?;
+            );
         }
         Ok((run_directory, metadata))
     })();
@@ -368,6 +366,47 @@ mod tests {
         }
     }
 
+    /// A server has a run only where it recorded windows and a browser test
+    /// reported; without either, or with evidence that cannot be read (an
+    /// error), its work is cleared.
+    #[test]
+    fn a_server_has_a_run_only_with_windows_and_a_test() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-has-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let server = |name: &str, windows: Option<&str>| {
+            let directory = root.join(".supercov/work/run/servers").join(name);
+            std::fs::create_dir_all(directory.join("evidence")).unwrap();
+            if let Some(text) = windows {
+                std::fs::write(directory.join("evidence/0.windows"), text).unwrap();
+            }
+            directory
+        };
+        let tests = [served("one", "passed", (0, 10))];
+        let line = r#"{"start":0,"end":10,"probes":[1],"vectors":[]}"#;
+        assert_eq!(
+            has_run(&root, &server("both", Some(line)), "go", &tests),
+            Ok(true)
+        );
+        assert_eq!(
+            has_run(&root, &server("untested", Some(line)), "go", &[]),
+            Ok(false)
+        );
+        assert_eq!(
+            has_run(&root, &server("silent", None), "go", &tests),
+            Ok(false)
+        );
+        let unreadable = server("unreadable", None);
+        std::fs::create_dir(unreadable.join("evidence/0.windows")).unwrap();
+        assert!(has_run(&root, &unreadable, "go", &tests).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     fn window(start: i64, end: i64, probes: &[u64], vectors: &[u64]) -> ServerWindow {
         ServerWindow {
             start,
@@ -394,6 +433,9 @@ mod tests {
             window(380, 390, &[1, 2], &[]),
             window(1000, 1001, &[1, 4], &[0, 9]),
         ];
+        // No window and no test credit nothing.
+        let (_, nothing, none, neither) = credit(&[], &[], 2, &[1]);
+        assert!(nothing.is_empty() && none.is_empty() && neither.is_empty());
         let (evidence, outcomes, credited, overlapped) = credit(&windows, &tests, 2, &[1]);
         assert_eq!(evidence.global, [1, 6]);
         // A vector no test's span holds still reaches the run's totals.
@@ -457,6 +499,133 @@ mod tests {
             }
             assert_eq!(has_run(&root, &directory, "go", served), Ok(false));
             assert!(!directory.exists());
+        }
+    }
+
+    /// Writes its first `lines` lines, then fails.
+    struct Lines(usize);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::Error::other("closed"));
+            }
+            self.0 -= 1;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A browser test the server's window ran under makes a run of the
+    /// server's own; each step of publishing it failing -- the windows read,
+    /// the work directory, the archive, the run already there, a line said
+    /// -- keeps the evidence and says so.
+    #[test]
+    fn a_server_window_a_test_ran_under_is_published_and_each_failure_kept() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-owned-server-published-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+        };
+        let probes = BTreeMap::new();
+        let inputs = crate::source_manifest::Inputs {
+            language: "go".into(),
+            files: BTreeMap::new(),
+        };
+        let browser = |name: &str, window: (i64, i64)| {
+            let mut test = served(name, "passed", window);
+            test.provenance.runner = "playwright".into();
+            test.provenance.kind = "browser".into();
+            test
+        };
+        let one = [browser("one", (100, 200))];
+        // Two tests at once: the window is the run's and neither's.
+        let both = [browser("one", (100, 200)), browser("two", (100, 200))];
+        let publishing = |id: &str, tests: &[ServedTest], fault: &str, said: &mut dyn Write| {
+            let directory = root.join(format!(".supercov/work/{id}/go"));
+            fs::create_dir_all(directory.join("evidence")).unwrap();
+            fs::write(
+                directory.join("evidence/1.windows"),
+                "{\"start\":100,\"end\":150,\"probes\":[],\"vectors\":[]}\n",
+            )
+            .unwrap();
+            let metadata = crate::lifecycle::test_run_metadata(id, 0);
+            crate::fault::during(fault, || {
+                publish(
+                    &root,
+                    OwnedServer {
+                        language: "Go",
+                        declaration: crate::owned_evidence::go_declaration(),
+                        environment: "go",
+                        coverage_model: crate::owned_evidence::go_coverage_model(),
+                        manifest: &manifest,
+                        probes: &probes,
+                        widths: &[],
+                        integrity: &metadata.integrity,
+                        source_inputs: &inputs,
+                        source_roots: None,
+                        directory: &directory,
+                        source_files: 0,
+                    },
+                    metadata.clone(),
+                    tests,
+                    said,
+                )
+            })
+        };
+        let mut said = Vec::new();
+        publishing("run_one", &one, "", &mut said).unwrap();
+        assert!(
+            String::from_utf8_lossy(&said).contains("Go server coverage: 1 test(s)"),
+            "{}",
+            String::from_utf8_lossy(&said)
+        );
+        let again = publishing("run_one", &one, "", &mut Vec::new()).unwrap_err();
+        assert!(again.contains("coverage run already exists"), "{again}");
+        for (id, tests, fault, lines) in [
+            (
+                "run_read",
+                &one[..],
+                "fs.read_to_string#owned_server.rs:79",
+                9,
+            ),
+            (
+                "run_work",
+                &one[..],
+                "fs.create_dir_all#owned_server.rs:294",
+                9,
+            ),
+            (
+                "run_archive",
+                &one[..],
+                "fs.rename#evidence_archive.rs:472",
+                9,
+            ),
+        ] {
+            let failed = publishing(id, tests, fault, &mut Lines(lines)).unwrap_err();
+            assert!(failed.contains("their evidence is kept"), "{id}: {failed}");
+        }
+        // A line about a published run that cannot be written takes nothing
+        // from the run.
+        for (id, tests, lines) in [("run_said", &one[..], 0), ("run_overlap", &both[..], 1)] {
+            publishing(id, tests, "", &mut Lines(lines))
+                .unwrap_or_else(|error| panic!("{id}: {error}"));
         }
     }
 }

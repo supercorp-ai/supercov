@@ -454,21 +454,12 @@ pub fn assessment_input(report: &CoverageReport) -> AssessmentInput {
     }
 }
 
-pub fn population(
-    root: &Path,
-    report: &CoverageReport,
-    sources: &BTreeMap<String, String>,
-    language: Language,
-) -> Result<Population, String> {
-    population_from(root, &assessment_input(report), sources, language)
-}
-
 pub fn population_from(
     root: &Path,
     input: &AssessmentInput,
     sources: &BTreeMap<String, String>,
     language: Language,
-) -> Result<Population, String> {
+) -> Population {
     let mut tests = Vec::new();
     // JVM tests are named by class; their file is found by its path.
     let jvm_files = if language == Language::Jvm {
@@ -590,7 +581,9 @@ pub fn population_from(
             // from the result types. (Writing the JVM's `null` out the same
             // way measured no better on commons-cli and moved the share away
             // from the truth, so the JVM keeps its description.)
-            Language::Go if valued => go::rewrite(source, line, change),
+            Language::Go if valued => {
+                go::rewrite(source, line, matches!(change, Change::ReturnUndefined))
+            }
             _ => None,
         };
         // A replacement that writes the statement out as it already is --
@@ -614,15 +607,16 @@ pub fn population_from(
         credit_module_level(&mut statements, sources, language);
     }
     let mut ran = vec![BTreeMap::<String, BTreeSet<usize>>::new(); tests.len()];
-    for s in &statements {
-        for &t in &s.tests {
+    statements
+        .iter()
+        .flat_map(|s| s.tests.iter().map(move |&t| (t, s)))
+        .for_each(|(t, s)| {
             ran[t].entry(s.file.clone()).or_default().insert(s.line);
-        }
-    }
+        });
     let source_files = statements.iter().map(|s| s.file.clone()).collect();
     let test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
     let unnumbered_test_codes = tests.iter().map(|_| std::sync::OnceLock::new()).collect();
-    Ok(Population {
+    Population {
         root: root.to_path_buf(),
         language,
         statements,
@@ -635,7 +629,7 @@ pub fn population_from(
         test_codes,
         unnumbered_test_codes,
         views: Default::default(),
-    })
+    }
 }
 
 /// A statement at a module's top level runs once, when the module is first
@@ -652,10 +646,9 @@ fn credit_module_level(
     for (index, statement) in statements.iter().enumerate() {
         files.entry(statement.file.clone()).or_default().push(index);
     }
+    // A statement is made only of a file whose source there is.
     for (file, indexes) in files {
-        let Some(source) = sources.get(&file) else {
-            continue;
-        };
+        let source = &sources[&file];
         let functions = outermost_functions(language, &file, source);
         let inside = |line: usize| {
             functions
@@ -972,7 +965,9 @@ fn python_statement_starts(source: &str) -> BTreeMap<usize, Vec<(String, Option<
 /// preferred over the same words anywhere else.
 fn js_test_line(lines: &[&str], name: &str) -> Option<usize> {
     let parts = name.split(" > ").collect::<Vec<_>>();
-    let (title, groups) = parts.split_last()?;
+    let (title, groups) = parts
+        .split_last()
+        .expect("a split's first piece is always there");
     let quoted = |line: &str, text: &str| {
         ['\'', '"', '`']
             .iter()
@@ -1239,12 +1234,15 @@ fn quoted_fragments(text: &str) -> Vec<String> {
                 _ => {}
             }
         }
-        for piece in pieces {
-            let piece = piece.trim();
-            if piece.len() >= 6 && piece.chars().filter(|c| c.is_alphabetic()).count() >= 3 {
-                out.push(piece.to_owned());
-            }
-        }
+        out.extend(
+            pieces
+                .iter()
+                .map(|piece| piece.trim())
+                .filter(|piece| {
+                    piece.len() >= 6 && piece.chars().filter(|c| c.is_alphabetic()).count() >= 3
+                })
+                .map(str::to_owned),
+        );
     }
     out.sort();
     out.dedup();
@@ -1276,18 +1274,17 @@ impl Population {
                 .files
                 .lock()
                 .expect("the file cache is only read and filled");
-            for (file, text) in files {
-                cache.insert(file, Some(text.into()));
-            }
+            cache.extend(
+                files
+                    .into_iter()
+                    .map(|(file, text)| (file, Some(text.into()))),
+            );
         }
         // Test code found before is code of the files replaced.
-        for code in self
-            .test_codes
+        self.test_codes
             .iter_mut()
             .chain(&mut self.unnumbered_test_codes)
-        {
-            *code = std::sync::OnceLock::new();
-        }
+            .for_each(|code| *code = std::sync::OnceLock::new());
         self.views = Default::default();
         self
     }
@@ -1310,7 +1307,7 @@ impl Population {
         files
             .entry(file.to_owned())
             .or_insert_with(|| {
-                std::fs::read_to_string(self.root.join(file))
+                crate::fault_fs::read_to_string(self.root.join(file))
                     .ok()
                     .map(Into::into)
             })
@@ -1382,8 +1379,10 @@ impl Population {
         if all.len() <= k {
             return all;
         }
+        // More tests than `k`, so neither these groups nor the files they
+        // fall in are empty.
         let mut groups = Vec::<((String, String), Vec<usize>)>::new();
-        for &t in &all {
+        all.iter().for_each(|&t| {
             let g = (
                 self.tests[t].file.clone(),
                 describe(
@@ -1395,14 +1394,14 @@ impl Population {
                 Some((_, v)) => v.push(t),
                 None => groups.push((g, vec![t])),
             }
-        }
+        });
         let mut by_file = Vec::<(String, Vec<Vec<usize>>)>::new();
-        for ((file, _), members) in groups {
+        groups.into_iter().for_each(|((file, _), members)| {
             match by_file.iter_mut().find(|(f, _)| *f == file) {
                 Some((_, v)) => v.push(members),
                 None => by_file.push((file, vec![members])),
             }
-        }
+        });
         by_file.sort_by_key(|(f, _)| {
             (
                 !Path::new(f)
@@ -1426,29 +1425,25 @@ impl Population {
             let (first, rest): (Vec<usize>, Vec<usize>) = quoting
                 .iter()
                 .partition(|&&t| files.insert(self.tests[t].file.clone()));
-            for t in first.into_iter().chain(rest) {
-                if picked.len() < k {
-                    picked.push(t);
-                }
-            }
+            let room = k.saturating_sub(picked.len());
+            picked.extend(first.into_iter().chain(rest).take(room));
         }
         let mut depth = 0;
         while picked.len() < k && by_file.iter().any(|(_, g)| g.len() > depth) {
-            for (_, g) in &by_file {
+            by_file.iter().for_each(|(_, g)| {
                 if depth < g.len() && picked.len() < k && !picked.contains(&g[depth][0]) {
                     picked.push(g[depth][0]);
                 }
-            }
+            });
             depth += 1;
         }
-        for t in all {
-            if picked.len() >= k {
-                break;
-            }
-            if !picked.contains(&t) {
-                picked.push(t);
-            }
-        }
+        // The rest in order, until `k` are picked.
+        let rest = all
+            .into_iter()
+            .filter(|t| !picked.contains(t))
+            .take(k.saturating_sub(picked.len()))
+            .collect::<Vec<_>>();
+        picked.extend(rest);
         picked
     }
 
@@ -1529,20 +1524,22 @@ impl Population {
         };
         let indent = lines[start].len() - lines[start].trim_start().len();
         let mut body = Vec::new();
-        for (i, l) in lines
+        // From the test's own line, which there is, to the next test call.
+        let _ = lines
             .iter()
             .copied()
             .enumerate()
             .take(start + BODY_LINES)
             .skip(start)
-        {
-            if i > start && is_test_call(l) && l.len() - l.trim_start().len() <= indent {
-                break;
-            }
-            if !self.language.comment(l) {
-                body.push(fmt(i));
-            }
-        }
+            .try_for_each(|(i, l)| {
+                if i > start && is_test_call(l) && l.len() - l.trim_start().len() <= indent {
+                    return std::ops::ControlFlow::Break(());
+                }
+                if !self.language.comment(l) {
+                    body.push(fmt(i));
+                }
+                std::ops::ControlFlow::Continue(())
+            });
         let mut out = head;
         if start > HEAD_LINES {
             out.push("  ...".into());
@@ -1605,17 +1602,18 @@ impl Population {
         // What the test uses from its own file: a table it loops over, a
         // helper it calls, a `let` it reads.
         shown.extend(used_definitions(&lines, self.language, located.start, end));
-        for i in shown {
+        // The test's own lines are among them, so they are never none.
+        shown.into_iter().for_each(|i| {
             // A doctest lives in comments: its lines are the test.
             if i < last || (commented[i] && self.language != Language::Rust) {
-                continue;
+                return;
             }
             if i > last {
                 out.push("  ...".into());
             }
             out.push(fmt(i));
             last = i + 1;
-        }
+        });
         out.join("\n")
     }
 
@@ -1680,9 +1678,10 @@ impl Population {
                 last = Some(i);
             }
         };
-        for i in class.into_iter().chain(first..=start) {
-            show(&mut out, i);
-        }
+        class
+            .into_iter()
+            .chain(first..=start)
+            .for_each(|i| show(&mut out, i));
         for (i, &l) in lines
             .iter()
             .enumerate()
@@ -1706,20 +1705,15 @@ impl Population {
     /// supergateway they were a sixth of what was sent and changed 4 verdicts
     /// in 101, two each way.
     pub fn helpers(&self, test: usize, questions: usize) -> BTreeMap<String, String> {
-        if self.language.asks_within_the_function() {
-            return BTreeMap::new();
-        }
         let cap = HELPER_CHARS.min(1500 + 400 * questions);
         let t = &self.tests[test];
-        let text = self.read(&t.file).unwrap_or_default();
-        let mut out = BTreeMap::new();
-        let mut size = 0;
+        let text = || self.read(&t.file).unwrap_or_default();
         let files = match self.language {
-            Language::JavaScript | Language::Python => Vec::new(),
-            Language::Ruby => ruby::helpers(&self.root, &t.file, &text),
-            Language::Go => go::helpers(&self.root, &t.file, &text),
-            Language::Rust => rust_source::helpers(&self.root, &t.file, &text),
-            Language::Jvm => jvm::imports(&text)
+            Language::JavaScript | Language::Python => return BTreeMap::new(),
+            Language::Ruby => ruby::helpers(&self.root, &t.file, &text()),
+            Language::Go => go::helpers(&self.root, &t.file, &text()),
+            Language::Rust => rust_source::helpers(&self.root, &t.file, &text()),
+            Language::Jvm => jvm::imports(&text())
                 .iter()
                 .filter_map(|import| {
                     jvm::class_paths(&import.replace('/', "."))
@@ -1731,6 +1725,8 @@ impl Population {
                 })
                 .collect(),
         };
+        let mut out = BTreeMap::new();
+        let mut size = 0;
         for file in files {
             if out.contains_key(&file) {
                 continue;
@@ -1757,7 +1753,7 @@ impl Population {
         }
         if self.language == Language::Ruby {
             let mut used = 0;
-            for file in ruby::support_files(&self.root, &text) {
+            for file in ruby::support_files(&self.root, &text()) {
                 if out.contains_key(&file) || used >= FIXTURE_CHARS {
                     continue;
                 }
@@ -1855,39 +1851,41 @@ impl Population {
                         .collect()
                 });
                 let mut kept = Vec::new();
-                for statement in asked.iter().map(|&a| &self.statements[a]) {
-                    if statement.file != f {
-                        continue;
-                    }
-                    kept.push(function(statement.line).unwrap_or(around(statement.line)));
-                    // A statement its question names by all its lines also
-                    // keeps what lies near each line it goes on to, as the
-                    // requests this was measured with did.
-                    for l in (statement.line + 1)
-                        ..statement.line + whole_statement(statement).unwrap_or(1)
-                    {
-                        kept.push(
-                            begins
-                                .contains(&l)
-                                .then(|| function(l))
-                                .flatten()
-                                .unwrap_or(around(l)),
-                        );
-                    }
-                }
+                // Never none: within a function only the asked statements'
+                // files are shown.
+                asked
+                    .iter()
+                    .map(|&a| &self.statements[a])
+                    .filter(|statement| statement.file == f)
+                    .for_each(|statement| {
+                        kept.push(function(statement.line).unwrap_or(around(statement.line)));
+                        // A statement its question names by all its lines also
+                        // keeps what lies near each line it goes on to, as the
+                        // requests this was measured with did.
+                        for l in (statement.line + 1)
+                            ..statement.line + whole_statement(statement).unwrap_or(1)
+                        {
+                            kept.push(
+                                begins
+                                    .contains(&l)
+                                    .then(|| function(l))
+                                    .flatten()
+                                    .unwrap_or(around(l)),
+                            );
+                        }
+                    });
                 kept
             });
             let mut show = BTreeSet::new();
             match &kept {
                 None => {
-                    for &l in r {
-                        show.extend(around(l, CONTEXT_LINES));
-                    }
+                    r.iter()
+                        .for_each(|&l| show.extend(around(l, CONTEXT_LINES)));
                 }
                 Some(kept) => {
                     // A ran line whose context can reach a kept range: within
                     // CONTEXT_LINES of its code lines, or of its lines.
-                    for &(from, to) in kept {
+                    kept.iter().for_each(|&(from, to)| {
                         let first = view.code.partition_point(|&c| c < from);
                         let last = view.code.partition_point(|&c| c <= to);
                         let lo = view
@@ -1902,12 +1900,11 @@ impl Population {
                             .copied()
                             .unwrap_or(0)
                             .max(to.saturating_add(CONTEXT_LINES));
-                        if lo <= hi {
-                            for &l in r.range(lo..=hi) {
-                                show.extend(around(l, CONTEXT_LINES));
-                            }
-                        }
-                    }
+                        // A kept range runs forward, so `lo` is at most `hi`,
+                        // and holds the ran lines it was kept for.
+                        r.range(lo..=hi)
+                            .for_each(|&l| show.extend(around(l, CONTEXT_LINES)));
+                    });
                 }
             }
             for &l in want.get(&f).unwrap_or(&empty) {
@@ -1917,13 +1914,16 @@ impl Population {
             // how much of it is not. Every line `around` gives is one of the
             // file's, counted from one.
             // No line before a ran code line reaches further than it does.
+            // Each file here is one the test ran a line of.
             let mut reached = 0;
-            for &l in r.iter().rev() {
+            let _ = r.iter().rev().try_for_each(|&l| {
                 reached = reached.max(reach(l, CONTEXT_LINES));
                 if view.position(l).is_some() {
-                    break;
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
                 }
-            }
+            });
             let end = std::iter::once(reached)
                 .chain(
                     want.get(&f)
@@ -2162,12 +2162,12 @@ impl Population {
         let t = &self.tests[test];
         let mut questions = serde_json::Map::new();
         for (n, &a) in asked.iter().enumerate() {
-            for (j, q) in self.questions(a).into_iter().enumerate() {
-                questions.insert(
+            questions.extend(self.questions(a).into_iter().enumerate().map(|(j, q)| {
+                (
                     format!("q{n}_{j}"),
                     json!({"type": "noul", "instructions": {"task": q}, "criteria": {"true": "The test fails.", "false": "The test still passes."}}),
-                );
-            }
+                )
+            }));
         }
         let mut state = json!({
             "instructions": INSTRUCTIONS, "runtime": runtime(&t.runner),
@@ -2294,19 +2294,20 @@ fn rust_question(line: &str, change: Change, replacement: &str) -> String {
 /// Write files' text, compressed, to `path`.
 pub fn save_snapshot(path: &Path, files: &BTreeMap<String, String>) -> Result<(), String> {
     use std::io::Write;
-    let bytes = serde_json::to_vec(files).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(files).expect("plain data serializes");
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(&bytes).map_err(|e| e.to_string())?;
-    let compressed = encoder.finish().map_err(|e| e.to_string())?;
+    const MEMORY: &str = "compressing into memory cannot fail";
+    encoder.write_all(&bytes).expect(MEMORY);
+    let compressed = encoder.finish().expect(MEMORY);
     let temp = path.with_extension("tmp");
-    std::fs::write(&temp, compressed).map_err(|e| e.to_string())?;
-    std::fs::rename(&temp, path).map_err(|e| e.to_string())
+    crate::fault_fs::write(&temp, compressed).map_err(|e| e.to_string())?;
+    crate::fault_fs::rename(&temp, path).map_err(|e| e.to_string())
 }
 
 /// Read files written by [`save_snapshot`].
 pub fn load_snapshot(path: &Path) -> Option<BTreeMap<String, String>> {
     use std::io::Read;
-    let compressed = std::fs::read(path).ok()?;
+    let compressed = crate::fault_fs::read(path).ok()?;
     let mut text = Vec::new();
     flate2::read::GzDecoder::new(compressed.as_slice())
         .read_to_end(&mut text)
@@ -2393,14 +2394,14 @@ const DEFINITION_LINES: usize = 120;
 fn used_definitions(lines: &[&str], language: Language, start: usize, end: usize) -> Vec<usize> {
     let words = |range: std::ops::RangeInclusive<usize>| {
         let mut out = BTreeSet::new();
-        for i in range {
+        range.for_each(|i| {
             let line = lines.get(i).copied().unwrap_or("");
             out.extend(
                 line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
                     .filter(|w| !w.is_empty())
                     .map(str::to_owned),
             );
-        }
+        });
         out
     };
     let definitions = definitions(lines, language);
@@ -2735,6 +2736,7 @@ fn normalize(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
     fn questions_of(
         file: &str,
         source: &str,
@@ -2761,11 +2763,122 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([(file.to_owned(), source.to_owned())]);
-        let population =
-            population_from(Path::new("/nonexistent"), &input, &sources, language).unwrap();
+        let population = population_from(Path::new("/nonexistent"), &input, &sources, language);
         (0..population.statements.len())
             .map(|s| population.questions(s))
             .collect()
+    }
+
+    /// Nothing to assess plans nothing, and a test asked about no statement
+    /// is asked nothing: no questions, no code.
+    #[test]
+    fn a_path_is_named_by_its_parts_with_dots_resolved() {
+        assert_eq!(normalize(Path::new("")), "");
+        assert_eq!(normalize(Path::new("./src/../lib/a.js")), "lib/a.js");
+    }
+
+    #[test]
+    fn nothing_to_assess_is_asked_nothing() {
+        let empty = AssessmentInput {
+            tests: Vec::new(),
+            points: Vec::new(),
+            decisions: Vec::new(),
+        };
+        assert!(empty.only_tests(|_| true).tests.is_empty());
+        let none = population_from(
+            Path::new("/nonexistent"),
+            &empty,
+            &BTreeMap::new(),
+            Language::JavaScript,
+        );
+        assert!(none.statements.is_empty());
+        let one = AssessmentInput {
+            tests: vec![InputTest {
+                id: "t".into(),
+                file: Some("t.test.js".into()),
+                name: "t".into(),
+                role: "test".into(),
+                runner: "node:test".into(),
+            }],
+            points: Vec::new(),
+            decisions: Vec::new(),
+        };
+        let population = population_from(
+            Path::new("/nonexistent"),
+            &one,
+            &BTreeMap::new(),
+            Language::JavaScript,
+        );
+        assert!(population.code_run(0, &[]).is_empty());
+        assert!(population.files_read().is_empty());
+        let request = population.request(0, &[], "m");
+        assert_eq!(request["model"], "m");
+        assert!(
+            request["questions"]
+                .as_object()
+                .is_none_or(|q| q.is_empty()),
+            "{request}"
+        );
+    }
+
+    /// Each runner a question can name is described, each language read
+    /// from its manifest name with its "nothing", and each runner's titles
+    /// split where it writes them.
+    #[test]
+    fn each_runner_and_language_is_named_as_questions_name_it() {
+        for (runner, first) in [
+            ("node:test", "node:test"),
+            ("jest", "Jest"),
+            ("ava", "AVA"),
+            ("tap", "node-tap"),
+            ("mocha", "Mocha"),
+            ("pytest", "pytest"),
+            ("rspec", "RSpec"),
+            ("minitest", "Minitest"),
+            ("test-unit", "test-unit"),
+            ("cucumber", "Cucumber"),
+            ("go-test", "go test"),
+            ("rust-libtest", "Rust tests"),
+            ("rustdoc", "Rust doctests"),
+            ("junit-platform", "JUnit"),
+            ("testng", "TestNG"),
+            ("unittest", "unittest"),
+        ] {
+            assert!(
+                runtime(runner).starts_with(first),
+                "{runner}: {}",
+                runtime(runner)
+            );
+        }
+        assert!(!runtime("no-such-runner").is_empty());
+        let languages = ["javascript", "python", "ruby", "go", "rust", "jvm"]
+            .map(|name| Language::from_manifest(name).unwrap());
+        assert_eq!(Language::from_manifest("cobol"), None);
+        assert_eq!(
+            languages.map(Language::nothing),
+            [
+                "undefined",
+                "None",
+                "nil",
+                "the zero value",
+                "`Default::default()`",
+                "the default value (null, or 0 or false for a primitive)",
+            ]
+        );
+        let [javascript, python, ruby, go, rust, jvm] = languages;
+        assert_eq!(
+            [
+                separator(javascript, "jest"),
+                separator(python, "pytest"),
+                separator(ruby, "rspec"),
+                separator(ruby, "minitest"),
+                separator(jvm, "junit-platform"),
+                separator(go, "go-test"),
+                separator(rust, "rustdoc"),
+                separator(rust, "rust-libtest"),
+            ],
+            [" > ", "::", ":", "#", "#", "/", " - ", "::"]
+        );
     }
 
     /// Go, the JVM languages and Rust are asked in their own terms: a zero
@@ -2844,12 +2957,50 @@ mod tests {
         assert!(!super::same_code("return 0, nil", "return n, nil"));
         let source = "package p\n\nfunc f(n int) (int, error) {\n\tif n > 0 {\n\t\treturn n, nil\n\t}\n\treturn 0, nil\n}\n";
         assert_eq!(
-            super::go::rewrite(source, 7, Change::ReturnUndefined).as_deref(),
+            super::go::rewrite(source, 7, true).as_deref(),
             Some("return 0, nil")
         );
     }
 
     use super::*;
+
+    /// Each helper given nothing finds nothing, and one given text it
+    /// cannot read hands it back.
+    #[test]
+    fn helpers_given_nothing_find_nothing() {
+        assert!(name_words("").is_empty());
+        for text in ["", "'", "''"] {
+            assert!(quoted_fragments(text).is_empty(), "{text}");
+        }
+        assert_eq!(comment_start(""), 0);
+        assert_eq!(brace_end_within(&[], 0, 5), 0);
+        assert_eq!(brace_end_within(&[""], 0, 1), 0);
+        assert!(definitions(&[], Language::Rust).is_empty());
+        assert_eq!(split_initializer("x"), None);
+        assert_eq!(python_class_lines(&["x = 1"], &["Missing"]), (0, 1, None));
+        for line in ["while x {", "if x {", "if (x"] {
+            assert_eq!(condition(line), line);
+        }
+        // Empty and unparsable sources hold no statement and no function.
+        for source in ["", "def (:\n"] {
+            assert!(python_statement_starts(source).is_empty(), "{source}");
+            assert!(
+                outermost_functions(Language::Python, "t.py", source).is_empty(),
+                "{source}"
+            );
+        }
+        assert!(outermost_functions(Language::JavaScript, "t.js", "").is_empty());
+        // An empty namespace and block hold none either.
+        assert_eq!(
+            outermost_functions(
+                Language::JavaScript,
+                "t.ts",
+                "namespace N {}\n{ }\nfunction f() {}\n"
+            )
+            .len(),
+            1
+        );
+    }
 
     #[test]
     fn a_statement_many_tests_run_is_asked_of_the_tests_that_ran_little_else() {
@@ -2904,8 +3055,7 @@ mod tests {
             &input,
             &sources,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         let target = population
             .statements
             .iter()
@@ -2991,6 +3141,17 @@ mod tests {
             change_at(&starts, 8, "a && b", js),
             Some(Change::ExpressionUndefined)
         );
+        // A default export of a value is skipped; of a declaration, not asked.
+        let exported = "export default { a: 1 }\nexport default function g() {}\n";
+        let starts = statement_starts("x.js", exported);
+        assert_eq!(
+            change_at(&starts, 1, "export default { a: 1 }", js),
+            Some(Change::Skip)
+        );
+        assert_eq!(
+            change_at(&starts, 2, "export default function g() {}", js),
+            None
+        );
     }
 
     #[test]
@@ -3012,13 +3173,14 @@ mod tests {
         );
         // destr: `return undefined as T` was asked as "returns undefined", which no
         // test can catch, and read as the one statement not asserted.
-        let typed = "function f<T>(a: number): T {\n  if (a === 1) return undefined as T\n  if (a === 2) return (undefined as unknown) as T\n  if (a === 3) return <T>undefined\n  return undefined!\n}\n";
+        let typed = "function f<T>(a: number): T {\n  if (a === 1) return undefined as T\n  if (a === 2) return (undefined as unknown) as T\n  if (a === 3) return <T>undefined\n  if (a === 4) return undefined satisfies unknown\n  return undefined!\n}\n";
         let starts = statement_starts("x.ts", typed);
         for (line, text) in [
             (2, "return undefined as T"),
             (3, "return (undefined as unknown) as T"),
             (4, "return <T>undefined"),
-            (5, "return undefined!"),
+            (5, "return undefined satisfies unknown"),
+            (6, "return undefined!"),
         ] {
             assert_eq!(
                 change_at(&starts, line, text, js),
@@ -3127,8 +3289,7 @@ mod tests {
             &input,
             &sources,
             Language::Python,
-        )
-        .unwrap();
+        );
         let question = |population: &Population, line: usize| {
             let at = population
                 .statements
@@ -3180,8 +3341,7 @@ mod tests {
             &js,
             &sources,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         assert_eq!(
             question(&javascript, 3),
             "src/g.js:3: `return;` is deleted (it never runs)."
@@ -3247,9 +3407,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("src/a".to_owned(), "x\n".to_owned())]);
-        population_from(&root, &input, &sources, language)
-            .unwrap()
-            .test_code(0)
+        population_from(&root, &input, &sources, language).test_code(0)
     }
 
     /// A Ruby test's helpers are what it loads that is not measured source,
@@ -3297,7 +3455,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("lib/m.rb".to_owned(), "def m\n  1\nend\n".to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Ruby).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Ruby);
         let helpers = population.helpers(0, 1);
         assert!(
             !helpers.contains_key("lib/m.rb"),
@@ -3375,13 +3533,20 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("src/limit.js".to_owned(), source.to_owned())]);
+        // A file the run measured that cannot be read now shows nothing.
+        let unread = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::JavaScript,
+        );
+        assert!(unread.code_run(0, &[0]).is_empty());
         let population = population_from(
             Path::new("/nonexistent"),
             &input,
             &sources,
             Language::JavaScript,
         )
-        .unwrap()
         .with_files(sources);
         let code = &population.code_run(0, &[0])["src/limit.js"];
         assert!(
@@ -3471,7 +3636,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("shop.py".to_owned(), "return 0\n".to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Python).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Python);
         let code = population.test_code(0);
         std::fs::remove_dir_all(&root).unwrap();
         let shown = code
@@ -3730,8 +3895,7 @@ mod tests {
             &input,
             &sources,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         let tests_of = |line: usize| {
             let mut tests = population
                 .statements
@@ -3973,7 +4137,7 @@ mod tests {
         };
         let sources =
             BTreeMap::from([("src/main/java/shop/Cart.java".to_owned(), cart.to_owned())]);
-        let jvm = population_from(&root, &input, &sources, Language::Jvm).unwrap();
+        let jvm = population_from(&root, &input, &sources, Language::Jvm);
         assert_eq!(
             jvm.tests
                 .iter()
@@ -3982,7 +4146,7 @@ mod tests {
             ["src/test/java/shop/CartTest.java", "CartTest.java"]
         );
         assert_eq!(jvm.statements[0].tests, [0, 1]);
-        let python = population_from(&root, &input, &sources, Language::Python).unwrap();
+        let python = population_from(&root, &input, &sources, Language::Python);
         assert!(python.tests.is_empty());
         assert!(python.statements.is_empty());
     }
@@ -4014,8 +4178,7 @@ mod tests {
                 "fn helper() -> u8 {\n    let z = 2;\n    z\n}\n".to_owned(),
             ),
         ]);
-        let rust =
-            population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust).unwrap();
+        let rust = population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust);
         assert_eq!(
             rust.statements
                 .iter()
@@ -4039,8 +4202,7 @@ mod tests {
             &input,
             &sources,
             Language::Python,
-        )
-        .unwrap();
+        );
         assert_eq!(
             python
                 .statements
@@ -4048,6 +4210,17 @@ mod tests {
                 .map(|s| (s.line, s.change))
                 .collect::<Vec<_>>(),
             [(4, Change::Invert)]
+        );
+    }
+
+    /// An accessor field and a static block are each one unit of their
+    /// class, as a method and a property are, whatever they hold.
+    #[test]
+    fn an_accessor_and_a_static_block_are_each_a_unit_of_their_class() {
+        let source = "class A {\n  accessor handler = () => {\n    return 1\n  };\n  static {\n    function setup() {\n      return 2\n    }\n  }\n}\n";
+        assert_eq!(
+            outermost_functions(Language::JavaScript, "src/a.js", source),
+            [(2, 4), (5, 9)]
         );
     }
 
@@ -4100,8 +4273,7 @@ mod tests {
             &input,
             &files,
             Language::JavaScript,
-        )
-        .unwrap();
+        );
         for file in ["tests/a.test.js", "tests/b.test.js", "tests/d.test.js"] {
             files.insert(file.into(), quotes.into());
         }
@@ -4205,6 +4377,19 @@ mod tests {
         );
         assert!(first.contains("assert one() == 1"), "{first}");
         assert!(!first.contains("..."), "{first}");
+        // A test written on the file's last line is that line alone.
+        let last = shown_test_code(
+            "tests/test_last.py",
+            // No newline after it: nothing follows the test's own line.
+            "def test_last(): assert last() == 1",
+            "tests/test_last.py::test_last",
+            "pytest",
+            Language::Python,
+        );
+        assert!(
+            last.contains("def test_last(): assert last() == 1"),
+            "{last}"
+        );
         let matrix = format!(
             "{constants}\n\nproduct = (a\n    @ b)\ndef test_after():\n    assert product\n"
         );
@@ -4256,7 +4441,7 @@ mod tests {
         };
         let sources =
             BTreeMap::from([("src/main/java/shop/Cart.java".to_owned(), cart.to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Jvm).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Jvm);
         let helpers = population.helpers(0, 1);
         assert_eq!(
             helpers.keys().collect::<Vec<_>>(),
@@ -4293,7 +4478,7 @@ mod tests {
             decisions: Vec::new(),
         };
         let sources = BTreeMap::from([("lib/m.rb".to_owned(), "def m\n  1\nend\n".to_owned())]);
-        let population = population_from(&root, &input, &sources, Language::Ruby).unwrap();
+        let population = population_from(&root, &input, &sources, Language::Ruby);
         let helpers = population.helpers(0, 1);
         assert_eq!(
             helpers.keys().collect::<Vec<_>>(),
@@ -4336,7 +4521,6 @@ mod tests {
                 &sources,
                 Language::JavaScript,
             )
-            .unwrap()
             .with_files(BTreeMap::from([("src/a.js".to_owned(), now.clone())]))
             .code_run(0, &[0])
             .remove("src/a.js")
@@ -4381,7 +4565,6 @@ mod tests {
             decisions: Vec::new(),
         };
         let population = population_from(Path::new("/nonexistent"), &input, &sources, Language::Go)
-            .unwrap()
             .with_files(sources.clone());
         let asked = population
             .statements
@@ -4399,6 +4582,89 @@ mod tests {
             shown["c.go"].contains("▶    4 \tready := compute(0)"),
             "{shown:?}"
         );
+    }
+
+    /// A declaration whose value starts on the next line is described by
+    /// what the line holds, a TypeScript throw by the bare error it becomes,
+    /// a JavaScript helper file names no definition, and a snapshot that is
+    /// no gzip reads as none.
+    #[test]
+    fn changes_are_described_by_the_line_they_start_on() {
+        let typescript = questions_of(
+            "a.ts",
+            "export function f(v: number) {\n  if (v) {\n    throw new TypeError(\"bad\");\n  }\n  let total\n    = v + 1;\n  return total;\n}\n",
+            &[(3, "throw new TypeError(\"bad\");"), (5, "let total")],
+            Language::JavaScript,
+        );
+        assert!(
+            typescript[0][0].contains("throws `new Error()` instead"),
+            "{typescript:#?}"
+        );
+        assert!(
+            typescript[1][0].contains("`let total`: the declared value becomes undefined"),
+            "{typescript:#?}"
+        );
+        for (file, source, said) in [
+            (
+                "a.rb",
+                "def f(v)\n  total \\\n    = v + 1\n  total\nend\n",
+                "`total \\`: the assigned value becomes nil",
+            ),
+            (
+                "a.py",
+                "def f(v):\n    total \\\n        = v + 1\n    return total\n",
+                "`total \\`: the assigned value becomes None",
+            ),
+        ] {
+            let language = if file.ends_with(".rb") {
+                Language::Ruby
+            } else {
+                Language::Python
+            };
+            let asked = questions_of(file, source, &[(2, "total \\")], language);
+            assert!(asked[0][0].contains(said), "{asked:#?}");
+        }
+        let input = AssessmentInput {
+            tests: vec![input_test(Some("t"), "t", "r")],
+            points: vec![point("src/a.rs", 2, "let total", &[0])],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([(
+            "src/a.rs".to_owned(),
+            "pub fn f(v: u8) -> u8 {\n    let total\n        = v + 1;\n    total\n}\n".to_owned(),
+        )]);
+        let mut rust = population_from(Path::new("/nonexistent"), &input, &sources, Language::Rust);
+        rust.statements[0].replacement = None;
+        // A statement in a file that cannot be read is listed with no code.
+        let unread = AssessmentInput {
+            points: vec![
+                point("src/a.rs", 2, "let total", &[0]),
+                point("src/gone.rs", 1, "gone();", &[0]),
+            ],
+            ..input.clone()
+        };
+        let root =
+            std::env::temp_dir().join(format!("supercov-assessment-unread-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), &sources["src/a.rs"]).unwrap();
+        let partial = population_from(&root, &unread, &sources, Language::Rust);
+        let shown = partial.code_run(0, &[0]);
+        assert!(
+            shown.contains_key("src/a.rs") && !shown.contains_key("src/gone.rs"),
+            "{shown:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            rust.questions(0),
+            ["src/a.rs:2: `let total`: the assigned value becomes `Default::default()`."]
+        );
+        // JavaScript and Python helpers are not read by name.
+        assert!(definitions(&["function helper() {}"], Language::JavaScript).is_empty());
+        let garbage =
+            std::env::temp_dir().join(format!("supercov-snapshot-garbage-{}", std::process::id()));
+        crate::fault_fs::write(&garbage, "not gzip").unwrap();
+        assert_eq!(load_snapshot(&garbage), None);
+        std::fs::remove_file(garbage).unwrap();
     }
 
     /// Where no value is written out for a change, each language keeps its
@@ -4429,7 +4695,7 @@ mod tests {
                 decisions: Vec::new(),
             };
             let sources = BTreeMap::from([(file.to_owned(), source.to_owned())]);
-            population_from(Path::new("/nonexistent"), &input, &sources, language).unwrap()
+            population_from(Path::new("/nonexistent"), &input, &sources, language)
         };
         let java = "class A {\n  int g(int x) {\n    int y = x + 1;\n    return y;\n  }\n}\n";
         let mut jvm = population(
@@ -4493,6 +4759,57 @@ mod tests {
                     "f.py:7: `return` is deleted: the function does not return here, and execution carries on with whatever follows it."
                 ],
             ]
+        );
+    }
+
+    /// Each language's wording for a value made absent and a literal
+    /// flipped.
+    #[test]
+    fn each_change_is_worded_as_its_language_reads_it() {
+        assert_eq!(
+            questions_of(
+                "a.rb",
+                "def f(v)\n  x = v.compute\n  x\nend\n",
+                &[(2, "x = v.compute")],
+                Language::Ruby
+            ),
+            [
+                [
+                    "a.rb:2: `x = v.compute`: the value after `x =` becomes nil (it is not evaluated)."
+                ]
+            ]
+        );
+        assert_eq!(
+            questions_of(
+                "f.py",
+                "def f(v):\n    y = v()\n    v.n += 1\n    return y\n",
+                &[(2, "y = v()"), (3, "v.n += 1")],
+                Language::Python
+            ),
+            [
+                ["f.py:2: `y = v()` becomes `y = None` (the value is not evaluated)."],
+                ["f.py:3: `v.n += 1` is deleted (it never runs)."],
+            ]
+        );
+        let javascript = questions_of(
+            "a.js",
+            "export function f(v) {\n  const x = v();\n  if (!v || v(')')) throw new TypeError('no');\n  return true;\n}\n",
+            &[
+                (2, "const x = v();"),
+                (3, "if (!v || v(')')) throw new TypeError('no');"),
+                (4, "return true;"),
+            ],
+            Language::JavaScript,
+        );
+        assert_eq!(
+            javascript[0],
+            [
+                "a.js:2: `const x = v();` becomes `const x = undefined` (the initializer is not evaluated)."
+            ]
+        );
+        assert_eq!(
+            javascript[2],
+            ["a.js:4: `return true;` becomes `return false;`."]
         );
     }
 
@@ -4592,6 +4909,17 @@ mod helper_shape_tests {
         assert_eq!(flipped_code("is_true(x) || true"), "is_true(x) || false");
         assert_eq!(flipped_code("trueish = false"), "trueish = true");
         assert_eq!(flipped_code("x = True"), "x = False");
+        // Nothing to flip leaves the line; a Rust value written without `=`
+        // is said as the value it assigns.
+        assert_eq!(flipped_code("work()"), "work()");
+        assert_eq!(
+            rust_question("total += x", Change::ValueUndefined, "0"),
+            "`total += x` becomes `total += 0;`"
+        );
+        assert!(
+            rust_question("push(x)", Change::ValueUndefined, "0")
+                .contains("the value it assigns becomes `0`")
+        );
         assert_eq!(
             brace_end_within(&["fn a() {", "  let x = 1 / 2; // }", "}", "after"], 0, 10),
             2,

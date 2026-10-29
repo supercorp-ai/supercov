@@ -6,10 +6,10 @@
 //! Reads validate the authenticated header, all checked layout invariants and
 //! the SHA-256 digest of every data page they touch.
 
+use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::{BTreeSet, HashSet},
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -121,19 +121,16 @@ impl From<io::Error> for QueryIndexError {
     }
 }
 
-fn get<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], QueryIndexError> {
-    bytes
-        .get(offset..offset + N)
-        .and_then(|slice| slice.try_into().ok())
-        .ok_or(QueryIndexError::InvalidHeader("truncated field"))
+/// A header's fields: each lies at a fixed offset inside it, the last
+/// descriptor's included (`QUERY_INDEX_MAX_SECTIONS` of them fit).
+type Header = [u8; QUERY_INDEX_HEADER_SIZE];
+
+fn get_u32(header: &Header, offset: usize) -> u32 {
+    u32::from_le_bytes(header[offset..offset + 4].try_into().expect("four bytes"))
 }
 
-fn get_u32(bytes: &[u8], offset: usize) -> Result<u32, QueryIndexError> {
-    Ok(u32::from_le_bytes(get(bytes, offset)?))
-}
-
-fn get_u64(bytes: &[u8], offset: usize) -> Result<u64, QueryIndexError> {
-    Ok(u64::from_le_bytes(get(bytes, offset)?))
+fn get_u64(header: &Header, offset: usize) -> u64 {
+    u64::from_le_bytes(header[offset..offset + 8].try_into().expect("eight bytes"))
 }
 
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
@@ -147,13 +144,6 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
 fn checked_end(offset: u64, length: u64) -> Result<u64, QueryIndexError> {
     offset
         .checked_add(length)
-        .ok_or(QueryIndexError::SizeOverflow)
-}
-
-fn align(value: u64, alignment: u64) -> Result<u64, QueryIndexError> {
-    value
-        .checked_add(alignment - 1)
-        .map(|value| value / alignment * alignment)
         .ok_or(QueryIndexError::SizeOverflow)
 }
 
@@ -196,14 +186,15 @@ fn layout_sections(
             });
         }
     }
+    // The sections are in memory, so their sum is far below `u64::MAX`.
     let mut cursor = QUERY_INDEX_HEADER_SIZE as u64;
     let mut descriptors = Vec::with_capacity(ordered.len());
     for section in &ordered {
-        cursor = align(cursor, 8)?;
-        let length =
-            u64::try_from(section.bytes.len()).map_err(|_| QueryIndexError::SizeOverflow)?;
+        cursor = cursor.next_multiple_of(8);
+        // Lossless: `usize` is 64 bits on every target Supercov builds for.
+        let length = section.bytes.len() as u64;
         let offset = cursor;
-        cursor = checked_end(cursor, length)?;
+        cursor += length;
         descriptors.push(SectionDescriptor {
             kind: section.kind,
             record_size: section.record_size,
@@ -212,13 +203,13 @@ fn layout_sections(
             count: section.count,
             digests_offset: 0,
             digest_count: u32::try_from(section.bytes.len().div_ceil(QUERY_INDEX_PAGE_SIZE))
-                .map_err(|_| QueryIndexError::SizeOverflow)?,
+                .expect("a section holds fewer than 2^32 pages: it is written from memory"),
         });
     }
     for descriptor in &mut descriptors {
-        cursor = align(cursor, 8)?;
+        cursor = cursor.next_multiple_of(8);
         descriptor.digests_offset = cursor;
-        cursor = checked_end(cursor, u64::from(descriptor.digest_count) * 32)?;
+        cursor += u64::from(descriptor.digest_count) * 32;
     }
     Ok((descriptors, cursor))
 }
@@ -268,41 +259,47 @@ pub fn write_query_index(
     let (temporary, mut file) = loop {
         let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary = temporary_path(destination, sequence)?;
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
+        match fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary) {
             Ok(file) => break (temporary, file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
     };
-    let result = (|| {
-        file.set_len(total_bytes)?;
-        let by_kind = sections
-            .iter()
-            .map(|section| (section.kind, section))
-            .collect::<std::collections::HashMap<_, _>>();
-        for descriptor in &descriptors {
-            let section = by_kind[&descriptor.kind];
-            file.seek(SeekFrom::Start(descriptor.offset))?;
-            file.write_all(&section.bytes)?;
-            file.seek(SeekFrom::Start(descriptor.digests_offset))?;
-            for page in section.bytes.chunks(QUERY_INDEX_PAGE_SIZE) {
-                file.write_all(&Sha256::digest(page))?;
-            }
-        }
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&make_header(identity, &descriptors, total_bytes))?;
-        // Not synced: an index is disposable, and a reader verifies every
-        // page against its digest, so one a machine crash left torn is
-        // rebuilt from the evidence like a missing one. Syncing 90 MB cost
-        // each publication of a 3,900-test run 50 ms.
-        drop(file);
-        fs::rename(&temporary, destination)?;
-        Ok(())
-    })();
+    let by_kind = sections
+        .iter()
+        .map(|section| (section.kind, section))
+        .collect::<std::collections::HashMap<_, _>>();
+    let sized = crate::fault::io("query-index-write", io::ErrorKind::Other, || {
+        file.set_len(total_bytes)
+    });
+    let mut at = |offset: u64, bytes: &[u8]| {
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.write_all(bytes))
+    };
+    // The sections, their digests, then the header; the first write that
+    // fails ends the index.
+    let written = sized
+        .and_then(|()| {
+            descriptors.iter().try_for_each(|descriptor| {
+                let section = by_kind[&descriptor.kind];
+                let digests = section
+                    .bytes
+                    .chunks(QUERY_INDEX_PAGE_SIZE)
+                    .flat_map(Sha256::digest)
+                    .collect::<Vec<_>>();
+                at(descriptor.offset, &section.bytes)
+                    .and_then(|()| at(descriptor.digests_offset, &digests))
+            })
+        })
+        .and_then(|()| at(0, &make_header(identity, &descriptors, total_bytes)));
+    // Not synced: an index is disposable, and a reader verifies every page
+    // against its digest, so one a machine crash left torn is rebuilt from
+    // the evidence like a missing one. Syncing 90 MB cost each publication
+    // of a 3,900-test run 50 ms.
+    drop(file);
+    let result = written
+        .and_then(|()| fs::rename(&temporary, destination))
+        .map_err(QueryIndexError::from);
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -315,9 +312,9 @@ pub fn write_query_index(
 /// its checksum included, so a damaged one is refused there.
 pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError> {
     let mut header = [0_u8; QUERY_INDEX_HEADER_SIZE];
-    File::open(path)?.read_exact(&mut header)?;
+    fs::read_exact_from(&mut fs::open(path)?, &mut header)?;
     let sha256 = header[48..80].try_into().expect("a 32-byte slice");
-    Ok((sha256, get_u64(&header, 24)?))
+    Ok((sha256, get_u64(&header, 24)))
 }
 
 pub struct QueryIndex {
@@ -332,36 +329,37 @@ impl QueryIndex {
         if !metadata.is_file() {
             return Err(QueryIndexError::NotRegularFile(path.to_owned()));
         }
-        let file = File::open(path)?;
+        let file = fs::open(path)?;
         // Supercov publishes a new immutable inode by rename and never mutates
         // the inode while it may be mapped. Readers retain this file handle.
         let mmap = unsafe { Mmap::map(&file)? };
-        let header = mmap
+        let header: &Header = mmap
             .get(..QUERY_INDEX_HEADER_SIZE)
+            .and_then(|header| header.try_into().ok())
             .ok_or(QueryIndexError::InvalidHeader("truncated"))?;
         if header.get(..8) != Some(MAGIC.as_slice()) {
             return Err(QueryIndexError::InvalidHeader("magic"));
         }
-        if get_u32(header, 8)? != QUERY_INDEX_SCHEMA_VERSION {
+        if get_u32(header, 8) != QUERY_INDEX_SCHEMA_VERSION {
             return Err(QueryIndexError::InvalidHeader("schema version"));
         }
-        if get_u32(header, 12)? as usize != QUERY_INDEX_HEADER_SIZE {
+        if get_u32(header, 12) as usize != QUERY_INDEX_HEADER_SIZE {
             return Err(QueryIndexError::InvalidHeader("header size"));
         }
         let expected_checksum = Sha256::digest(&header[..HEADER_CHECKSUM_OFFSET]);
         if header[HEADER_CHECKSUM_OFFSET..] != expected_checksum[..] {
             return Err(QueryIndexError::InvalidHeader("checksum"));
         }
-        if get_u64(header, 16)? != mmap.len() as u64 {
+        if get_u64(header, 16) != mmap.len() as u64 {
             return Err(QueryIndexError::InvalidHeader("total length"));
         }
-        if get_u32(header, 40)? as usize != QUERY_INDEX_PAGE_SIZE {
+        if get_u32(header, 40) as usize != QUERY_INDEX_PAGE_SIZE {
             return Err(QueryIndexError::InvalidHeader("page size"));
         }
-        if get_u64(header, 24)? != expected.evidence_bytes {
+        if get_u64(header, 24) != expected.evidence_bytes {
             return Err(QueryIndexError::IdentityMismatch("evidence length"));
         }
-        if get_u32(header, 32)? != expected.archive_schema_version {
+        if get_u32(header, 32) != expected.archive_schema_version {
             return Err(QueryIndexError::IdentityMismatch("archive schema"));
         }
         if header[48..80] != expected.evidence_sha256 {
@@ -373,7 +371,7 @@ impl QueryIndex {
         if header[112..144] != expected.producer_sha256 {
             return Err(QueryIndexError::IdentityMismatch("producer hash"));
         }
-        let section_count = get_u32(header, 36)? as usize;
+        let section_count = get_u32(header, 36) as usize;
         if section_count > QUERY_INDEX_MAX_SECTIONS {
             return Err(QueryIndexError::TooManySections(section_count));
         }
@@ -383,13 +381,13 @@ impl QueryIndex {
         for index in 0..section_count {
             let offset = DESCRIPTOR_OFFSET + index * DESCRIPTOR_SIZE;
             let descriptor = SectionDescriptor {
-                kind: get_u32(header, offset)?,
-                record_size: get_u32(header, offset + 4)?,
-                offset: get_u64(header, offset + 8)?,
-                length: get_u64(header, offset + 16)?,
-                count: get_u64(header, offset + 24)?,
-                digests_offset: get_u64(header, offset + 32)?,
-                digest_count: get_u32(header, offset + 40)?,
+                kind: get_u32(header, offset),
+                record_size: get_u32(header, offset + 4),
+                offset: get_u64(header, offset + 8),
+                length: get_u64(header, offset + 16),
+                count: get_u64(header, offset + 24),
+                digests_offset: get_u64(header, offset + 32),
+                digest_count: get_u32(header, offset + 40),
             };
             if descriptor.kind == 0 || !kinds.insert(descriptor.kind) {
                 return Err(QueryIndexError::DuplicateSection(descriptor.kind));
@@ -405,9 +403,7 @@ impl QueryIndex {
                     reason: "record shape",
                 });
             }
-            let digest_count = usize::try_from(descriptor.length)
-                .map_err(|_| QueryIndexError::SizeOverflow)?
-                .div_ceil(QUERY_INDEX_PAGE_SIZE);
+            let digest_count = (descriptor.length as usize).div_ceil(QUERY_INDEX_PAGE_SIZE);
             if descriptor.digest_count as usize != digest_count {
                 return Err(QueryIndexError::InvalidSection {
                     kind: descriptor.kind,
@@ -452,14 +448,14 @@ impl QueryIndex {
 
     /// Authenticate every section page before a disposable index is accepted.
     pub fn verify_all(&self) -> Result<(), QueryIndexError> {
-        for descriptor in &self.descriptors {
-            for page in 0..descriptor.digest_count as usize {
-                self.verify_page(*descriptor, page)?;
-            }
-        }
-        Ok(())
+        self.descriptors.iter().try_for_each(|descriptor| {
+            (0..descriptor.digest_count as usize)
+                .try_for_each(|page| self.verify_page(*descriptor, page))
+        })
     }
 
+    /// One page of a section `open` accepted: its data and its digest lie
+    /// inside the mapping, so only the digest can be wrong.
     fn verify_page(
         &self,
         descriptor: SectionDescriptor,
@@ -469,27 +465,11 @@ impl QueryIndex {
         if self.verified_pages.lock().unwrap().contains(&key) {
             return Ok(());
         }
-        let page_start = usize::try_from(descriptor.offset)
-            .map_err(|_| QueryIndexError::SizeOverflow)?
-            .checked_add(page * QUERY_INDEX_PAGE_SIZE)
-            .ok_or(QueryIndexError::SizeOverflow)?;
-        let section_end = usize::try_from(checked_end(descriptor.offset, descriptor.length)?)
-            .map_err(|_| QueryIndexError::SizeOverflow)?;
-        let page_end = page_start
-            .checked_add(QUERY_INDEX_PAGE_SIZE)
-            .ok_or(QueryIndexError::SizeOverflow)?
-            .min(section_end);
-        let digest_start = usize::try_from(descriptor.digests_offset)
-            .map_err(|_| QueryIndexError::SizeOverflow)?
-            .checked_add(page * 32)
-            .ok_or(QueryIndexError::SizeOverflow)?;
-        let expected =
-            self.mmap
-                .get(digest_start..digest_start + 32)
-                .ok_or(QueryIndexError::CorruptPage {
-                    kind: descriptor.kind,
-                    page,
-                })?;
+        let page_start = descriptor.offset as usize + page * QUERY_INDEX_PAGE_SIZE;
+        let section_end = (descriptor.offset + descriptor.length) as usize;
+        let page_end = (page_start + QUERY_INDEX_PAGE_SIZE).min(section_end);
+        let digest_start = descriptor.digests_offset as usize + page * 32;
+        let expected = &self.mmap[digest_start..digest_start + 32];
         let actual = Sha256::digest(&self.mmap[page_start..page_end]);
         if actual[..] != expected[..] {
             return Err(QueryIndexError::CorruptPage {
@@ -512,18 +492,12 @@ impl QueryIndex {
             });
         }
         if length > 0 {
-            let first = usize::try_from(offset).map_err(|_| QueryIndexError::SizeOverflow)?
-                / QUERY_INDEX_PAGE_SIZE;
-            let last = usize::try_from(end - 1).map_err(|_| QueryIndexError::SizeOverflow)?
-                / QUERY_INDEX_PAGE_SIZE;
-            for page in first..=last {
-                self.verify_page(descriptor, page)?;
-            }
+            let first = offset as usize / QUERY_INDEX_PAGE_SIZE;
+            let last = (end - 1) as usize / QUERY_INDEX_PAGE_SIZE;
+            (first..=last).try_for_each(|page| self.verify_page(descriptor, page))?;
         }
-        let start = usize::try_from(descriptor.offset + offset)
-            .map_err(|_| QueryIndexError::SizeOverflow)?;
-        let end =
-            usize::try_from(descriptor.offset + end).map_err(|_| QueryIndexError::SizeOverflow)?;
+        let start = (descriptor.offset + offset) as usize;
+        let end = (descriptor.offset + end) as usize;
         Ok(&self.mmap[start..end])
     }
 
@@ -536,9 +510,8 @@ impl QueryIndex {
                 length: 1,
             });
         }
-        let offset = index
-            .checked_mul(u64::from(descriptor.record_size))
-            .ok_or(QueryIndexError::SizeOverflow)?;
+        // Below `count`, whose records `open` found to fill the section.
+        let offset = index * u64::from(descriptor.record_size);
         self.bytes(kind, offset, u64::from(descriptor.record_size))
     }
 }
@@ -607,6 +580,15 @@ mod tests {
         assert!(matches!(
             index.record(2, 2),
             Err(QueryIndexError::OutOfBounds { .. })
+        ));
+        // A section the index does not hold.
+        assert!(matches!(
+            index.record(99, 0),
+            Err(QueryIndexError::MissingSection(99))
+        ));
+        assert!(matches!(
+            index.bytes(99, 0, 1),
+            Err(QueryIndexError::MissingSection(99))
         ));
         assert!(fs::read_dir(&root).unwrap().all(|entry| {
             !entry
@@ -792,6 +774,71 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// An index of no sections opens and verifies; a read past a section,
+    /// or one whose end overflows, is refused; a write that fails, and a
+    /// destination with no directory or no name, publish nothing.
+    /// A regular file that cannot be mapped -- one of Linux's process
+    /// files -- is an error, not an index.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_that_cannot_be_mapped_is_no_index() {
+        let expected = QueryIndexIdentity {
+            evidence_sha256: [0; 32],
+            evidence_bytes: 0,
+            analysis_sha256: [0; 32],
+            producer_sha256: [0; 32],
+            archive_schema_version: 0,
+        };
+        assert!(matches!(
+            QueryIndex::open(Path::new("/proc/self/status"), &expected),
+            Err(QueryIndexError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn an_empty_index_opens_and_a_read_or_write_past_its_limits_is_refused() {
+        let root = root("limits");
+        let path = root.join("query-index.v1.bin");
+        write_query_index(&[], &identity(1), &path).unwrap();
+        let empty = QueryIndex::open(&path, &identity(1)).unwrap();
+        empty.verify_all().unwrap();
+        write_query_index(&sections(9), &identity(1), &path).unwrap();
+        let index = QueryIndex::open(&path, &identity(1)).unwrap();
+        assert!(matches!(
+            index.bytes(1, u64::MAX, 2),
+            Err(QueryIndexError::SizeOverflow)
+        ));
+        assert!(matches!(
+            write_query_index(
+                &[QueryIndexSection {
+                    kind: 1,
+                    record_size: 2,
+                    count: u64::MAX,
+                    bytes: vec![0; 2]
+                }],
+                &identity(1),
+                &path,
+            ),
+            Err(QueryIndexError::SizeOverflow)
+        ));
+        let failed = crate::fault::during("query-index-write", || {
+            write_query_index(&sections(9), &identity(1), &root.join("failed.bin"))
+        });
+        assert!(matches!(failed, Err(QueryIndexError::Io(_))));
+        for destination in [Path::new("/"), &root.join("..")] {
+            assert!(matches!(
+                write_query_index(&sections(9), &identity(1), destination),
+                Err(QueryIndexError::InvalidHeader(_))
+            ));
+        }
+        let names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["query-index.v1.bin"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlinked_indexes() {
@@ -851,6 +898,7 @@ mod tests {
         longer.extend_from_slice(&[0; 8]);
         let cases: Vec<(Vec<u8>, &str)> = vec![
             (valid[..100].to_vec(), "InvalidHeader(\"truncated\")"),
+            (Vec::new(), "InvalidHeader(\"truncated\")"),
             (signed(&|b| b[0] = b'X'), "InvalidHeader(\"magic\")"),
             (
                 signed(&|b| put32(b, 8, 99)),
@@ -899,6 +947,15 @@ mod tests {
                 signed(&|b| put64(b, field(1, 8), read64(field(0, 8)))),
                 "overlapping sections",
             ),
+            (
+                signed(&|b| put64(b, field(sized, 24), u64::MAX)),
+                "SizeOverflow",
+            ),
+            (signed(&|b| put64(b, field(0, 8), u64::MAX)), "SizeOverflow"),
+            (
+                signed(&|b| put64(b, field(0, 32), u64::MAX)),
+                "SizeOverflow",
+            ),
         ];
         for (bytes, expected) in &cases {
             let said = open(bytes);
@@ -945,5 +1002,46 @@ mod tests {
             assert!(said.contains(reason), "{reason}: {said}");
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_query_index_error_says_what_failed() {
+        let messages = [
+            QueryIndexError::from(io::Error::other("disk full")),
+            QueryIndexError::NotRegularFile(PathBuf::from("index")),
+            QueryIndexError::InvalidHeader("magic"),
+            QueryIndexError::IdentityMismatch("evidence digest"),
+            QueryIndexError::TooManySections(99),
+            QueryIndexError::InvalidSection {
+                kind: 3,
+                reason: "record size",
+            },
+            QueryIndexError::DuplicateSection(3),
+            QueryIndexError::MissingSection(4),
+            QueryIndexError::OutOfBounds {
+                kind: 5,
+                offset: 8,
+                length: 16,
+            },
+            QueryIndexError::CorruptPage { kind: 6, page: 2 },
+            QueryIndexError::SizeOverflow,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "disk full",
+                "query index is not a regular file: index",
+                "invalid query-index header: magic",
+                "stale query-index evidence digest",
+                "query index has 99 sections",
+                "invalid query-index section 3: record size",
+                "duplicate query-index section 3",
+                "missing query-index section 4",
+                "query-index section 5 range 8+16 is out of bounds",
+                "query-index section 6 page 2 is corrupt",
+                "query index exceeds its format limits",
+            ]
+        );
     }
 }

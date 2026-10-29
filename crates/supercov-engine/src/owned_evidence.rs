@@ -39,7 +39,6 @@ use crate::go_instrumenter::{GoProbe, GoProbeTarget};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedEvidenceError {
     Truncated(&'static str),
-    NoTests,
 }
 
 impl std::fmt::Display for OwnedEvidenceError {
@@ -48,10 +47,6 @@ impl std::fmt::Display for OwnedEvidenceError {
             OwnedEvidenceError::Truncated(part) => {
                 write!(f, "Coverage evidence ended in the middle of its {part}")
             }
-            OwnedEvidenceError::NoTests => write!(
-                f,
-                "the run produced coverage evidence but no test announced itself"
-            ),
         }
     }
 }
@@ -108,10 +103,9 @@ impl Cursor<'_> {
     }
 
     fn u64(&mut self, part: &'static str) -> Result<u64, OwnedEvidenceError> {
-        let end = self
-            .offset
-            .checked_add(8)
-            .ok_or(OwnedEvidenceError::Truncated(part))?;
+        // The offset never passes the end of the bytes, so eight more is a
+        // position: only a length read from the file can overflow.
+        let end = self.offset + 8;
         let slice = self
             .bytes
             .get(self.offset..end)
@@ -457,21 +451,7 @@ pub fn merge_evidence(parts: Vec<OwnedEvidence>) -> OwnedEvidence {
 /// A short, stable identity derived from what makes the thing itself, so two
 /// runs of the same test agree on what to call it.
 fn stable_id(prefix: &str, values: &[&str]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    for value in values {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(prefix.len() + 25);
-    encoded.push_str(prefix);
-    encoded.push(':');
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("string formatting");
-    }
-    encoded
+    crate::stable_ids::prefixed(prefix, values)
 }
 
 /// The obligation each probe answers for, by id.
@@ -530,17 +510,20 @@ fn snapshot(
             .iter()
             .map(|key| unpack_vector(*key, width))
             .collect::<Vec<_>>();
-        for vector in &observed {
-            events.push(RuntimeEvent {
-                event_type: "decision".into(),
-                id: meta.id.clone(),
-                vector: Some(vector.clone()),
-                timestamp_ms: clock,
-                phase_id: Some(phase.to_owned()),
-                environment: environment.into(),
-            });
-            clock += 1;
-        }
+        events.extend(
+            observed
+                .iter()
+                .zip(clock..)
+                .map(|(vector, timestamp_ms)| RuntimeEvent {
+                    event_type: "decision".into(),
+                    id: meta.id.clone(),
+                    vector: Some(vector.clone()),
+                    timestamp_ms,
+                    phase_id: Some(phase.to_owned()),
+                    environment: environment.into(),
+                }),
+        );
+        clock += observed.len() as i64;
         decisions.push(DecisionSnapshot {
             meta: meta.clone(),
             vectors: observed,
@@ -564,7 +547,7 @@ pub struct OwnedFrontendRun {
 impl OwnedFrontendRun {
     /// The archive a run publishes: what the numbers mean, who produced them,
     /// the obligations they are measured against, and one record per test.
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -575,24 +558,29 @@ impl OwnedFrontendRun {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&model)?,
+                contents: serde_json::to_vec(&model).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&self.declaration)?,
+                contents: serde_json::to_vec(&self.declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
-                contents: serde_json::to_vec(&self.request.manifest)?,
+                contents: serde_json::to_vec(&self.request.manifest)
+                    .expect("plain data serializes"),
             },
         ];
-        for (index, result) in self.request.raw_results.iter().enumerate() {
-            entries.push(EvidenceArchiveEntry {
-                path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result)?,
-            });
-        }
-        Ok(entries)
+        entries.extend(
+            self.request
+                .raw_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| EvidenceArchiveEntry {
+                    path: format!("results/{index:08}/mcdc.json"),
+                    contents: serde_json::to_vec(result).expect("plain data serializes"),
+                }),
+        );
+        entries
     }
 }
 
@@ -626,7 +614,11 @@ pub struct OwnedRunInputs<'a> {
 /// result, with no coverage. Dropping it would make a suite look smaller than
 /// it is, and a test that ran without reaching any measured line is a fact
 /// worth seeing rather than an absence worth hiding.
-pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, OwnedEvidenceError> {
+///
+/// Callers refuse a run in which no test announced itself and nothing was
+/// reached, so there is always a result: a test's, or the background record
+/// holding what no test could claim.
+pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
     let OwnedRunInputs {
         declaration,
         environment,
@@ -645,8 +637,9 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     let default_runner = declaration
         .runners
         .first()
-        .map(|runner| runner.runner.clone())
-        .ok_or(OwnedEvidenceError::NoTests)?;
+        .expect("every owned frontend declares its runner")
+        .runner
+        .clone();
     let declared = declaration
         .runners
         .iter()
@@ -845,16 +838,6 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         });
     }
 
-    // Nothing to publish only when neither a test nor the run as a whole
-    // reached anything. An empty list of outcomes on its own is not that: a Go
-    // package whose every test calls `t.Parallel()` announces no test by
-    // design, and refusing it there discarded a fully measured package --
-    // lines, branches and MC/DC alike -- over the fact that the evidence had
-    // no owner. The background record above is the owner it has.
-    if raw_results.is_empty() {
-        return Err(OwnedEvidenceError::NoTests);
-    }
-
     // A declaration naming a runner that produced nothing claims something the
     // run did not do, and the reader refuses it — rightly. A JVM frontend can
     // drive JUnit and TestNG, but any one project usually runs one of them, so
@@ -873,7 +856,12 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     declaration.structural_limitations = manifest
         .limitations
         .iter()
-        .filter_map(|limitation| limitation.get("id")?.as_str().map(str::to_owned))
+        .map(|limitation| {
+            limitation["id"]
+                .as_str()
+                .expect("an owned frontend names each limitation")
+                .to_owned()
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -884,7 +872,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     declaration
         .runners
         .retain(|runner| observed.contains(runner.runner.as_str()));
-    Ok(OwnedFrontendRun {
+    OwnedFrontendRun {
         declaration,
         tests: raw_results.len(),
         request: CoverageReportRequest {
@@ -896,11 +884,19 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(test_exit_code)),
         },
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_owned_evidence_error_says_what_failed() {
+        assert_eq!(
+            OwnedEvidenceError::Truncated("header").to_string(),
+            "Coverage evidence ended in the middle of its header"
+        );
+    }
+
     use super::*;
 
     fn write(values: &[u64]) -> Vec<u8> {
@@ -972,38 +968,40 @@ mod tests {
         ));
     }
 
+    /// A file holding every part -- probe totals, a test with tags, probes
+    /// and vectors, a decision table -- cut at any byte is refused.
     #[test]
-    fn a_run_with_no_tests_is_an_error_not_an_empty_report() {
-        // Nothing announced itself and nothing was reached: there is no run
-        // here, and an empty report would claim a floor it never established.
-        // What makes this an error is the second half, not the first -- see
-        // the test below.
-        let evidence = OwnedEvidence::default();
-        let manifest = CoverageManifest {
-            decisions: Vec::new(),
-            points: Vec::new(),
-            branches: Vec::new(),
-            limitations: Vec::new(),
-            unmeasured: Vec::new(),
-            scope: None,
-            assertion_sites: Vec::new(),
+    fn a_file_cut_anywhere_is_refused() {
+        let mut bytes = Vec::new();
+        let put = |bytes: &mut Vec<u8>, value: u64| bytes.extend_from_slice(&value.to_le_bytes());
+        let text = |bytes: &mut Vec<u8>, value: &str| {
+            bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
         };
-        assert_eq!(
-            build_frontend_run(OwnedRunInputs {
-                declaration: go_declaration(),
-                environment: "go",
-                manifest: &manifest,
-                probes: &BTreeMap::new(),
-                evidence: &evidence,
-                outcomes: &[],
-                run_id: "run",
-                generated_at: "now",
-                test_exit_code: 0,
-                coverage_model: go_coverage_model(),
-            })
-            .err(),
-            Some(OwnedEvidenceError::NoTests)
-        );
+        put(&mut bytes, 1); // one probe
+        put(&mut bytes, 1);
+        put(&mut bytes, 1); // one test
+        text(&mut bytes, "t");
+        text(&mut bytes, "passed");
+        put(&mut bytes, 0);
+        text(&mut bytes, "node:test");
+        put(&mut bytes, 1);
+        text(&mut bytes, "unit");
+        put(&mut bytes, 1); // one probe hit
+        put(&mut bytes, 0);
+        put(&mut bytes, 1);
+        put(&mut bytes, 1); // one vector
+        put(&mut bytes, 0);
+        put(&mut bytes, 0b01);
+        put(&mut bytes, 1); // one decision
+        put(&mut bytes, 2);
+        put(&mut bytes, 1);
+        put(&mut bytes, 0b01);
+        let whole = read_evidence(&bytes).unwrap();
+        assert_eq!(whole.tests[0].tags, ["unit"]);
+        for cut in 0..bytes.len() {
+            assert!(read_evidence(&bytes[..cut]).is_err(), "cut at {cut}");
+        }
     }
 
     #[test]
@@ -1057,8 +1055,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 0,
             coverage_model: go_coverage_model(),
-        })
-        .expect("a measured package publishes even when no test can claim it");
+        });
         assert_eq!(run.tests, 1, "the one record is what nobody could claim");
         assert_eq!(run.request.raw_results[0].role, "background");
         assert_eq!(
@@ -1077,8 +1074,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 1,
             coverage_model: go_coverage_model(),
-        })
-        .unwrap();
+        });
         assert_eq!(
             failed.request.raw_results[0].status.as_deref(),
             Some("failed"),
@@ -1245,8 +1241,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 0,
             coverage_model: go_coverage_model(),
-        })
-        .expect("run");
+        });
 
         let result = |name: &str| {
             run.request
@@ -1315,8 +1310,7 @@ mod tests {
             generated_at: "now",
             test_exit_code: 0,
             coverage_model: go_coverage_model(),
-        })
-        .expect("run");
+        });
         assert_eq!(run.tests, 1);
         let result = &run.request.raw_results[0];
         assert_eq!(result.test, "TestSilent");
@@ -1358,7 +1352,8 @@ mod tests {
             widths: vec![2],
             decision_vectors: vec![vec![0b01, 0b11]],
         };
-        let merged = merge_evidence(vec![left, right]);
+        // A package whose process recorded nothing adds nothing.
+        let merged = merge_evidence(vec![left, right, OwnedEvidence::default()]);
         // Run-wide totals are a union: a probe any package reached is reached.
         assert_eq!(merged.global, [0b11, 0b10]);
         // Tests accumulate, because each belongs to exactly one binary.

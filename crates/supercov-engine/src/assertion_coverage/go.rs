@@ -9,19 +9,22 @@ use tree_sitter::{Node, Parser, Tree};
 /// types, constants and imports, and `var` without a value, are not assessed.
 pub(super) fn statement_starts(source: &str) -> Starts {
     let mut out = Starts::new();
-    let Some(tree) = parse(source) else {
-        return out;
-    };
+    let tree = parse(source);
     let starts = line_starts(source);
     walk(tree.root_node(), source, &starts, &mut out);
     out
 }
 
 /// The tree of a Go source, a broken one included.
-fn parse(source: &str) -> Option<Tree> {
+fn parse(source: &str) -> Tree {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
-    parser.parse(source, None)
+    parser
+        .set_language(&tree_sitter_go::LANGUAGE.into())
+        .expect("the Go grammar is built for this tree-sitter");
+    // With no timeout or cancellation set, a parse always gives a tree.
+    parser
+        .parse(source, None)
+        .expect("tree-sitter recovers a tree from any text")
 }
 
 fn walk(node: Node, source: &str, starts: &[usize], out: &mut Starts) {
@@ -93,39 +96,43 @@ fn change(node: Node) -> Option<Option<Change>> {
 /// written out: `return true` -> `return false`, `return uuid, nil` ->
 /// `return UUID{}, nil` (from the function's result types), `x := &T{}` ->
 /// `x := nil`. Nothing where a zero value cannot be written down.
-pub(super) fn rewrite(source: &str, line: usize, change: Change) -> Option<String> {
-    let tree = parse(source)?;
+/// `returning`: the change returns zero values (`ReturnUndefined`); else it
+/// leaves a value zero (`ValueUndefined`), the two changes that have a value.
+pub(super) fn rewrite(source: &str, line: usize, returning: bool) -> Option<String> {
+    let tree = parse(source);
     let starts = line_starts(source);
     let text = |n: Node| source.get(n.byte_range()).unwrap_or("").to_owned();
-    let node = find_statement(tree.root_node(), &starts, line, &|n| match change {
-        Change::ReturnUndefined => n.kind() == "return_statement",
-        Change::ValueUndefined => {
+    let node = find_statement(tree.root_node(), &starts, line, &|n| {
+        if returning {
+            n.kind() == "return_statement"
+        } else {
             matches!(n.kind(), "short_var_declaration" | "assignment_statement")
         }
-        _ => false,
     })?;
-    match change {
-        Change::ReturnUndefined => {
-            let results = result_types(node, source)?;
-            let zeros = results.iter().map(|t| zero_of_type(t)).collect::<Vec<_>>();
-            Some(format!("return {}", zeros.join(", ")))
-        }
-        Change::ValueUndefined => {
-            let left = text(node.child_by_field_name("left")?);
-            let right = node.child_by_field_name("right")?;
-            let operator = if node.kind() == "short_var_declaration" {
-                ":="
-            } else {
-                "="
-            };
-            let mut cursor = right.walk();
-            let zeros = right
-                .named_children(&mut cursor)
-                .map(|value| zero_of_value(&text(value)))
-                .collect::<Option<Vec<_>>>()?;
-            Some(format!("{left} {operator} {}", zeros.join(", ")))
-        }
-        _ => None,
+    if returning {
+        let results = result_types(node, source)?;
+        let zeros = results.iter().map(|t| zero_of_type(t)).collect::<Vec<_>>();
+        Some(format!("return {}", zeros.join(", ")))
+    } else {
+        // The file compiled and ran: an assignment has both its sides.
+        let left = text(
+            node.child_by_field_name("left")
+                .expect("an assignment has its left side"),
+        );
+        let right = node
+            .child_by_field_name("right")
+            .expect("an assignment has its right side");
+        let operator = if node.kind() == "short_var_declaration" {
+            ":="
+        } else {
+            "="
+        };
+        let mut cursor = right.walk();
+        let zeros = right
+            .named_children(&mut cursor)
+            .map(|value| zero_of_value(&text(value)))
+            .collect::<Option<Vec<_>>>()?;
+        Some(format!("{left} {operator} {}", zeros.join(", ")))
     }
 }
 
@@ -154,12 +161,15 @@ fn find_statement<'a>(
 
 /// The result types of the function a `return` leaves, one per value.
 fn result_types(node: Node, source: &str) -> Option<Vec<String>> {
-    let function = std::iter::successors(node.parent(), |n| n.parent()).find(|n| {
-        matches!(
-            n.kind(),
-            "function_declaration" | "method_declaration" | "func_literal"
-        )
-    })?;
+    // A `return` that compiled is inside a function.
+    let function = std::iter::successors(node.parent(), |n| n.parent())
+        .find(|n| {
+            matches!(
+                n.kind(),
+                "function_declaration" | "method_declaration" | "func_literal"
+            )
+        })
+        .expect("a return is inside a function");
     let result = function.child_by_field_name("result")?;
     let text = |n: Node| source.get(n.byte_range()).unwrap_or("").to_owned();
     if result.kind() != "parameter_list" {
@@ -168,7 +178,11 @@ fn result_types(node: Node, source: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut cursor = result.walk();
     for declaration in result.named_children(&mut cursor) {
-        let ty = text(declaration.child_by_field_name("type")?);
+        let ty = text(
+            declaration
+                .child_by_field_name("type")
+                .expect("a result declaration has its type"),
+        );
         let mut names = declaration.walk();
         let count = declaration
             .children_by_field_name("name", &mut names)
@@ -325,28 +339,22 @@ mod tests {
     #[test]
     fn a_value_change_is_written_as_the_line_it_becomes() {
         let source = "package v\n\nfunc Less(a int) bool {\n\treturn true\n}\n\nfunc New() (UUID, error) {\n\tuuid := &UUID{}\n\tvar err error\n\treturn *uuid, nil\n}\n\nfunc parts() (n int, s []string, err error) {\n\tsegments := append(s, \"x\")\n\tcount, name := 3, \"a\"\n\treturn len(segments), segments, nil\n}\n";
+        assert_eq!(rewrite(source, 4, true).as_deref(), Some("return false"));
+        assert_eq!(rewrite(source, 8, false).as_deref(), Some("uuid := nil"));
         assert_eq!(
-            rewrite(source, 4, Change::ReturnUndefined).as_deref(),
-            Some("return false")
-        );
-        assert_eq!(
-            rewrite(source, 8, Change::ValueUndefined).as_deref(),
-            Some("uuid := nil")
-        );
-        assert_eq!(
-            rewrite(source, 10, Change::ReturnUndefined).as_deref(),
+            rewrite(source, 10, true).as_deref(),
             Some("return UUID{}, nil")
         );
         assert_eq!(
-            rewrite(source, 14, Change::ValueUndefined).as_deref(),
+            rewrite(source, 14, false).as_deref(),
             Some("segments := nil")
         );
         assert_eq!(
-            rewrite(source, 15, Change::ValueUndefined).as_deref(),
+            rewrite(source, 15, false).as_deref(),
             Some("count, name := 0, \"\"")
         );
         assert_eq!(
-            rewrite(source, 16, Change::ReturnUndefined).as_deref(),
+            rewrite(source, 16, true).as_deref(),
             Some("return 0, nil, nil")
         );
     }
@@ -382,6 +390,11 @@ mod tests {
             change_at(&starts, 13, "fmt.Println(z)", go),
             Some(Change::Skip)
         );
+        // A constant and a comment in a body are no statement to change.
+        let body = "package a\n\nfunc g() int {\n\tconst c = 1\n\t// note\n\treturn c\n}\n";
+        let starts_of_body = statement_starts(body);
+        assert_eq!(change_at(&starts_of_body, 4, "const c = 1", go), None);
+        assert_eq!(change_at(&starts_of_body, 5, "// note", go), None);
         assert_eq!(condition("} else if x := f(); x > 0 {"), "x := f(); x > 0");
         let test =
             "package a\n\nfunc TestF(t *testing.T) {\n\tif f(1) != 2 {\n\t\tt.Fatal()\n\t}\n}\n";
@@ -395,7 +408,7 @@ mod tests {
     #[test]
     fn a_value_without_a_declared_type_is_zeroed_by_its_shape() {
         let source = "package a\n\nfunc f() {\n\tp := Point{X: 1, Y: 2}\n\tc := config.Options{Verbose: true}\n\tn := 42\n\tr := `raw`\n\tv := compute(n)\n\tm := Point{X: 1}.Scale(2)\n}\n";
-        let at = |line| rewrite(source, line, Change::ValueUndefined);
+        let at = |line| rewrite(source, line, false);
         assert_eq!(at(4).as_deref(), Some("p := Point{}"));
         assert_eq!(at(5).as_deref(), Some("c := config.Options{}"));
         assert_eq!(at(6).as_deref(), Some("n := 0"));
@@ -424,8 +437,13 @@ mod tests {
         assert_eq!(change_at(&starts, 8, "{", go), Some(Change::Skip));
         assert_eq!(change_at(&starts, 12, "return", go), Some(Change::Skip));
         assert_eq!(
-            rewrite(source, 11, Change::ValueUndefined).as_deref(),
+            rewrite(source, 11, false).as_deref(),
             Some("p := my_pkg.Point_3{}")
+        );
+        // An empty result list returns no value.
+        assert_eq!(
+            rewrite("package a\n\nfunc f() () {\n\treturn\n}\n", 4, true).as_deref(),
+            Some("return ")
         );
     }
 
@@ -506,6 +524,8 @@ mod tests {
         ] {
             std::fs::write(root.join(file), body).unwrap();
         }
+        // A directory named as a test file has nothing to read.
+        std::fs::create_dir(root.join("pkg/folder_test.go")).unwrap();
         let text = std::fs::read_to_string(root.join("pkg/a_test.go")).unwrap();
         assert_eq!(
             helpers(&root, "pkg/a_test.go", &text),
@@ -530,10 +550,7 @@ mod tests {
     #[test]
     fn a_line_between_declarations_has_nothing_to_rewrite() {
         let source = "package a\n\nfunc f() int {\n\treturn 1\n}\n";
-        assert_eq!(rewrite(source, 2, Change::ReturnUndefined), None);
-        assert_eq!(
-            rewrite(source, 4, Change::ReturnUndefined).as_deref(),
-            Some("return 0")
-        );
+        assert_eq!(rewrite(source, 2, true), None);
+        assert_eq!(rewrite(source, 4, true).as_deref(), Some("return 0"));
     }
 }

@@ -23,9 +23,10 @@
 //! containers it measured, and the rest of their compose projects, so each
 //! writes its last evidence; it never removes them.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
@@ -91,7 +92,7 @@ fn upstream_socket_through(
     if let Some(context) = environment.get("DOCKER_CONTEXT") {
         command.env("DOCKER_CONTEXT", context);
     }
-    if let Ok(output) = command.output()
+    if let Ok(output) = command.launch_output()
         && output.status.success()
     {
         let host = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -124,7 +125,6 @@ pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
         fs::create_dir_all(state)?;
         return Ok(preferred);
     }
-    use std::os::unix::fs::DirBuilderExt;
     let directory = PathBuf::from("/tmp").join(format!(
         "supercov-docker-{}-{}",
         std::process::id(),
@@ -133,7 +133,7 @@ pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0)
     ));
-    fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    fs::create_private_dir(&directory)?;
     Ok(directory.join("docker.sock"))
 }
 
@@ -171,6 +171,8 @@ struct Shared {
     created: Mutex<Vec<CreatedContainer>>,
     /// Compose services already built from the copy in this run.
     built: Mutex<BTreeSet<(String, String)>>,
+    /// The Docker CLI compose is asked through.
+    docker: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +190,9 @@ impl DockerProxy {
         }
         let _ = fs::remove_file(socket);
         let listener = UnixListener::bind(socket)?;
-        listener.set_nonblocking(true)?;
+        listener
+            .set_nonblocking(true)
+            .expect("a listening socket just bound can be made nonblocking");
         if let Some(parent) = settings.state.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -199,6 +203,7 @@ impl DockerProxy {
             started_ms: now_ms(),
             created: Mutex::new(Vec::new()),
             built: Mutex::new(BTreeSet::new()),
+            docker: PathBuf::from("docker"),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -206,7 +211,8 @@ impl DockerProxy {
             let stop = Arc::clone(&stop);
             std::thread::Builder::new()
                 .name("supercov-docker-relay".into())
-                .spawn(move || accept(&listener, &shared, &stop))?
+                .spawn(move || accept(&listener, &shared, &stop))
+                .expect("a thread for the relay starts")
         };
         Ok(Self {
             socket: socket.to_owned(),
@@ -288,7 +294,9 @@ fn now_ms() -> i64 {
 }
 
 fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
-    while !stop.load(Ordering::Acquire) {
+    // Looked at once at least, so a relay stopped as soon as it started ends
+    // the same way as one stopped later.
+    loop {
         match listener.accept() {
             Ok((client, _)) => {
                 let _ = client.set_nonblocking(false);
@@ -302,6 +310,9 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
             // Nothing waiting, or a connection that failed before it was
             // taken: look again shortly.
             Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+        if stop.load(Ordering::Acquire) {
+            break;
         }
     }
 }
@@ -458,19 +469,25 @@ fn read_body(head: &Head, reader: &mut impl BufRead) -> io::Result<Vec<u8>> {
     if !head.chunked() {
         return Ok(encoded);
     }
+    // `relay_body` read every size line as text and copied every chunk
+    // whole, so what it wrote decodes.
     let mut decoded = Vec::new();
     let mut cursor = io::Cursor::new(encoded);
     loop {
         let mut size_line = String::new();
-        cursor.read_line(&mut size_line)?;
+        cursor
+            .read_line(&mut size_line)
+            .expect("each size line was read as text");
         let size =
             usize::from_str_radix(size_line.trim().split(';').next().unwrap_or("").trim(), 16)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
+                .expect("each chunk size was read");
         if size == 0 {
             return Ok(decoded);
         }
         let mut chunk = vec![0; size + 2];
-        cursor.read_exact(&mut chunk)?;
+        cursor
+            .read_exact(&mut chunk)
+            .expect("each chunk was copied whole");
         decoded.extend_from_slice(&chunk[..size]);
     }
 }
@@ -521,19 +538,47 @@ fn endpoint(head: &Head) -> (&str, &str) {
 
 fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
     let upstream = UnixStream::connect(&shared.upstream)?;
-    let mut client_reader = BufReader::new(client.try_clone()?);
+    // A connected socket's descriptor duplicates.
+    let mut client_reader = BufReader::new(client.try_clone().expect("a socket duplicates"));
     let mut client_writer = client;
-    let mut upstream_reader = BufReader::new(upstream.try_clone()?);
+    let mut upstream_reader = BufReader::new(upstream.try_clone().expect("a socket duplicates"));
     let mut upstream_writer = upstream;
+    if relay_messages(
+        &mut client_reader,
+        &mut client_writer,
+        &mut upstream_reader,
+        &mut upstream_writer,
+        shared,
+    )? {
+        return splice(
+            client_reader,
+            client_writer,
+            upstream_reader,
+            upstream_writer,
+        );
+    }
+    Ok(())
+}
+
+/// Each request from the client and the daemon's answer to it, until either
+/// side is done; true when both agreed to hand the connection over to a
+/// stream, which the caller splices.
+fn relay_messages(
+    client_reader: &mut impl BufRead,
+    client_writer: &mut impl Write,
+    upstream_reader: &mut impl BufRead,
+    upstream_writer: &mut impl Write,
+    shared: &Shared,
+) -> io::Result<bool> {
     loop {
-        let Some(mut request) = read_head(&mut client_reader)? else {
-            return Ok(());
+        let Some(mut request) = read_head(client_reader)? else {
+            return Ok(false);
         };
         let (method, path) = endpoint(&request);
         let creating = method == "POST" && path == "/containers/create";
         let mut created_context = None;
         if creating {
-            let body = read_body(&request, &mut client_reader)?;
+            let body = read_body(&request, client_reader)?;
             let (body, context) = match serde_json::from_slice::<Value>(&body) {
                 Ok(config) => {
                     let (config, context) = shared.instrument(config);
@@ -544,11 +589,11 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
             created_context = context;
             request.without("transfer-encoding");
             request.set("Content-Length", body.len().to_string());
-            request.write(&mut upstream_writer)?;
+            request.write(upstream_writer)?;
             upstream_writer.write_all(&body)?;
             upstream_writer.flush()?;
         } else {
-            request.write(&mut upstream_writer)?;
+            request.write(upstream_writer)?;
             upstream_writer.flush()?;
             if request
                 .header("expect")
@@ -556,38 +601,33 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
             {
                 // The daemon answers `100 Continue` (or refuses) before the
                 // body is sent.
-                let Some(interim) = read_head(&mut upstream_reader)? else {
-                    return Ok(());
+                let Some(interim) = read_head(upstream_reader)? else {
+                    return Ok(false);
                 };
-                interim.write(&mut client_writer)?;
+                interim.write(client_writer)?;
                 client_writer.flush()?;
                 if !interim.start.contains(" 100") {
                     if !bodiless(&request, &interim) {
-                        relay_body(&interim, &mut upstream_reader, &mut client_writer)?;
+                        relay_body(&interim, upstream_reader, client_writer)?;
                     }
                     continue;
                 }
             }
-            relay_body(&request, &mut client_reader, &mut upstream_writer)?;
+            relay_body(&request, client_reader, upstream_writer)?;
         }
-        let Some(response) = read_head(&mut upstream_reader)? else {
-            return Ok(());
+        let Some(response) = read_head(upstream_reader)? else {
+            return Ok(false);
         };
-        response.write(&mut client_writer)?;
+        response.write(client_writer)?;
         client_writer.flush()?;
         if hijacked(&request, &response) {
-            return splice(
-                client_reader,
-                client_writer,
-                upstream_reader,
-                upstream_writer,
-            );
+            return Ok(true);
         }
         if bodiless(&request, &response) {
             continue;
         }
         if let Some(context) = created_context {
-            let body = read_body(&response, &mut upstream_reader)?;
+            let body = read_body(&response, upstream_reader)?;
             // Recorded before the client hears of it: a client that has its
             // answer may end the run, and the run's end reads the record.
             if let Ok(created) = serde_json::from_slice::<Value>(&body)
@@ -608,10 +648,10 @@ fn relay_connection(client: UnixStream, shared: &Shared) -> io::Result<()> {
         }
         if !response.chunked() && response.content_length().is_none() {
             // Delimited by the connection closing.
-            io::copy(&mut upstream_reader, &mut client_writer)?;
-            return Ok(());
+            io::copy(upstream_reader, client_writer)?;
+            return Ok(false);
         }
-        relay_body(&response, &mut upstream_reader, &mut client_writer)?;
+        relay_body(&response, upstream_reader, client_writer)?;
     }
 }
 
@@ -639,10 +679,19 @@ fn splice(
 /// One request to the daemon, made by the relay itself: the body of the
 /// answer when it succeeded.
 fn daemon_request(socket: &Path, method: &str, path: &str, body: Option<&[u8]>) -> Option<Vec<u8>> {
-    let mut stream = UnixStream::connect(socket).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .ok()?;
+    let stream = UnixStream::connect(socket).ok()?;
+    // A connected socket takes a timeout: only an unconnected one refuses.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    daemon_exchange(stream, method, path, body)
+}
+
+/// [`daemon_request`] over a stream already open to the daemon.
+fn daemon_exchange(
+    mut stream: impl Read + Write,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Option<Vec<u8>> {
     let body = body.unwrap_or_default();
     write!(
         stream,
@@ -812,22 +861,22 @@ impl Shared {
             return Some(true);
         }
         let mut arguments = vec!["compose".to_owned(), "-p".into(), project.to_owned()];
-        for file in config_files.iter().flat_map(|files| files.split(',')) {
-            if !file.is_empty() {
-                arguments.extend(["-f".into(), file.to_owned()]);
-            }
-        }
+        config_files
+            .iter()
+            .flat_map(|files| files.split(','))
+            .filter(|file| !file.is_empty())
+            .for_each(|file| arguments.extend(["-f".into(), file.to_owned()]));
         if let Some(directory) = &working_dir {
             arguments.extend(["--project-directory".into(), directory.clone()]);
         }
-        let mut config = Command::new("docker");
+        let mut config = Command::new(&self.docker);
         config
             .args(&arguments)
             .args(["config", "--format", "json"])
             .env("DOCKER_HOST", format!("unix://{}", self.upstream.display()))
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        let output = config.output().ok()?;
+        let output = config.launch_output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -844,14 +893,14 @@ impl Shared {
             "compose-build",
             || Some(false),
             || {
-                Command::new("docker")
+                Command::new(&self.docker)
                     .args(&arguments)
                     .args(["build", service])
                     .env("DOCKER_HOST", format!("unix://{}", self.upstream.display()))
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .status()
+                    .launch_status()
                     .ok()
                     .map(|status| status.success())
             },
@@ -884,11 +933,10 @@ impl Shared {
             "service": context.service,
             "note": context.note,
         });
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.settings.state)
-        {
+        if let Ok(mut file) = fs::open_with(
+            fs::OpenOptions::new().create(true).append(true),
+            &self.settings.state,
+        ) {
             let _ = writeln!(file, "{line}");
         }
     }
@@ -995,7 +1043,8 @@ fn url_path_segment(name: &str) -> String {
 fn parse_rfc3339_ms(text: &str) -> Option<i64> {
     let (date, rest) = text.split_once('T')?;
     let mut date_parts = date.split('-');
-    let year: i64 = date_parts.next()?.parse().ok()?;
+    // A split's first piece is always there; an empty one parses as nothing.
+    let year: i64 = date_parts.next().unwrap_or_default().parse().ok()?;
     let month: i64 = date_parts.next()?.parse().ok()?;
     let day: i64 = date_parts.next()?.parse().ok()?;
     let (time, offset_seconds) = if let Some(time) = rest.strip_suffix('Z') {
@@ -1005,16 +1054,17 @@ fn parse_rfc3339_ms(text: &str) -> Option<i64> {
         let (time, offset) = rest.split_at(index);
         let sign = if offset.starts_with('-') { -1 } else { 1 };
         let mut parts = offset[1..].split(':');
-        let hours: i64 = parts.next()?.parse().ok()?;
+        let hours: i64 = parts.next().unwrap_or_default().parse().ok()?;
         let minutes: i64 = parts.next().unwrap_or("0").parse().ok()?;
         (time, sign * (hours * 3600 + minutes * 60))
     };
     let (clock, fraction) = time.split_once('.').unwrap_or((time, "0"));
     let mut clock_parts = clock.split(':');
-    let hour: i64 = clock_parts.next()?.parse().ok()?;
+    let hour: i64 = clock_parts.next().unwrap_or_default().parse().ok()?;
     let minute: i64 = clock_parts.next()?.parse().ok()?;
     let second: i64 = clock_parts.next()?.parse().ok()?;
-    let millis: i64 = format!("{fraction:0<3}")[..3].parse().ok()?;
+    // By characters: a fraction that is not digits is no time, not a panic.
+    let millis: i64 = format!("{fraction:0<3}").get(..3)?.parse().ok()?;
     // Days from the civil date (Howard Hinnant's algorithm).
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
@@ -1724,6 +1774,7 @@ mod tests {
             "ghcr.io/org/app:1.2@sha256"
         );
         assert_eq!(url_path_segment("a b?c#d"), "a%20b%3Fc%23d");
+        assert_eq!(url_path_segment(""), "");
     }
 
     #[test]
@@ -1905,6 +1956,7 @@ mod tests {
             started_ms: now_ms(),
             created: Mutex::default(),
             built: Mutex::default(),
+            docker: PathBuf::from("docker"),
         };
         // An empty name in the list is skipped; the file named is missing.
         let files = format!("{},", directory.join("missing.yml").display());
@@ -1913,6 +1965,62 @@ mod tests {
             None
         );
         assert!(shared.built.lock().unwrap().is_empty());
+        // Compose that cannot be started, that says something other than
+        // JSON, or that can be asked but not built with: none of it builds.
+        let stand_in = |name: &str, script: &str| {
+            let path = directory.join(name);
+            fs::write(&path, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            Shared {
+                docker: path,
+                settings: settings(&directory),
+                upstream: directory.join("d.sock"),
+                socket: directory.join("p.sock"),
+                started_ms: now_ms(),
+                created: Mutex::default(),
+                built: Mutex::default(),
+            }
+        };
+        let absent = Shared {
+            docker: directory.join("no-docker"),
+            ..stand_in("unused", "#!/bin/sh\n")
+        };
+        let context = directory.join("copy/api").display().to_string();
+        for shared in [
+            absent,
+            stand_in("garbled", "#!/bin/sh\necho not json\n"),
+            stand_in(
+                "unbuildable",
+                &format!(
+                    "#!/bin/sh\nrm \"$0\"\necho '{{\"services\":{{\"api\":{{\"build\":{{\"context\":\"{context}\"}}}}}}}}'\n"
+                ),
+            ),
+        ] {
+            assert_eq!(
+                shared.build_compose_service("shop", "api", None, None),
+                None
+            );
+            assert!(shared.built.lock().unwrap().is_empty());
+        }
+        // Empty binds and mounts have nothing to rewrite, and no settings
+        // add only what marks the container as the run's.
+        let mut config = json!({"HostConfig": {"Binds": [], "Mounts": []}});
+        shared.rewrite_socket_mounts(&mut config);
+        assert_eq!(config, json!({"HostConfig": {"Binds": [], "Mounts": []}}));
+        let bare = ProxySettings {
+            environment: Vec::new(),
+            ..settings(&directory)
+        };
+        let mut config = json!({});
+        add_settings(&mut config, &bare, &BTreeMap::new());
+        assert_eq!(
+            config["Env"],
+            json!([
+                "SUPERCOV_CONTAINER=1",
+                "PYTHONPYCACHEPREFIX=/tmp/supercov-pycache"
+            ])
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1963,6 +2071,47 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// The relay's own directories that cannot be made refuse it, and a
+    /// daemon gone after it started leaves a client with no answer.
+    #[test]
+    fn a_relay_whose_directories_cannot_be_made_or_whose_daemon_is_gone_says_so() {
+        let directory = temporary("relay-steps");
+        let daemon = directory.join("d.sock");
+        let _created = fake_daemon(&daemon);
+        assert!(
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:125", || {
+                socket_path(&directory.join("state"))
+            })
+            .is_err()
+        );
+        // A run directory too deep for a socket address gets a private
+        // directory under /tmp instead, which can fail to be made too.
+        assert!(
+            crate::fault::during("fs.create_dir#docker_proxy.rs:136", || {
+                socket_path(&directory.join("state").join("d".repeat(120)))
+            })
+            .is_err()
+        );
+        assert!(
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:197", || {
+                DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
+            })
+            .is_err()
+        );
+        let gone = directory.join("gone.sock");
+        let proxy =
+            DockerProxy::start(&directory.join("q.sock"), &gone, settings(&directory)).unwrap();
+        let mut stream = UnixStream::connect(directory.join("q.sock")).unwrap();
+        stream
+            .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer);
+        assert!(answer.is_empty(), "{}", String::from_utf8_lossy(&answer));
+        proxy.finish();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn a_registry_that_cannot_be_written_is_left_alone() {
         let directory = temporary("registry");
@@ -2001,5 +2150,364 @@ mod tests {
         )]));
         let default = PathBuf::from("/var/run/docker.sock");
         assert_eq!(upstream, default.exists().then_some(default));
+    }
+
+    /// A time written any other way is no time: never a panic, whatever is
+    /// where a number belongs.
+    #[test]
+    fn a_time_written_wrong_is_no_time() {
+        for text in [
+            "2026-10-17",
+            "x-10-17T21:05:37Z",
+            "2026-10-17T",
+            "2026-x-17T21:05:37Z",
+            "2026-10T21:05:37Z",
+            "2026T21:05:37Z",
+            "2026-10-xT21:05:37Z",
+            "2026--T21:05:37Z",
+            "2026-10-17T21:05:37",
+            "2026-10-17T21:05:37+x",
+            "2026-10-17T21:05:37+05:x",
+            "2026-10-17Tx:05:37Z",
+            "2026-10-17T21Z",
+            "2026-10-17T21:x:37Z",
+            "2026-10-17T21:05Z",
+            "2026-10-17T21:05:xZ",
+            "2026-10-17T21:05:37.xZ",
+            "2026-10-17T21:05:37.\u{e9}\u{e9}Z",
+        ] {
+            assert_eq!(parse_rfc3339_ms(text), None, "{text}");
+        }
+        assert!(parse_rfc3339_ms("2026-10-17T21:05:37+05Z").is_none());
+        assert!(parse_rfc3339_ms("2026-10-17T21:05:37.5+05").is_some());
+    }
+
+    /// A stream that fails at its `n`th read or write, as a socket the other
+    /// side closed does.
+    struct Faulty<T> {
+        inner: T,
+        left: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl<T> Faulty<T> {
+        fn count_call(&self) -> io::Result<()> {
+            match self.left.get() {
+                // Spent: from now on every call fails, and says it did by
+                // leaving the count at its largest.
+                0 | usize::MAX => {
+                    self.left.set(usize::MAX);
+                    Err(io::Error::other("closed"))
+                }
+                left => {
+                    self.left.set(left - 1);
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    impl<T: Read> Read for Faulty<T> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.count_call()?;
+            // A byte at a time, so each line takes many reads.
+            let end = buffer.len().min(1);
+            self.inner.read(&mut buffer[..end])
+        }
+    }
+
+    impl<T: Write> Write for Faulty<T> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.count_call()?;
+            self.inner.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.count_call()?;
+            self.inner.flush()
+        }
+    }
+
+    /// One connection's messages, relayed over streams that each fail at
+    /// the `left`th call any of them makes; what the daemon was sent and the
+    /// client answered, or the relay's error.
+    fn relay_with(
+        shared: &Shared,
+        client: &[u8],
+        daemon: &[u8],
+        left: usize,
+    ) -> (io::Result<bool>, Vec<u8>, Vec<u8>, bool) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(left));
+        let faulty = |inner| Faulty {
+            inner,
+            left: calls.clone(),
+        };
+        let mut client_reader = BufReader::new(faulty(client));
+        let mut upstream_reader = BufReader::new(faulty(daemon));
+        let mut client_writer = Faulty {
+            inner: Vec::new(),
+            left: calls.clone(),
+        };
+        let mut upstream_writer = Faulty {
+            inner: Vec::new(),
+            left: calls.clone(),
+        };
+        let relayed = relay_messages(
+            &mut client_reader,
+            &mut client_writer,
+            &mut upstream_reader,
+            &mut upstream_writer,
+            shared,
+        );
+        let failed = calls.get() == usize::MAX;
+        (relayed, upstream_writer.inner, client_writer.inner, failed)
+    }
+
+    /// Both ends of a connection in memory: what the other side sends, and
+    /// what is sent to it.
+    struct Duplex<'a> {
+        input: &'a [u8],
+        output: Vec<u8>,
+    }
+
+    impl Read for Duplex<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for Duplex<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.output.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The relay's own request to the daemon, over a stream that fails at
+    /// each call in turn: a failure is no answer, and with none the body of
+    /// a sized or a close-delimited answer is the answer, a refusal none.
+    #[test]
+    fn a_request_of_the_relay_s_own_fails_to_no_answer() {
+        for (answer, body) in [
+            (
+                &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"[..],
+                Some(&b"OK"[..]),
+            ),
+            (b"HTTP/1.1 200 OK\r\n\r\nall of it", Some(b"all of it")),
+            (b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", None),
+        ] {
+            let mut nth = 0;
+            loop {
+                let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+                let stream = Faulty {
+                    inner: Duplex {
+                        input: answer,
+                        output: Vec::new(),
+                    },
+                    left: left.clone(),
+                };
+                let answered = daemon_exchange(stream, "GET", "/images/x/json", Some(b"{}"));
+                if left.get() != usize::MAX {
+                    assert_eq!(answered.as_deref(), body);
+                    break;
+                }
+                assert_eq!(answered, None, "{nth}");
+                nth += 1;
+            }
+            assert!(nth > 3, "{nth}");
+        }
+        // A daemon that closes before it answers answers nothing.
+        let silent = Duplex {
+            input: b"",
+            output: Vec::new(),
+        };
+        assert_eq!(daemon_exchange(silent, "GET", "/_ping", None), None);
+    }
+
+    /// Every kind of exchange on one connection -- a continue granted and
+    /// one refused, a create the daemon answers chunked and one it answers
+    /// sized, a create whose body is not JSON, and an answer the daemon's
+    /// closing ends -- relayed once for each read or write with that one
+    /// failing: each failure is the relay's error, never a panic.
+    #[test]
+    fn a_connection_whose_stream_fails_anywhere_ends_with_an_error() {
+        let directory = temporary("relay-faults");
+        let shared = Shared {
+            settings: settings(&directory),
+            upstream: directory.join("d.sock"),
+            socket: directory.join("p.sock"),
+            started_ms: now_ms(),
+            created: Mutex::default(),
+            built: Mutex::default(),
+            docker: PathBuf::from("docker"),
+        };
+        let create = br#"{"Image":"shop"}"#;
+        let client = [
+            &b"POST /build HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\nbody"[..],
+            b"POST /refuse HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n",
+            format!(
+                "POST /containers/create HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                create.len()
+            )
+            .as_bytes(),
+            create,
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                create.len()
+            )
+            .as_bytes(),
+            create,
+            b"POST /containers/create HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
+            b"GET /logs HTTP/1.1\r\n\r\n",
+        ]
+        .concat();
+        let daemon = [
+            &b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"[..],
+            b"HTTP/1.1 417 Expectation Failed\r\nContent-Length: 4\r\n\r\nnope",
+            b"HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\nC\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n",
+            b"HTTP/1.1 201 Created\r\nContent-Length: 12\r\n\r\n{\"Id\":\"two\"}",
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\nno",
+            b"HTTP/1.1 200 OK\r\n\r\nall of it",
+        ]
+        .concat();
+        let mut nth = 0;
+        loop {
+            let (relayed, _, answered, failed) = relay_with(&shared, &client, &daemon, nth);
+            if !failed {
+                assert!(!relayed.unwrap());
+                let answered = String::from_utf8(answered).unwrap();
+                assert!(answered.ends_with("all of it"), "{answered}");
+                assert!(
+                    answered.contains("c\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n"),
+                    "{answered}"
+                );
+                break;
+            }
+            assert!(relayed.is_err(), "{nth}");
+            nth += 1;
+        }
+        assert!(nth > 100, "{nth}");
+        // A daemon gone before it answers ends the connection quietly, as
+        // does a client that asked to hand it over to a stream.
+        for client in [
+            &b"GET /_ping HTTP/1.1\r\n\r\n"[..],
+            b"POST /build HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n",
+        ] {
+            assert!(!relay_with(&shared, client, b"", usize::MAX - 1).0.unwrap());
+        }
+        let (handed, _, _, _) = relay_with(
+            &shared,
+            b"POST /attach HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+            b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+            usize::MAX - 1,
+        );
+        assert!(handed.unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Relaying a message whose stream fails at each read in turn, and then
+    /// at each write: every failure is an error, and with none the message
+    /// crosses whole.
+    /// What the client sent ahead of a handed-over stream that the daemon,
+    /// gone already, cannot take ends the stream with that error.
+    #[test]
+    fn a_handed_over_stream_whose_daemon_has_gone_ends_with_an_error() {
+        let (client, mut sent) = UnixStream::pair().unwrap();
+        sent.write_all(b"raw bytes").unwrap();
+        let mut client_reader = BufReader::new(client.try_clone().unwrap());
+        assert!(!client_reader.fill_buf().unwrap().is_empty());
+        let (upstream, daemon) = UnixStream::pair().unwrap();
+        drop(daemon);
+        let upstream_reader = BufReader::new(upstream.try_clone().unwrap());
+        assert!(splice(client_reader, client, upstream_reader, upstream).is_err());
+    }
+
+    #[test]
+    fn a_stream_that_fails_anywhere_fails_the_relay_and_never_panics() {
+        let chunked = head("HTTP/1.1 200 OK", &[("Transfer-Encoding", "chunked")]);
+        let sized = head("HTTP/1.1 200 OK", &[("Content-Length", "5")]);
+        let messages: [(&Head, &[u8]); 2] = [
+            (
+                &chunked,
+                b"3\r\nabc\r\n2;x=1\r\nde\r\n0\r\nTrailer: t\r\n\r\n",
+            ),
+            (&sized, b"hello"),
+        ];
+        for (head, body) in messages {
+            for failing_reads in [true, false] {
+                let mut nth = 0;
+                loop {
+                    let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+                    let unlimited = std::rc::Rc::new(std::cell::Cell::new(usize::MAX - 1));
+                    let (reads, writes) = if failing_reads {
+                        (left.clone(), unlimited)
+                    } else {
+                        (unlimited, left.clone())
+                    };
+                    let mut reader = io::BufReader::with_capacity(
+                        1,
+                        Faulty {
+                            inner: body,
+                            left: reads,
+                        },
+                    );
+                    let mut out = Faulty {
+                        inner: Vec::new(),
+                        left: writes,
+                    };
+                    let relayed = relay_body(head, &mut reader, &mut out);
+                    if left.get() != usize::MAX {
+                        relayed.unwrap();
+                        assert_eq!(out.inner, body);
+                        break;
+                    }
+                    assert!(relayed.is_err(), "{nth} {failing_reads}");
+                    nth += 1;
+                }
+                assert!(nth > 2, "{nth}");
+            }
+            // Read whole, failing at each read in turn.
+            let mut nth = 0;
+            loop {
+                let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+                let mut reader = io::BufReader::with_capacity(
+                    1,
+                    Faulty {
+                        inner: body,
+                        left: left.clone(),
+                    },
+                );
+                let read = read_body(head, &mut reader);
+                if left.get() != usize::MAX {
+                    read.unwrap();
+                    break;
+                }
+                assert!(read.is_err());
+                nth += 1;
+            }
+        }
+        // A head cut by a failing read, at each read.
+        let text: &[u8] = b"\r\nGET / HTTP/1.1\r\nHost: docker\r\n\r\n";
+        let mut nth = 0;
+        loop {
+            let left = std::rc::Rc::new(std::cell::Cell::new(nth));
+            let mut reader = io::BufReader::with_capacity(
+                1,
+                Faulty {
+                    inner: text,
+                    left: left.clone(),
+                },
+            );
+            let read = read_head(&mut reader);
+            if left.get() != usize::MAX {
+                assert!(read.unwrap().is_some());
+                break;
+            }
+            assert!(read.is_err());
+            nth += 1;
+        }
+        assert!(nth > 10, "{nth}");
     }
 }

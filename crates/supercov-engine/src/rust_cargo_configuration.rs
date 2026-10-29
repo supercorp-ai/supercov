@@ -7,11 +7,12 @@
 //! before the repository is copied into the isolated workspace. Unsupported
 //! configuration surfaces fail before user code executes.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::OsString,
-    fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Command,
     str::FromStr,
 };
@@ -73,25 +74,6 @@ pub struct RustCargoResolvedRunner {
 pub struct RustCargoTargetRunnerPlan {
     pub target: String,
     pub underlying_runner: Option<RustCargoUnderlyingRunner>,
-}
-
-impl RustCargoTargetRunnerPlan {
-    pub fn resolve(&self, workspace: &Path) -> RustCargoResolvedTargetRunner {
-        RustCargoResolvedTargetRunner {
-            target: self.target.clone(),
-            underlying_runner: self
-                .underlying_runner
-                .as_ref()
-                .map(|runner| runner.resolve(workspace)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RustCargoResolvedTargetRunner {
-    pub target: String,
-    pub underlying_runner: Option<RustCargoResolvedRunner>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -180,11 +162,20 @@ fn io_error(path: &Path, error: impl std::fmt::Display) -> RustCargoConfiguratio
     }
 }
 
-fn command_targets(
+/// What a Cargo command line itself says: its `--target`s, its `--config`
+/// values, and whether it names a rustup toolchain.
+#[derive(Debug, PartialEq)]
+struct CommandLine {
+    targets: Vec<String>,
+    config: Vec<String>,
+    toolchain: bool,
+}
+
+fn command_line(
     invocation: &CargoTestInvocation,
-) -> Result<Vec<String>, RustCargoConfigurationError> {
+) -> Result<CommandLine, RustCargoConfigurationError> {
     let command_position = invocation.command_position();
-    toolchain_selector(invocation, command_position)?;
+    let toolchain = toolchain_selector(invocation, command_position)?.is_some();
     if invocation.arguments[..command_position]
         .iter()
         .any(|argument| argument == "-Z" || argument.starts_with("-Z"))
@@ -195,74 +186,41 @@ fn command_targets(
         ));
     }
     let mut targets = Vec::new();
-    let mut index = 0;
-    while index < invocation.arguments.len() {
-        let argument = &invocation.arguments[index];
-        if argument == "--config" {
-            if invocation.arguments.get(index + 1).is_none() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--config has no value".into(),
-                ));
+    let mut config = Vec::new();
+    // The flag whose value the next argument is.
+    let mut pending: Option<&str> = None;
+    // Never empty: the test subcommand is one of them.
+    invocation.arguments.iter().try_for_each(|argument| {
+        match pending.take() {
+            Some("--config") => config.push(argument.clone()),
+            Some(_) => targets.push(argument.clone()),
+            None if argument == "--config" || argument == "--target" => pending = Some(argument),
+            None => {
+                for (flag, list) in [("--config=", &mut config), ("--target=", &mut targets)] {
+                    if let Some(value) = argument.strip_prefix(flag) {
+                        if value.is_empty() {
+                            return Err(RustCargoConfigurationError::Invalid(format!(
+                                "{} has no value",
+                                &flag[..flag.len() - 1]
+                            )));
+                        }
+                        list.push(value.to_owned());
+                    }
+                }
             }
-            index += 2;
-            continue;
         }
-        if let Some(value) = argument.strip_prefix("--config=") {
-            if value.is_empty() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--config has no value".into(),
-                ));
-            }
-            index += 1;
-            continue;
-        }
-        if argument == "--target" {
-            let target = invocation.arguments.get(index + 1).ok_or_else(|| {
-                RustCargoConfigurationError::Invalid("--target has no value".into())
-            })?;
-            targets.push(target.clone());
-            index += 2;
-            continue;
-        }
-        if let Some(target) = argument.strip_prefix("--target=") {
-            if target.is_empty() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--target has no value".into(),
-                ));
-            }
-            targets.push(target.to_owned());
-        }
-        index += 1;
+        Ok(())
+    })?;
+    if let Some(flag) = pending {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "{flag} has no value"
+        )));
     }
-    Ok(targets)
-}
-
-fn command_config_arguments(
-    invocation: &CargoTestInvocation,
-) -> Result<Vec<String>, RustCargoConfigurationError> {
-    let mut values = Vec::new();
-    let mut index = 0;
-    while index < invocation.arguments.len() {
-        let argument = &invocation.arguments[index];
-        if argument == "--config" {
-            let value = invocation.arguments.get(index + 1).ok_or_else(|| {
-                RustCargoConfigurationError::Invalid("--config has no value".into())
-            })?;
-            values.push(value.clone());
-            index += 2;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--config=") {
-            if value.is_empty() {
-                return Err(RustCargoConfigurationError::Invalid(
-                    "--config has no value".into(),
-                ));
-            }
-            values.push(value.to_owned());
-        }
-        index += 1;
-    }
-    Ok(values)
+    Ok(CommandLine {
+        targets,
+        config,
+        toolchain,
+    })
 }
 
 fn toolchain_selector(
@@ -295,7 +253,7 @@ fn command_stdout(
 ) -> Result<String, RustCargoConfigurationError> {
     let output = Command::new(program)
         .args(arguments)
-        .output()
+        .launch_output()
         .map_err(|error| io_error(program, error))?;
     if !output.status.success() {
         return Err(RustCargoConfigurationError::Invalid(format!(
@@ -323,14 +281,9 @@ fn command_stdout(
     })
 }
 
+/// The rustup beside the Cargo proxy `which` found, an absolute path.
 fn rustup_program(cargo: &Path) -> PathBuf {
-    cargo
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(
-            || PathBuf::from(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
-            |parent| parent.join(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
-        )
+    cargo.with_file_name(format!("rustup{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn selected_cargo_program(
@@ -389,11 +342,12 @@ fn model_target_config<'a>(
     model: &'a CargoConfigValue,
     target: &str,
 ) -> Option<&'a CargoConfigValue> {
-    let target_table = model.at(&["target"])?.table()?;
-    if let Some(value) = target_table.get(target) {
+    let targets = model.at(&["target"])?;
+    if let Some(value) = targets.table()?.get(target) {
         return Some(value);
     }
-    let mut value = model.at(&["target"])?;
+    // `[target.thumbv8m.main-none-eabi]` is a table in a table to TOML.
+    let mut value = targets;
     for component in target.split('.') {
         value = value.table()?.get(component)?;
     }
@@ -499,14 +453,15 @@ fn model_targets(
         .map(BTreeSet::into_iter)
         .map(Iterator::collect::<Vec<_>>)?;
     let mut names = HashMap::new();
-    for target in &targets {
-        if let Some(first) = names.insert(&target.name, &target.cargo_argument) {
-            return Err(RustCargoConfigurationError::Invalid(format!(
+    targets.iter().try_for_each(|target| {
+        match names.insert(&target.name, &target.cargo_argument) {
+            Some(first) => Err(RustCargoConfigurationError::Invalid(format!(
                 "Cargo targets {first} and {} have the same configuration identity {:?}",
                 target.cargo_argument, target.name
-            )));
+            ))),
+            None => Ok(()),
         }
-    }
+    })?;
     Ok(targets)
 }
 
@@ -662,7 +617,7 @@ fn compiler_host(
     let output = compiler
         .command(root)
         .arg("-vV")
-        .output()
+        .launch_output()
         .map_err(|error| io_error(&compiler.rustc.resolve(root), error))?;
     if !output.status.success() {
         return Err(RustCargoConfigurationError::Invalid(format!(
@@ -725,7 +680,7 @@ fn target_cfg(
         .command(execution_root)
         .args(["--print", "cfg", "--target"])
         .arg(&target_argument)
-        .output()
+        .launch_output()
         .map_err(|error| io_error(&compiler.rustc.resolve(execution_root), error))?;
     if !output.status.success() {
         return Err(RustCargoConfigurationError::Invalid(format!(
@@ -827,14 +782,14 @@ fn runner_program(
     path: PathBuf,
 ) -> Result<RustCargoRunnerProgram, RustCargoConfigurationError> {
     if path.is_absolute() {
+        // A relative runner climbs out of the workspace as Cargo reads it:
+        // to where it then names, as on Windows, whose verbatim root resolves
+        // `..` when joined. Inside the workspace it moves with the copy.
+        let path = crate::source_discovery::lexical_normalize(&path);
         if let Ok(relative) = path.strip_prefix(root) {
-            if relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, Component::Normal(_)))
-            {
+            if relative.as_os_str().is_empty() {
                 return Err(RustCargoConfigurationError::Invalid(format!(
-                    "runner path is not a regular workspace-relative path: {}",
+                    "runner path is the workspace itself: {}",
                     path.display()
                 )));
             }
@@ -994,24 +949,27 @@ fn model_rustflags(
         .collect::<Vec<_>>();
     if !cfg_flags.is_empty() {
         let cfg = target_cfg(configuration_root, execution_root, compiler, target)?;
-        for (key, expression, value) in cfg_flags {
-            let expression = CfgExpr::from_str(expression).map_err(|error| {
-                RustCargoConfigurationError::Invalid(format!(
-                    "invalid Cargo target cfg key {key:?}: {error}"
-                ))
+        cfg_flags
+            .into_iter()
+            .try_for_each(|(key, expression, value)| {
+                let expression = CfgExpr::from_str(expression).map_err(|error| {
+                    RustCargoConfigurationError::Invalid(format!(
+                        "invalid Cargo target cfg key {key:?}: {error}"
+                    ))
+                })?;
+                if expression.matches(&cfg) {
+                    flags.extend(
+                        flag_list(
+                            Some(value),
+                            &format!("target.{key}.rustflags"),
+                            None,
+                            inputs,
+                        )?
+                        .unwrap_or_default(),
+                    );
+                }
+                Ok::<(), RustCargoConfigurationError>(())
             })?;
-            if expression.matches(&cfg) {
-                flags.extend(
-                    flag_list(
-                        Some(value),
-                        &format!("target.{key}.rustflags"),
-                        None,
-                        inputs,
-                    )?
-                    .unwrap_or_default(),
-                );
-            }
-        }
     }
     if !flags.is_empty() {
         return Ok(Some(flags));
@@ -1051,25 +1009,20 @@ fn resolve_targets(
     let root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
     let execution_root =
         fs::canonicalize(execution_root).map_err(|error| io_error(execution_root, error))?;
-    let command_targets = command_targets(invocation)?;
-    let command_config = command_config_arguments(invocation)?;
-    let command_position = invocation.command_position();
-    let explicit_toolchain = toolchain_selector(invocation, command_position)?.is_some();
+    let CommandLine {
+        targets: command_targets,
+        config: command_config,
+        toolchain: explicit_toolchain,
+    } = command_line(invocation)?;
     let selected_cargo = selected_cargo_program(invocation)?;
     let model = load_cargo_configuration(&root, model_inputs.cargo_home.clone(), &command_config)
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
-    let selected_cargo_path = PathBuf::from(&selected_cargo);
-    let default_rustc = if explicit_toolchain {
-        selected_cargo_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .map(|parent| parent.join(format!("rustc{}", std::env::consts::EXE_SUFFIX)))
-            .filter(|candidate| candidate.is_file())
-            .map(|candidate| runner_program(&root, candidate))
-            .transpose()?
-            .unwrap_or_else(|| RustCargoRunnerProgram::SearchPath {
-                value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
-            })
+    // An explicit toolchain's Cargo is the absolute path rustup named, and
+    // its rustc, when it has one, is beside it.
+    let beside = PathBuf::from(&selected_cargo)
+        .with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+    let default_rustc = if explicit_toolchain && beside.is_file() {
+        runner_program(&root, beside).expect("a rustc file is never the workspace itself")
     } else {
         RustCargoRunnerProgram::SearchPath {
             value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
@@ -1130,8 +1083,8 @@ mod tests {
     }
 
     /// A runner path is relative to the workspace when inside it, absolute
-    /// when outside, a name to search for when bare, and refused when it is
-    /// the workspace itself, climbs out of it, or is left relative.
+    /// when outside -- `..` read where it leads -- a name to search for when
+    /// bare, and refused when it is the workspace itself or left relative.
     #[test]
     fn a_runner_path_is_read_against_the_workspace() {
         use crate::test_directory::native;
@@ -1156,9 +1109,54 @@ mod tests {
                 value: "wasm-runner".into()
             }
         );
-        for refused in [native("/w"), native("/w/../x"), "tools/run".to_owned()] {
+        // Out of the workspace and back in, or out for good, as Cargo reads it.
+        assert_eq!(
+            read(&native("/w/tools/../bin/run")).unwrap(),
+            RustCargoRunnerProgram::WorkspaceRelative {
+                value: "bin/run".into()
+            }
+        );
+        assert_eq!(
+            read(&native("/w/../x")).unwrap(),
+            RustCargoRunnerProgram::Absolute {
+                value: native("/x").into()
+            }
+        );
+        for refused in [native("/w"), native("/w/bin/.."), "tools/run".to_owned()] {
             assert!(read(&refused).is_err(), "{refused}");
         }
+    }
+
+    /// A configured runner that climbs out of the workspace runs from where
+    /// it leads, on every platform alike.
+    #[test]
+    fn a_runner_out_of_the_workspace_runs_from_where_it_leads() {
+        let root = fixture();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.'cfg(all())']\nrunner='../../outside/run'\n",
+        )
+        .unwrap();
+        let mut real_host = model_inputs();
+        real_host.host_override = None;
+        let plan = resolve_with_inputs(&root, &root, &invocation(&["test"]), real_host).unwrap();
+        let runner = plan.targets[0]
+            .underlying_runner
+            .as_ref()
+            .expect("a runner");
+        let RustCargoRunnerProgram::Absolute { value } = &runner.program else {
+            panic!("{runner:?}");
+        };
+        assert!(
+            value.ends_with(Path::new("outside").join("run")),
+            "{value:?}"
+        );
+        assert!(
+            !value
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// `--config` takes its value from the next word or after `=`, and one
@@ -1167,12 +1165,22 @@ mod tests {
     #[test]
     fn command_line_configuration_and_toolchains_are_read_exactly() {
         assert_eq!(
-            command_config_arguments(&invocation(&["--config", "a=1", "test", "--config=b=2"]))
-                .unwrap(),
-            ["a=1", "b=2"]
+            command_line(&invocation(&[
+                "+nightly",
+                "--config",
+                "a=1",
+                "test",
+                "--config=b=2"
+            ]))
+            .unwrap(),
+            CommandLine {
+                targets: Vec::new(),
+                config: vec!["a=1".into(), "b=2".into()],
+                toolchain: true,
+            }
         );
-        assert!(command_config_arguments(&invocation(&["test", "--config"])).is_err());
-        assert!(command_config_arguments(&invocation(&["test", "--config="])).is_err());
+        assert!(command_line(&invocation(&["test", "--config"])).is_err());
+        assert!(command_line(&invocation(&["test", "--config="])).is_err());
         let selector = |arguments: &[&str]| {
             let invocation = invocation(arguments);
             let position = invocation.command_position();
@@ -1185,8 +1193,8 @@ mod tests {
         assert_eq!(selector(&["test"]).unwrap(), None);
         assert!(selector(&["+", "test"]).is_err());
         assert!(selector(&["-v", "+nightly", "test"]).is_err());
-        assert!(command_targets(&invocation(&["-Zunstable-options", "test"])).is_err());
-        assert!(command_targets(&invocation(&["-Z", "x", "test"])).is_err());
+        assert!(command_line(&invocation(&["-Zunstable-options", "test"])).is_err());
+        assert!(command_line(&invocation(&["-Z", "x", "test"])).is_err());
     }
 
     fn invocation(arguments: &[&str]) -> CargoTestInvocation {
@@ -1196,6 +1204,86 @@ mod tests {
             arguments: arguments.iter().map(|value| (*value).into()).collect(),
             runner_arguments: Vec::new(),
         }
+    }
+
+    /// Each place a tool can be named refuses the workspace itself: `RUSTC`,
+    /// `CARGO_BUILD_RUSTC`, either wrapper, a target's runner. So is a
+    /// compiler that is no string, rustflags of the wrong kind, a compiler
+    /// that cannot start when cfg values are needed, an execution root that
+    /// is not there, and a toolchain whose Cargo proxy cannot be found.
+    #[test]
+    fn each_place_a_tool_is_named_refuses_what_is_no_tool() {
+        let root = fixture();
+        let itself = root.to_string_lossy().into_owned();
+        fs::write(root.join(".cargo/config.toml"), "").unwrap();
+        let empty = load_cargo_configuration(&root, None, &[]).unwrap();
+        let default = || RustCargoRunnerProgram::SearchPath {
+            value: "rustc".into(),
+        };
+        for key in [
+            "RUSTC",
+            "CARGO_BUILD_RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+        ] {
+            let inputs = model_inputs_with([(OsString::from(key), OsString::from(&itself))]);
+            assert!(
+                compiler_command_plan(&root, &empty, default(), &inputs).is_err(),
+                "{key}"
+            );
+            assert!(
+                resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs).is_err(),
+                "{key}"
+            );
+        }
+        let untyped = load_cargo_configuration(&root, None, &["build.rustc=1".into()]).unwrap();
+        assert!(compiler_command_plan(&root, &untyped, default(), &model_inputs()).is_err());
+        let resolve = |config: &str, inputs: CargoModelInputs| {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs)
+        };
+        let canonical = fs::canonicalize(&root).unwrap();
+        let runner = format!(
+            "[target.aarch64-apple-darwin]\nrunner = {:?}\n",
+            canonical.to_string_lossy()
+        );
+        assert!(resolve(&runner, model_inputs()).is_err());
+        assert!(
+            resolve(
+                "[target.aarch64-apple-darwin]\nrustflags = 1\n",
+                model_inputs()
+            )
+            .is_err()
+        );
+        let gone = root.join("no-such-rustc").to_string_lossy().into_owned();
+        assert!(
+            resolve(
+                "[target.'cfg(unix)']\nrustflags = [\"-Dwarnings\"]\n",
+                model_inputs_with([(OsString::from("RUSTC"), OsString::from(&gone))]),
+            )
+            .is_err()
+        );
+        fs::write(root.join(".cargo/config.toml"), "").unwrap();
+        assert!(
+            resolve_with_inputs(
+                &root,
+                &root.join("missing"),
+                &invocation(&["test"]),
+                model_inputs()
+            )
+            .is_err()
+        );
+        let mut proxy = invocation(&["+nightly", "test"]);
+        proxy.program = "supercov-no-such-cargo".into();
+        assert!(resolve_with_inputs(&root, &root, &proxy, model_inputs()).is_err());
+        // A bare runner name that is no text, where the system allows one.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let name = PathBuf::from(OsString::from_vec(b"\xff".to_vec()));
+            assert!(runner_program(&root, name).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn model_inputs() -> CargoModelInputs {
@@ -1499,6 +1587,79 @@ mod tests {
                 arguments: vec!["--environment".into()],
             })
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A target specification named in UTF-8 that leads to a file or a
+    /// directory whose name is not is refused by what it is. (macOS names
+    /// none.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_target_specification_that_leads_to_no_utf8_name_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = fixture();
+        let odd = std::ffi::OsStr::from_bytes(b"\xff");
+        fs::write(root.join(odd).with_extension("json"), "{}").unwrap();
+        std::os::unix::fs::symlink(
+            root.join(odd).with_extension("json"),
+            root.join("stem.json"),
+        )
+        .unwrap();
+        fs::create_dir(root.join(odd)).unwrap();
+        fs::write(root.join(odd).join("spec.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(root.join(odd).join("spec.json"), root.join("path.json"))
+            .unwrap();
+        for (target, said) in [
+            ("stem.json", "no UTF-8 file stem"),
+            ("path.json", "path is not UTF-8"),
+        ] {
+            let error = resolve_with_inputs(
+                &root,
+                &root,
+                &invocation(&["test", "--target", target]),
+                model_inputs(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(said), "{target}: {error}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A target table that is not one, and a key that only begins like a
+    /// cfg, set no runner.
+    #[test]
+    fn target_tables_of_odd_shapes_set_no_runner() {
+        let root = fixture();
+        for config in [
+            "target = 1\n",
+            "[target.'cfg(unix']\nrustflags = [\"-x\"]\n",
+        ] {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            let plan =
+                resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs()).unwrap();
+            assert_eq!(plan.targets[0].underlying_runner, None, "{config}");
+        }
+        // A target whose name has a dot is read through the tables TOML
+        // makes of it; one of them missing, or no table, sets no runner.
+        let dotted = invocation(&["test", "--target", "thumbv8m.main-none-eabi"]);
+        for (config, runner) in [
+            (
+                "[target.thumbv8m.main-none-eabi]\nrunner = \"probe\"\n",
+                true,
+            ),
+            ("[target.thumbv8m.other]\nrunner = \"probe\"\n", false),
+            ("[target]\nthumbv8m = 1\n", false),
+        ] {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            let plan = resolve_with_inputs(&root, &root, &dotted, model_inputs()).unwrap();
+            assert_eq!(plan.targets[0].target, "thumbv8m.main-none-eabi");
+            assert_eq!(
+                plan.targets[0].underlying_runner.is_some(),
+                runner,
+                "{config}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1833,7 +1994,7 @@ mod tests {
             .to_string();
         assert!(error.contains("several matching instances"), "{error}");
         assert!(
-            command_targets(&invocation(&["--quiet", "+nightly", "test"]))
+            command_line(&invocation(&["--quiet", "+nightly", "test"]))
                 .unwrap_err()
                 .to_string()
                 .contains("must be the first")
@@ -1940,6 +2101,27 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// One target names the cfg a run's source is read under; two name none.
+    #[test]
+    fn the_active_cfg_is_one_targets_and_two_targets_have_none() {
+        let root = fixture();
+        assert!(active_target_cfg(&root, &invocation(&["test"])).is_some());
+        assert!(
+            active_target_cfg(
+                &root,
+                &invocation(&[
+                    "test",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                    "--target",
+                    "aarch64-apple-darwin",
+                ]),
+            )
+            .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn targets_come_from_the_command_then_the_environment_then_the_configuration() {
         let root = fixture();
@@ -2026,6 +2208,41 @@ mod tests {
             error("half-rustc"),
             "invalid Cargo configuration: Cargo's configured compiler command failed while resolving cfg values for target x86_64-unknown-linux-gnu with status 3: no cfg here"
         );
+        let host = "if [ \"$1\" = -vV ]; then echo 'host: x86_64-unknown-linux-gnu'; exit 0; fi\n";
+        for (rustc, script, said) in [
+            (
+                "hostless-rustc",
+                "echo 'release: 1.95.0'\n".to_owned(),
+                "did not report a host in rustc -vV output",
+            ),
+            (
+                "binary-rustc",
+                "printf '\\377'\n".to_owned(),
+                "produced non-UTF-8 verbose version output",
+            ),
+            (
+                "killed-rustc",
+                "kill -9 $$\n".to_owned(),
+                "while resolving its host with status signal",
+            ),
+            (
+                "binary-cfg-rustc",
+                format!("{host}printf '\\377'\n"),
+                "produced non-UTF-8 cfg output for target x86_64-unknown-linux-gnu",
+            ),
+            (
+                "bad-cfg-rustc",
+                format!("{host}echo '1x='\n"),
+                "rustc emitted an invalid cfg value",
+            ),
+            ("absent-rustc", String::new(), "absent-rustc"),
+        ] {
+            if !script.is_empty() {
+                write_script(&root.join(rustc), &format!("#!/bin/sh\n{script}"));
+            }
+            let said_error = error(rustc);
+            assert!(said_error.contains(said), "{rustc}: {said_error}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2042,9 +2259,52 @@ mod tests {
         .unwrap();
         let mut inputs = model_inputs();
         inputs.host_override = None;
-        let plan = resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs).unwrap();
+        let plan =
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs.clone()).unwrap();
         assert_eq!(plan.targets.len(), 1);
         assert_eq!(plan.targets[0].underlying_runner, None);
+        // An empty target table configures nothing.
+        fs::write(root.join(".cargo/config.toml"), "[target]\n").unwrap();
+        let plan =
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs.clone()).unwrap();
+        assert_eq!(plan.targets[0].underlying_runner, None);
+        // A custom target's cfg values are asked for by its spec, from where
+        // Cargo runs the compiler.
+        #[cfg(unix)]
+        {
+            fs::write(root.join("board.json"), "{}").unwrap();
+            write_script(
+                &root.join("spec-rustc"),
+                "#!/bin/sh\nif [ \"$1\" = -vV ]; then echo 'host: x86_64-unknown-linux-gnu'; exit 0; fi\n[ -f \"$4\" ] && echo 'target_os=\"none\"'\n",
+            );
+            fs::write(
+                root.join(".cargo/config.toml"),
+                "[build]\nrustc='./spec-rustc'\n[target.'cfg(target_os = \"none\")']\nrunner='board-runner'\n",
+            )
+            .unwrap();
+            let plan = resolve_with_inputs(
+                &root,
+                &root,
+                &invocation(&["test", "--target", "board.json"]),
+                inputs.clone(),
+            )
+            .unwrap();
+            assert!(plan.targets[0].underlying_runner.is_some(), "{plan:?}");
+            // A spec outside the project is asked for where it is.
+            let outside = root.with_extension("specs");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("board.json"), "{}").unwrap();
+            let spec = outside.join("board.json").display().to_string();
+            let plan = resolve_with_inputs(
+                &root,
+                &root,
+                &invocation(&["test", "--target", &spec]),
+                inputs,
+            )
+            .unwrap();
+            assert!(plan.targets[0].underlying_runner.is_some(), "{plan:?}");
+            fs::remove_dir_all(outside).unwrap();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2187,6 +2447,173 @@ mod tests {
             .unwrap_err(),
             "invalid Cargo configuration: the +stable Cargo proxy and rustup's selected Cargo executable disagree"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An explicit toolchain is refused at whichever step of finding its
+    /// Cargo fails: an empty selector, a proxy that is nowhere, a Cargo
+    /// rustup names that is not there or cannot be read, and a proxy or a
+    /// selected Cargo that cannot say its version.
+    #[cfg(unix)]
+    #[test]
+    fn an_explicit_toolchain_fails_at_each_step_it_takes() {
+        let root = fixture();
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let selected = root.join("selected-cargo");
+        let setup = |proxy: &str, rustup: &str, chosen: &str| {
+            write_script(&bin.join("cargo"), &format!("#!/bin/sh\n{proxy}\n"));
+            write_script(&bin.join("rustup"), &format!("#!/bin/sh\n{rustup}\n"));
+            write_script(&selected, &format!("#!/bin/sh\n{chosen}\n"));
+        };
+        let select = |program: &Path, arguments: &[&str]| {
+            selected_cargo_program(&CargoTestInvocation {
+                program: program.display().to_string(),
+                kind: crate::rust_test_runner::RustCargoCommandKind::CargoTest,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+                runner_arguments: Vec::new(),
+            })
+            .map_err(|error| error.to_string())
+        };
+        let names = format!("echo '{}'", selected.display());
+        let same = "echo 'cargo 1.95.0 (same)'";
+        setup(same, &names, same);
+        assert!(select(&bin.join("cargo"), &["+stable", "test"]).is_ok());
+        // A toolchain's Cargo with no rustc beside it compiles with the rustc
+        // the search path finds.
+        let plan = resolve_with_inputs(
+            &root,
+            &root,
+            &CargoTestInvocation {
+                program: bin.join("cargo").display().to_string(),
+                kind: crate::rust_test_runner::RustCargoCommandKind::CargoTest,
+                arguments: vec!["+stable".into(), "test".into()],
+                runner_arguments: Vec::new(),
+            },
+            model_inputs(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &plan.compiler.rustc,
+            RustCargoRunnerProgram::SearchPath { value } if value.starts_with("rustc")
+        ));
+        let failing = |faults: &str| {
+            crate::fault::during(faults, || select(&bin.join("cargo"), &["+stable", "test"]))
+        };
+        // Reading the named Cargo fails after it was found.
+        assert!(failing("fs@2").unwrap_err().contains("selected-cargo"));
+        assert!(
+            select(&bin.join("cargo"), &["+", "test"])
+                .unwrap_err()
+                .contains("the rustup toolchain selector is empty")
+        );
+        assert!(
+            select(&root.join("nowhere/cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("could not resolve the Cargo proxy")
+        );
+        setup(same, "echo '/nowhere/supercov-cargo'", same);
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("/nowhere/supercov-cargo")
+        );
+        setup("exit 3", &names, same);
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("verifying the explicit rustup Cargo selection")
+        );
+        setup(same, &names, "exit 3");
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("verifying the resolved Cargo executable")
+        );
+        // A rustup that answers in bytes that are no text, or none beside
+        // the proxy at all.
+        setup(same, "printf '\\377'", same);
+        assert!(
+            select(&bin.join("cargo"), &["+stable", "test"])
+                .unwrap_err()
+                .contains("produced non-UTF-8 output")
+        );
+        fs::remove_file(bin.join("rustup")).unwrap();
+        let missing = select(&bin.join("cargo"), &["+stable", "test"]).unwrap_err();
+        assert!(missing.contains("rustup"), "{missing}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Each way a configuration or the environment can be written wrong is
+    /// refused by what is wrong in it, before anything runs.
+    #[test]
+    fn each_malformed_configuration_is_refused_by_name() {
+        let root = fixture();
+        let refused = |config: &str, arguments: &[&str], inputs: CargoModelInputs| {
+            fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            match resolve_with_inputs(&root, &root, &invocation(arguments), inputs) {
+                Err(error) => error.to_string(),
+                Ok(plan) => panic!("{config} {arguments:?} was accepted: {plan:?}"),
+            }
+        };
+        let mut real_host = model_inputs();
+        real_host.host_override = None;
+        for (config, arguments, said) in [
+            (
+                "[target.'cfg(foo bar)']\nrunner='never'\n",
+                &["test"][..],
+                "invalid Cargo target cfg key",
+            ),
+            (
+                "[target.'cfg(foo bar)']\nrustflags=['--cfg', 'x']\n",
+                &["test"][..],
+                "invalid Cargo target cfg key",
+            ),
+            ("[build]\ntarget=5\n", &["test"][..], "build.target"),
+            ("[build\n", &["test"][..], "invalid Cargo configuration"),
+            ("[build]\nrustflags=5\n", &["test"][..], "rustflags"),
+            (
+                "[target.'cfg(all())']\nrustflags=5\n",
+                &["test"][..],
+                "rustflags",
+            ),
+            (
+                "[target.'cfg(all())']\nrunner=''\n",
+                &["test"][..],
+                "cannot be empty",
+            ),
+            (
+                "",
+                &["test", "--target", "missing-spec.json"][..],
+                "missing-spec.json",
+            ),
+        ] {
+            let error = refused(config, arguments, real_host.clone());
+            assert!(error.contains(said), "{config} {arguments:?}: {error}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let not_utf8 = || OsString::from_vec(vec![0xff, 0xfe]);
+            for (variable, said) in [
+                ("CARGO_BUILD_TARGET", "CARGO_BUILD_TARGET is not UTF-8"),
+                ("CARGO_BUILD_RUSTFLAGS", "is not UTF-8"),
+                (
+                    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER",
+                    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER is not UTF-8",
+                ),
+            ] {
+                let error = refused(
+                    "",
+                    &["test"],
+                    model_inputs_with([(OsString::from(variable), not_utf8())]),
+                );
+                assert!(error.contains(said), "{variable}: {error}");
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

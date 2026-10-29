@@ -88,7 +88,7 @@ pub fn is_test_file(relative: &str) -> bool {
 /// Empty when there is no workspace, which is also the answer for a repository
 /// that simply has one module at its root.
 pub fn workspace_modules(root: &Path) -> BTreeSet<String> {
-    let Ok(text) = std::fs::read_to_string(root.join("go.work")) else {
+    let Ok(text) = crate::fault_fs::read_to_string(root.join("go.work")) else {
         return BTreeSet::new();
     };
     let mut modules = BTreeSet::new();
@@ -136,7 +136,7 @@ pub fn workspace_modules(root: &Path) -> BTreeSet<String> {
 
 fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String> {
     let members = workspace_modules(root);
-    let entries = std::fs::read_dir(directory)
+    let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     let mut sorted = entries
         .collect::<Result<Vec<_>, _>>()
@@ -144,16 +144,15 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
     sorted.sort_by_key(std::fs::DirEntry::path);
     for entry in sorted {
         let path = entry.path();
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
+        let relative = path
+            .strip_prefix(root)
+            .expect("a walked entry lies under the root it started from");
         let relative = relative.to_string_lossy().replace('\\', "/");
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let file_type = entry
-            .file_type()
+        let file_type = crate::fault_fs::file_type(&entry)
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
             if EXCLUDED_DIRECTORIES.contains(&name.as_str()) || name.starts_with('.') {
@@ -226,7 +225,7 @@ const IGNORED_BY_THE_TOOLCHAIN: &str = "ignored by the Go toolchain";
 
 /// A Go file's text, for the constraints above its package clause.
 fn read_source(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path)
+    let bytes = crate::fault_fs::read(path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -277,14 +276,13 @@ fn ignored_by_the_toolchain(
     directory: &Path,
     files: &mut GoFiles,
 ) -> Result<(), String> {
-    let entries = std::fs::read_dir(directory)
+    let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("could not read {}: {error}", directory.display()))?;
         let path = entry.path();
-        let file_type = entry
-            .file_type()
+        let file_type = crate::fault_fs::file_type(&entry)
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
             ignored_by_the_toolchain(root, &path, files)?;
@@ -394,7 +392,7 @@ pub fn prepare_go_project(
     let mut next_decision = 0_u32;
     for relative in &files.sources {
         let path = root.join(relative);
-        let Ok(source) = std::fs::read_to_string(&path) else {
+        let Ok(source) = crate::fault_fs::read_to_string(&path) else {
             let reason = "file could not be read as UTF-8";
             manifest
                 .limitations
@@ -469,7 +467,7 @@ pub fn prepare_go_project(
             )
         }
     };
-    manifest.scope = Some(serde_json::to_value(scope).map_err(|error| error.to_string())?);
+    manifest.scope = Some(serde_json::to_value(scope).expect("plain data serializes"));
     Ok(PreparedGoProject {
         root: root.to_owned(),
         files,
@@ -502,18 +500,18 @@ pub fn go_integrity_inputs(files: &GoFiles, command: &[String]) -> ExplicitInteg
 /// `//go:build go1.N` line above its package clause sets an older one.
 fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
     let minor = |text: &str| -> Option<u32> {
-        text.strip_prefix("1.")?
-            .split(|c: char| !c.is_ascii_digit())
-            .next()?
-            .parse()
-            .ok()
+        let rest = text.strip_prefix("1.")?;
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
     };
     let mut directory = root.join(relative);
     let module = loop {
         if !directory.pop() || !directory.starts_with(root) {
             break None;
         }
-        if let Ok(text) = std::fs::read_to_string(directory.join("go.mod")) {
+        if let Ok(text) = crate::fault_fs::read_to_string(directory.join("go.mod")) {
             break Some(text);
         }
     };
@@ -543,26 +541,11 @@ fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
 /// The module path declared in `go.mod`, which package identities are relative
 /// to.
 pub fn module_path(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
+    let text = crate::fault_fs::read_to_string(root.join("go.mod")).ok()?;
     text.lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix("module "))
         .map(|path| path.trim().to_owned())
-}
-
-/// Package directories that hold at least one test file, which is the unit
-/// `go test` actually runs.
-pub fn test_packages(files: &GoFiles) -> Vec<String> {
-    files
-        .tests
-        .iter()
-        .map(|test| match test.rsplit_once('/') {
-            Some((directory, _)) => directory.to_owned(),
-            None => ".".to_owned(),
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 #[cfg(test)]
@@ -619,6 +602,41 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// A listing the walk cannot read fails discovery, naming the
+    /// directory: the project's own, one below it, and the tree the
+    /// toolchain ignores, an entry of it, its kind, and one below that.
+    #[test]
+    fn a_walk_that_cannot_read_a_directory_fails_discovery() {
+        let root = fixture("walk-faults");
+        write(&root, "go.mod", "module example.com/w\n\ngo 1.22\n");
+        write(&root, "main.go", "package main\n\nfunc main() {}\n");
+        write(&root, "pkg/a.go", "package pkg\n");
+        write(&root, "_examples/deep/x.go", "package x\n");
+        fs::create_dir_all(root.join("_examples/empty")).unwrap();
+        let files = discover_go_files(&root).unwrap();
+        assert!(
+            files
+                .excluded
+                .iter()
+                .any(|(file, _)| file == "_examples/deep/x.go")
+        );
+        for fault in [
+            "fs.read_dir",
+            "fs.read_dir entry",
+            "fs.read_dir#go_project.rs:139@2",
+            "fs.read_dir#go_project.rs:279",
+            "fs.read_dir entry#go_project.rs:279",
+            "fs.file_type#go_project.rs:285",
+            "fs.read_dir#go_project.rs:279@2",
+        ] {
+            assert!(
+                crate::fault::during(fault, || discover_go_files(&root)).is_err(),
+                "{fault}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn write(root: &Path, relative: &str, contents: &str) {
@@ -809,7 +827,6 @@ mod tests {
         );
         assert_eq!(files.configuration_files, [PathBuf::from(".go-version")]);
         assert_eq!(module_path(&root).as_deref(), Some("example.com/app"));
-        assert_eq!(test_packages(&files), ["pkg/api"]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -888,8 +905,10 @@ mod tests {
         fs::create_dir_all(root.join("sub")).unwrap();
         fs::write(root.join("sub/go.mod"), "module example.com/sub\n").unwrap();
         fs::write(root.join("sub/sub.go"), "package sub\n\nfunc B() {}\n").unwrap();
-        // A plain subdirectory of this module is still measured.
+        // A plain subdirectory of this module is still measured, and an
+        // empty one holds nothing.
         fs::create_dir_all(root.join("internal")).unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
         fs::write(
             root.join("internal/helper.go"),
             "package internal\n\nfunc C() {}\n",
@@ -951,6 +970,12 @@ mod tests {
             "p.go",
             &source("//go:build !go1.17 && linux")
         ));
+        // A term that starts as a version does and is none sets no version.
+        assert!(has_generics(
+            &root,
+            "p.go",
+            &source("//go:build goexperiment.rangefunc")
+        ));
         fs::write(root.join("go.mod"), "module m\n\ngo 1.17\n").unwrap();
         assert!(!has_generics(&root, "p.go", &source("")));
         fs::write(root.join("go.mod"), "module m\n").unwrap();
@@ -987,6 +1012,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["only"]
         );
+
+        // An empty go.work names none.
+        fs::write(root.join("go.work"), "").unwrap();
+        assert!(workspace_modules(&root).is_empty());
 
         // And a repository with no workspace has none, which is how a single
         // module at the root is told apart from a workspace member.

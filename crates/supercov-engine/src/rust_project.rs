@@ -1,8 +1,9 @@
 //! Cargo workspace discovery and isolated owned-Rust frontend preparation.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Component, Path, PathBuf},
     process::Command,
 };
@@ -87,7 +88,6 @@ pub enum RustProjectError {
     NoSourceFiles,
     Instrument { file: String, reason: String },
     DuplicateObligation(String),
-    Runtime(String),
     SourceRoots(String),
 }
 
@@ -116,7 +116,6 @@ impl std::fmt::Display for RustProjectError {
             Self::DuplicateObligation(id) => {
                 write!(formatter, "duplicate Rust obligation ID: {id}")
             }
-            Self::Runtime(reason) => write!(formatter, "could not generate Rust runtime: {reason}"),
             Self::SourceRoots(reason) => write!(formatter, "{reason}"),
         }
     }
@@ -152,6 +151,7 @@ struct CargoTarget {
     src_path: PathBuf,
 }
 
+#[track_caller]
 fn canonical_directory(path: &Path) -> Result<PathBuf, RustProjectError> {
     fs::canonicalize(path).map_err(|error| RustProjectError::Io {
         path: path.to_owned(),
@@ -178,7 +178,7 @@ fn cargo_metadata(root: &Path) -> Result<CargoMetadata, RustProjectError> {
         .args(["metadata", "--format-version=1", "--no-deps"])
         .current_dir(root)
         .env("CARGO_TARGET_DIR", copy_target_directory(root))
-        .output()
+        .launch_output()
         .map_err(|error| RustProjectError::MetadataLaunch(error.to_string()))?;
     if !output.status.success() {
         return Err(RustProjectError::MetadataFailed(
@@ -205,29 +205,41 @@ pub fn compiled_source_files(
     target_directory: &Path,
 ) -> Option<BTreeSet<String>> {
     let mut compiled = BTreeSet::new();
-    let mut depinfo_files = 0;
-    let mut directories = vec![target_directory.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+    let depinfo_files = collect_depinfo_files(target_directory, workspace, &mut compiled);
+    (depinfo_files > 0).then_some(compiled)
+}
+
+/// Read every depinfo file under `directory` into `compiled`; how many
+/// there were.
+fn collect_depinfo_files(
+    directory: &Path,
+    workspace: &Path,
+    compiled: &mut BTreeSet<String>,
+) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
             let path = entry.path();
             match entry.file_type() {
-                Ok(file_type) if file_type.is_dir() => directories.push(path),
-                Ok(file_type) if file_type.is_file() => {
-                    if path.extension().is_some_and(|extension| extension == "d")
-                        && let Ok(text) = fs::read_to_string(&path)
-                    {
-                        depinfo_files += 1;
-                        collect_depinfo_sources(&text, workspace, &mut compiled);
-                    }
+                Ok(file_type) if file_type.is_dir() => {
+                    collect_depinfo_files(&path, workspace, compiled)
                 }
-                _ => {}
+                Ok(file_type)
+                    if file_type.is_file()
+                        && path.extension().is_some_and(|extension| extension == "d") =>
+                {
+                    fs::read_to_string(&path).map_or(0, |text| {
+                        collect_depinfo_sources(&text, workspace, compiled);
+                        1
+                    })
+                }
+                _ => 0,
             }
-        }
-    }
-    (depinfo_files > 0).then_some(compiled)
+        })
+        .sum()
 }
 
 /// The prerequisites of every rule in a depinfo file, as workspace-relative
@@ -508,7 +520,10 @@ fn token_tree_modules(node: &ra_ap_syntax::SyntaxNode) -> Vec<String> {
         .filter_map(|element| element.into_token())
         .filter(|token| !token.kind().is_trivia())
         .peekable();
-    while let Some(token) = tokens.next() {
+    loop {
+        let Some(token) = tokens.next() else {
+            break;
+        };
         if token.text() != "mod" {
             continue;
         }
@@ -549,55 +564,50 @@ fn string_literal(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
 /// there, so no test process ever executes it and the owned probes see
 /// nothing. `crate_roots` has already confined every one of them to the
 /// workspace.
-fn proc_macro_crate_roots(
-    packages: &[CargoPackage],
-) -> Result<BTreeSet<PathBuf>, RustProjectError> {
-    let mut roots = BTreeSet::new();
-    for package in packages {
-        for target in &package.targets {
-            if !target.kind.iter().any(|kind| kind == "proc-macro") {
-                continue;
-            }
-            let root =
-                fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
-                    path: target.src_path.clone(),
-                    reason: error.to_string(),
-                })?;
-            roots.insert(root);
-        }
-    }
-    Ok(roots)
-}
+/// Every crate's root, confined to the workspace, and the proc-macro crates'
+/// among them.
+type CrateRoots = (BTreeSet<PathBuf>, BTreeSet<PathBuf>);
+
+/// What every path under the workspace that a crate's module tree reached,
+/// or a crate root already confined, is.
+const INSIDE: &str = "a path the workspace's crates reach is inside it";
 
 fn crate_roots(
     workspace: &Path,
     packages: &[CargoPackage],
-) -> Result<BTreeSet<PathBuf>, RustProjectError> {
+) -> Result<CrateRoots, RustProjectError> {
     let mut roots = BTreeSet::new();
-    for package in packages {
-        let directory = package.manifest_path.parent().ok_or_else(|| {
-            RustProjectError::UnsafePath(package.manifest_path.display().to_string())
-        })?;
+    let mut proc_macros = BTreeSet::new();
+    packages.iter().try_for_each(|package| {
+        let directory = package
+            .manifest_path
+            .parent()
+            .expect("Cargo names a manifest by its absolute path");
         let directory = canonical_directory(directory)?;
         confined_relative(workspace, &directory).or_else(|error| {
             (directory == workspace)
                 .then_some(String::new())
                 .ok_or(error)
         })?;
-        for target in &package.targets {
-            if target.kind.iter().any(|kind| kind == "custom-build") {
-                continue;
-            }
-            let root =
-                fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
-                    path: target.src_path.clone(),
-                    reason: error.to_string(),
-                })?;
-            confined_relative(workspace, &root)?;
-            roots.insert(root);
-        }
-    }
-    Ok(roots)
+        package
+            .targets
+            .iter()
+            .filter(|target| !target.kind.iter().any(|kind| kind == "custom-build"))
+            .try_for_each(|target| {
+                let root =
+                    fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
+                        path: target.src_path.clone(),
+                        reason: error.to_string(),
+                    })?;
+                confined_relative(workspace, &root)?;
+                if target.kind.iter().any(|kind| kind == "proc-macro") {
+                    proc_macros.insert(root.clone());
+                }
+                roots.insert(root);
+                Ok(())
+            })
+    })?;
+    Ok((roots, proc_macros))
 }
 
 /// The library roots of the workspace's Rust Workers, each with the cfg of
@@ -609,7 +619,10 @@ fn worker_library_roots(
     packages
         .iter()
         .filter_map(|package| {
-            let directory = package.manifest_path.parent()?;
+            let directory = package
+                .manifest_path
+                .parent()
+                .expect("Cargo names a manifest by its absolute path");
             let cfg = crate::rust_worker::worker_build_cfg(directory, &package.features)?;
             Some(
                 package
@@ -675,9 +688,9 @@ fn decline_proc_macro_obligations(
     workspace: &Path,
     proc_macro_roots: &BTreeSet<PathBuf>,
     manifest: &mut CoverageManifest,
-) -> Result<(), RustProjectError> {
+) {
     if proc_macro_roots.is_empty() {
-        return Ok(());
+        return;
     }
     let mut reached = BTreeSet::new();
     resolve_module_tree(
@@ -687,12 +700,12 @@ fn decline_proc_macro_obligations(
         &mut reached,
         &mut BTreeSet::new(),
         &mut BTreeMap::new(),
-    )?;
-    // The module tree reaches files inside the workspace alone.
+    )
+    .expect("the proc-macro crates' modules were resolved with every crate's");
     let files = reached
         .iter()
-        .map(|path| confined_relative(workspace, path))
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .map(|path| confined_relative(workspace, path).expect(INSIDE))
+        .collect::<BTreeSet<_>>();
     let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
     unmeasured.extend(
         manifest
@@ -723,8 +736,8 @@ fn decline_proc_macro_obligations(
             .and_then(|file| file.as_str())
             .is_none_or(|file| !files.contains(file))
     });
-    for file in files {
-        manifest.limitations.push(serde_json::json!({
+    manifest.limitations.extend(files.into_iter().map(|file| {
+        serde_json::json!({
             "id": format!("rust-proc-macro-runs-in-the-compiler#{file}"),
             "kind": "source-scope",
             "file": file,
@@ -733,9 +746,8 @@ fn decline_proc_macro_obligations(
             "source": "",
             "blocking": false,
             "reason": "This crate compiles to a compiler plugin: rustc loads it and runs it while building the crate under test, so no test process executes it"
-        }));
-    }
-    Ok(())
+        })
+    }));
 }
 
 pub fn manifest_token(manifest: &CoverageManifest) -> String {
@@ -886,9 +898,8 @@ pub fn prepare_rust_project_for(
     }
 
     let started = std::time::Instant::now();
-    let roots = crate_roots(&workspace, &packages)?;
+    let (roots, proc_macro_roots) = crate_roots(&workspace, &packages)?;
     let worker_roots = worker_library_roots(&packages);
-    let proc_macro_roots = proc_macro_crate_roots(&packages)?;
     let mut files = BTreeSet::new();
     let mut tests = BTreeSet::new();
     let mut owners = BTreeMap::new();
@@ -912,21 +923,23 @@ pub fn prepare_rust_project_for(
     // Test code is instrumented for its assertion markers alone.
     let tests = tests
         .iter()
-        .map(|path| confined_relative(&workspace, path))
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .map(|path| confined_relative(&workspace, path).expect(INSIDE))
+        .collect::<BTreeSet<_>>();
     if files.is_empty() {
         return Err(RustProjectError::NoSourceFiles);
     }
 
-    let mut sources = BTreeMap::new();
-    for path in files {
-        let relative = confined_relative(&workspace, &path)?;
-        let source = fs::read_to_string(&path).map_err(|error| RustProjectError::Io {
-            path: path.clone(),
-            reason: error.to_string(),
-        })?;
-        sources.insert(relative, source);
-    }
+    let mut sources = files
+        .into_iter()
+        .map(|path| {
+            let relative = confined_relative(&workspace, &path).expect(INSIDE);
+            let source = fs::read_to_string(&path).map_err(|error| RustProjectError::Io {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
+            Ok((relative, source))
+        })
+        .collect::<Result<BTreeMap<_, _>, RustProjectError>>()?;
     preparation.discovery_ms = elapsed(started);
     let started = std::time::Instant::now();
     let runtime_module = runtime_module_name(&sources);
@@ -957,25 +970,23 @@ pub fn prepare_rust_project_for(
     // One numbering spans the workspace: a file may be compiled into several
     // crates, and every crate's runtime maps the same region.
     let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
-    for (relative, source) in &sources {
+    // Never none: no source left by the roots was refused above.
+    sources.iter().try_for_each(|(relative, source)| -> Result<(), RustProjectError> {
         let test_file = tests.contains(relative) || test_code_path(relative);
         // A file is compiled as each crate that holds it is built: a Worker's
         // library by worker-build, the rest for the command's target. Items
         // are left out only where every one of those builds leaves them out.
-        let builds = owners.get(relative).map(|roots| {
-            roots
-                .iter()
-                .map(|root| worker_roots.get(root).or(cfg))
-                .collect::<Vec<_>>()
-        });
-        let file_cfg = match builds.as_deref() {
-            Some([first, rest @ ..]) => rest
-                .iter()
-                .all(|other| other == first)
-                .then_some(*first)
-                .flatten(),
-            _ => cfg,
-        };
+        // A file the module tree reached has the crate it reached it from.
+        let builds = owners[relative]
+            .iter()
+            .map(|root| worker_roots.get(root).or(cfg))
+            .collect::<Vec<_>>();
+        let (first, rest) = builds.split_first().expect("a file has a crate");
+        let file_cfg = rest
+            .iter()
+            .all(|other| other == first)
+            .then_some(*first)
+            .flatten();
         let transformed = match instrument_rust_file_numbered(
             relative,
             source,
@@ -998,7 +1009,7 @@ pub fn prepare_rust_project_for(
                     "blocking": false,
                     "reason": format!("Supercov hit {error} instrumenting this file, a bug to report; it compiles as written and nothing in it is measured"),
                 }));
-                continue;
+                return Ok(());
             }
             Err(error) => {
                 return Err(RustProjectError::Instrument {
@@ -1007,64 +1018,69 @@ pub fn prepare_rust_project_for(
                 });
             }
         };
-        merge_manifest(&mut manifest, transformed.manifest)?;
+        merge_manifest(&mut manifest, transformed.manifest)
+            .expect("obligation ids carry their file, so files never share one");
         fs::write(workspace.join(relative), transformed.code).map_err(|error| {
             RustProjectError::Io {
                 path: workspace.join(relative),
                 reason: error.to_string(),
             }
         })?;
-    }
+        Ok(())
+    })?;
 
     preparation.instrument_ms = elapsed(started);
     let started = std::time::Instant::now();
-    decline_proc_macro_obligations(&workspace, &proc_macro_roots, &mut manifest)?;
+    decline_proc_macro_obligations(&workspace, &proc_macro_roots, &mut manifest);
 
     let token = manifest_token(&manifest);
     probes.token = token.clone();
     let mut crate_roots = Vec::new();
     let mut crate_files = Vec::new();
-    for root in roots {
-        let relative = confined_relative(&workspace, &root)?;
-        // The crate answers `cfg!` for the gates in the files it compiles.
-        let crate_cfgs = probes
-            .cfgs
-            .iter()
-            .enumerate()
-            .filter(|(_, gate)| {
-                owners
-                    .get(&gate.file)
-                    .is_some_and(|roots| roots.contains(&root))
-            })
-            .map(|(ordinal, _)| ordinal)
-            .collect::<Vec<_>>();
-        let key = crate_key(&token, &relative);
-        if worker_roots.contains_key(&root) {
-            probes.workers.insert(key.clone());
-        }
-        let runtime =
-            render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs)
-                .map_err(RustProjectError::Runtime)?;
-        crate_files.push((
-            key,
-            owners
+    // A workspace has a crate at least.
+    roots
+        .into_iter()
+        .try_for_each(|root| -> Result<(), RustProjectError> {
+            let relative = confined_relative(&workspace, &root).expect(INSIDE);
+            // The crate answers `cfg!` for the gates in the files it compiles.
+            let crate_cfgs = probes
+                .cfgs
                 .iter()
-                .filter(|(_, roots)| roots.contains(&root))
-                .map(|(file, _)| file.clone())
-                .collect::<Vec<_>>(),
-        ));
-        let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
-            path: root.clone(),
-            reason: error.to_string(),
+                .enumerate()
+                .filter(|(_, gate)| {
+                    owners
+                        .get(&gate.file)
+                        .is_some_and(|roots| roots.contains(&root))
+                })
+                .map(|(ordinal, _)| ordinal)
+                .collect::<Vec<_>>();
+            let key = crate_key(&token, &relative);
+            if worker_roots.contains_key(&root) {
+                probes.workers.insert(key.clone());
+            }
+            let runtime =
+                render_rust_region_runtime(&runtime_module, &token, &key, &probes, &crate_cfgs);
+            crate_files.push((
+                key,
+                owners
+                    .iter()
+                    .filter(|(_, roots)| roots.contains(&root))
+                    .map(|(file, _)| file.clone())
+                    .collect::<Vec<_>>(),
+            ));
+            let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
+                path: root.clone(),
+                reason: error.to_string(),
+            })?;
+            source.push('\n');
+            source.push_str(&runtime);
+            fs::write(&root, source).map_err(|error| RustProjectError::Io {
+                path: root,
+                reason: error.to_string(),
+            })?;
+            crate_roots.push(relative);
+            Ok(())
         })?;
-        source.push('\n');
-        source.push_str(&runtime);
-        fs::write(&root, source).map_err(|error| RustProjectError::Io {
-            path: root,
-            reason: error.to_string(),
-        })?;
-        crate_roots.push(relative);
-    }
     preparation.runtime_ms = elapsed(started);
     probes.crates = crate_files.into_iter().collect();
 
@@ -1107,10 +1123,7 @@ pub fn prepare_rust_project_for(
             )
         }
     };
-    manifest.scope = Some(
-        serde_json::to_value(scope)
-            .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?,
-    );
+    manifest.scope = Some(serde_json::to_value(scope).expect("plain data serializes"));
     Ok(PreparedRustProject {
         workspace_root: workspace,
         target_directory,
@@ -1130,6 +1143,45 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn each_rust_project_error_says_what_failed() {
+        use super::RustProjectError as E;
+        let messages = [
+            E::Io {
+                path: std::path::PathBuf::from("Cargo.toml"),
+                reason: "gone".into(),
+            },
+            E::MetadataLaunch("no cargo".into()),
+            E::MetadataFailed("exit 101".into()),
+            E::MetadataJson("eof".into()),
+            E::UnsafePath("../x".into()),
+            E::NoWorkspacePackages,
+            E::NoSourceFiles,
+            E::Instrument {
+                file: "src/lib.rs".into(),
+                reason: "parse".into(),
+            },
+            E::DuplicateObligation("o1".into()),
+            E::SourceRoots("no roots".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Cargo.toml: gone",
+                "could not launch cargo metadata: no cargo",
+                "cargo metadata failed: exit 101",
+                "invalid cargo metadata: eof",
+                "Cargo reported an unsafe workspace path: ../x",
+                "Cargo metadata reported no workspace packages",
+                "Cargo workspace contains no owned Rust source files",
+                "could not instrument src/lib.rs: parse",
+                "duplicate Rust obligation ID: o1",
+                "no roots",
+            ]
+        );
+    }
 
     use super::*;
 
@@ -1183,6 +1235,18 @@ fn integration_choice() {
         )
         .unwrap();
         root
+    }
+
+    /// Nothing to read is nothing read: no depinfo line, a rule with no
+    /// prerequisite, and a path with no component.
+    #[test]
+    fn empty_depinfo_and_paths_name_nothing() {
+        let mut compiled = BTreeSet::new();
+        collect_depinfo_sources("", Path::new("/w"), &mut compiled);
+        collect_depinfo_sources("target/x: \n", Path::new("/w"), &mut compiled);
+        assert!(compiled.is_empty());
+        assert_eq!(normalize(Path::new("")), PathBuf::new());
+        assert_eq!(normalize(Path::new("./a/../b")), PathBuf::from("b"));
     }
 
     #[test]
@@ -1873,7 +1937,7 @@ fn integration_choice() {
         for (file, text) in [
             (
                 "src/lib.rs",
-                "mod a;\nmod b;\n#[path = \"other/c_impl.rs\"]\nmod c;\nmod inline {\n    #[path = \"deep.rs\"]\n    mod d;\n    mod e;\n}\n#[cfg(test)]\nmod tests;\ninclude!(\"gen.rs\");\ninclude!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\nconst DATA: &str = include_str!(\"data.txt\");\n#[path = \"../../outside.rs\"]\nmod out;\ncfg_if::cfg_if! {\n    if #[cfg(unix)] {\n        mod unix_impl;\n    } else {\n        mod other_impl;\n    }\n}\nmod missing;\n",
+                "mod a;\nmod b;\n#[path = \"other/c_impl.rs\"]\nmod c;\nmod inline {\n    #[path = \"deep.rs\"]\n    mod d;\n    mod e;\n}\n#[cfg(test)]\nmod tests;\ninclude!(\"gen.rs\");\ninclude!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\nconst DATA: &str = include_str!(\"data.txt\");\n#[path = \"../../outside.rs\"]\nmod out;\ncfg_if::cfg_if! {\n    if #[cfg(unix)] {\n        mod unix_impl;\n    } else {\n        mod other_impl;\n    }\n}\nmod missing;\nmod ;\nquirk! { mod 3; }\ninclude!(GENERATED);\n",
             ),
             ("src/a.rs", "mod a_child;\n"),
             ("src/a/a_child.rs", ""),

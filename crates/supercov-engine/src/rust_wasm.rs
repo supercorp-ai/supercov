@@ -10,9 +10,9 @@
 //! Playwright fixture, in each page. Each take belongs to the test that just
 //! ended, exactly, and the run publishes them as a Rust run of its own.
 
+use crate::fault_fs as fs;
 use std::{
     collections::BTreeMap,
-    fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -33,6 +33,15 @@ use crate::{
 /// depends on `wasm-bindgen`. A Worker's crate, which `worker-build` builds,
 /// is measured by `rust_worker` instead.
 fn wasm_crates(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    wasm_crates_under(root, 0, &mut found);
+    found.sort();
+    found
+}
+
+/// The wasm libraries at most six directories below `directory`, which is
+/// `depth` below the root, added to `found`.
+fn wasm_crates_under(directory: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     const SKIPPED: &[&str] = &[
         "node_modules",
         "target",
@@ -43,34 +52,28 @@ fn wasm_crates(root: &Path) -> Vec<PathBuf> {
         ".supercov",
         ".wrangler",
     ];
-    let mut found = Vec::new();
-    let mut directories = vec![(root.to_path_buf(), 0)];
-    while let Some((directory, depth)) = directories.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                if depth < 6 && !SKIPPED.contains(&name) {
-                    directories.push((path, depth + 1));
-                }
-                continue;
+        let Ok(kind) = fs::file_type(&entry) else {
+            continue;
+        };
+        if kind.is_dir() {
+            if depth < 6 && !SKIPPED.contains(&name) {
+                wasm_crates_under(&path, depth + 1, found);
             }
-            if kind.is_file() && name == "Cargo.toml" && is_wasm_library(&path) {
-                found.push(path);
-            }
+            continue;
+        }
+        if kind.is_file() && name == "Cargo.toml" && is_wasm_library(&path) {
+            found.push(path);
         }
     }
-    found.sort();
-    found
 }
 
 fn is_wasm_library(manifest: &Path) -> bool {
@@ -308,15 +311,16 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
     let mut regions = Vec::new();
     for region in value.get("regions")?.as_array()? {
         let crate_key = region.get(0)?.as_str()?.to_owned();
-        let length = usize::try_from(region.get(1)?.as_u64()?).ok()?;
+        // A length or offset is far below what a usize holds on any host.
+        let length = region.get(1)?.as_u64()? as usize;
         let mut bytes = vec![0_u8; length];
         for segment in region.get(2)?.as_array()? {
-            let offset = usize::try_from(segment.get(0)?.as_u64()?).ok()?;
+            let offset = segment.get(0)?.as_u64()? as usize;
             let data = base64::engine::general_purpose::STANDARD
                 .decode(segment.get(1)?.as_str()?)
                 .ok()?;
             bytes
-                .get_mut(offset..offset + data.len())?
+                .get_mut(offset..offset.checked_add(data.len())?)?
                 .copy_from_slice(&data);
         }
         regions.push((crate_key, bytes));
@@ -327,6 +331,39 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A take's regions are rebuilt from a well-formed record, and any part
+    /// of one missing or of the wrong kind is no regions at all.
+    #[test]
+    fn a_take_s_regions_are_read_or_refused_whole() {
+        use serde_json::json;
+        assert_eq!(
+            regions_from(&json!({"regions": [["abc", 4, [[1, "AQI="]]], ["def", 2, []]]})),
+            Some(vec![
+                ("abc".into(), vec![0, 1, 2, 0]),
+                ("def".into(), vec![0, 0])
+            ])
+        );
+        for refused in [
+            json!({}),
+            json!({"regions": {}}),
+            json!({"regions": [[]]}),
+            json!({"regions": [[1]]}),
+            json!({"regions": [["abc"]]}),
+            json!({"regions": [["abc", "4"]]}),
+            json!({"regions": [["abc", 4]]}),
+            json!({"regions": [["abc", 4, {}]]}),
+            json!({"regions": [["abc", 4, [[]]]]}),
+            json!({"regions": [["abc", 4, [["1", "AQI="]]]]}),
+            json!({"regions": [["abc", 4, [[1]]]]}),
+            json!({"regions": [["abc", 4, [[1, 2]]]]}),
+            json!({"regions": [["abc", 4, [[1, "not base64!"]]]]}),
+            json!({"regions": [["abc", 4, [[3, "AQI="]]]]}),
+            json!({"regions": [["abc", 4, [[u64::MAX, "AQI="]]]]}),
+        ] {
+            assert_eq!(regions_from(&refused), None, "{refused}");
+        }
+    }
 
     #[test]
     fn a_wasm_library_is_a_cdylib_that_depends_on_wasm_bindgen() {
@@ -371,6 +408,14 @@ mod tests {
             "node_modules/e/Cargo.toml",
             "[package]\nname = \"e\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\nwasm-bindgen = \"0.2\"\n",
         );
+        // A manifest that is no TOML is no wasm library.
+        write("broken/Cargo.toml", "[package\n");
+        // macOS names no file that is not UTF-8.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::create_dir_all(root.join(std::ffi::OsStr::from_bytes(b"\xff"))).unwrap();
+        }
         let found = wasm_crates(&root)
             .into_iter()
             .map(|path| path.strip_prefix(&root).unwrap().to_owned())
@@ -382,6 +427,16 @@ mod tests {
                 PathBuf::from("targeted/Cargo.toml")
             ]
         );
+        // A directory that cannot be listed, an entry whose kind cannot be
+        // read and a manifest that cannot be read each hold none.
+        for fault in [
+            "fs.read_dir#rust_wasm.rs:55",
+            "fs.file_type",
+            "fs.read_to_string",
+        ] {
+            let found = crate::fault::during(fault, || wasm_crates(&root));
+            assert!(found.is_empty(), "{fault}: {found:?}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -417,6 +472,34 @@ mod tests {
         .unwrap();
         fs::write(directory.join("b.jsonl"), "{\"regions\": []}\n").unwrap();
         fs::write(directory.join("notes.txt"), "{\"regions\": []}\n").unwrap();
+        fs::write(directory.join("c.jsonl"), "").unwrap();
+        assert!(read_records(&directory.join("absent")).unwrap().is_empty());
+        // No wasm library in the workspace is no server to prepare.
+        assert!(
+            RustWasmServer::prepare(&directory, &directory, &directory, "run", &[])
+                .unwrap()
+                .is_empty()
+        );
+        // A wasm library whose Cargo workspace lies above the root belongs
+        // to no workspace this run instruments.
+        fs::write(
+            directory.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"inner/lib\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let inner = directory.join("inner");
+        fs::create_dir_all(inner.join("lib/src")).unwrap();
+        fs::write(
+            inner.join("lib/Cargo.toml"),
+            "[package]\nname = \"l\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwasm-bindgen = \"0.2\"\n",
+        )
+        .unwrap();
+        fs::write(inner.join("lib/src/lib.rs"), "").unwrap();
+        assert!(
+            RustWasmServer::prepare(&inner, &inner, &inner, "run", &[])
+                .unwrap()
+                .is_empty()
+        );
         let owners = read_records(&directory)
             .unwrap()
             .into_iter()

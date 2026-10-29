@@ -259,6 +259,10 @@ try {
     assert.match(decision, /FTT -> T +tests=1/u, `${label}\n${decision}`);
     const scope = JSON.parse(run(root, binary, ['runs', id, 'scope', '--json', '--limit', '0']).stdout).data.entries;
     assert.equal(scope.find((entry) => entry.file === 'worker/src/lib.rs')?.status, 'included', `${label}: ${JSON.stringify(scope)}`);
+    // A test's Worker windows that cannot be read fail the run, saying where.
+    const unread = run(root, binary, ['--', ...command], { PATH: path, SUPERCOV_TEST_FAULT: 'fs.read_to_string#rust_worker.rs:1803' });
+    assert.notEqual(unread.status, 0, `${label}\n${unread.stderr}`);
+    assert.ok(unread.stderr.includes('test fault at fs (rust_worker.rs:1803'), `${label}\n${unread.stderr}`);
   }
 
   // A run whose tests start no Worker compiles the Worker crate and never

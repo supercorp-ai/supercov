@@ -18,7 +18,6 @@ use ruff_python_ast::{
 use ruff_python_parser::parse_module;
 use ruff_text_size::{Ranged, TextRange};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{
     coverage_analysis::PointKind,
@@ -281,7 +280,14 @@ impl<'a> SourceLocations<'a> {
         }
     }
 
+    #[track_caller]
     fn range(&self, range: TextRange) -> Result<(usize, usize), PythonInstrumenterError> {
+        // A test fault stands in for a range the parser gave that the source
+        // cannot hold, so each place that refuses one runs under test: the
+        // place that asked, through the helpers that ask for it.
+        if crate::fault::injected_here("python-range", "range") {
+            return Err(PythonInstrumenterError::InvalidRange);
+        }
         // A `TextRange` never starts after it ends.
         let start = range.start().to_usize();
         let end = range.end().to_usize();
@@ -299,6 +305,7 @@ impl<'a> SourceLocations<'a> {
         (line_index + 1, offset - self.line_starts[line_index])
     }
 
+    #[track_caller]
     fn span(&self, range: TextRange) -> Result<PlanSpan, PythonInstrumenterError> {
         let (start, end) = self.range(range)?;
         let (start_line, start_column) = self.line_column(start);
@@ -309,6 +316,7 @@ impl<'a> SourceLocations<'a> {
         })
     }
 
+    #[track_caller]
     fn text(&self, range: TextRange) -> Result<String, PythonInstrumenterError> {
         let (start, end) = self.range(range)?;
         Ok(self.source[start..end].trim().to_owned())
@@ -316,19 +324,9 @@ impl<'a> SourceLocations<'a> {
 }
 
 fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
-    let mut hash = Sha256::new();
     let start = range.start().to_usize().to_string();
     let end = range.end().to_usize().to_string();
-    for value in [file, kind, &start, &end, suffix] {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(24);
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
+    let encoded = crate::stable_ids::digest(&[file, kind, &start, &end, suffix]);
     format!("py:{kind}:{encoded}")
 }
 
@@ -406,6 +404,7 @@ impl<'a> PythonObligationCollector<'a> {
         None
     }
 
+    #[track_caller]
     fn location_source(&mut self, range: TextRange) -> Option<(usize, usize, String)> {
         let result = self.locations.range(range).map(|(start, _)| {
             let (line, column) = self.locations.line_column(start);
@@ -417,6 +416,7 @@ impl<'a> PythonObligationCollector<'a> {
         }
     }
 
+    #[track_caller]
     fn span(&mut self, range: TextRange) -> Option<PlanSpan> {
         match self.locations.span(range) {
             Ok(span) => Some(span),
@@ -499,13 +499,7 @@ impl<'a> PythonObligationCollector<'a> {
     ) -> Option<ConditionTree> {
         let (operand, not) = Self::strip_not(expr);
         if let Expr::BoolOp(boolean) = operand {
-            let mut items = Vec::with_capacity(boolean.values.len());
-            let mut groups = Vec::with_capacity(boolean.values.len());
-            for value in &boolean.values {
-                let first = leaves.len();
-                items.push(self.tree(value, leaves, boolops)?);
-                groups.push((first..leaves.len()).collect());
-            }
+            let (items, groups) = self.trees(&boolean.values, leaves, boolops)?;
             boolops.push((boolean.range, groups));
             return Some(ConditionTree::Node {
                 op: match boolean.op {
@@ -519,6 +513,23 @@ impl<'a> PythonObligationCollector<'a> {
         let span = self.span(operand.range())?;
         leaves.push(ConditionPlan { span, not });
         Some(ConditionTree::Leaf(leaves.len() - 1))
+    }
+
+    /// The trees of a BoolOp's operands, each with the leaves it added.
+    fn trees(
+        &mut self,
+        values: &[Expr],
+        leaves: &mut Vec<ConditionPlan>,
+        boolops: &mut Vec<(TextRange, Vec<Vec<usize>>)>,
+    ) -> Option<(Vec<ConditionTree>, Vec<Vec<usize>>)> {
+        values
+            .iter()
+            .map(|value| {
+                let first = leaves.len();
+                let item = self.tree(value, leaves, boolops)?;
+                Some((item, (first..leaves.len()).collect()))
+            })
+            .collect()
     }
 
     fn decision(&mut self, test: &Expr, kind: &str) {
@@ -552,8 +563,7 @@ impl<'a> PythonObligationCollector<'a> {
         let mut boolops = Vec::new();
         build(self, &mut leaves, &mut boolops)?;
         let tree = boolops.clone();
-        let mut conditions = Vec::with_capacity(leaves.len());
-        for leaf in &leaves {
+        let conditions = leaves.iter().map(|leaf| {
             let leaf_range = TextRange::new(
                 self.locations.line_starts[leaf.span.start[0] - 1]
                     .saturating_add(leaf.span.start[1])
@@ -564,17 +574,20 @@ impl<'a> PythonObligationCollector<'a> {
                     .try_into()
                     .unwrap_or_default(),
             );
-            match self.locations.text(leaf_range) {
-                Ok(text) => conditions.push(if leaf.not % 2 == 1 {
+            self.locations.text(leaf_range).map(|text| {
+                if leaf.not % 2 == 1 {
                     format!("not {text}")
                 } else {
                     text
-                }),
-                Err(error) => {
-                    return self.fail(error);
                 }
+            })
+        });
+        let conditions = match conditions.collect::<Result<Vec<_>, _>>() {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                return self.fail(error);
             }
-        }
+        };
         for (boolop_range, groups) in boolops {
             let (start, end) = match self.locations.range(boolop_range) {
                 Ok(bounds) => bounds,
@@ -651,12 +664,7 @@ impl<'a> PythonObligationCollector<'a> {
                         true,
                         Heads::default(),
                         |this, leaves, boolops| {
-                            let mut groups = Vec::with_capacity(left.len());
-                            for value in left {
-                                let first = leaves.len();
-                                this.tree(value, leaves, boolops)?;
-                                groups.push((first..leaves.len()).collect());
-                            }
+                            let (_, groups) = this.trees(left, leaves, boolops)?;
                             boolops.push((range, groups.clone()));
                             regrouped = groups;
                             Some(())
@@ -770,10 +778,11 @@ impl<'a> PythonObligationCollector<'a> {
         ) else {
             return;
         };
-        let body_range = match (statement.body.first(), statement.body.last()) {
-            (Some(first), Some(last)) => TextRange::new(first.start(), last.end()),
-            _ => return,
-        };
+        const BODY: &str = "a parsed `try` has a body";
+        let body_range = TextRange::new(
+            statement.body.first().expect(BODY).start(),
+            statement.body.last().expect(BODY).end(),
+        );
         let Some(body) = self.span(body_range) else {
             return;
         };
@@ -833,80 +842,82 @@ impl<'a> PythonObligationCollector<'a> {
             BoolOp::Or => "or",
         };
         let last = boolean.values.len() - 1;
-        for (index, value) in boolean.values.iter().enumerate().skip(1) {
-            let Some(id) = self.branch(
-                value.range(),
-                &format!("logical-{op}-{index}"),
-                [
-                    ("short-circuit", "short-circuited"),
-                    ("evaluated", "right operand evaluated"),
-                ],
-            ) else {
-                continue;
-            };
-            // Regrouped as `(a or b) or c`: the operands but the last are the
-            // inner BoolOp's, judged from its decision's vectors; the last is
-            // the outer one's second operand.
-            let (decision_id, previous_leaves, operand_leaves, boolop, operand) =
-                match (&decision, &regrouped) {
-                    (Some((decision_id, groups)), _) => (
-                        Some(decision_id.clone()),
-                        Some(groups[index - 1].clone()),
-                        Some(groups[index].clone()),
-                        boolop_span,
-                        index,
-                    ),
-                    (None, Some((decision_id, groups, inner))) if index < last => (
-                        Some(decision_id.clone()),
-                        Some(groups[index - 1].clone()),
-                        Some(groups[index].clone()),
-                        *inner,
-                        index,
-                    ),
-                    (None, Some(_)) => (None, None, None, boolop_span, 1),
-                    (None, None) => (None, None, None, boolop_span, index),
+        boolean
+            .values
+            .iter()
+            .enumerate()
+            .skip(1)
+            .for_each(|(index, value)| {
+                let Some(id) = self.branch(
+                    value.range(),
+                    &format!("logical-{op}-{index}"),
+                    [
+                        ("short-circuit", "short-circuited"),
+                        ("evaluated", "right operand evaluated"),
+                    ],
+                ) else {
+                    return;
                 };
-            self.plan.logical.push(LogicalPlan {
-                short_circuit: format!("{id}:short-circuit"),
-                evaluated: format!("{id}:evaluated"),
-                id,
-                boolop,
-                operand,
-                decision: decision_id,
-                previous_leaves,
-                operand_leaves,
+                // Regrouped as `(a or b) or c`: the operands but the last are the
+                // inner BoolOp's, judged from its decision's vectors; the last is
+                // the outer one's second operand.
+                let (decision_id, previous_leaves, operand_leaves, boolop, operand) =
+                    match (&decision, &regrouped) {
+                        (Some((decision_id, groups)), _) => (
+                            Some(decision_id.clone()),
+                            Some(groups[index - 1].clone()),
+                            Some(groups[index].clone()),
+                            boolop_span,
+                            index,
+                        ),
+                        (None, Some((decision_id, groups, inner))) if index < last => (
+                            Some(decision_id.clone()),
+                            Some(groups[index - 1].clone()),
+                            Some(groups[index].clone()),
+                            *inner,
+                            index,
+                        ),
+                        (None, Some(_)) => (None, None, None, boolop_span, 1),
+                        (None, None) => (None, None, None, boolop_span, index),
+                    };
+                self.plan.logical.push(LogicalPlan {
+                    short_circuit: format!("{id}:short-circuit"),
+                    evaluated: format!("{id}:evaluated"),
+                    id,
+                    boolop,
+                    operand,
+                    decision: decision_id,
+                    previous_leaves,
+                    operand_leaves,
+                });
             });
-        }
     }
 
     fn match_statement(&mut self, statement: &ruff_python_ast::StmtMatch) {
         let Some(span) = self.span(statement.range) else {
             return;
         };
-        let mut cases = Vec::with_capacity(statement.cases.len());
-        for (index, case) in statement.cases.iter().enumerate() {
+        let cases = statement.cases.iter().enumerate().map(|(index, case)| {
             let kind = format!("match-case-{index}");
-            let Some(id) = self.branch(
+            let id = self.branch(
                 case.range,
                 &kind,
                 [("missed", "not selected"), ("selected", "selected")],
-            ) else {
-                return;
-            };
+            )?;
             if let Some(guard) = &case.guard {
                 self.decision(guard, "match-guard");
             }
-            let Some(case_span) = self.span(case.range) else {
-                return;
-            };
-            cases.push(MatchCasePlan {
+            Some(MatchCasePlan {
                 missed: format!("{id}:missed"),
                 selected: format!("{id}:selected"),
                 id,
-                span: case_span,
+                span: self.span(case.range)?,
                 irrefutable: case.guard.is_none() && case.pattern.is_irrefutable(),
-            });
-        }
+            })
+        });
+        let Some(cases) = cases.collect::<Option<Vec<_>>>() else {
+            return;
+        };
         let no_case = if statement
             .cases
             .iter()
@@ -1065,9 +1076,9 @@ pub fn build_python_obligations(
     file: &str,
     source: &str,
 ) -> Result<PythonFileObligations, PythonInstrumenterError> {
-    within_text_size(source.len())?;
-    let parsed =
-        parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))?;
+    let parsed = within_text_size(source.len()).and_then(|()| {
+        parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))
+    })?;
     obligations_of(file, source, parsed.suite())
 }
 
@@ -1107,6 +1118,18 @@ pub fn build_python_manifest(
 
 #[cfg(test)]
 mod tests {
+    /// A plan's span is written and read as two pairs.
+    #[test]
+    fn a_plan_span_is_read_back_as_it_is_written() {
+        let span = PlanSpan {
+            start: [1, 2],
+            end: [3, 4],
+        };
+        let written = serde_json::to_string(&span).unwrap();
+        assert_eq!(written, "[[1,2],[3,4]]");
+        assert_eq!(serde_json::from_str::<PlanSpan>(&written).unwrap(), span);
+    }
+
     use super::*;
 
     const SOURCE: &str = r#"async def classify[T](items, flag=True):
@@ -1126,6 +1149,48 @@ mod tests {
         return None
     return (lambda value: value or flag)(None)
 "#;
+
+    /// A range the source cannot hold refuses the file rather than probing
+    /// it wrongly.
+    #[test]
+    fn a_range_the_source_cannot_hold_refuses_its_file() {
+        assert!(
+            crate::fault::during("python-range", || build_python_obligations(
+                "src/app.py",
+                SOURCE
+            ))
+            .is_err()
+        );
+    }
+
+    /// Each place that asks for a range, failing there: a condition's text,
+    /// an operator's bounds, a decision's span, a `try` body's and its
+    /// `finally`'s spans, a handler's branch, a `match` case's span. The
+    /// file is refused at each.
+    #[test]
+    fn each_place_that_asks_for_a_range_refuses_the_file_there() {
+        let decided = "def f(a, b):\n    if a and (b or not a):\n        pass\n";
+        let tried = "try:\n    g()\nexcept ValueError:\n    pass\nfinally:\n    h()\n";
+        let matched = "match a:\n    case 1:\n        pass\n";
+        for (source, place) in [
+            (decided, "577"),
+            (decided, "592"),
+            (decided, "618"),
+            (decided, "831"),
+            (tried, "786"),
+            (tried, "792"),
+            (tried, "733@2"),
+            (matched, "914"),
+        ] {
+            assert!(build_python_obligations("a.py", source).is_ok(), "{place}");
+            let fault = format!("python-range#python_instrumenter.rs:{place}");
+            assert_eq!(
+                crate::fault::during(&fault, || build_python_obligations("a.py", source)),
+                Err(PythonInstrumenterError::InvalidRange),
+                "{fault}"
+            );
+        }
+    }
 
     #[test]
     fn discovers_current_python_obligations_with_exact_ranges_and_stable_ids() {
@@ -1486,6 +1551,87 @@ mod tests {
         assert!(obligations_of("a.py", "if a_long_name:\n    pass\n", parsed.suite()).is_ok());
     }
 
+    /// A tree read against its source cut short anywhere: wherever the
+    /// first range falls past the end, the whole file is refused, never
+    /// half of its obligations.
+    #[test]
+    fn a_tree_read_against_any_shorter_source_is_refused_whole() {
+        let source = concat!(
+            "def f(a, b, c):\n",
+            "    if a and (b or not c):\n",
+            "        return [x for x in a if x]\n",
+            "    for item in b:\n",
+            "        print(item)\n",
+            "    while c:\n",
+            "        c -= 1\n",
+            "    try:\n",
+            "        g()\n",
+            "    except ValueError:\n",
+            "        pass\n",
+            "    except (KeyError, TypeError):\n",
+            "        pass\n",
+            "    finally:\n",
+            "        h()\n",
+            "    match a:\n",
+            "        case 1 if b:\n",
+            "            pass\n",
+            "        case _:\n",
+            "            pass\n",
+            "    x = a or b or c\n",
+            "    y = 1 if a else 2\n",
+            "    assert a, 'a'\n",
+            "    return x and y\n",
+        );
+        let parsed = parse_module(source).unwrap();
+        assert!(obligations_of("a.py", source, parsed.suite()).is_ok());
+        // Short of the last character any range can end at.
+        for cut in 0..source.trim_end().len() {
+            assert_eq!(
+                obligations_of("a.py", &source[..cut], parsed.suite()),
+                Err(PythonInstrumenterError::InvalidRange),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    /// The same tree read against a source of its length whose characters
+    /// are laid out otherwise -- two bytes made one `é`, at every place --
+    /// so that only the ranges with an edge inside it fall within a
+    /// character: each such source is refused whole, never half read, and
+    /// never panics.
+    #[test]
+    fn a_tree_read_against_a_source_with_a_character_anywhere_is_refused_whole() {
+        let source = concat!(
+            "def f(a, b, c):\n",
+            "    if a and (b or not c):\n",
+            "        return [x for x in a if x]\n",
+            "    for item in b:\n",
+            "        print(item)\n",
+            "    match a:\n",
+            "        case 1 if b:\n",
+            "            pass\n",
+            "        case _:\n",
+            "            pass\n",
+            "    x = a or b or c\n",
+            "    y = 1 if a else 2\n",
+            "    return x and (y or not b)\n",
+        );
+        let parsed = parse_module(source).unwrap();
+        let mut refused = 0;
+        for at in 0..source.len() - 1 {
+            let mut shifted = source.to_owned();
+            shifted.replace_range(at..at + 2, "é");
+            match obligations_of("a.py", &shifted, parsed.suite()) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error, PythonInstrumenterError::InvalidRange, "at {at}");
+                    refused += 1;
+                }
+            }
+        }
+        assert!(refused > 10, "{refused}");
+    }
+
     #[test]
     fn a_source_longer_than_ruff_can_address_is_too_large() {
         assert_eq!(within_text_size(u32::MAX as usize), Ok(()));
@@ -1532,5 +1678,24 @@ mod tests {
         // Its outcome and the loop.
         assert_eq!(collector.manifest.branches.len(), 2);
         assert_eq!(collector.plan.loops.len(), 1);
+    }
+
+    #[test]
+    fn each_python_instrumenter_error_says_what_failed() {
+        use super::PythonInstrumenterError as E;
+        let messages = [
+            E::SourceTooLarge,
+            E::Parse("bad indent".into()),
+            E::InvalidRange,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Python source exceeds the parser range",
+                "Python parse failed: bad indent",
+                "Python parser returned an invalid range",
+            ]
+        );
     }
 }

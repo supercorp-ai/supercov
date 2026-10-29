@@ -1,9 +1,10 @@
 //! Isolated project snapshots and crash-recoverable stable build cache.
 
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
     io::{self, Write},
+    ops::ControlFlow,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -12,10 +13,12 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::fault_fs::{self as fs, OpenOptions};
 use crate::lifecycle::{LifecycleError, ProjectLock, atomic_rename, remove_stored_tree_deferred};
 
-const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
-const WORKSPACE_MARKER_CONTENTS: &[u8] = b"Supercov instrumented workspace. Safe to delete.\n";
+pub(crate) const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
+pub(crate) const WORKSPACE_MARKER_CONTENTS: &[u8] =
+    b"Supercov instrumented workspace. Safe to delete.\n";
 const ROOT_EXCLUSIONS: &[&str] = &[
     ".cache",
     ".git",
@@ -127,6 +130,7 @@ fn omit_escaping_link(path: &Path, target: &Path) {
 /// misjudge every link, and the prefix shows up in every diagnostic. Canonical
 /// paths are simplified back to the ordinary form at the one place they are
 /// made, so nothing downstream ever sees the verbatim spelling.
+#[track_caller]
 pub(crate) fn canonicalize_simplified<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     fs::canonicalize(path).map(simplified)
 }
@@ -221,6 +225,10 @@ fn unique() -> String {
     )
 }
 
+/// A project a lock is taken on is a directory with a name: the lock refuses
+/// any other root.
+const NAMED: &str = "a locked project has a name";
+
 fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
     root.file_name()
         .ok_or_else(|| WorkspaceError::UnsafePath(root.into()))
@@ -229,35 +237,32 @@ fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
 /// The git repository a project is a directory of, when it is not the
 /// repository itself: a package in a monorepo. None for a project inside one
 /// of Supercov's own copies, which is never laid out again.
-fn enclosing_repository(root: &Path) -> Option<&Path> {
+fn enclosing_repository(root: &Path) -> Option<(&Path, &Path)> {
     let repository = root
         .ancestors()
         .skip(1)
-        .find(|directory| directory.join(".git").exists())?;
-    let relative = root.strip_prefix(repository).ok()?;
+        .find(|directory| directory.file_name().is_some() && directory.join(".git").exists())?;
+    let relative = root.strip_prefix(repository);
+    let relative = relative.expect("a root is under its ancestors");
     if relative
         .components()
         .any(|component| component.as_os_str() == ".supercov")
     {
         return None;
     }
-    Some(repository)
+    Some((repository, relative))
 }
 
 /// Where in a copy directory the project's copy sits: under its own name, or,
 /// for a package of a repository, at its path in the repository, so that
 /// what its suite reaches as `../` is where it is in the checkout.
 fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
-    let Some(repository) = enclosing_repository(root) else {
-        return Ok(PathBuf::from(project_name(root)?));
-    };
-    let name = repository
-        .file_name()
-        .ok_or_else(|| WorkspaceError::UnsafePath(repository.into()))?;
-    let relative = root
-        .strip_prefix(repository)
-        .map_err(|_| WorkspaceError::UnsafePath(root.into()))?;
-    Ok(Path::new(name).join(relative))
+    match enclosing_repository(root) {
+        Some((repository, relative)) => {
+            Ok(Path::new(repository.file_name().expect(NAMED)).join(relative))
+        }
+        None => Ok(PathBuf::from(project_name(root)?)),
+    }
 }
 
 /// Around a package's copy, the rest of its repository: each directory on
@@ -267,53 +272,56 @@ fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
 /// alone. Only the package is copied: what lies outside it is the checkout's,
 /// as when the suite runs there, and `.git` is never shared. Best effort.
 fn link_repository_around(root: &Path, workspace: &Path) {
-    let Some(repository) = enclosing_repository(root) else {
+    let Some((_, relative)) = enclosing_repository(root) else {
         return;
     };
-    let (mut real, mut copy) = (root, workspace);
-    while real != repository {
-        let (Some(real_parent), Some(copy_parent)) = (real.parent(), copy.parent()) else {
-            return;
-        };
-        let Ok(entries) = fs::read_dir(real_parent) else {
-            return;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            // A lockfile is never reached as `../`, and a tool that takes the
-            // topmost one as the root (Next.js) found the repository's twice,
-            // beside the copy and in the checkout above `.supercov`, and
-            // warned of a second lockfile the run alone had.
-            if Some(name.as_os_str()) == real.file_name()
-                || matches!(
-                    name.to_str(),
-                    Some(
-                        ".git"
-                            | ".supercov"
-                            | "package-lock.json"
-                            | "npm-shrinkwrap.json"
-                            | "yarn.lock"
-                            | "pnpm-lock.yaml"
-                            | "bun.lock"
-                            | "bun.lockb"
-                    )
-                )
-            {
-                continue;
-            }
-            let destination = copy_parent.join(&name);
-            if fs::symlink_metadata(&destination).is_ok() {
-                continue;
-            }
-            let target = entry.path();
-            let directory = fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir());
-            // Windows: a file link needs a privilege a junction does not.
-            if create_link(&target, &destination, directory).is_err() && !directory {
-                let _ = fs::copy(&target, &destination);
-            }
-        }
-        (real, copy) = (real_parent, copy_parent);
-    }
+    // Each level from the package up to the repository, beside its copy.
+    let levels = root.ancestors().zip(workspace.ancestors());
+    levels
+        .take(relative.components().count())
+        .for_each(|(real, copy)| {
+            const UNDER: &str = "a level below the repository has a parent";
+            let (real_parent, copy_parent) =
+                (real.parent().expect(UNDER), copy.parent().expect(UNDER));
+            let Ok(entries) = fs::read_dir(real_parent) else {
+                return;
+            };
+            entries
+                .filter_map(Result::ok)
+                // A lockfile is never reached as `../`, and a tool that takes
+                // the topmost one as the root (Next.js) found the repository's
+                // twice, beside the copy and in the checkout above `.supercov`,
+                // and warned of a second lockfile the run alone had.
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    Some(name.as_os_str()) != real.file_name()
+                        && !matches!(
+                            name.to_str(),
+                            Some(
+                                ".git"
+                                    | ".supercov"
+                                    | "package-lock.json"
+                                    | "npm-shrinkwrap.json"
+                                    | "yarn.lock"
+                                    | "pnpm-lock.yaml"
+                                    | "bun.lock"
+                                    | "bun.lockb"
+                            )
+                        )
+                })
+                .for_each(|entry| {
+                    let destination = copy_parent.join(entry.file_name());
+                    if fs::symlink_metadata(&destination).is_ok() {
+                        return;
+                    }
+                    let target = entry.path();
+                    let directory = fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir());
+                    // Windows: a file link needs a privilege a junction does not.
+                    if create_link(&target, &destination, directory).is_err() && !directory {
+                        let _ = fs::copy(&target, &destination);
+                    }
+                });
+        });
 }
 
 pub fn workspace_container(root: &Path) -> PathBuf {
@@ -352,7 +360,8 @@ pub fn planted_cargo_configuration(root: &Path, workspace: &Path) -> Option<Path
     }
     // A repository's own, linked around a package's copy, applies to the
     // checkout too.
-    let repository = enclosing_repository(root).and_then(|path| canonicalize_simplified(path).ok());
+    let repository =
+        enclosing_repository(root).and_then(|(path, _)| canonicalize_simplified(path).ok());
     workspace
         .ancestors()
         .skip(1)
@@ -388,8 +397,8 @@ pub(crate) fn copy_directories(container: &Path, copy: usize) -> [PathBuf; 2] {
 }
 
 /// Where the copy a run holds is.
-pub fn cached_workspace_path(root: &Path, lock: &ProjectLock) -> Result<PathBuf, WorkspaceError> {
-    copy_path(root, lock.copy())
+pub fn cached_workspace_path(root: &Path, lock: &ProjectLock) -> PathBuf {
+    copy_path(root, lock.copy()).expect(NAMED)
 }
 
 /// Where one of the project's copies is, by its number.
@@ -468,11 +477,10 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
         ] {
             let path = container.join(name);
             match crate::fault::io("workspace-file", io::ErrorKind::PermissionDenied, || {
-                OpenOptions::new().write(true).create_new(true).open(&path)
+                fs::open_with(OpenOptions::new().write(true).create_new(true), &path)
             }) {
-                Ok(mut file) => file
-                    .write_all(contents)
-                    .and_then(|_| file.sync_all())
+                Ok(mut file) => fs::write_all(&mut file, contents)
+                    .and_then(|_| fs::sync_all(&file))
                     .map_err(|source| io_error(&path, source))?,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     // The marker's contents were checked as the container
@@ -498,8 +506,7 @@ fn lexical_normalize(path: &Path) -> Option<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Prefix(_) | Component::RootDir => normalized.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
                 if !normalized.pop() {
@@ -557,11 +564,13 @@ impl WorkspaceOperations for SystemWorkspaceOperations {
 }
 
 #[cfg(unix)]
+#[track_caller]
 pub(crate) fn create_link(target: &Path, destination: &Path, _directory: bool) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, destination)
+    fs::symlink(target, destination)
 }
 
 #[cfg(windows)]
+#[track_caller]
 pub(crate) fn create_link(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
     if directory {
         // Junctions work on ordinary NTFS installations without requiring
@@ -574,7 +583,7 @@ pub(crate) fn create_link(target: &Path, destination: &Path, directory: bool) ->
             Ok(()) => Ok(()),
             Err(junction_error) => {
                 let _ = fs::remove_dir(destination);
-                std::os::windows::fs::symlink_dir(target, destination).map_err(
+                fs::symlink_dir(target, destination).map_err(
                     |symlink_error| {
                         io::Error::new(
                             symlink_error.kind(),
@@ -590,7 +599,7 @@ pub(crate) fn create_link(target: &Path, destination: &Path, directory: bool) ->
         // A project that already contains a file symlink necessarily runs in
         // an environment capable of creating one. Do not silently copy it:
         // that can change Node realpath/module-identity semantics.
-        std::os::windows::fs::symlink_file(target, destination)
+        fs::symlink_file(target, destination)
     }
 }
 
@@ -653,11 +662,11 @@ fn hard_link_tree(source: &Path, destination: &Path) -> bool {
             let entry = entry?;
             let from = entry.path();
             let to = destination.join(entry.file_name());
-            let file_type = entry.file_type()?;
+            let file_type = fs::file_type(&entry)?;
             if file_type.is_dir() {
                 link(&from, &to)?;
             } else if file_type.is_symlink() {
-                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+                fs::symlink(fs::read_link(&from)?, &to)?;
             } else if file_type.is_file() {
                 fs::hard_link(&from, &to)?;
             } else {
@@ -813,9 +822,8 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 omit_escaping_link(&from, &link);
                 continue;
             }
-            let local_target = lexical_target
-                .strip_prefix(roots.source)
-                .map_err(|_| WorkspaceError::UnsafePath(lexical_target.clone()))?;
+            let local_target = lexical_target.strip_prefix(roots.source);
+            let local_target = local_target.expect("a link that stays is inside the project");
             let relocated = roots.destination.join(local_target);
             let Some(canonical_target) = canonical_target else {
                 // Windows link creation needs the target's type, which a
@@ -826,7 +834,7 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 #[cfg(not(windows))]
                 {
                     let isolated_link = if link.is_absolute() {
-                        pathdiff(&to, &relocated)?
+                        pathdiff(&to, &relocated)
                     } else {
                         link
                     };
@@ -842,13 +850,13 @@ fn copy_tree<Operations: WorkspaceOperations>(
             let isolated_link = if target_metadata.is_dir() {
                 roots.final_destination.join(local_target)
             } else if link.is_absolute() {
-                pathdiff(&to, &relocated)?
+                pathdiff(&to, &relocated)
             } else {
                 link
             };
             #[cfg(not(windows))]
             let isolated_link = if link.is_absolute() {
-                pathdiff(&to, &relocated)?
+                pathdiff(&to, &relocated)
             } else {
                 link
             };
@@ -884,11 +892,12 @@ fn link_loop(_error: &io::Error) -> bool {
     false
 }
 
-fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
-    let from = from
+/// `to` as a link at `from` names it: relative to the link's directory, or
+/// `to` itself where the two have nothing in common.
+fn pathdiff(from: &Path, to: &Path) -> PathBuf {
+    let from_components = from
         .parent()
-        .ok_or_else(|| WorkspaceError::UnsafePath(from.into()))?;
-    let from_components = from.components().collect::<Vec<_>>();
+        .map_or_else(Vec::new, |directory| directory.components().collect());
     let to_components = to.components().collect::<Vec<_>>();
     let common = from_components
         .iter()
@@ -896,16 +905,10 @@ fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
         .take_while(|(left, right)| left == right)
         .count();
     if common == 0 {
-        return Err(WorkspaceError::UnsafePath(to.into()));
+        return to.to_owned();
     }
-    let mut relative = PathBuf::new();
-    for _ in common..from_components.len() {
-        relative.push("..");
-    }
-    for component in &to_components[common..] {
-        relative.push(component.as_os_str());
-    }
-    Ok(relative)
+    let up = std::iter::repeat_n(Component::ParentDir, from_components.len() - common);
+    up.chain(to_components[common..].iter().copied()).collect()
 }
 
 /// One entry of the root `node_modules`. A package of the project's own
@@ -962,7 +965,7 @@ fn link_package(
     {
         let copy = workspace.join(local);
         if fs::symlink_metadata(&copy).is_ok() {
-            return create_link(&pathdiff(to, &copy)?, to, true)
+            return create_link(&pathdiff(to, &copy), to, true)
                 .map_err(|error| io_error(to, error));
         }
     }
@@ -1065,9 +1068,7 @@ fn link_node_modules<Operations: WorkspaceOperations>(
         link_package(root, workspace, &target, &to)?;
         #[cfg(windows)]
         {
-            let file_type = entry
-                .file_type()
-                .map_err(|error| io_error(&target, error))?;
+            let file_type = fs::file_type(&entry).map_err(|error| io_error(&target, error))?;
             let resolved = if file_type.is_symlink() {
                 canonicalize_simplified(&target).map_err(|error| io_error(&target, error))?
             } else {
@@ -1088,9 +1089,10 @@ fn link_node_modules<Operations: WorkspaceOperations>(
     Ok(())
 }
 
-fn require_lock(root: &Path, lock: &ProjectLock) -> Result<(), WorkspaceError> {
+/// The copy the lock holds, when it is the project's.
+fn require_lock(root: &Path, lock: &ProjectLock) -> Result<PathBuf, WorkspaceError> {
     if lock.protects(root) {
-        Ok(())
+        Ok(cached_workspace_path(root, lock))
     } else {
         Err(WorkspaceError::MissingLock)
     }
@@ -1124,25 +1126,17 @@ pub fn prepare_isolated_workspace(
     Ok(workspace)
 }
 
-fn transaction_prefix(root: &Path, kind: &str) -> Result<String, WorkspaceError> {
-    Ok(format!(
-        ".{}.{}-",
-        project_name(root)?.to_string_lossy(),
-        kind
-    ))
+fn transaction_prefix(root: &Path, kind: &str) -> String {
+    let name = root.file_name().expect(NAMED);
+    format!(".{}.{}-", name.to_string_lossy(), kind)
 }
 
-fn transaction_path(
-    root: &Path,
-    lock: &ProjectLock,
-    kind: &str,
-) -> Result<PathBuf, WorkspaceError> {
-    let workspace = cached_workspace_path(root, lock)?;
-    Ok(workspace.parent().expect("workspace parent").join(format!(
+fn transaction_path(root: &Path, workspace: &Path, kind: &str) -> PathBuf {
+    workspace.parent().expect("workspace parent").join(format!(
         "{}{}",
-        transaction_prefix(root, kind)?,
+        transaction_prefix(root, kind),
         unique()
-    )))
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1157,8 +1151,7 @@ pub fn recover_cached_workspace(
     root: &Path,
     lock: &ProjectLock,
 ) -> Result<CacheRecoveryResult, WorkspaceError> {
-    require_lock(root, lock)?;
-    let workspace = cached_workspace_path(root, lock)?;
+    let workspace = require_lock(root, lock)?;
     let parent = workspace.parent().expect("workspace parent");
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
@@ -1171,8 +1164,8 @@ pub fn recover_cached_workspace(
         }
         Err(error) => return Err(io_error(parent, error)),
     };
-    let staging_prefix = transaction_prefix(root, "staging")?;
-    let previous_prefix = transaction_prefix(root, "previous")?;
+    let staging_prefix = transaction_prefix(root, "staging");
+    let previous_prefix = transaction_prefix(root, "previous");
     let mut staging = Vec::new();
     let mut previous = Vec::new();
     let mut invalid_previous = Vec::new();
@@ -1182,9 +1175,7 @@ pub fn recover_cached_workspace(
         if name.starts_with(&staging_prefix) {
             staging.push(entry.path());
         } else if name.starts_with(&previous_prefix) {
-            let metadata = entry
-                .file_type()
-                .map_err(|error| io_error(&entry.path(), error))?;
+            let metadata = fs::file_type(&entry).map_err(|error| io_error(&entry.path(), error))?;
             if metadata.is_dir() {
                 let modified = entry
                     .metadata()
@@ -1251,12 +1242,11 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
     reuse_paths: &[PathBuf],
     operations: &mut Operations,
 ) -> Result<PathBuf, WorkspaceError> {
-    require_lock(root, lock)?;
+    let workspace = require_lock(root, lock)?;
     ensure_container(root)?;
     recover_cached_workspace(root, lock)?;
-    let workspace = cached_workspace_path(root, lock)?;
-    let staging = transaction_path(root, lock, "staging")?;
-    let previous = transaction_path(root, lock, "previous")?;
+    let staging = transaction_path(root, &workspace, "staging");
+    let previous = transaction_path(root, &workspace, "previous");
     let result = (|| {
         let canonical_root =
             canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
@@ -1363,16 +1353,19 @@ fn walk_output_files(
     directory: &Path,
     entries: &mut BTreeMap<PathBuf, (u64, SystemTime)>,
 ) -> Result<(), WorkspaceError> {
-    for entry in fs::read_dir(directory)
+    let mut listed = fs::read_dir(directory)
         .map_err(|error| io_error(directory, error))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| io_error(directory, error))?
-    {
+        .map_err(|error| io_error(directory, error))?;
+    // By name, so a walk meets what it cannot read in the same order on
+    // every platform.
+    listed.sort_by_key(fs::DirEntry::file_name);
+    for entry in listed {
         let path = entry.path();
         let name = entry.file_name();
-        let relative = path
-            .strip_prefix(workspace)
-            .map_err(|_| WorkspaceError::UnsafePath(path.clone()))?
+        let relative = path.strip_prefix(workspace);
+        let relative = relative
+            .expect("a walked path is in the workspace")
             .to_owned();
         // Supercov's generated state never flows back, `.git` is not a
         // command output, and symlinks (the node_modules link above all) point
@@ -1382,26 +1375,17 @@ fn walk_output_files(
         {
             continue;
         }
-        let metadata = entry.metadata().map_err(|error| io_error(&path, error))?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
         // Dependencies are never command outputs. Nested node_modules may be
         // materialised clones (see copy_tree), and a tool's cache inside any
         // node_modules must not flow back into the project's dependency tree.
-        if metadata.is_dir() && name.to_str() == Some("node_modules") {
-            continue;
-        }
-        if fs::symlink_metadata(&path)
-            .map_err(|error| io_error(&path, error))?
-            .file_type()
-            .is_symlink()
-        {
+        if metadata.is_symlink() || metadata.is_dir() && name.to_str() == Some("node_modules") {
             continue;
         }
         if metadata.is_dir() {
             walk_output_files(workspace, &path, entries)?;
         } else if metadata.is_file() {
-            let modified = metadata
-                .modified()
-                .map_err(|error| io_error(&path, error))?;
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
             entries.insert(relative, (metadata.len(), modified));
         }
     }
@@ -1427,18 +1411,22 @@ fn validate_writeback_destination(root: &Path, relative: &Path) -> Result<(), Wo
         return Err(WorkspaceError::UnsafePath(relative.into()));
     }
     let mut current = root.to_owned();
-    for component in relative.components() {
+    let checked = relative.components().try_for_each(|component| {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(WorkspaceError::UnsafePath(current));
+                ControlFlow::Break(Err(WorkspaceError::UnsafePath(current.clone())))
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(error) => return Err(io_error(&current, error)),
+            Ok(_) => ControlFlow::Continue(()),
+            // Nothing below a path that is not there can be a link.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => ControlFlow::Break(Ok(())),
+            Err(error) => ControlFlow::Break(Err(io_error(&current, error))),
         }
+    });
+    match checked {
+        ControlFlow::Break(result) => result,
+        ControlFlow::Continue(()) => Ok(()),
     }
-    Ok(())
 }
 
 /// Paths by the place a reader would look for them: each top-level directory
@@ -1555,9 +1543,7 @@ impl<'a> CargoTargets<'a> {
 
     fn hold(&mut self, relative: &Path) -> bool {
         let mut directory = PathBuf::new();
-        let Some(parent) = relative.parent() else {
-            return false;
-        };
+        let parent = relative.parent().expect("a file's path has a parent");
         for component in parent.components() {
             directory.push(component);
             let workspace = self.workspace;
@@ -1608,7 +1594,7 @@ fn is_build_output(root: &Path, directory: &Path) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .launch_status()
         .is_ok_and(|status| status.code() == Some(0))
 }
 
@@ -1689,9 +1675,6 @@ pub fn console_names(root: &Path, workspace: &Path) -> crate::process_supervisio
 /// `text` with each spelling of the copy's directory replaced by the
 /// project's, when it holds one.
 pub(crate) fn project_named(text: &str, places: &[(String, String)]) -> Option<String> {
-    if !places.iter().any(|(copy, _)| text.contains(copy.as_str())) {
-        return None;
-    }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     // The next place the copy is named, the longest spelling where two start
@@ -1809,27 +1792,34 @@ fn jvm_build_state(workspace: &Path, relative: &Path) -> bool {
         return true;
     }
     let mut module = workspace.to_path_buf();
-    for (index, part) in parts.iter().enumerate() {
-        let output = match part.as_str() {
-            "target" => module.join("pom.xml").is_file(),
-            "build" => [
-                "build.gradle",
-                "build.gradle.kts",
-                "settings.gradle",
-                "settings.gradle.kts",
-            ]
-            .iter()
-            .any(|file| module.join(file).is_file()),
-            _ => false,
-        };
-        if output {
-            return !parts[index + 1..]
+    // A file's path has a part at least.
+    parts
+        .iter()
+        .enumerate()
+        .find_map(|(index, part)| {
+            let output = match part.as_str() {
+                "target" => module.join("pom.xml").is_file(),
+                "build" => [
+                    "build.gradle",
+                    "build.gradle.kts",
+                    "settings.gradle",
+                    "settings.gradle.kts",
+                ]
                 .iter()
-                .any(|inside| JVM_REPORTS.contains(&inside.as_str()));
-        }
-        module.push(part);
-    }
-    false
+                .any(|file| module.join(file).is_file()),
+                _ => false,
+            };
+            if output {
+                return Some(
+                    !parts[index + 1..]
+                        .iter()
+                        .any(|inside| JVM_REPORTS.contains(&inside.as_str())),
+                );
+            }
+            module.push(part);
+            None
+        })
+        .unwrap_or(false)
 }
 
 /// What a run leaves in the copy that is no output of the command's own:
@@ -2034,14 +2024,16 @@ pub fn mirror_git_repository(root: &Path, workspace: &Path) -> Result<(), String
     }
     let target = workspace.join(".git");
     let git = |directory: &Path, arguments: &[&str]| -> Result<String, String> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(directory)
-            .args(arguments)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| format!("git {}: {error}", arguments.join(" ")))?;
+        let output = crate::fault::io("git", io::ErrorKind::NotFound, || {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(arguments)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(std::process::Stdio::null())
+                .launch_output()
+        })
+        .map_err(|error| format!("git {}: {error}", arguments.join(" ")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
@@ -2118,17 +2110,24 @@ pub fn hide_rewritten_files(workspace: &Path, files: &[String]) {
         return;
     }
     let run = |arguments: &[&str], input: &str| {
-        let mut child = std::process::Command::new("git")
-            .arg("-C")
-            .arg(workspace)
-            .args(arguments)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
-        let output = child.wait_with_output().ok()?;
+        let output = crate::fault::io("git", io::ErrorKind::NotFound, || {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(workspace)
+                .args(arguments)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .launch()
+                .and_then(|mut child| {
+                    // Written and closed before the wait; a git that stopped
+                    // reading is still waited for.
+                    let stdin = child.stdin.take().expect("stdin is piped");
+                    let written = { stdin }.write_all(input.as_bytes());
+                    written.and(child.wait_with_output())
+                })
+        })
+        .ok()?;
         output
             .status
             .success()
@@ -2174,9 +2173,7 @@ fn unaccompanied_install_manifest(root: &Path, workspace: &Path, relative: &Path
                     | "bun.lockb"
             )
         });
-    let Some(directory) = relative.parent() else {
-        return false;
-    };
+    let directory = relative.parent().expect("a file's path has a parent");
     manifest
         && workspace.join(directory).join("node_modules").is_dir()
         && !root.join(directory).join("node_modules").exists()
@@ -2214,8 +2211,7 @@ pub fn prune_cached_workspace_sources(
     root: &Path,
     lock: &ProjectLock,
 ) -> Result<Vec<String>, WorkspaceError> {
-    require_lock(root, lock)?;
-    let workspace = cached_workspace_path(root, lock)?;
+    let workspace = require_lock(root, lock)?;
     if fs::symlink_metadata(&workspace).is_err() {
         return Ok(Vec::new());
     }
@@ -2248,7 +2244,7 @@ pub fn prune_cached_workspace_sources(
                     "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "jsx" | "tsx"
                 )
             });
-            if script && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            if script && fs::file_type(&entry).is_ok_and(|kind| kind.is_file()) {
                 fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
                 removed.push(format!(".supercov/{}", entry.file_name().to_string_lossy()));
             }
@@ -2260,6 +2256,17 @@ pub fn prune_cached_workspace_sources(
 
 #[cfg(test)]
 mod tests {
+    /// A file at the project's root is in no directory that could be built
+    /// output, and neither is no file at all.
+    #[test]
+    fn a_file_at_the_root_is_in_no_built_directory() {
+        let mut built = BuiltDirectories::new(Path::new("/nowhere"));
+        built.add(Path::new("file.txt"));
+        built.add(Path::new(""));
+        assert!(built.directories.is_empty() && built.judged.is_empty());
+        assert!(!built.holds(Path::new("file.txt")));
+    }
+
     #[test]
     fn file_urls_match_what_node_derives_for_every_path_shape() {
         use super::file_url_from_slash_path;
@@ -2283,6 +2290,8 @@ mod tests {
             file_url_from_slash_path("/w/p x?q/ü.mjs"),
             "file:///w/p%20x%3Fq/%C3%BC.mjs"
         );
+        // A server named alone is its root.
+        assert_eq!(file_url_from_slash_path("//server"), "file://server/");
     }
 
     #[test]
@@ -2343,6 +2352,336 @@ mod tests {
     }
 
     use super::*;
+
+    /// A tree that cannot be linked -- its directory, its listing, an
+    /// entry's type, a link or a hard link failing -- is not linked, and
+    /// what was made of it is gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_cannot_be_linked_is_left_unmade() {
+        let source = std::env::temp_dir().join(format!("supercov-link-source-{}", unique()));
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/file"), "x").unwrap();
+        std::os::unix::fs::symlink("nested/file", source.join("link")).unwrap();
+        for operation in [
+            "create_dir",
+            "read_dir",
+            "file_type",
+            "read_link",
+            "symlink",
+            "hard_link",
+        ] {
+            let destination = source.with_extension(operation);
+            let linked = crate::fault::during(&format!("fs.{operation}"), || {
+                hard_link_tree(&source, &destination)
+            });
+            assert!(!linked, "{operation}");
+            assert!(!destination.exists(), "{operation}");
+        }
+        let whole = source.with_extension("whole");
+        assert!(hard_link_tree(&source, &whole));
+        assert_eq!(fs::read_to_string(whole.join("link")).unwrap(), "x");
+        fs::remove_dir_all(whole).unwrap();
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    /// Linking a project's dependencies refuses what it cannot make, at each
+    /// step: its own listing and directory, the tools of `.bin` (listed
+    /// first), and a scope's packages. A store linked in place of
+    /// `node_modules` that cannot be resolved or read is refused too.
+    #[cfg(unix)]
+    #[test]
+    fn linking_dependencies_refuses_each_step_that_fails() {
+        let root = project();
+        fs::create_dir_all(root.join("node_modules/@acme/pkg")).unwrap();
+        fs::create_dir_all(root.join("node_modules/plain")).unwrap();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        fs::write(root.join("node_modules/.bin/tool"), "").unwrap();
+        // In sorted order: `.bin` (link_tools), `@acme` (a scope), `plain`.
+        for fault in [
+            "fs.symlink_metadata",
+            "fs.create_dir_all",
+            "fs.read_dir",
+            "fs.create_dir_all@2",
+            "fs.read_dir@2",
+            "fs.symlink",
+            "fs.symlink_metadata@2",
+            "fs.create_dir_all@3",
+            "fs.read_dir@3",
+            "fs.symlink@2",
+        ] {
+            let workspace = root.with_extension(format!("copy-{}", unique()));
+            let linked = crate::fault::during(fault, || {
+                link_node_modules(&root, &workspace, &mut SystemWorkspaceOperations)
+            });
+            assert!(linked.is_err(), "{fault}");
+            let _ = fs::remove_dir_all(workspace);
+        }
+        let store = root.with_extension("store");
+        fs::create_dir_all(store.join("left-pad")).unwrap();
+        let linked_root = project();
+        std::os::unix::fs::symlink(&store, linked_root.join("node_modules")).unwrap();
+        for fault in ["fs.canonicalize", "fs.symlink_metadata@2"] {
+            let workspace = linked_root.with_extension(format!("copy-{}", unique()));
+            let linked = crate::fault::during(fault, || {
+                link_node_modules(&linked_root, &workspace, &mut SystemWorkspaceOperations)
+            });
+            assert!(linked.is_err(), "{fault}");
+            let _ = fs::remove_dir_all(workspace);
+        }
+        for directory in [root, store, linked_root] {
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// Copying a tree refuses each step that fails: its directory and its
+    /// listing, an entry's type, a link's target read, resolved or its type,
+    /// a link remade (resolved, dangling, or a virtual environment's), and a
+    /// nested `node_modules` that could not be linked whole, linked entry by
+    /// entry.
+    #[cfg(unix)]
+    #[test]
+    fn copying_a_tree_refuses_each_step_that_fails() {
+        let copied = |entries: &dyn Fn(&Path), fault: &str| {
+            let source = std::env::temp_dir().join(format!("supercov-copy-source-{}", unique()));
+            fs::create_dir_all(&source).unwrap();
+            entries(&source);
+            let destination = source.with_extension("copy");
+            let canonical = canonicalize_simplified(&source).unwrap();
+            let result = crate::fault::during(fault, || {
+                copy_tree(
+                    &source,
+                    &destination,
+                    CopyRoots {
+                        source: &source,
+                        destination: &destination,
+                        final_destination: &destination,
+                        canonical_source: &canonical,
+                    },
+                    true,
+                    &mut SystemWorkspaceOperations,
+                )
+            });
+            let _ = fs::remove_dir_all(&destination);
+            fs::remove_dir_all(&source).unwrap();
+            result
+        };
+        let plain = |root: &Path| fs::write(root.join("file"), "x").unwrap();
+        let linked = |root: &Path| {
+            fs::write(root.join("file"), "x").unwrap();
+            std::os::unix::fs::symlink("file", root.join("link")).unwrap();
+        };
+        let dangling =
+            |root: &Path| std::os::unix::fs::symlink("missing", root.join("link")).unwrap();
+        let environment = |root: &Path| {
+            fs::create_dir_all(root.join("venv")).unwrap();
+            fs::write(root.join("venv/pyvenv.cfg"), "").unwrap();
+        };
+        // One entry a level, so the order a listing gives them in is one.
+        let tools = |root: &Path| {
+            fs::create_dir_all(root.join("pkg/node_modules/.bin")).unwrap();
+            fs::write(root.join("pkg/node_modules/.bin/tool"), "").unwrap();
+        };
+        let package = |root: &Path| {
+            fs::create_dir_all(root.join("pkg/node_modules/dep")).unwrap();
+            fs::write(root.join("pkg/node_modules/dep/index.js"), "").unwrap();
+        };
+        // A nested `node_modules` that can be neither cloned nor hard-linked.
+        let unlinkable = "directory-clone,fs.hard_link";
+        for (entries, fault) in [
+            (&plain as &dyn Fn(&Path), "fs.create_dir_all".to_owned()),
+            (&plain, "fs.read_dir".to_owned()),
+            (&plain, "fs.symlink_metadata".to_owned()),
+            (&linked, "fs.read_link".to_owned()),
+            (&linked, "fs.canonicalize".to_owned()),
+            (&linked, "fs.metadata".to_owned()),
+            (&linked, "fs.symlink".to_owned()),
+            (&dangling, "fs.symlink".to_owned()),
+            (&environment, "fs.symlink".to_owned()),
+            // The root and `pkg` make two directories and listings first, and
+            // the hard links tried list `node_modules` and its `.bin`.
+            (&tools, format!("{unlinkable},fs.create_dir_all@3")),
+            (&tools, format!("{unlinkable},fs.read_dir@5")),
+            (&tools, format!("{unlinkable},fs.create_dir_all@4")),
+            (&tools, format!("{unlinkable},fs.read_dir@6")),
+            (&package, format!("{unlinkable},fs.symlink")),
+        ] {
+            assert!(copied(entries, &fault).is_err(), "{fault}");
+        }
+        assert!(copied(&tools, unlinkable).is_ok());
+        assert!(copied(&package, unlinkable).is_ok());
+    }
+
+    /// Making a project's container refuses each step that fails: the store,
+    /// the directory made, its marker, and the files written in it. Copying
+    /// a file refuses one it cannot read the size of, and one it cannot copy,
+    /// small or large.
+    #[test]
+    fn making_a_container_and_copying_a_file_refuse_each_step_that_fails() {
+        for fault in [
+            "fs.create_dir_all",
+            "fs.create_dir",
+            "fs.write@2",
+            "fs.write_all",
+        ] {
+            let root = std::env::temp_dir().join(format!("supercov-container-{}", unique()));
+            fs::create_dir_all(&root).unwrap();
+            let made = crate::fault::during(fault, || ensure_container(&root));
+            assert!(made.is_err(), "{fault}: {made:?}");
+            fs::remove_dir_all(root).unwrap();
+        }
+        let root = std::env::temp_dir().join(format!("supercov-copy-file-{}", unique()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("small"), "x").unwrap();
+        fs::write(root.join("large"), vec![0u8; 2 * 1024 * 1024]).unwrap();
+        let mut operations = SystemWorkspaceOperations;
+        for fault in ["fs.symlink_metadata", "fs.copy"] {
+            let copied = crate::fault::during(fault, || {
+                operations.copy_file(&root.join("small"), &root.join("copy"))
+            });
+            assert!(copied.is_err(), "{fault}");
+        }
+        // Into a directory that is not there, a large file is refused too.
+        assert!(
+            operations
+                .copy_file(&root.join("large"), &root.join("missing/large"))
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Preparing a copy refuses each step that fails: the container, the old
+    /// copy cleared, the root resolved, recovery, linking dependencies, a
+    /// reused path that leaves the project, and a reused artifact that cannot
+    /// replace the stale one or be read.
+    #[cfg(unix)]
+    #[test]
+    fn preparing_a_copy_refuses_each_step_that_fails() {
+        let attempt = |setup: &dyn Fn(&Path), fault: &str, reuse: &[PathBuf], isolated: bool| {
+            let root = project();
+            setup(&root);
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let prepared = crate::fault::during(fault, || {
+                if isolated {
+                    prepare_isolated_workspace(&root, "run", &lock)
+                } else {
+                    prepare_cached_workspace(&root, &lock, reuse)
+                }
+            });
+            lock.release().unwrap();
+            let _ = crate::lifecycle::sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+            prepared
+        };
+        let nothing = |_: &Path| {};
+        // A copy prepared once, so the next finds the container and a copy.
+        let prepared_once = |root: &Path| {
+            // A nested output is mirrored, so a reused one replaces a copy.
+            fs::create_dir_all(root.join("packages/app/dist")).unwrap();
+            fs::write(root.join("packages/app/dist/stale.js"), "stale").unwrap();
+            let mut lock = ProjectLock::acquire(root, "once", "now").unwrap();
+            prepare_cached_workspace(root, &lock, &[]).unwrap();
+            prepare_isolated_workspace(root, "run", &lock).unwrap();
+            lock.release().unwrap();
+        };
+        let dependencies_a_file = |root: &Path| fs::write(root.join("node_modules"), "").unwrap();
+        let build = [PathBuf::from("packages/app/dist")];
+        let built = [PathBuf::from("src/index.js")];
+        for (setup, fault, reuse, isolated) in [
+            (
+                &nothing as &dyn Fn(&Path),
+                "fs.create_dir_all",
+                &[][..],
+                false,
+            ),
+            (&prepared_once, "fs.read_dir", &[][..], false),
+            (&prepared_once, "fs.canonicalize", &[][..], false),
+            (&dependencies_a_file, "", &[][..], false),
+            (
+                &prepared_once,
+                "",
+                &[PathBuf::from("../outside")][..],
+                false,
+            ),
+            (&prepared_once, "fs.remove_dir_all", &build[..], false),
+            (&prepared_once, "fs.remove_file", &built[..], false),
+            (&prepared_once, "fs.canonicalize@2", &build[..], false),
+            (&nothing, "fs.create_dir_all", &[][..], true),
+            (&prepared_once, "fs.rename", &[][..], true),
+            (&prepared_once, "fs.canonicalize", &[][..], true),
+        ] {
+            let prepared = attempt(setup, fault, reuse, isolated);
+            assert!(
+                prepared.is_err(),
+                "{fault} {reuse:?} isolated {isolated}: {prepared:?}"
+            );
+        }
+    }
+
+    /// Recovering the cached copy refuses each step that fails: an entry's
+    /// type read, the newest previous copy put back, a leftover removed.
+    #[test]
+    fn recovering_the_cached_copy_refuses_each_step_that_fails() {
+        for (fault, keep_copy) in [
+            ("fs.file_type", true),
+            ("fs.rename", false),
+            ("fs.rename", true),
+        ] {
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            let previous = transaction_path(&root, &workspace, "previous");
+            fs::create_dir_all(&previous).unwrap();
+            if !keep_copy {
+                fs::remove_dir_all(&workspace).unwrap();
+            }
+            let recovered = crate::fault::during(fault, || recover_cached_workspace(&root, &lock));
+            assert!(recovered.is_err(), "{fault} {keep_copy}: {recovered:?}");
+            lock.release().unwrap();
+            let _ = crate::lifecycle::sweep_trash(&root);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// The fault switch the tests here use: a fault named by the place
+    /// that calls its site never fails a call that names no place, and one
+    /// naming an errno fails its place's call with that errno.
+    #[test]
+    fn a_fault_by_place_or_errno_fails_as_it_names() {
+        let unplaced = crate::fault::during("named#1", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(unplaced.is_ok());
+        let errno = crate::fault::during("errno:2", || {
+            crate::fault::io_at(
+                "errno",
+                io::ErrorKind::Other,
+                (std::panic::Location::caller(), "test"),
+                || Ok(()),
+            )
+        });
+        assert_eq!(errno.unwrap_err().raw_os_error(), Some(2));
+        // A fault for another process's role is none of this one's.
+        let elsewhere = crate::fault::during("__no-such-command/named", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(elsewhere.is_ok());
+        let unset = crate::fault::during("env:SUPERCOV_NO_SUCH_VARIABLE/named", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(unset.is_ok());
+        let set = crate::fault::during("env:PATH/named", || {
+            crate::fault::io("named", io::ErrorKind::Other, || Ok(()))
+        });
+        assert!(set.is_err());
+        // Two entries for one site fail each of their calls.
+        let failed = crate::fault::during("named@1,named@3", || {
+            (0..4)
+                .map(|_| crate::fault::io("named", io::ErrorKind::Other, || Ok(())).is_err())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(failed, [true, false, true, false]);
+    }
 
     fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {
         let base =
@@ -2516,6 +2855,25 @@ mod tests {
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
+    /// A copy with no file in it returns nothing.
+    #[test]
+    fn an_empty_copy_returns_nothing() {
+        let (root, workspace) = writeback_fixture("empty-copy");
+        fs::remove_dir_all(&workspace).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        let sync = sync_outputs_of(
+            CommandOutputs::Go,
+            &root,
+            &workspace,
+            &baseline,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(sync, CommandOutputSync::default());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn what_a_go_jvm_or_rust_command_writes_flows_back_and_what_it_builds_stays() {
         // Only JavaScript's command had its files returned. `go test
@@ -2626,11 +2984,15 @@ mod tests {
             "dep",
         )
         .unwrap();
+        // Only a directory of that name is a dependency tree.
+        fs::create_dir_all(workspace.join("notes")).unwrap();
+        fs::write(workspace.join("notes/node_modules"), "a file").unwrap();
         let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
-        assert_eq!(sync.synced, 0);
+        assert_eq!(sync.synced, 1);
         assert!(sync.deleted_in_workspace.is_empty());
         assert!(!root.join("node_modules").exists());
         assert!(!root.join("packages").exists());
+        assert!(root.join("notes/node_modules").is_file());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
@@ -2772,6 +3134,7 @@ mod tests {
             ".next/ 3, coverage/ 1, notes.txt, out/ 1, 2 elsewhere"
         );
         assert_eq!(summarize_paths(&paths[..1]), ".next/ 1");
+        assert_eq!(summarize_paths(&[]), "");
     }
 
     #[test]
@@ -3334,6 +3697,41 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_on_another_project_or_a_root_without_a_name_holds_no_copy() {
+        let (root, other) = (project(), project());
+        let mut lock = ProjectLock::acquire(&other, "run", "now").unwrap();
+        for result in [
+            prepare_isolated_workspace(&root, "run", &lock),
+            prepare_cached_workspace(&root, &lock, &[]),
+            recover_cached_workspace(&root, &lock).map(|_| PathBuf::new()),
+            prune_cached_workspace_sources(&root, &lock).map(|_| PathBuf::new()),
+        ] {
+            assert!(
+                matches!(result, Err(WorkspaceError::MissingLock)),
+                "{result:?}"
+            );
+        }
+        lock.release().unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        assert!(matches!(
+            prepare_isolated_workspace(&root, "..", &lock),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        lock.release().unwrap();
+        let nameless = Path::new("/");
+        assert!(matches!(
+            copy_path(nameless, 1),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            isolated_workspace_path(nameless, "run"),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
     fn everything_supercov_writes_lives_under_the_store() {
         let root = project();
         assert_eq!(
@@ -3636,17 +4034,11 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         ensure_container(&root).unwrap();
-        let workspace = cached_workspace_path(&root, &lock).unwrap();
+        let workspace = cached_workspace_path(&root, &lock);
         let parent = workspace.parent().unwrap();
         fs::create_dir_all(parent).unwrap();
-        let previous = parent.join(format!(
-            "{}old",
-            transaction_prefix(&root, "previous").unwrap()
-        ));
-        let staging = parent.join(format!(
-            "{}new",
-            transaction_prefix(&root, "staging").unwrap()
-        ));
+        let previous = parent.join(format!("{}old", transaction_prefix(&root, "previous")));
+        let staging = parent.join(format!("{}new", transaction_prefix(&root, "staging")));
         fs::create_dir_all(&previous).unwrap();
         fs::write(previous.join("complete"), "yes").unwrap();
         fs::create_dir_all(&staging).unwrap();
@@ -3669,26 +4061,24 @@ mod tests {
         assert_eq!(lexical_normalize(&path("/a/./b/../c")), Some(path("/a/c")));
         assert_eq!(lexical_normalize(&path("a/../..")), None);
         assert_eq!(lexical_normalize(&path("")), Some(path("")));
+        assert_eq!(lexical_normalize(&path("./a")), Some(path("a")));
         assert!(inside(&path("/r"), &path("/r")));
         assert!(inside(&path("/r"), &path("/r/a/b")));
         assert!(!inside(&path("/r"), &path("/r/../x")));
         assert!(!inside(&path("/r"), &path("/rx")));
         assert_eq!(
-            pathdiff(&path("/r/a/link"), &path("/r/b/target")).unwrap(),
+            pathdiff(&path("/r/a/link"), &path("/r/b/target")),
             path("../b/target")
         );
         assert_eq!(
-            pathdiff(&path("/r/link"), &path("/r/target")).unwrap(),
+            pathdiff(&path("/r/link"), &path("/r/target")),
             path("target")
         );
-        assert!(matches!(
+        assert_eq!(
             pathdiff(&path("a/link"), &path("b/target")),
-            Err(WorkspaceError::UnsafePath(_))
-        ));
-        assert!(matches!(
-            pathdiff(&path("/"), &path("/x")),
-            Err(WorkspaceError::UnsafePath(_))
-        ));
+            path("b/target")
+        );
+        assert_eq!(pathdiff(&path("/"), &path("/x")), path("/x"));
     }
 
     /// The workspace container is Supercov's only where it holds the marker
@@ -3915,6 +4305,23 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A name that is not UTF-8 is refused: the copy could not be judged by
+    /// it. Linux allows one; macOS's file systems do not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_stops_the_copy() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = project();
+        fs::write(root.join(std::ffi::OsStr::from_bytes(b"src/\xff.js")), "x").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        assert!(matches!(
+            prepare_isolated_workspace(&root, "run", &lock),
+            Err(WorkspaceError::UnsafePath(path)) if path.ends_with(std::ffi::OsStr::from_bytes(b"\xff.js"))
+        ));
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A link that stays in the project by its path but leaves it through
     /// another link on the way is left out.
     #[cfg(unix)]
@@ -3996,7 +4403,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         ensure_container(&root).unwrap();
-        let workspace = cached_workspace_path(&root, &lock).unwrap();
+        let workspace = cached_workspace_path(&root, &lock);
         let parent = workspace.parent().unwrap().to_owned();
         fs::write(&parent, "").unwrap();
         assert!(matches!(
@@ -4005,10 +4412,7 @@ mod tests {
         ));
         fs::remove_file(&parent).unwrap();
         fs::create_dir_all(&parent).unwrap();
-        let previous = parent.join(format!(
-            "{}old",
-            transaction_prefix(&root, "previous").unwrap()
-        ));
+        let previous = parent.join(format!("{}old", transaction_prefix(&root, "previous")));
         fs::write(&previous, "not a generation").unwrap();
         let result = recover_cached_workspace(&root, &lock).unwrap();
         assert!(!result.restored_previous);
@@ -4266,9 +4670,60 @@ mod tests {
             [".supercov/vitest.config.mjs"]
         );
         assert!(workspace.join(".supercov/helpers.js").is_dir());
+        // An empty copy, and one whose generated directory is empty.
+        fs::remove_dir_all(workspace.join(".supercov")).unwrap();
+        assert!(
+            prune_cached_workspace_sources(&root, &lock)
+                .unwrap()
+                .is_empty()
+        );
+        fs::create_dir(workspace.join(".supercov")).unwrap();
+        assert!(
+            prune_cached_workspace_sources(&root, &lock)
+                .unwrap()
+                .is_empty()
+        );
         lock.release().unwrap();
         crate::lifecycle::sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Pruning refuses each step that fails: listing the copy, moving an
+    /// entry to the trash, removing a generated script; and an entry whose
+    /// name is not UTF-8. No command sees the refusal -- a run prunes its
+    /// copy on the way out and ends as it would have -- so it is checked here.
+    #[test]
+    fn pruning_refuses_each_step_that_fails() {
+        for fault in ["fs.read_dir@1", "fs.create_dir_all@1", "fs.remove_file@1"] {
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            fs::create_dir_all(workspace.join(".supercov")).unwrap();
+            fs::write(workspace.join(".supercov/vitest.config.mjs"), "").unwrap();
+            assert!(
+                crate::fault::during(fault, || prune_cached_workspace_sources(&root, &lock))
+                    .is_err(),
+                "{fault}"
+            );
+            lock.release().unwrap();
+            crate::lifecycle::sweep_trash(&root).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            fs::write(workspace.join(std::ffi::OsStr::from_bytes(b"bad-\xff")), "").unwrap();
+            assert!(matches!(
+                prune_cached_workspace_sources(&root, &lock),
+                Err(WorkspaceError::UnsafePath(_))
+            ));
+            lock.release().unwrap();
+            crate::lifecycle::sweep_trash(&root).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// Linking the repository around a copy is best effort: where the
@@ -4345,6 +4800,351 @@ mod tests {
             cfg!(unix),
             "{linked:?}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_workspace_error_says_what_failed() {
+        let path = PathBuf::from("project/src");
+        let messages = [
+            WorkspaceError::Io {
+                path: path.clone(),
+                source: io::Error::other("disk full"),
+            },
+            WorkspaceError::UnsafePath(path.clone()),
+            WorkspaceError::UnsupportedEntry(path.clone()),
+            WorkspaceError::MissingLock,
+            WorkspaceError::from(LifecycleError::LockUnavailable),
+            WorkspaceError::UnsupportedPlatform("no links"),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "project/src: disk full",
+                "unsafe workspace path: project/src",
+                "unsupported filesystem entry in isolated project: project/src",
+                "isolated workspace preparation requires the active project lock",
+                "could not acquire the Supercov project lock",
+                "unsupported workspace platform: no links",
+            ]
+        );
+    }
+
+    /// A venv search that cannot list a directory, or look at an entry,
+    /// finds no environment there.
+    #[cfg(unix)]
+    #[test]
+    fn a_virtual_environment_search_that_cannot_look_finds_none() {
+        let base = project();
+        let venv = base.join("venv");
+        fs::create_dir_all(&venv).unwrap();
+        fs::write(venv.join("pyvenv.cfg"), "home = /usr\n").unwrap();
+        let workspace = base.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        std::os::unix::fs::symlink(&venv, workspace.join(".venv")).unwrap();
+        assert!(links_a_virtual_environment(&workspace));
+        for fault in [
+            "fs.read_dir#workspace.rs:46",
+            "fs.symlink_metadata#workspace.rs:52",
+        ] {
+            assert!(
+                !crate::fault::during(fault, || links_a_virtual_environment(&workspace)),
+                "{fault}"
+            );
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A level of the repository that cannot be listed gets nothing linked
+    /// beside its copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_level_that_cannot_be_listed_is_not_linked_around() {
+        let repository = project();
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::write(repository.join("tsconfig.base.json"), "{}").unwrap();
+        let root = repository.join("packages/web");
+        fs::create_dir_all(&root).unwrap();
+        let elsewhere = project();
+        let workspace = elsewhere.join("repository/packages/web");
+        fs::create_dir_all(&workspace).unwrap();
+        crate::fault::during(
+            "fs.read_dir#workspace.rs:286@1,fs.read_dir#workspace.rs:286@2",
+            || {
+                link_repository_around(&root, &workspace);
+            },
+        );
+        assert!(!elsewhere.join("repository/tsconfig.base.json").exists());
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
+    }
+
+    /// In a package of a repository, a `.cargo` above the copy is Supercov's
+    /// only when it leads out of the repository: one of the repository's
+    /// own applies to the checkout too.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_configuration_in_a_repository_is_one_that_leads_out_of_it() {
+        let repository = project();
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        let root = repository.join("packages/crate");
+        let copies = root.join(".supercov/workspaces");
+        let workspace = copies.join("x/repository/packages/crate");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(copies.join(".cargo")).unwrap();
+        assert_eq!(planted_cargo_configuration(&root, &workspace), None);
+        let outside = project();
+        std::os::unix::fs::symlink(&outside, copies.join("x/.cargo")).unwrap();
+        assert_eq!(
+            planted_cargo_configuration(&root, &workspace),
+            Some(copies.join("x/.cargo"))
+        );
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    /// A nested node_modules whose listing fails part way through its hard
+    /// links, or that cannot be made at all, is linked package by package
+    /// -- an empty one as an empty directory; one whose own tools cannot
+    /// get their launchers stops the copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_dependency_tree_falls_back_or_stops_by_what_failed() {
+        let prepare = |fault: &str, tools: bool| {
+            let root = project();
+            let nested = root.join("packages/a/node_modules");
+            fs::create_dir_all(&nested).unwrap();
+            if tools {
+                fs::create_dir_all(nested.join("left-pad")).unwrap();
+                fs::create_dir_all(nested.join(".bin")).unwrap();
+                fs::write(nested.join(".bin/biome"), "#!/bin/sh\n").unwrap();
+            }
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let faults = format!("directory-clone,{fault}");
+            let prepared =
+                crate::fault::during(&faults, || prepare_isolated_workspace(&root, "run", &lock));
+            lock.release().unwrap();
+            (root, prepared)
+        };
+        let (root, prepared) = prepare("fs.read_dir entry#workspace.rs:661", true);
+        let copied = prepared.unwrap().join("packages/a/node_modules");
+        assert_eq!(
+            fs::read_link(copied.join("left-pad")).unwrap(),
+            root.join("packages/a/node_modules/left-pad")
+        );
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, prepared) = prepare("fs.create_dir#workspace.rs:660", false);
+        let copied = prepared.unwrap().join("packages/a/node_modules");
+        assert_eq!(fs::read_dir(copied).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+
+        for fault in [
+            "fs.read_dir entry#source_tools.rs:186",
+            "fs.create_dir#workspace.rs:660,fs.write#workspace.rs:1001",
+        ] {
+            let (root, prepared) = prepare(fault, true);
+            assert!(
+                matches!(&prepared, Err(WorkspaceError::Io { path, .. }) if path.starts_with(&root)),
+                "{fault}: {prepared:?}"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// A link that climbs above the file system's root leads nowhere a path
+    /// can name, and is left out of the copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_above_the_file_system_root_is_omitted() {
+        let root = project();
+        std::os::unix::fs::symlink("../".repeat(64), root.join("src/up")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert!(fs::symlink_metadata(workspace.join("src/up")).is_err());
+        assert!(workspace.join("src/index.js").is_file());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The root's dependencies linked package by package: an empty scope is
+    /// an empty directory, and a workspace package whose link to its copy
+    /// cannot be made stops the copy.
+    #[cfg(unix)]
+    #[test]
+    fn root_dependencies_link_an_empty_scope_and_stop_on_a_failed_link() {
+        let root = project();
+        fs::create_dir_all(root.join("node_modules/@empty")).unwrap();
+        fs::create_dir_all(root.join("packages/app/src")).unwrap();
+        fs::write(root.join("packages/app/src/index.js"), "").unwrap();
+        std::os::unix::fs::symlink("../packages/app", root.join("node_modules/app")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert_eq!(
+            fs::read_dir(workspace.join("node_modules/@empty"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(
+            fs::read_link(workspace.join("node_modules/app"))
+                .unwrap()
+                .is_relative()
+        );
+        let failed = crate::fault::during("fs.symlink#workspace.rs:968", || {
+            prepare_isolated_workspace(&root, "run", &lock)
+        });
+        assert!(
+            matches!(&failed, Err(WorkspaceError::Io { path, .. }) if path.ends_with("node_modules/app")),
+            "{failed:?}"
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A recovery whose listing of the copies fails part way stops.
+    #[test]
+    fn a_recovery_that_cannot_list_the_copies_stops() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let recovered = crate::fault::during("fs.read_dir entry#workspace.rs:1156", || {
+            recover_cached_workspace(&root, &lock)
+        });
+        assert!(
+            matches!(recovered, Err(WorkspaceError::Io { .. })),
+            "{recovered:?}"
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A reused artifact that cannot be copied into the new copy, a file or
+    /// a directory of them, stops the preparation; and a staging copy that
+    /// cannot be cleared away after that stops it with that error.
+    #[test]
+    fn a_reused_artifact_that_cannot_be_copied_stops_the_preparation() {
+        for (reused, clear) in [
+            ("out.js", ""),
+            ("build", ""),
+            ("out.js", "fs.create_dir_all#workspace.rs:1324"),
+        ] {
+            let root = project();
+            let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+            let first = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+            fs::create_dir_all(first.join("build")).unwrap();
+            fs::write(first.join("build/output.js"), "instrumented").unwrap();
+            fs::write(first.join("out.js"), "instrumented").unwrap();
+            let reuse = [PathBuf::from(reused)];
+            let mut counting = FaultOperations {
+                copy_count: 0,
+                fail_copy_at: None,
+                rename_count: 0,
+                fail_rename_at: None,
+            };
+            prepare_cached_workspace_with_operations(&root, &lock, &reuse, &mut counting).unwrap();
+            let mut failing = FaultOperations {
+                copy_count: 0,
+                fail_copy_at: Some(counting.copy_count),
+                rename_count: 0,
+                fail_rename_at: None,
+            };
+            let failed = crate::fault::during(clear, || {
+                prepare_cached_workspace_with_operations(&root, &lock, &reuse, &mut failing)
+            });
+            match failed {
+                Err(WorkspaceError::Io { source, .. }) if clear.is_empty() => {
+                    assert_eq!(source.kind(), io::ErrorKind::StorageFull, "{reused}");
+                }
+                Err(WorkspaceError::Lifecycle(_)) if !clear.is_empty() => {}
+                other => panic!("{reused} {clear}: {other:?}"),
+            }
+            lock.release().unwrap();
+            crate::lifecycle::sweep_trash(&root).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Writing back stops at a file it cannot look at or read, whichever
+    /// language's command wrote it; a file that is no UTF-8 text is copied
+    /// as it is.
+    #[test]
+    fn writeback_stops_at_a_file_it_cannot_read() {
+        for (kind, fault) in [
+            (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1378"),
+            (CommandOutputs::Go, "fs.metadata#workspace.rs:1643"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1647"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1749"),
+            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2197"),
+        ] {
+            let (root, workspace) = writeback_fixture("unreadable");
+            let baseline = workspace_output_baseline(&workspace).unwrap();
+            fs::write(workspace.join("report.txt"), "written").unwrap();
+            let synced = crate::fault::during(fault, || {
+                sync_outputs_of(kind, &root, &workspace, &baseline, &BTreeSet::new())
+            });
+            assert!(
+                matches!(&synced, Err(WorkspaceError::Io { path, .. }) if path.ends_with("report.txt")),
+                "{fault}: {synced:?}"
+            );
+            fs::remove_dir_all(root.parent().unwrap()).unwrap();
+        }
+        let (root, workspace) = writeback_fixture("not-utf8");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::write(workspace.join("latin1.txt"), b"caf\xe9").unwrap();
+        sync_outputs_of(
+            CommandOutputs::Go,
+            &root,
+            &workspace,
+            &baseline,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join("latin1.txt")).unwrap(), b"caf\xe9");
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// Text that names no copy is not renamed.
+    #[test]
+    fn text_naming_no_copy_is_not_renamed() {
+        let places = [("/tmp/copy".to_owned(), "/home/project".to_owned())];
+        assert_eq!(project_named("nothing here", &places), None);
+        assert_eq!(project_named("/tmp/copy-old", &places), None);
+    }
+
+    /// The workspace repository is best effort: a git that cannot start
+    /// hides nothing, and an old repository that cannot be cleared away is
+    /// an error.
+    #[test]
+    fn a_workspace_repository_git_cannot_reach_is_left_as_it_is() {
+        let (root, workspace) = writeback_fixture("git-unreachable");
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        crate::fault::during("git", || {
+            hide_rewritten_files(&workspace, &["src/app.ts".to_owned()]);
+        });
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2049", || {
+            mirror_git_repository(&root, &workspace)
+        });
+        assert!(mirrored.is_err());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// Pruning stops at an entry of the copy it cannot read.
+    #[test]
+    fn pruning_stops_at_an_entry_it_cannot_read() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2220", || {
+            prune_cached_workspace_sources(&root, &lock)
+        });
+        assert!(
+            matches!(pruned, Err(WorkspaceError::Io { .. })),
+            "{pruned:?}"
+        );
+        lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }

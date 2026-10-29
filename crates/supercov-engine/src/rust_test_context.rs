@@ -41,11 +41,13 @@ pub fn rust_test_context_id(test: &str) -> Result<u64, RustTestContextError> {
     if test.is_empty() || test.contains('\0') {
         return Err(RustTestContextError::InvalidTestName);
     }
-    let mut value = OFFSET_BASIS;
-    for byte in DOMAIN.iter().copied().chain(test.bytes()) {
-        value ^= u64::from(byte);
-        value = value.wrapping_mul(PRIME);
-    }
+    let value = DOMAIN
+        .iter()
+        .copied()
+        .chain(test.bytes())
+        .fold(OFFSET_BASIS, |value, byte| {
+            (value ^ u64::from(byte)).wrapping_mul(PRIME)
+        });
     Ok(unreserved(value))
 }
 
@@ -122,6 +124,13 @@ mod tests {
             preflight_rust_test_contexts(["same".into(), "same".into()]),
             Err(RustTestContextError::DuplicateTest(_))
         ));
+        // A name that cannot be numbered stops the preflight.
+        assert_eq!(
+            preflight_with(["named".into()], |_| Err(
+                RustTestContextError::InvalidTestName
+            )),
+            Err(RustTestContextError::InvalidTestName)
+        );
         assert!(matches!(
             preflight_with(["first".into(), "second".into()], |_| Ok(7)),
             Err(RustTestContextError::Collision { context_id: 7, .. })
@@ -130,6 +139,29 @@ mod tests {
         assert_eq!(
             contexts.keys().cloned().collect::<Vec<_>>(),
             ["first", "second"]
+        );
+    }
+
+    #[test]
+    fn each_test_context_error_says_what_failed() {
+        use super::RustTestContextError as E;
+        let messages = [
+            E::InvalidTestName,
+            E::DuplicateTest("a::b".into()),
+            E::Collision {
+                context_id: 255,
+                first: "a".into(),
+                second: "b".into(),
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "Rust test name is empty or contains NUL",
+                "duplicate Rust test identity a::b",
+                "Rust test context 00000000000000ff collides between a and b",
+            ]
         );
     }
 }

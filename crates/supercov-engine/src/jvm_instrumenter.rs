@@ -54,133 +54,16 @@ pub fn parse(
     };
     parser
         .set_language(&grammar)
-        .map_err(|error| JvmInstrumenterError::Parse(error.to_string()))?;
+        .expect("the JVM grammars are built for this tree-sitter");
     let tree = parser
         .parse(source, None)
-        .ok_or_else(|| JvmInstrumenterError::Parse("parser returned no tree".into()))?;
+        .expect("a parser given its language and no time limit returns a tree");
     if tree.root_node().has_error() {
-        if language == JvmLanguage::Kotlin
-            && let Some(joined) = constructors_joined(source)
-            && let Some(retried) = parser
-                .parse(&joined, None)
-                .filter(|retried| !retried.root_node().has_error())
-        {
-            return Ok(retried);
-        }
         return Err(JvmInstrumenterError::Parse(
             crate::go_instrumenter::parse_failure(&tree, source),
         ));
     }
     Ok(tree)
-}
-
-/// The source with each primary constructor that starts a line moved onto its
-/// class's line, every byte and every line kept where it was.
-///
-/// Kotlin lets a nested class put `private constructor(` on the line after its
-/// name, and moshi's `JsonReader.Options` does. tree-sitter's Kotlin grammar
-/// ends the class header at that line break and reads the rest as a secondary
-/// constructor of the enclosing class -- which cannot declare properties -- so
-/// the whole file fails to parse. Moving the line break from before the
-/// modifiers to after `constructor` is something the grammar reads as
-/// intended. The rewrite swaps whitespace with the header's own words, so
-/// offsets and line numbers inside every body are unchanged and the tree reads
-/// against the original source.
-fn constructors_joined(source: &str) -> Option<String> {
-    let mut out = String::with_capacity(source.len());
-    let mut changed = false;
-    let mut rest = source;
-    while let Some(newline) = rest.find('\n') {
-        let line = &rest[..newline];
-        let after = &rest[newline + 1..];
-        let indent_len = after.len() - after.trim_start_matches([' ', '\t']).len();
-        let next = &after[indent_len..];
-        let header = line.trim_end_matches([' ', '\t', '\r']);
-        if let Some(keyword) = constructor_prefix(next)
-            && ends_class_header(header)
-        {
-            // trailing whitespace + line break + indent, then the modifiers
-            // and the keyword: the words go first, behind one separating
-            // space, and the whitespace after them -- one byte shorter, which
-            // the separating space makes up.
-            let whitespace = format!("{}\n{}", &line[header.len()..], &after[..indent_len]);
-            let words = &next[..keyword];
-            let original = format!("{whitespace}{words}");
-            let (header, rotated) = match whitespace.find([' ', '\t']) {
-                Some(at) => (
-                    header.to_owned(),
-                    format!(" {words}{}{}", &whitespace[..at], &whitespace[at + 1..]),
-                ),
-                // No byte to spare after the header: the last space among the
-                // words becomes the line break, or failing that the header
-                // gives up one byte of its own indent.
-                None => match (words.rfind(' '), header.strip_prefix([' ', '\t'])) {
-                    (Some(at), _) => (
-                        header.to_owned(),
-                        format!(" {}\n{}", &words[..at], &words[at + 1..]),
-                    ),
-                    (None, Some(outdented)) => (outdented.to_owned(), format!(" {words}\n")),
-                    (None, None) => (header.to_owned(), original.clone()),
-                },
-            };
-            changed |= rotated != original;
-            out.push_str(&header);
-            out.push_str(&rotated);
-            rest = &next[keyword..];
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-        rest = after;
-    }
-    out.push_str(rest);
-    debug_assert_eq!(out.len(), source.len());
-    changed.then_some(out)
-}
-
-/// The length of `[modifiers or annotations] constructor` when a line starts
-/// with a primary constructor.
-fn constructor_prefix(line: &str) -> Option<usize> {
-    let mut at = 0usize;
-    loop {
-        let word = &line[at..];
-        let length = word
-            .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '@' | '.')))
-            .unwrap_or(word.len());
-        if length == 0 {
-            return None;
-        }
-        let name = &word[..length];
-        let tail = &word[length..];
-        if name == "constructor" {
-            return tail.trim_start().starts_with('(').then_some(at + length);
-        }
-        let modifier = name.starts_with('@')
-            || matches!(name, "private" | "protected" | "internal" | "public");
-        if !modifier || !tail.starts_with(' ') {
-            return None;
-        }
-        at += length + 1;
-    }
-}
-
-/// Whether a line ends with `class Name` or `class Name<T>`, as a header whose
-/// constructor comes next would.
-fn ends_class_header(line: &str) -> bool {
-    let line = line.trim_end();
-    let name = match line.strip_suffix('>') {
-        Some(_) => line.rfind('<').map(|at| &line[..at]).unwrap_or(line),
-        None => line,
-    };
-    let name = name.trim_end();
-    let start = name
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map_or(0, |at| at + 1);
-    let before = name[..start].trim_end();
-    start < name.len()
-        && before.ends_with("class")
-        && !before[..before.len() - "class".len()]
-            .ends_with(|c: char| c.is_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -426,7 +309,8 @@ impl Collector<'_> {
         let id = self.id(node, "decision");
         let index = self.decision_base as usize + self.widths.len();
         self.widths.push(leaves.len().min(64) as u8);
-        for (position, leaf) in leaves.iter().enumerate() {
+        // A decision has a leaf at least.
+        leaves.iter().enumerate().for_each(|(position, leaf)| {
             // Java and Kotlin both evaluate an argument only when the call is
             // reached, so a wrapped right-hand operand runs exactly when the
             // unwrapped one would have.
@@ -436,7 +320,7 @@ impl Collector<'_> {
                 format!("{RUNTIME_CLASS}.c({index}, {position}, "),
             );
             self.edit(leaf.end_byte(), 20, ")".to_owned());
-        }
+        });
         self.decisions.push(DecisionMeta {
             id,
             file: self.file.to_owned(),
@@ -467,25 +351,28 @@ impl Collector<'_> {
     /// behaviour: it is the branch the program already took.
     fn record_arms(&mut self, node: Node, language: JvmLanguage, probes: &[u64]) {
         let (consequence, alternative) = arms(node, language);
-        for (arm, probe) in [consequence, alternative].into_iter().zip(probes) {
-            match arm {
-                // `ensure_block` has already braced an unbraced arm, and a
-                // store ranked above that brace lands inside it.
-                Some(arm) if arm.kind() == "block" => self.store(arm.start_byte() + 1, *probe),
-                Some(arm) => self.store(arm.start_byte(), *probe),
-                // Ranked above the brace `ensure_block` may have added at
-                // this same offset. Edits at one offset are applied highest
-                // rank first and each pushes the last to the right, so a
-                // lower rank here would put the `else` inside the braces
-                // rather than after them -- which is what an unbraced arm on
-                // one line produced, and it is not Kotlin.
-                None => self.edit(
-                    node.end_byte(),
-                    70,
-                    format!(" else {{ {HITS}[{probe}] = 2; }}"),
-                ),
-            }
-        }
+        [consequence, alternative]
+            .into_iter()
+            .zip(probes)
+            .for_each(|(arm, probe)| {
+                match arm {
+                    // `ensure_block` has already braced an unbraced arm, and a
+                    // store ranked above that brace lands inside it.
+                    Some(arm) if arm.kind() == "block" => self.store(arm.start_byte() + 1, *probe),
+                    Some(arm) => self.store(arm.start_byte(), *probe),
+                    // Ranked above the brace `ensure_block` may have added at
+                    // this same offset. Edits at one offset are applied highest
+                    // rank first and each pushes the last to the right, so a
+                    // lower rank here would put the `else` inside the braces
+                    // rather than after them -- which is what an unbraced arm on
+                    // one line produced, and it is not Kotlin.
+                    None => self.edit(
+                        node.end_byte(),
+                        70,
+                        format!(" else {{ {HITS}[{probe}] = 2; }}"),
+                    ),
+                }
+            });
     }
 
     /// Braces a loop's body, where it has one: a Kotlin `while` may not.
@@ -551,20 +438,21 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
                 .unwrap_or("");
             if operator == "&&" || operator == "||" {
                 // The grammar gives every binary expression both operands.
-                for operand in ["left", "right"]
+                // A binary expression has both its operands.
+                ["left", "right"]
                     .into_iter()
                     .filter_map(|field| node.child_by_field_name(field))
-                {
-                    condition_nodes(operand, source, out);
-                }
+                    .for_each(|operand| condition_nodes(operand, source, out));
                 return;
             }
             out.push(node);
         }
-        "parenthesized_expression" => match first_named_child(node) {
-            Some(inner) => condition_nodes(inner, source, out),
-            None => out.push(node),
-        },
+        // A tree with no error holds an expression in parentheses.
+        "parenthesized_expression" => condition_nodes(
+            first_named_child(node).expect("parentheses hold an expression"),
+            source,
+            out,
+        ),
         _ => out.push(node),
     }
 }
@@ -592,7 +480,7 @@ fn opening_contract<'tree>(
     if first.kind() != "call_expression" {
         return None;
     }
-    let callee = first.child(0)?;
+    let callee = first.child(0).expect("a call has its callee");
     (source[callee.byte_range()].trim() == "contract").then_some(first)
 }
 
@@ -703,12 +591,15 @@ fn arms<'t>(node: Node<'t>, language: JvmLanguage) -> (Option<Node<'t>>, Option<
 
 /// The expression inside `if (...)`. Java's grammar makes its condition a
 /// parenthesized expression; Kotlin's holds the expression itself.
-fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
-    let condition = node.child_by_field_name("condition")?;
+fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Node<'t> {
+    // A tree with no error gives every `if` a condition.
+    let condition = node
+        .child_by_field_name("condition")
+        .expect("an if has its condition");
     if language == JvmLanguage::Java {
-        return first_named_child(condition);
+        return first_named_child(condition).expect("parentheses hold an expression");
     }
-    Some(condition)
+    condition
 }
 
 /// The first named child that is not a comment: tree-sitter names comments
@@ -797,13 +688,11 @@ fn walk(collector: &mut Collector, node: Node) {
                 }));
             } else {
                 let probes = collector.add_branch(node, "value", &["true", "false"]);
-                let decision = collector.add_decision(node, "value");
-                let wrapper = match decision {
-                    Some(index) => {
-                        format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1])
-                    }
-                    None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-                };
+                // `&&` or `||` has two operands, each a condition at least.
+                let index = collector
+                    .add_decision(node, "value")
+                    .expect("a logical value has two conditions");
+                let wrapper = format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]);
                 collector.edit(node.start_byte(), 5, wrapper);
                 collector.edit(node.end_byte(), 5, ")".to_owned());
             }
@@ -941,13 +830,15 @@ fn walk(collector: &mut Collector, node: Node) {
 /// The grammar gives every `if` a condition.
 fn if_node(collector: &mut Collector, node: Node) -> Option<()> {
     let language = collector.language;
-    let condition = condition_of(node, language)?;
+    let condition = condition_of(node, language);
     let probes = collector.add_branch(node, "if", &["true", "false"]);
     // An arm written without braces has nowhere to record itself.
     let (consequence, alternative) = arms(node, language);
-    for arm in [consequence, alternative].into_iter().flatten() {
-        collector.ensure_block(arm);
-    }
+    // An `if` has its consequence at least.
+    [consequence, alternative]
+        .into_iter()
+        .flatten()
+        .for_each(|arm| collector.ensure_block(arm));
     if narrows_a_type(condition, collector.source, language) {
         // The condition stays exactly as written, and the branch is
         // recorded from inside the arms instead. Which way it went
@@ -1011,78 +902,72 @@ fn is_logical_operand_parent(parent: Node, source: &str) -> bool {
 /// Whether `node` sits in the condition of an `if` or a loop, which is
 /// measured there, before any lambda or class that starts code of its own.
 fn in_measured_condition(node: Node) -> bool {
-    let mut child = node;
-    while let Some(parent) = child.parent() {
-        if matches!(
-            parent.kind(),
-            "lambda_expression"
-                | "class_body"
-                | "method_declaration"
-                | "constructor_declaration"
-                | "lambda_literal"
-                | "anonymous_function"
-                | "function_declaration"
-        ) {
-            return false;
-        }
-        if matches!(
-            parent.kind(),
-            "if_statement"
-                | "while_statement"
-                | "for_statement"
-                | "do_statement"
-                | "if_expression"
-                | "do_while_statement"
-        ) && parent
-            .child_by_field_name("condition")
-            .is_some_and(|condition| condition.byte_range().contains(&node.start_byte()))
-        {
-            return true;
-        }
-        child = parent;
-    }
-    false
+    // A node of a file is never its root: it has a parent.
+    std::iter::successors(node.parent(), |parent| parent.parent())
+        .find_map(|parent| {
+            if matches!(
+                parent.kind(),
+                "lambda_expression"
+                    | "class_body"
+                    | "method_declaration"
+                    | "constructor_declaration"
+                    | "lambda_literal"
+                    | "anonymous_function"
+                    | "function_declaration"
+            ) {
+                return Some(false);
+            }
+            (matches!(
+                parent.kind(),
+                "if_statement"
+                    | "while_statement"
+                    | "for_statement"
+                    | "do_statement"
+                    | "if_expression"
+                    | "do_while_statement"
+            ) && parent
+                .child_by_field_name("condition")
+                .is_some_and(|condition| condition.byte_range().contains(&node.start_byte())))
+            .then_some(true)
+        })
+        .unwrap_or(false)
 }
 
 /// Whether `node`'s value must stay a compile-time constant: in an annotation,
 /// or initializing a `final` field another constant expression may read.
 fn in_constant_context(node: Node, source: &str) -> bool {
-    let mut current = node;
-    while let Some(parent) = current.parent() {
-        match parent.kind() {
+    std::iter::successors(node.parent(), |parent| parent.parent())
+        .find_map(|parent| match parent.kind() {
             "annotation"
             | "marker_annotation"
             | "element_value_pair"
-            | "annotation_argument_list" => {
-                return true;
-            }
-            "field_declaration" => {
-                return parent
+            | "annotation_argument_list" => Some(true),
+            "field_declaration" => Some(
+                parent
                     .children(&mut parent.walk())
                     .find(|child| child.kind() == "modifiers")
-                    .is_some_and(|modifiers| source[modifiers.byte_range()].contains("final"));
-            }
+                    .is_some_and(|modifiers| source[modifiers.byte_range()].contains("final")),
+            ),
             // Kotlin's `const val`.
-            "property_declaration" => {
-                return parent
+            "property_declaration" => Some(
+                parent
                     .children(&mut parent.walk())
                     .find(|child| child.kind() == "modifiers")
                     .is_some_and(|modifiers| {
                         source[modifiers.byte_range()]
                             .split_whitespace()
                             .any(|word| word == "const")
-                    });
-            }
+                    }),
+            ),
             "method_declaration"
             | "constructor_declaration"
             | "lambda_expression"
             | "function_declaration"
             | "lambda_literal"
-            | "anonymous_function" => return false,
-            _ => current = parent,
-        }
-    }
-    false
+            | "anonymous_function" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// A for-each loop's outcomes are whether it ran at all, as every other
@@ -1104,10 +989,13 @@ fn record_loop_ran(collector: &mut Collector, node: Node, language: JvmLanguage)
     // Where the flag is set: just inside the body's brace, or before its one
     // statement, which `ensure_block` then braces.
     let (set_at, set_rank) = if java {
-        match node.child_by_field_name("body") {
-            Some(body) if body.kind() == "block" => (body.start_byte() + 1, 100),
-            Some(body) => (body.start_byte(), 80),
-            None => return false,
+        let body = node
+            .child_by_field_name("body")
+            .expect("a Java loop has its body");
+        if body.kind() == "block" {
+            (body.start_byte() + 1, 100)
+        } else {
+            (body.start_byte(), 80)
         }
     } else {
         // A label (`outer@ for`) and an annotated variable are both inside
@@ -1284,8 +1172,9 @@ class Outer {
 
     /// square/moshi's JsonReader.kt: a nested class whose primary
     /// constructor is written on the line after its name, which
-    /// tree-sitter-kotlin-ng 1.1.0 reads as a secondary constructor of the
-    /// enclosing class. The file is measured, every statement on the line it
+    /// tree-sitter-kotlin-ng 1.1.0 read as a secondary constructor of the
+    /// enclosing class and the grammar built with upstream's scanner fixes
+    /// reads as written. The file is measured, every statement on the line it
     /// is written on.
     #[test]
     fn a_primary_constructor_on_its_own_line_is_read_as_one() {
@@ -1309,26 +1198,6 @@ class Outer {
         assert!(lines.contains(&(11, "return strings.size")), "{lines:?}");
         assert!(lines.contains(&(18, "return n * 2")), "{lines:?}");
         assert!(lines.contains(&(25, "return t")), "{lines:?}");
-
-        let joined = constructors_joined(source).expect("rewritten");
-        assert_eq!(joined.len(), source.len());
-        assert_eq!(joined.lines().count(), source.lines().count());
-        assert!(
-            joined.contains("  public class Options private constructor\n (\n"),
-            "{joined}"
-        );
-        // No indent after the line break to borrow a byte from: the class
-        // line gives up one of its own.
-        assert!(joined.contains("\n class Bare constructor\n("), "{joined}");
-        // Valid Kotlin the grammar already reads is never touched.
-        assert_eq!(
-            constructors_joined("class A private constructor(val n: Int)\n"),
-            None
-        );
-        assert_eq!(
-            constructors_joined("val subclass = 1\nconstructor(x)\n"),
-            None
-        );
     }
 
     #[test]
@@ -1837,27 +1706,6 @@ class Outer {
         );
         // A labelled loop and one without braces have nowhere for the flag.
         assert_eq!(obligations.manifest.limitations.len(), 2);
-    }
-
-    #[test]
-    fn a_constructor_line_is_joined_only_to_a_class_header_through_plain_modifiers() {
-        // An annotation counts among the modifiers before `constructor`.
-        assert_eq!(
-            constructor_prefix("@Inject constructor(val n: Int)"),
-            Some("@Inject constructor".len())
-        );
-        // A modifier has to be followed by a space.
-        assert_eq!(constructor_prefix("private\tconstructor(x)"), None);
-        assert_eq!(constructor_prefix("private(x)"), None);
-        assert!(ends_class_header("class My_Box"));
-        assert!(ends_class_header("  data class Box<T>"));
-        for line in ["fun f(", "subclass Box", "my_class Box", "class"] {
-            assert!(!ends_class_header(line), "{line}");
-        }
-        // A file that still fails once its constructor is joined is refused.
-        let source = "class Outer {\n  class Inner\n  private constructor(val n: Int) {\n    fun f(): Int {\n      return n )\n    }\n  }\n}\n";
-        assert!(constructors_joined(source).is_some());
-        assert!(parse(source, JvmLanguage::Kotlin).is_err());
     }
 
     #[test]

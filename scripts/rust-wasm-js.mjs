@@ -25,7 +25,7 @@ const { devDependencies } = JSON.parse(readFileSync(resolve(repository, 'package
 const PLAYWRIGHT = devDependencies['@playwright/test'];
 const VITEST = devDependencies.vitest;
 const JEST = devDependencies.jest;
-const run = (cwd, command, args) => spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', CI: '1' } });
+const run = (cwd, command, args, env = {}) => spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', CI: '1', ...env } });
 const required = process.env.SUPERCOV_REQUIRE_RUST_WASM === '1';
 const freePort = () => new Promise((done, fail) => {
   const server = createServer();
@@ -172,6 +172,40 @@ try {
     const decision = run(cwd, binary, ['runs', rust.id, 'decision', 'rust/src/lib.rs:5']).stdout;
     assert.match(decision, /FF- -> F +tests=1/u, `${entry.suite}\n${decision}`);
     assert.match(decision, /FTT -> T +tests=1/u, `${entry.suite}\n${decision}`);
+    // Each step of preparing the crate in the copy, and of reading back
+    // what the tests took from it, that fails ends the run, saying where:
+    // the project's inputs listed, its sources captured, its integrity
+    // recorded, a test process's record read.
+    // The wasm run without a test, and a test that never loads the wasm:
+    // neither has anything to credit, and with no JavaScript source there
+    // is no run to publish.
+    if (entry.suite === 'node:test') {
+      writeFileSync(resolve(cwd, 'test/plain.test.mjs'), 'import test from "node:test";\ntest("needs no wasm", () => {});\n');
+      for (const command of [
+        ['sh', '-c', 'sh build.sh && node -e "require(\'./pkg/grades.js\').grade(1, false)"'],
+        ['sh', '-c', 'sh build.sh && node --test test/plain.test.mjs'],
+      ]) {
+        const ran = run(cwd, binary, ['--', ...command]);
+        assert.notEqual(ran.status, 0, `${command.at(-1)}\n${ran.stderr}`);
+        assert.match(ran.stderr, /there was nothing to measure, and no run was published/u, `${command.at(-1)}\n${ran.stderr}`);
+      }
+      rmSync(resolve(cwd, 'test/plain.test.mjs'));
+    }
+    if (entry.suite === 'node:test') {
+      for (const [fault, place] of [
+        ['fs.read_dir#rust_run.rs:88', 'rust_run.rs:88'],
+        ['fs.canonicalize#source_capture.rs:25@2', 'source_capture.rs:25'],
+        ['fs.open#integrity.rs:427@3', 'integrity.rs:427'],
+        ['fs.read_to_string#rust_wasm.rs:291', 'rust_wasm.rs:291'],
+        // The wasm run's own publication: its work directory.
+        ['fs.create_dir_all#rust_wasm_evidence.rs:375', 'rust_wasm_evidence.rs:375'],
+      ]) {
+        const failed = run(cwd, binary, ['--', ...entry.command], { SUPERCOV_TEST_FAULT: fault });
+        assert.notEqual(failed.status, 0, `${fault}\n${failed.stderr}`);
+        assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}\n${failed.stderr}`);
+        assert.doesNotMatch(failed.stderr, /panicked/u, `${fault}\n${failed.stderr}`);
+      }
+    }
   }
   console.log('[rust-wasm-js] Rust wasm loaded by node:test, Vitest, Jest and a Playwright page is measured, each test credited exactly, and its build kept out of the project');
 } finally {

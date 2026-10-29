@@ -166,14 +166,16 @@ impl std::error::Error for IndexedQueryError {}
 
 fn grouped_decimal(value: usize) -> String {
     let digits = value.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.bytes().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(char::from(digit));
-    }
-    grouped
+    let grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    digits
+        .char_indices()
+        .fold(grouped, |mut grouped, (index, digit)| {
+            if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+            grouped
+        })
 }
 
 fn metric_name(metric: MinimizeMetric) -> &'static str {
@@ -382,11 +384,6 @@ impl IndexedQueryError {
                 QueryError::Index(error) => (
                     ErrorCode::InternalError,
                     format!("Coverage index query failed: {error}"),
-                    None,
-                ),
-                QueryError::InvalidRecordSelection => (
-                    ErrorCode::InternalError,
-                    "Coverage index contains inconsistent references".into(),
                     None,
                 ),
             },
@@ -685,12 +682,12 @@ pub fn query_indexed(
         );
         // Each location once, in the order asked; `--offset` skips the
         // locations a reply before this one answered.
-        let mut locations = Vec::new();
-        for location in std::iter::once(first).chain(request.more_lines.iter().cloned()) {
+        let mut locations = vec![first];
+        request.more_lines.iter().cloned().for_each(|location| {
             if !locations.contains(&location) {
                 locations.push(location);
             }
-        }
+        });
         let total = locations.len();
         let mut lines = Vec::new();
         let mut pages = Vec::new();
@@ -1153,5 +1150,112 @@ mod tests {
         );
         assert!(error.message.contains("5,000-state safety budget"));
         assert_eq!(error.details.as_ref().unwrap()["exploredStates"], 5_001);
+    }
+
+    #[test]
+    fn each_indexed_query_error_says_what_failed() {
+        use super::IndexedQueryError as E;
+        let size = crate::agent_json::ResponseTooLarge {
+            actual_bytes: 20,
+            max_bytes: 10,
+        };
+        let messages = [
+            E::InvalidFilter("[".into()),
+            E::UnsupportedCommand("fly".into()),
+            E::MissingArgument("--file"),
+            E::MissingNewerRun,
+            E::MissingReport,
+            E::from(size.clone()),
+            E::PageTooLarge {
+                size,
+                asked: 5,
+                fits: 2,
+            },
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "invalid coverage filter: [",
+                "unsupported indexed query: fly",
+                "indexed query requires --file",
+                "indexed diff requires a newer run",
+                "coverage minimization requires reconstructed per-test evidence",
+                "response is 20 bytes and exceeds the 10-byte limit",
+                "response is 20 bytes and exceeds the 10-byte limit",
+            ]
+        );
+        assert!(
+            E::Query(QueryError::ScopeUnavailable)
+                .to_string()
+                .contains("ScopeUnavailable")
+        );
+    }
+
+    /// Each refusal reaches an agent under the code it is acted on by.
+    #[test]
+    fn each_refusal_reaches_an_agent_under_its_code() {
+        use super::IndexedQueryError as E;
+        use crate::agent_json::ErrorCode as C;
+        let query = |error| E::Query(error);
+        for (error, code) in [
+            (E::InvalidFilter("[".into()), C::InvalidArgument),
+            (E::UnsupportedCommand("fly".into()), C::UnknownCommand),
+            (E::MissingArgument("--file"), C::InvalidArgument),
+            (E::MissingNewerRun, C::InvalidArgument),
+            (E::MissingReport, C::InternalError),
+            (query(QueryError::InvalidTarget(2.0)), C::InvalidArgument),
+            (query(QueryError::InvalidPagination), C::InvalidArgument),
+            (
+                query(QueryError::OutOfScope {
+                    file: "a.js".into(),
+                    status: "excluded".into(),
+                    reason: "test source".into(),
+                }),
+                C::SourceNotFound,
+            ),
+            (
+                query(QueryError::AmbiguousSelector {
+                    selector: "a".into(),
+                    matches: vec!["a.js".into(), "b/a.js".into()],
+                }),
+                C::AmbiguousSelector,
+            ),
+            (query(QueryError::ScopeUnavailable), C::ScopeUnavailable),
+            (
+                query(QueryError::Analysis(
+                    crate::coverage_report::ReportError::InvalidEvent("e".into()),
+                )),
+                C::InternalError,
+            ),
+            (
+                query(QueryError::Index(
+                    crate::coverage_index::CoverageIndexError::InvalidRecord("r"),
+                )),
+                C::InternalError,
+            ),
+        ] {
+            assert_eq!(error.agent_error().code, code, "{error}");
+        }
+        for (metric, name) in [
+            (MinimizeMetric::All, "all"),
+            (MinimizeMetric::Lines, "lines"),
+            (MinimizeMetric::Statements, "statements"),
+            (MinimizeMetric::Functions, "functions"),
+            (MinimizeMetric::Branches, "branches"),
+            (MinimizeMetric::Mcdc, "mcdc"),
+        ] {
+            assert_eq!(metric_name(metric), name);
+        }
+        assert_eq!(grouped_decimal(0), "0");
+        assert_eq!(grouped_decimal(1_234_567), "1,234,567");
+        let request = |filter: &str| -> IndexedQueryRequest {
+            serde_json::from_value(json!({ "runId": "r", "filter": filter, "command": "summary" }))
+                .unwrap()
+        };
+        assert_eq!(request("failed").view().unwrap(), CoverageViewId::Failed);
+        assert!(
+            matches!(request("some").view(), Err(E::InvalidFilter(filter)) if filter == "some")
+        );
     }
 }

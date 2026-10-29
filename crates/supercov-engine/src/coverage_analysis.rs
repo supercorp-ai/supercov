@@ -46,22 +46,22 @@ impl Bits {
     }
 
     fn and_assign(&mut self, other: &Self) {
-        for (word, mask) in self.0.iter_mut().zip(&other.0) {
-            *word &= mask;
-        }
+        self.0
+            .iter_mut()
+            .zip(&other.0)
+            .for_each(|(word, mask)| *word &= mask);
     }
 
     fn and_not_assign(&mut self, other: &Self) {
-        for (word, mask) in self.0.iter_mut().zip(&other.0) {
-            *word &= !mask;
-        }
+        self.0
+            .iter_mut()
+            .zip(&other.0)
+            .for_each(|(word, mask)| *word &= !mask);
     }
 
     fn remove_through(&mut self, index: usize) {
         let word = index / 64;
-        for entry in &mut self.0[..word] {
-            *entry = 0;
-        }
+        self.0[..word].fill(0);
         // Only a vector's own index is removed through, and the set has a
         // bit for every vector: its word is always there.
         let bit = index % 64;
@@ -128,13 +128,15 @@ pub fn find_witnesses_for_conditions(
     let mut true_values = false_values.clone();
     for (index, vector) in vectors.iter().enumerate() {
         outcomes[usize::from(vector.outcome)].insert(index);
-        for (condition, value) in vector.values.iter().enumerate() {
-            match value {
+        vector
+            .values
+            .iter()
+            .enumerate()
+            .for_each(|(condition, value)| match value {
                 Some(false) => false_values[condition].insert(index),
                 Some(true) => true_values[condition].insert(index),
                 None => {}
-            }
-        }
+            });
     }
 
     let witnesses = (0..width)
@@ -150,16 +152,15 @@ pub fn find_witnesses_for_conditions(
                     &true_values[target]
                 });
                 candidates.remove_through(left_index);
-                for (condition, value) in left.values.iter().enumerate() {
-                    if condition == target {
-                        continue;
-                    }
-                    match value {
+                left.values
+                    .iter()
+                    .enumerate()
+                    .filter(|(condition, _)| *condition != target)
+                    .for_each(|(condition, value)| match value {
                         Some(false) => candidates.and_not_assign(&true_values[condition]),
                         Some(true) => candidates.and_not_assign(&false_values[condition]),
                         None => {}
-                    }
-                }
+                    });
                 if let Some(second) = candidates.first() {
                     return Some(WitnessIndexes {
                         first: left_index,

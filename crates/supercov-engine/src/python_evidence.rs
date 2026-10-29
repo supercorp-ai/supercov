@@ -15,16 +15,15 @@
 //! last records of its process. Rust joins those records into the shared
 //! frontend protocol; the runtime never computes a verdict.
 
+use crate::fault_fs as fs;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
     path::{Path, PathBuf},
 };
 
 use memmap2::{Mmap, MmapOptions};
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use supercov_contracts::{
     AttributionPrecision, ExecutionModel, FrontendAttribution, FrontendLimitation,
     FrontendLimitationScope, FrontendRunDeclaration, FrontendRunnerDeclaration,
@@ -259,20 +258,7 @@ impl std::fmt::Display for PythonEvidenceError {
 impl std::error::Error for PythonEvidenceError {}
 
 fn stable_id(prefix: &str, values: &[&str]) -> String {
-    let mut hash = Sha256::new();
-    for value in values {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    let digest = hash.finalize();
-    let mut encoded = String::with_capacity(prefix.len() + 25);
-    encoded.push_str(prefix);
-    encoded.push(':');
-    for byte in &digest[..12] {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("string formatting");
-    }
-    encoded
+    crate::stable_ids::prefixed(prefix, values)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -476,6 +462,7 @@ fn read_evidence_directory_with(
 /// tracker is one -- can close between the listing and this read. It harvested
 /// its slot into its transport first, so a slot that is gone holds nothing to
 /// miss. Anything else missing is still an error.
+#[track_caller]
 fn entry_metadata(name: &str, path: &Path) -> Result<Option<fs::Metadata>, PythonEvidenceError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(metadata)),
@@ -562,7 +549,7 @@ fn shared_slot_bytes(name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceError
         };
     }
     // SAFETY: shm_open returned a fresh descriptor this function owns.
-    let file = unsafe { File::from_raw_fd(descriptor) };
+    let file = unsafe { fs::File::from_raw_fd(descriptor) };
     let length = file
         .metadata()
         .map_err(|error| PythonEvidenceError::Io(error.to_string()))?
@@ -588,8 +575,9 @@ fn shared_slot_bytes(_name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceErro
 /// A slot, or None when it is gone by the time it is opened: taken back by a
 /// process that closed after the directory was listed, and so already
 /// harvested into its transport.
+#[track_caller]
 fn map_slot(path: &Path) -> Result<Option<Mmap>, PythonEvidenceError> {
-    match File::open(path) {
+    match fs::open(path) {
         Ok(file) => unsafe { MmapOptions::new().map(&file) }
             .map(Some)
             .map_err(|error| PythonEvidenceError::Io(error.to_string())),
@@ -598,8 +586,9 @@ fn map_slot(path: &Path) -> Result<Option<Mmap>, PythonEvidenceError> {
     }
 }
 
+#[track_caller]
 fn map_evidence(path: &Path) -> Result<Mmap, PythonEvidenceError> {
-    let file = File::open(path).map_err(|error| PythonEvidenceError::Io(error.to_string()))?;
+    let file = fs::open(path).map_err(|error| PythonEvidenceError::Io(error.to_string()))?;
     // The file is immutable from Supercov's perspective after the wrapped
     // interpreter has exited. No mutable alias is created while this map is
     // alive.
@@ -811,16 +800,21 @@ impl SlotLayout {
         if contents.len() != self.bytes {
             return Err(invalid("slot size does not match the layout"));
         }
-        let context =
-            transport_u64(contents, 0).ok_or_else(|| invalid("slot context is missing"))?;
+        // Before the tag read above, so there.
+        let context = checked_u64(contents, 0);
         let mut decoded = Decoded::default();
-        for (index, byte) in contents.iter().enumerate().skip(self.header) {
-            match byte {
-                0 => continue,
-                1 => self.decode(index, &mut decoded),
-                _ => return Err(invalid("slot byte is neither 0 nor 1")),
-            }
-        }
+        contents
+            .iter()
+            .enumerate()
+            .skip(self.header)
+            .try_for_each(|(index, byte)| match byte {
+                0 => Ok(()),
+                1 => {
+                    self.decode(index, &mut decoded);
+                    Ok(())
+                }
+                _ => Err(invalid("slot byte is neither 0 nor 1")),
+            })?;
         Ok(decoded.into_records(context))
     }
 
@@ -830,16 +824,15 @@ impl SlotLayout {
             return Err("slot runs must pair a first byte with a length");
         }
         let mut decoded = Decoded::default();
-        for run in runs.chunks_exact(2) {
+        runs.chunks_exact(2).try_for_each(|run| {
             let (start, length) = (run[0], run[1]);
             let end = start
                 .checked_add(length)
                 .filter(|end| length > 0 && start >= self.header && *end <= self.bytes)
                 .ok_or("a slot run lies outside the layout")?;
-            for index in start..end {
-                self.decode(index, &mut decoded);
-            }
-        }
+            (start..end).for_each(|index| self.decode(index, &mut decoded));
+            Ok::<(), &'static str>(())
+        })?;
         Ok(decoded.into_records(context))
     }
 
@@ -847,9 +840,7 @@ impl SlotLayout {
     fn decode(&self, index: usize, into: &mut Decoded) {
         self.decode_one(index, into);
         if let Some(implied) = self.implied_by.get(&index) {
-            for byte in implied {
-                self.decode_one(*byte, into);
-            }
+            implied.iter().for_each(|byte| self.decode_one(*byte, into));
         }
     }
 
@@ -930,11 +921,7 @@ fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) ->
             .collect::<Vec<_>>();
         workers
             .into_iter()
-            .flat_map(|worker| {
-                worker
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
+            .flat_map(|worker| worker.join().unwrap_or_else(crate::threads::rethrow))
             .collect::<Vec<_>>()
     });
     done.sort_unstable_by_key(|(index, _)| *index);
@@ -1186,7 +1173,7 @@ fn apply_transport(
                         at,
                         line_number,
                         name.to_owned(),
-                        process_worker.clone().unwrap_or_else(|| "main".into()),
+                        process_worker.as_deref().unwrap_or("main").to_owned(),
                     ));
                 } else {
                     if identity.phase == "call" {
@@ -1241,14 +1228,12 @@ fn apply_transport(
                 if let Some(file) = file.filter(|path| !path.is_empty()) {
                     evidence.test_files.entry(key.clone()).or_insert(file);
                 }
-                if !tags.is_empty() {
+                tags.into_iter().for_each(|tag| {
                     let known = evidence.test_tags.entry(key.clone()).or_default();
-                    for tag in tags {
-                        if !known.contains(&tag) {
-                            known.push(tag);
-                        }
+                    if !known.contains(&tag) {
+                        known.push(tag);
                     }
-                }
+                });
                 fold_outcome(
                     evidence.outcomes.entry(key).or_default(),
                     phase,
@@ -1338,7 +1323,8 @@ fn apply_transport(
                     name,
                     line_number,
                 )?;
-                for (id, v, o) in vectors {
+                // An empty record is passed over above.
+                vectors.into_iter().try_for_each(|(id, v, o)| {
                     let (values, outcome) = decision_vector(&v, o).map_err(invalid)?;
                     if let Some(before) = before.as_mut() {
                         before
@@ -1352,20 +1338,15 @@ fn apply_transport(
                         .entry(id)
                         .or_default()
                         .insert((values, outcome));
-                }
+                    Ok::<_, PythonEvidenceError>(())
+                })?;
             }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
                 if let Some(before) = before_assertion.remove(&ctx) {
-                    let identity =
-                        contexts
-                            .get(&ctx)
-                            .ok_or(PythonEvidenceError::UnknownContext {
-                                file: name.into(),
-                                line: line_number,
-                                context: ctx,
-                            })?;
+                    // A call phase's context is known from its phase record.
+                    let identity = &contexts[&ctx];
                     let asserted = evidence
                         .per_identity
                         .entry(Identity {
@@ -1399,16 +1380,16 @@ fn apply_transport(
                         obligation,
                     });
             }
-            // Expanded through the layout before it is applied.
-            Record::Runs { .. } => return Err(invalid("slot runs were not expanded")),
-            Record::Exit { .. } => {}
+            // Runs are expanded through the layout as the transport is read,
+            // into the records they stand for; none is left to apply.
+            Record::Runs { .. } | Record::Exit { .. } => {}
         }
         Ok(())
     };
-    for (line_number, record) in parsed.records {
-        apply(line_number, record)?;
-    }
-    Ok(())
+    parsed
+        .records
+        .into_iter()
+        .try_for_each(|(line_number, record)| apply(line_number, record))
 }
 
 fn observations<'a>(
@@ -1566,20 +1547,23 @@ fn snapshot(
         let Some(meta) = index.decisions.get(id.as_str()) else {
             return Err(PythonEvidenceError::UnknownObligation(id.clone()));
         };
-        let mut observed = Vec::new();
-        for (values, outcome) in vectors {
-            if values.len() != meta.conditions.len() {
-                return Err(PythonEvidenceError::InvalidVector {
-                    id: id.clone(),
-                    expected: meta.conditions.len(),
-                    actual: values.len(),
-                });
-            }
-            observed.push(McdcVector {
-                values: values.clone(),
-                outcome: *outcome,
-            });
-        }
+        // A decision is observed with a vector at least.
+        let observed = vectors
+            .iter()
+            .map(|(values, outcome)| {
+                if values.len() != meta.conditions.len() {
+                    return Err(PythonEvidenceError::InvalidVector {
+                        id: id.clone(),
+                        expected: meta.conditions.len(),
+                        actual: values.len(),
+                    });
+                }
+                Ok(McdcVector {
+                    values: values.clone(),
+                    outcome: *outcome,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         decisions.push(DecisionSnapshot {
             meta: (*meta).clone(),
             vectors: observed,
@@ -1653,7 +1637,7 @@ pub struct PythonFrontendRun {
 }
 
 impl PythonFrontendRun {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -1664,24 +1648,29 @@ impl PythonFrontendRun {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&model)?,
+                contents: serde_json::to_vec(&model).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&self.declaration)?,
+                contents: serde_json::to_vec(&self.declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
-                contents: serde_json::to_vec(&self.request.manifest)?,
+                contents: serde_json::to_vec(&self.request.manifest)
+                    .expect("plain data serializes"),
             },
         ];
-        for (index, result) in self.request.raw_results.iter().enumerate() {
-            entries.push(EvidenceArchiveEntry {
-                path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result)?,
-            });
-        }
-        Ok(entries)
+        entries.extend(
+            self.request
+                .raw_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| EvidenceArchiveEntry {
+                    path: format!("results/{index:08}/mcdc.json"),
+                    contents: serde_json::to_vec(result).expect("plain data serializes"),
+                }),
+        );
+        entries
     }
 }
 
@@ -1731,7 +1720,8 @@ pub fn build_python_server_run(
 ) -> Result<PythonFrontendRun, PythonEvidenceError> {
     let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
     let mut by_attempt = BTreeMap::new();
-    for test in served {
+    // The caller publishes no server run when no browser test reported.
+    served.iter().for_each(|test| {
         let key = (test.worker.clone(), test.test_id.clone(), test.retry);
         let outcome = match test.status.as_str() {
             "passed" => "passed",
@@ -1747,7 +1737,7 @@ pub fn build_python_server_run(
             .runners
             .insert(key.clone(), test.provenance.runner.clone());
         by_attempt.insert(key, test);
-    }
+    });
     let by_time = credit_requests_by_time(&mut evidence, |evidence, transport, at, _| {
         crate::served_tests::owner(served, evidence.served_by.get(transport), at)
             .map(|test| (test.worker.clone(), test.test_id.clone(), test.retry))
@@ -1760,7 +1750,8 @@ pub fn build_python_server_run(
         test_exit_code,
         root,
     )?;
-    for raw in &mut run.request.raw_results {
+    // A run with no test outcome is refused before this.
+    run.request.raw_results.iter_mut().for_each(|raw| {
         let Some(test) = raw.scope.as_ref().and_then(|scope| {
             by_attempt.get(&(
                 scope.worker_id.clone(),
@@ -1768,7 +1759,7 @@ pub fn build_python_server_run(
                 raw.retry.unwrap_or(0),
             ))
         }) else {
-            continue;
+            return;
         };
         raw.test = test.name.clone();
         raw.title = Some(test.title.clone());
@@ -1779,7 +1770,7 @@ pub fn build_python_server_run(
         if by_time.contains(&(test.worker.clone(), test.test_id.clone(), test.retry)) {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
     run.tests = run
         .request
         .raw_results
@@ -1793,8 +1784,9 @@ pub fn build_python_server_run(
 
 /// Say of each attempt credited with a request by time that it was.
 fn mark_by_time(run: &mut PythonFrontendRun, by_time: &BTreeSet<(String, String, usize)>) {
-    for raw in &mut run.request.raw_results {
-        let Some(scope) = &raw.scope else { continue };
+    // `build_from_evidence` refuses a run with no test outcome.
+    run.request.raw_results.iter_mut().for_each(|raw| {
+        let Some(scope) = &raw.scope else { return };
         let key = (
             scope.worker_id.clone(),
             scope.test_id.clone(),
@@ -1804,7 +1796,7 @@ fn mark_by_time(run: &mut PythonFrontendRun, by_time: &BTreeSet<(String, String,
         if by_time.contains(&key) {
             raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
         }
-    }
+    });
 }
 
 /// Give each request that named no test to the test attempt `owner` names
@@ -1911,171 +1903,182 @@ fn build_from_evidence(
             .remove(identity)
             .expect("each phase's snapshot is taken once")
     };
-    for ((worker, test, retry), mut outcomes) in outcomes {
-        let runner = runners
-            .get(&(worker.clone(), test.clone(), retry))
-            .cloned()
-            .unwrap_or_else(default_runner);
-        let attempt_identities = identities_by_attempt
-            .remove(&(worker.clone(), test.clone(), retry))
-            .unwrap_or_default();
-        observed_runners.insert(runner.clone());
-        outcomes.sort_by_key(|(phase, _, _)| match phase.as_str() {
-            "setup" => 0,
-            "call" => 1,
-            _ => 2,
-        });
-        let mut phases = Vec::new();
-        let mut runtime = Vec::new();
-        let mut observed_phases = BTreeSet::new();
-        for (position, (phase_name, outcome, xfail)) in outcomes.iter().enumerate() {
-            observed_phases.insert(phase_name.clone());
-            let identity = Identity {
-                worker: worker.clone(),
-                test: test.clone(),
-                retry,
-                phase: phase_name.clone(),
-            };
-            let id = phase_id(run_id, &identity);
-            phases.push(CoveragePhase {
-                id: id.clone(),
-                kind: match phase_name.as_str() {
-                    "call" => "test",
-                    value => value,
-                }
-                .into(),
-                operation: format!("{runner} {phase_name}"),
-                source: Some(test.clone()),
-                caused_by_phase_id: None,
-                started_at_ms: position as i64 * 2 + 1,
-                ended_at_ms: Some(position as i64 * 2 + 2),
-                status: Some(match outcome.as_str() {
-                    "rerun" | "error" => "failed".into(),
-                    value => value.into(),
-                }),
-                error: None,
+    outcomes
+        .into_iter()
+        .try_for_each(|((worker, test, retry), mut outcomes)| {
+            let runner = runners
+                .get(&(worker.clone(), test.clone(), retry))
+                .cloned()
+                .unwrap_or_else(default_runner);
+            let attempt_identities = identities_by_attempt
+                .remove(&(worker.clone(), test.clone(), retry))
+                .unwrap_or_default();
+            observed_runners.insert(runner.clone());
+            outcomes.sort_by_key(|(phase, _, _)| match phase.as_str() {
+                "setup" => 0,
+                "call" => 1,
+                _ => 2,
             });
-            if let Some((observed, _)) = attempt_identities
-                .iter()
-                .find(|(candidate, _)| candidate.phase == phase_name.as_str())
-            {
-                runtime.push(take(observed)?);
-            }
-            if phase_name != "call" {
-                continue;
-            }
-            // What the test recorded before its first assertion is that
-            // assertion's evidence, linked when the phase passed outright:
-            // a failed, skipped or expected-to-fail phase witnessed nothing.
-            if let Some((identity, _)) = attempt_identities
-                .iter()
-                .find(|(candidate, _)| candidate.phase == "assertion")
-            {
-                observed_phases.insert("assertion".to_owned());
-                let id = phase_id(run_id, identity);
-                phases.push(CoveragePhase {
-                    id: id.clone(),
-                    kind: "assertion".into(),
-                    operation: format!("{runner} assertion"),
-                    source: Some(test.clone()),
-                    caused_by_phase_id: None,
-                    started_at_ms: position as i64 * 2 + 1,
-                    ended_at_ms: Some(position as i64 * 2 + 2),
-                    status: Some(
-                        if outcome == "passed" && !*xfail {
-                            "passed"
-                        } else {
-                            "failed"
+            let mut phases = Vec::new();
+            let mut runtime = Vec::new();
+            let mut observed_phases = BTreeSet::new();
+            outcomes.iter().enumerate().try_for_each(
+                |(position, (phase_name, outcome, xfail))| {
+                    observed_phases.insert(phase_name.clone());
+                    let identity = Identity {
+                        worker: worker.clone(),
+                        test: test.clone(),
+                        retry,
+                        phase: phase_name.clone(),
+                    };
+                    let id = phase_id(run_id, &identity);
+                    phases.push(CoveragePhase {
+                        id: id.clone(),
+                        kind: match phase_name.as_str() {
+                            "call" => "test",
+                            value => value,
                         }
                         .into(),
-                    ),
-                    error: None,
-                });
-                runtime.push(take(identity)?);
+                        operation: format!("{runner} {phase_name}"),
+                        source: Some(test.clone()),
+                        caused_by_phase_id: None,
+                        started_at_ms: position as i64 * 2 + 1,
+                        ended_at_ms: Some(position as i64 * 2 + 2),
+                        status: Some(match outcome.as_str() {
+                            "rerun" | "error" => "failed".into(),
+                            value => value.into(),
+                        }),
+                        error: None,
+                    });
+                    if let Some((observed, _)) = attempt_identities
+                        .iter()
+                        .find(|(candidate, _)| candidate.phase == phase_name.as_str())
+                    {
+                        runtime.push(take(observed)?);
+                    }
+                    if phase_name != "call" {
+                        return Ok(());
+                    }
+                    // What the test recorded before its first assertion is that
+                    // assertion's evidence, linked when the phase passed outright:
+                    // a failed, skipped or expected-to-fail phase witnessed nothing.
+                    if let Some((identity, _)) = attempt_identities
+                        .iter()
+                        .find(|(candidate, _)| candidate.phase == "assertion")
+                    {
+                        observed_phases.insert("assertion".to_owned());
+                        let id = phase_id(run_id, identity);
+                        phases.push(CoveragePhase {
+                            id: id.clone(),
+                            kind: "assertion".into(),
+                            operation: format!("{runner} assertion"),
+                            source: Some(test.clone()),
+                            caused_by_phase_id: None,
+                            started_at_ms: position as i64 * 2 + 1,
+                            ended_at_ms: Some(position as i64 * 2 + 2),
+                            status: Some(
+                                if outcome == "passed" && !*xfail {
+                                    "passed"
+                                } else {
+                                    "failed"
+                                }
+                                .into(),
+                            ),
+                            error: None,
+                        });
+                        // What it holds the call phase holds too, and that
+                        // phase was read above without a fault.
+                        runtime.push(
+                            take(identity)
+                                .expect("an assertion's evidence reads as its call phase's did"),
+                        );
+                    }
+                    Ok::<(), PythonEvidenceError>(())
+                },
+            )?;
+            // A phase the runtime entered but pytest never reported (the worker
+            // died inside it) is a failed phase with its evidence kept.
+            for (identity, _) in attempt_identities {
+                if !observed_phases.contains(&identity.phase) {
+                    let id = phase_id(run_id, identity);
+                    phases.push(CoveragePhase {
+                        id: id.clone(),
+                        kind: match identity.phase.as_str() {
+                            "call" => "test",
+                            value => value,
+                        }
+                        .into(),
+                        operation: format!("{runner} {}", identity.phase),
+                        source: Some(test.clone()),
+                        caused_by_phase_id: None,
+                        started_at_ms: phases.len() as i64 * 2 + 1,
+                        ended_at_ms: None,
+                        status: Some("failed".into()),
+                        error: Some("the phase started but the runner reported no outcome".into()),
+                    });
+                    runtime.push(take(identity)?);
+                }
             }
-        }
-        // A phase the runtime entered but pytest never reported (the worker
-        // died inside it) is a failed phase with its evidence kept.
-        for (identity, _) in attempt_identities {
-            if !observed_phases.contains(&identity.phase) {
-                let id = phase_id(run_id, identity);
-                phases.push(CoveragePhase {
-                    id: id.clone(),
-                    kind: match identity.phase.as_str() {
-                        "call" => "test",
-                        value => value,
+            let status = if phases.iter().any(|phase| phase.error.is_some()) {
+                "failed".into()
+            } else {
+                attempt_status(&outcomes)
+            };
+            let test_file = test_files
+                .get(&(worker.clone(), test.clone(), retry))
+                .and_then(|path| relative(root, path))
+                .or_else(|| test.split("::").next().map(str::to_owned));
+            raw_results.push(RawTestResult {
+                span: None,
+                test_id: Some(test.clone()),
+                scope: Some(scope(run_id, &worker, &test, retry)),
+                test: test.clone(),
+                // What the runner named, as the project names it. A dotted
+                // module path or a pytest node id is not a path, so the old
+                // derivation stays only as a fallback.
+                test_file: test_file.clone(),
+                title: test.rsplit("::").next().map(str::to_owned),
+                retry: Some(retry),
+                status: Some(status),
+                // pytest's xfail is expected to fail, and passing it unexpectedly
+                // is still a pass unless the mark is strict -- in which case pytest
+                // reports the phase as failed and drops the mark. So only a phase
+                // that did not pass carries the expectation; one that passed with
+                // the mark on it (XPASS) is a passing test, as pytest counts it.
+                expected_status: Some(
+                    if outcomes
+                        .iter()
+                        .any(|(_, outcome, xfail)| *xfail && outcome != "passed")
+                    {
+                        "failed"
+                    } else {
+                        "passed"
                     }
                     .into(),
-                    operation: format!("{runner} {}", identity.phase),
-                    source: Some(test.clone()),
-                    caused_by_phase_id: None,
-                    started_at_ms: phases.len() as i64 * 2 + 1,
-                    ended_at_ms: None,
-                    status: Some("failed".into()),
-                    error: Some("the phase started but the runner reported no outcome".into()),
-                });
-                runtime.push(take(identity)?);
-            }
-        }
-        let status = if phases.iter().any(|phase| phase.error.is_some()) {
-            "failed".into()
-        } else {
-            attempt_status(&outcomes)
-        };
-        let test_file = test_files
-            .get(&(worker.clone(), test.clone(), retry))
-            .and_then(|path| relative(root, path))
-            .or_else(|| test.split("::").next().map(str::to_owned));
-        raw_results.push(RawTestResult {
-            span: None,
-            test_id: Some(test.clone()),
-            scope: Some(scope(run_id, &worker, &test, retry)),
-            test: test.clone(),
-            // What the runner named, as the project names it. A dotted
-            // module path or a pytest node id is not a path, so the old
-            // derivation stays only as a fallback.
-            test_file: test_file.clone(),
-            title: test.rsplit("::").next().map(str::to_owned),
-            retry: Some(retry),
-            status: Some(status),
-            // pytest's xfail is expected to fail, and passing it unexpectedly
-            // is still a pass unless the mark is strict -- in which case pytest
-            // reports the phase as failed and drops the mark. So only a phase
-            // that did not pass carries the expectation; one that passed with
-            // the mark on it (XPASS) is a passing test, as pytest counts it.
-            expected_status: Some(
-                if outcomes
-                    .iter()
-                    .any(|(_, outcome, xfail)| *xfail && outcome != "passed")
-                {
-                    "failed"
-                } else {
-                    "passed"
-                }
-                .into(),
-            ),
-            flaky: false,
-            provenance: {
-                let tags = test_tags
-                    .get(&(worker.clone(), test.clone(), retry))
-                    .cloned()
-                    .unwrap_or_default();
-                TestProvenance {
-                    runner: runner.clone(),
-                    kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
-                    project: None,
-                    source: PYTHON_FRONTEND_VERSION.into(),
-                    tags,
-                }
-            },
-            role: "test".into(),
-            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
-            phases,
-            runtime,
-            browser: Vec::new(),
-            server: Vec::new(),
-        });
-    }
+                ),
+                flaky: false,
+                provenance: {
+                    let tags = test_tags
+                        .get(&(worker.clone(), test.clone(), retry))
+                        .cloned()
+                        .unwrap_or_default();
+                    TestProvenance {
+                        runner: runner.clone(),
+                        kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
+                        project: None,
+                        source: PYTHON_FRONTEND_VERSION.into(),
+                        tags,
+                    }
+                },
+                role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
+                phases,
+                runtime,
+                browser: Vec::new(),
+                server: Vec::new(),
+            });
+            Ok::<(), PythonEvidenceError>(())
+        })?;
     // Phases with observations whose test never produced any outcome at all
     // (for example a worker killed during its first phase).
     let default_observed = observed_runners
@@ -2087,29 +2090,32 @@ fn build_from_evidence(
         let runner = default_observed.clone();
         let mut phases = Vec::new();
         let mut runtime = Vec::new();
-        for (position, (identity, _)) in identities.iter().enumerate() {
-            let id = phase_id(run_id, identity);
-            phases.push(CoveragePhase {
-                id: id.clone(),
-                kind: match identity.phase.as_str() {
-                    "call" => "test",
-                    value => value,
-                }
-                .into(),
-                operation: format!("{runner} {}", identity.phase),
-                source: Some(test.clone()),
-                caused_by_phase_id: None,
-                started_at_ms: position as i64 * 2 + 1,
-                ended_at_ms: None,
-                status: Some("failed".into()),
-                error: Some("the phase started but the runner reported no outcome".into()),
-            });
-            runtime.push(take(identity)?);
-        }
-        let test_file = test_files
-            .get(&(worker.clone(), test.clone(), retry))
-            .and_then(|path| relative(root, path))
-            .or_else(|| test.split("::").next().map(str::to_owned));
+        identities
+            .iter()
+            .enumerate()
+            .try_for_each(|(position, (identity, _))| {
+                let id = phase_id(run_id, identity);
+                phases.push(CoveragePhase {
+                    id: id.clone(),
+                    kind: match identity.phase.as_str() {
+                        "call" => "test",
+                        value => value,
+                    }
+                    .into(),
+                    operation: format!("{runner} {}", identity.phase),
+                    source: Some(test.clone()),
+                    caused_by_phase_id: None,
+                    started_at_ms: position as i64 * 2 + 1,
+                    ended_at_ms: None,
+                    status: Some("failed".into()),
+                    error: Some("the phase started but the runner reported no outcome".into()),
+                });
+                runtime.push(take(identity)?);
+                Ok::<(), PythonEvidenceError>(())
+            })?;
+        // Only an outcome names a test's file, and this test reported none:
+        // a pytest node id begins with it.
+        let test_file = test.split("::").next().map(str::to_owned);
         raw_results.push(RawTestResult {
             span: None,
             test_id: Some(test.clone()),
@@ -2398,6 +2404,15 @@ pub(crate) mod tests {
         python_instrumenter::build_python_obligations,
     };
 
+    /// An attempt reported more than once keeps its worst outcome: a
+    /// failure over a skip, a skip over a pass.
+    #[test]
+    fn outcomes_are_ranked_failure_skip_pass() {
+        assert!(outcome_severity("error") > outcome_severity("skipped"));
+        assert!(outcome_severity("skipped") > outcome_severity("passed"));
+        assert_eq!(outcome_severity("rerun"), outcome_severity("failed"));
+    }
+
     // A request that named no test is the test's that was running when it
     // came, if only one was: among those its process answered a request of,
     // where it answered any, and among every test otherwise.
@@ -2673,6 +2688,18 @@ pub(crate) mod tests {
             );
         }
         assert!(layout.runs(1, &[16, 2]).is_ok());
+        // A harvest's runs in a transport are read against the layout too.
+        let harvest = |runs: &[u8]| {
+            parse_transport("t", &transport_bytes(&[runs]), &[], Some(&layout))
+                .map(|parsed| parsed.records.len())
+                .map_err(|error| error.to_string())
+        };
+        assert!(
+            harvest(br#"{"t":"runs","ctx":1,"r":[16]}"#)
+                .unwrap_err()
+                .contains("pair a first byte")
+        );
+        assert_eq!(harvest(br#"{"t":"runs","ctx":1,"r":[]}"#), Ok(0));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2712,6 +2739,8 @@ pub(crate) mod tests {
             Err(error) => error.to_string(),
         };
         assert_eq!(read(&valid), "accepted");
+        // A transport its process never wrote to holds its header alone.
+        assert_eq!(read(&transport_bytes(&[])), "accepted");
         // The first frame's header starts at 64, its payload at 80 and ends at
         // 99, and its padding runs to 104.
         let set = |at: usize, value: &[u8]| {
@@ -2986,6 +3015,17 @@ pub(crate) mod tests {
             BTreeSet::from([(vec![Some(false), Some(true)], true)])
         );
         fs::remove_dir_all(directory).unwrap();
+        // A slot whose context no phase of its process declared.
+        let directory = killed_process("py-slot-unknown", &slot_bytes(7, Some(SLOT_DIGEST), &[16]));
+        let unknown = read_evidence_directory(&directory, "run-1").err().unwrap();
+        assert!(
+            matches!(
+                unknown,
+                PythonEvidenceError::UnknownContext { context: 7, .. }
+            ),
+            "{unknown:?}"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -3093,6 +3133,159 @@ pub(crate) mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A name in the evidence directory that is not UTF-8, or a shared slot
+    /// not numbered, is no evidence file of Supercov's and is refused.
+    #[cfg(unix)]
+    #[test]
+    fn an_evidence_name_supercov_never_writes_is_refused() {
+        let directory = killed_process("py-odd-names", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
+        fs::write(directory.join("stray.shm"), b"").unwrap();
+        assert!(matches!(
+            read_evidence_directory(&directory, "run-1"),
+            Err(PythonEvidenceError::UnsafeEntry(name)) if name == "stray.shm"
+        ));
+        fs::remove_file(directory.join("stray.shm")).unwrap();
+        // macOS names no file that is not UTF-8.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::write(
+                directory.join(std::ffi::OsStr::from_bytes(b"\xff.slot")),
+                b"",
+            )
+            .unwrap();
+            assert!(matches!(
+                read_evidence_directory(&directory, "run-1"),
+                Err(PythonEvidenceError::UnsafeEntry(name)) if name == "<non-utf8>"
+            ));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A hit or decisions in a context no phase opened, and an obligation the
+    /// manifest does not hold in any kind of phase -- one reported, one left
+    /// without its outcome, one of a test that reported nothing, the
+    /// background -- refuse the run.
+    #[test]
+    fn an_unknown_context_or_obligation_in_any_phase_refuses_the_run() {
+        let obligations = build_python_obligations("m.py", "x = 1\n").unwrap();
+        let process = json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]});
+        let phase = |ctx: u64, test: &str, phase: &str| json!({"t":"phase","ctx":ctx,"at":5,"worker":"main","test":test,"retry":0,"phase":phase});
+        let outcome = |phase: &str| json!({"t":"outcome","worker":"main","test":"t::a","retry":0,"phase":phase,"outcome":"passed","xfail":false});
+        let unknown = |ctx: u64| json!({"t":"hit","ctx":ctx,"id":"py:unknown"});
+        let exit = json!({"t":"exit","at":9});
+        for (label, records, said) in [
+            (
+                "hit",
+                vec![process.clone(), unknown(3), exit.clone()],
+                "context 3",
+            ),
+            (
+                "decisions",
+                vec![
+                    process.clone(),
+                    json!({"t":"decs","ctx":3,"v":[["d", "21", 0]]}),
+                    exit.clone(),
+                ],
+                "context 3",
+            ),
+            (
+                "reported",
+                vec![
+                    process.clone(),
+                    phase(1, "t::a", "call"),
+                    unknown(1),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+            (
+                "unreported phase",
+                vec![
+                    process.clone(),
+                    phase(1, "t::a", "setup"),
+                    outcome("setup"),
+                    phase(2, "t::a", "call"),
+                    unknown(2),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+            (
+                "no outcome",
+                vec![
+                    process.clone(),
+                    phase(1, "t::a", "call"),
+                    outcome("call"),
+                    phase(2, "t::b", "call"),
+                    unknown(2),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+            (
+                "background",
+                vec![
+                    process.clone(),
+                    unknown(0),
+                    phase(1, "t::a", "call"),
+                    outcome("call"),
+                    exit.clone(),
+                ],
+                "py:unknown",
+            ),
+        ] {
+            let directory = temporary("unknown-context");
+            write_transport(&directory.join("main.1.mmap"), &records, 0);
+            let built = build_python_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            );
+            let got = built
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            assert!(got.contains(said), "{label}: {got}");
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// A slot gone between the listing and the look at it is read as gone;
+    /// one left with no layout to read it by is refused.
+    #[test]
+    fn a_slot_gone_while_read_is_skipped_and_one_without_a_layout_refused() {
+        let directory = killed_process("py-slot-race", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
+        // Listed: layout.json, the slot, the transport.
+        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:382@2", || {
+            read_evidence_directory(&directory, "run-1")
+        });
+        assert!(read.is_ok(), "{:?}", read.err());
+        // Gone by the time it is opened: harvested by a process that closed.
+        let opened = crate::fault::during("fs.open:2#python_evidence.rs:437", || {
+            read_evidence_directory(&directory, "run-1")
+        });
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        // Opened but no longer readable is refused.
+        assert!(
+            crate::fault::during("fs.open:13#python_evidence.rs:437", || {
+                read_evidence_directory(&directory, "run-1")
+            })
+            .is_err()
+        );
+        fs::remove_file(directory.join("layout.json")).unwrap();
+        assert!(matches!(
+            read_evidence_directory(&directory, "run-1"),
+            Err(PythonEvidenceError::InvalidTransport { reason, .. })
+                if reason.contains("without the run's slot layout")
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn a_slot_needs_its_transport_and_a_partial_layout_is_ignored() {
         let directory = killed_process("py-slot-orphan", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
@@ -3192,6 +3385,34 @@ pub(crate) mod tests {
         run
     }
 
+    /// A server that left no interpreter's evidence, or evidence that is no
+    /// directory, makes no run.
+    #[test]
+    fn a_server_without_evidence_makes_no_run() {
+        let obligations = build_python_obligations("m.py", "x = 1\n").unwrap();
+        let server_run = |directory: &Path| {
+            build_python_server_run(
+                &obligations.manifest,
+                directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+                &[],
+            )
+            .err()
+            .map(|error| format!("{error:?}"))
+        };
+        let directory = temporary("server-without-evidence");
+        let empty = server_run(&directory).unwrap();
+        assert!(!empty.starts_with("Io"), "{empty}");
+        fs::remove_dir_all(&directory).unwrap();
+        fs::write(&directory, b"x").unwrap();
+        let unlisted = server_run(&directory).unwrap();
+        assert!(unlisted.starts_with("Io"), "{unlisted}");
+        fs::remove_file(directory).unwrap();
+    }
+
     #[test]
     fn a_snapshot_that_names_its_phase_analyses_as_the_events_it_replaces() {
         // Python names a snapshot's phase once instead of writing an explicit
@@ -3270,7 +3491,7 @@ pub(crate) mod tests {
         let run = phased_run("py-archived");
         let directory = temporary("py-archived-archive");
         let archive = directory.join("evidence.raw.gz");
-        crate::evidence_archive::write_archive(run.archive_entries().unwrap(), &archive).unwrap();
+        crate::evidence_archive::write_archive(run.archive_entries(), &archive).unwrap();
         let integrity = json!({"schemaVersion": 2});
         let from_archive = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,
@@ -3293,6 +3514,18 @@ pub(crate) mod tests {
             TransportStats::none(),
         )
         .unwrap();
+        // A request whose results are another run's is refused.
+        assert!(
+            analyze_frontend_request(
+                &run.declaration,
+                &CoverageReportRequest {
+                    run_id: "another-run".into(),
+                    ..run.request.clone()
+                },
+                TransportStats::none(),
+            )
+            .is_err()
+        );
         fs::remove_dir_all(directory).unwrap();
         assert_eq!(
             serde_json::to_value(&in_memory).unwrap(),
@@ -3556,6 +3789,30 @@ pub(crate) mod tests {
             ),
             Err(PythonEvidenceError::UnknownObligation(id)) if id == "nope"
         ));
+        // A phase that hit an obligation the run does not have.
+        assert!(matches!(
+            run_with("unknown-hit", &[json!({"t":"hit","ctx":1,"id":"nowhere"})]),
+            Err(PythonEvidenceError::UnknownObligation(id)) if id == "nowhere"
+        ));
+        // And one hit before the test's first assertion: the call phase
+        // holds it too, and is refused for it first.
+        let directory = temporary("unknown-asserted");
+        write_transport(
+            &directory.join("main.1.mmap"),
+            &[
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11","executable":"python","argv":["pytest"]}),
+                json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":1,"id":"before"}),
+                json!({"t":"assert","ctx":1}),
+                json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            ],
+            0,
+        );
+        assert!(matches!(
+            build_python_frontend_run(&measured.manifest, &directory, "run-1", "now", 0, Path::new("")),
+            Err(PythonEvidenceError::UnknownObligation(id)) if id == "before"
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -3605,6 +3862,70 @@ pub(crate) mod tests {
             &["", &decision.id]
         )));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Every record of a run's evidence with each of its fields gone, null
+    /// or of another kind, and each record gone: the run is built or
+    /// refused, never with a panic.
+    #[test]
+    fn evidence_with_any_field_damaged_is_read_or_refused() {
+        let source = "def f(a, b):\n    if a and b:\n        return 1\n    return 2\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let statements = &obligations.plan.statements;
+        let decision = &obligations.manifest.decisions[0].id;
+        let test = "tests/test_m.py::test_a";
+        let records = vec![
+            json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]}),
+            json!({"t":"hit","ctx":0,"id":statements[0].id}),
+            json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":test,"retry":0,"phase":"setup"}),
+            json!({"t":"hits","ctx":1,"ids":[statements[0].id, statements[1].id]}),
+            json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"setup","outcome":"passed","xfail":false}),
+            json!({"t":"phase","ctx":2,"at":6,"worker":"main","test":test,"retry":0,"phase":"call"}),
+            json!({"t":"dec","ctx":2,"id":decision,"v":"22","o":1}),
+            json!({"t":"decs","ctx":2,"v":[[decision, "21", 0]]}),
+            json!({"t":"assert","ctx":2}),
+            json!({"t":"limitation","id":"python-code-object-unmapped","file":"m.py","reason":"no ranges"}),
+            json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            json!({"t":"exit","at":9}),
+        ];
+        let build = |records: &[serde_json::Value]| {
+            let directory = temporary("damaged-fields");
+            write_transport(&directory.join("main.1.mmap"), records, 0);
+            let built = build_python_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            )
+            .is_ok();
+            fs::remove_dir_all(directory).unwrap();
+            built
+        };
+        assert!(build(&records));
+        let mut refused = 0;
+        for (index, record) in records.iter().enumerate() {
+            let mut without = records.clone();
+            without.remove(index);
+            refused += usize::from(!build(&without));
+            for key in record.as_object().unwrap().keys() {
+                let other = match &record[key] {
+                    serde_json::Value::String(_) => json!(7),
+                    _ => json!("x"),
+                };
+                for damaged in [None, Some(json!(null)), Some(other)] {
+                    let mut changed = records.clone();
+                    let fields = changed[index].as_object_mut().unwrap();
+                    match damaged {
+                        None => drop(fields.remove(key)),
+                        Some(value) => drop(fields.insert(key.clone(), value)),
+                    }
+                    refused += usize::from(!build(&changed));
+                }
+            }
+        }
+        assert!(refused > 20, "{refused}");
     }
 
     #[test]
@@ -4122,6 +4443,7 @@ pub(crate) mod tests {
         assert!(read(&unknown).contains("notes.txt"), "{}", read(&unknown));
         for (label, marker) in [
             ("no-size", "/name".to_owned()),
+            ("bad-size", "/name big".to_owned()),
             ("long-name", format!("/{} 64", "a".repeat(40))),
             ("no-slash", "name 64".to_owned()),
             ("bad-char", "/na-me 64".to_owned()),
@@ -4169,6 +4491,13 @@ pub(crate) mod tests {
             assert!(matches!(metadata, Ok(None)), "{metadata:?}");
             assert!(matches!(mapped, Ok(None)));
         }
+        // A directory where a slot or the evidence should be opens, and is
+        // nothing to map.
+        #[cfg(unix)]
+        {
+            assert!(map_slot(&base).is_err());
+            assert!(map_evidence(&base).is_err());
+        }
         let no_marker = |marker: &Path| {
             materialize_shared_slot(marker, "p.1.slot", &|_| unreachable!()).map_err(|_| ())
         };
@@ -4203,6 +4532,32 @@ pub(crate) mod tests {
             Err(PythonEvidenceError::InvalidTransport { .. })
         ));
         assert!(!directory.join("p.1.slot").exists());
+        // Shared memory that cannot be read, and a copy that cannot be
+        // written, are errors of their own.
+        let unreadable = |_: &[u8]| Err(PythonEvidenceError::Io("no shared memory".into()));
+        assert!(matches!(
+            materialize_shared_slot(&directory.join("p.1.shm"), "p.1.slot", &unreadable),
+            Err(PythonEvidenceError::Io(reason)) if reason == "no shared memory"
+        ));
+        let unwritten = crate::fault::during("fs.write", || {
+            materialize_shared_slot(&directory.join("p.1.shm"), "p.1.slot", &shared)
+        });
+        assert!(matches!(unwritten, Err(PythonEvidenceError::Io(_))));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A slot layout that is no JSON is refused as such.
+    #[test]
+    fn a_slot_layout_that_is_no_json_is_refused() {
+        let directory = killed_process(
+            "py-layout-garbage",
+            &slot_bytes(1, Some(SLOT_DIGEST), &[16]),
+        );
+        fs::write(directory.join("layout.json"), b"not json").unwrap();
+        assert!(matches!(
+            read_evidence_directory(&directory, "run-1"),
+            Err(PythonEvidenceError::InvalidTransport { file, .. }) if file == "layout.json"
+        ));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -4294,5 +4649,141 @@ pub(crate) mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn each_python_evidence_error_says_what_failed() {
+        use super::PythonEvidenceError as E;
+        let messages = [
+            E::Io("gone".into()),
+            E::UnsafeEntry("../e".into()),
+            E::InvalidRecord {
+                file: "e".into(),
+                line: 2,
+                reason: "json".into(),
+            },
+            E::InvalidTransport {
+                file: "e".into(),
+                reason: "size".into(),
+            },
+            E::DroppedRecords {
+                file: "e".into(),
+                count: 3,
+            },
+            E::RunMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            E::UnsupportedVersion(9),
+            E::UnknownContext {
+                file: "e".into(),
+                line: 2,
+                context: 7,
+            },
+            E::UnknownObligation("o".into()),
+            E::InvalidVector {
+                id: "d".into(),
+                expected: 2,
+                actual: 3,
+            },
+            E::NoInterpreter,
+            E::NoTests,
+            E::UnsupportedPython("3.8.1".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "could not read Python evidence: gone",
+                "unsafe Python evidence entry: ../e",
+                "invalid Python evidence record e:2: json",
+                "invalid Python evidence transport e: size",
+                "Python evidence transport e exhausted its bounded capacity and dropped 3 record(s)",
+                "Python evidence belongs to run b, expected a",
+                "unsupported Python evidence version 9",
+                "Python evidence e:2 references undeclared context 7",
+                "Python runtime reported an unknown obligation: o",
+                "Python decision d reported 3 condition values, expected 2",
+                "no Supercov-hooked Python interpreter ran: the test command did not start CPython 3.9+ with Supercov's start-up hook (PYTHONPATH may be ignored by -I/-E/-S, or the runner is not Python)",
+                "the Python run produced no test outcomes; Supercov measures Python through pytest and unittest",
+                "Supercov measures CPython 3.9 or newer; the test command ran Python 3.8.1",
+            ]
+        );
+    }
+
+    /// A test over code with nothing to measure is a test of no obligation.
+    #[test]
+    fn a_test_over_nothing_to_measure_covers_nothing() {
+        use serde_json::json;
+        let directory = temporary("nothing-to-measure");
+        let manifest: CoverageManifest =
+            serde_json::from_str(r#"{"decisions":[],"points":[],"branches":[]}"#).unwrap();
+        write_transport(
+            &directory.join("main.1.mmap"),
+            &[
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11","executable":"python","argv":[]}),
+                json!({"t":"outcome","worker":"main","test":"test_a","retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            ],
+            0,
+        );
+        let run =
+            build_python_frontend_run(&manifest, &directory, "run-1", "now", 0, Path::new(""))
+                .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        assert_eq!(run.tests, 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A phase the runtime entered and the runner never reported failed,
+    /// whichever phase it was: a teardown of a test that passed, or the
+    /// setup of a test the runner never reported at all.
+    #[test]
+    fn a_phase_entered_but_never_reported_is_a_failed_phase_of_its_name() {
+        use serde_json::json;
+        let built = build_python_obligations("m.py", "x = 1\n").unwrap();
+        let statement = &built.plan.statements[0];
+        let directory = temporary("unreported-phases");
+        write_transport(
+            &directory.join("main.1.mmap"),
+            &[
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11","executable":"python","argv":["pytest"]}),
+                json!({"t":"phase","ctx":1,"at":1,"worker":"main","test":"t.py::test_a","retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":1,"id":statement.id}),
+                json!({"t":"decs","ctx":1,"v":[]}),
+                json!({"t":"outcome","worker":"main","test":"t.py::test_a","retry":0,"phase":"call","outcome":"passed","xfail":false}),
+                json!({"t":"phase","ctx":2,"at":2,"worker":"main","test":"t.py::test_a","retry":0,"phase":"teardown"}),
+                json!({"t":"hit","ctx":2,"id":statement.id}),
+                json!({"t":"phase","ctx":3,"at":3,"worker":"main","test":"t.py::test_b","retry":0,"phase":"setup"}),
+                json!({"t":"hit","ctx":3,"id":statement.id}),
+            ],
+            0,
+        );
+        let run = build_python_frontend_run(
+            &built.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        let phase = |test: &str, kind: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|raw| raw.test == test)
+                .and_then(|raw| raw.phases.iter().find(|phase| phase.kind == kind))
+                .map(|phase| (phase.status.clone(), phase.error.is_some()))
+        };
+        assert_eq!(
+            phase("t.py::test_a", "teardown"),
+            Some((Some("failed".into()), true))
+        );
+        assert_eq!(
+            phase("t.py::test_b", "setup"),
+            Some((Some("failed".into()), true))
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 }

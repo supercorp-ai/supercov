@@ -128,16 +128,16 @@ pub fn change_questions() -> Map<String, Value> {
             )
         })
         .collect();
-    for risk in risks() {
-        questions.insert(
+    questions.extend(risks().iter().map(|risk| {
+        (
             risk.id.clone(),
             noul(
                 format!("{CHANGE_PREFIX_PLAIN}{}", risk.task),
                 &risk.present,
                 &risk.absent,
             ),
-        );
-    }
+        )
+    }));
     questions.extend(security::change_questions());
     questions
 }
@@ -376,23 +376,20 @@ pub mod security {
         candidates
             .iter()
             .enumerate()
-            .filter_map(|(i, candidate)| {
-                let check = checks().iter().find(|c| c.id == candidate.check);
-                let (task, present, absent) = match check {
-                    Some(c) => (
-                        format!(
-                            "Line {} of the file reads: `{}`. Considering only what reaches that line, and how the value got there: {}{}",
-                            candidate.line,
-                            candidate.text,
-                            c.task.replacen("Does this file", "does this line", 1),
-                            ""
-                        ),
-                        c.present.clone(),
-                        c.absent.clone(),
-                    ),
-                    None => return None,
-                };
-                Some((format!("c{i}"), noul(task, &present, &absent)))
+            .map(|(i, candidate)| {
+                // A candidate's check is one the line was classified as, from
+                // the catalog's own.
+                let c = checks()
+                    .iter()
+                    .find(|c| c.id == candidate.check)
+                    .expect("a candidate's check is the catalog's");
+                let task = format!(
+                    "Line {} of the file reads: `{}`. Considering only what reaches that line, and how the value got there: {}",
+                    candidate.line,
+                    candidate.text,
+                    c.task.replacen("Does this file", "does this line", 1),
+                );
+                (format!("c{i}"), noul(task, &c.present, &c.absent))
             })
             .collect()
     }
@@ -446,12 +443,11 @@ pub mod security {
         offset: usize,
         among: &[String],
     ) -> Map<String, Value> {
-        let mut criteria = Map::new();
-        for c in checks() {
-            if among.contains(&c.id) {
-                criteria.insert(c.id.clone(), Value::String(short(&c.id).to_owned()));
-            }
-        }
+        let mut criteria = checks()
+            .iter()
+            .filter(|c| among.contains(&c.id))
+            .map(|c| (c.id.clone(), Value::String(short(&c.id).to_owned())))
+            .collect::<Map<String, Value>>();
         criteria.insert(
             "none".into(),
             Value::String("none of these; an ordinary line".into()),
@@ -562,14 +558,15 @@ pub mod security {
             .map(|f| (f.start.max(line.saturating_sub(40)).max(1), line))
             .unwrap_or((line.saturating_sub(30).max(1), line));
         let mut options = Map::new();
-        for n in start..=end.min(lines.len()) {
+        // The candidate's own line is in the view, so the range holds it.
+        (start..=end.min(lines.len())).for_each(|n| {
             let text = lines[n - 1].trim();
             let comment = text.starts_with("//") || (hash_comments && text.starts_with('#'));
             if !text.is_empty() && !comment {
                 let shown: String = text.chars().take(100).collect();
                 options.insert(format!("L{n}"), Value::String(format!("line {n}: {shown}")));
             }
-        }
+        });
         if options.is_empty() {
             return None;
         }
@@ -793,6 +790,10 @@ before it arrives, does not count.",
             assert!(!questions.contains_key("s0"), "{request}");
             assert!(questions.contains_key("s1"), "{request}");
             assert!(questions.contains_key("t0") && questions.contains_key("t1"));
+            // No candidate and no function ask nothing.
+            let none = confirm_request("a.py", "x = 1\n", &[], &Structure::default());
+            assert!(none["questions"].as_object().unwrap().is_empty(), "{none}");
+            assert!(function_questions(&[]).is_empty());
         }
 
         #[test]

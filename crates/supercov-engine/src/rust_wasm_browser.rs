@@ -15,9 +15,10 @@
 //! Chrome only: the remembering script is installed through Chrome's
 //! DevTools protocol. A test run in another browser is said to be unmeasured.
 
+use crate::fault_process::Launch;
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -129,17 +130,15 @@ pub(crate) fn browser_from(
         }
     }
     let path = ambient("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        for driver in DRIVERS {
+    // Never empty: even an empty PATH is one directory.
+    std::env::split_paths(&path).find_map(|directory| {
+        DRIVERS.iter().find_map(|driver| {
             let candidate = directory
                 .join(driver)
                 .with_extension(std::env::consts::EXE_EXTENSION);
-            if candidate.exists() {
-                return Some(pick(driver, candidate));
-            }
-        }
-    }
-    None
+            candidate.exists().then(|| pick(driver, candidate))
+        })
+    })
 }
 
 /// The proxy in front of one chromedriver, for the whole run.
@@ -163,19 +162,21 @@ impl BrowserReader {
         token: &str,
         patience: Duration,
     ) -> Result<Self, String> {
-        let port = free_port()?;
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        let port = crate::rust_worker::free_port()?;
+        let listener = crate::rust_worker::local_listener()?;
+        let address = listener
+            .local_addr()
+            .expect("a bound listener has its address");
         listener
             .set_nonblocking(true)
-            .map_err(|error| error.to_string())?;
+            .expect("a listener can be made not to block");
         let mut driver = Command::new(chromedriver)
             .args(arguments)
             .arg(format!("--port={port}"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
+            .launch()
             .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
         let mut stop_driver = |error: String| {
             let _ = driver.kill();
@@ -184,14 +185,18 @@ impl BrowserReader {
         };
         let upstream = SocketAddr::from(([127, 0, 0, 1], port));
         let started = Instant::now();
-        while TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).is_err() {
+        // A driver just started listens only after a moment.
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+            if TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).is_ok() {
+                break;
+            }
             if started.elapsed() > patience {
                 return Err(stop_driver(format!(
                     "{} never listened",
                     chromedriver.display()
                 )));
             }
-            std::thread::sleep(Duration::from_millis(50));
         }
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -199,7 +204,8 @@ impl BrowserReader {
         let spawned = std::thread::Builder::new()
             .name("supercov-browser-proxy".into())
             .spawn(move || {
-                while !flag.load(Ordering::Acquire) {
+                // Stopped only once the reader that started it is dropped.
+                loop {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             // An accepted socket keeps the listener's
@@ -212,9 +218,12 @@ impl BrowserReader {
                         }
                         Err(_) => std::thread::sleep(Duration::from_millis(10)),
                     }
+                    if flag.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
             });
-        spawned.map_err(|error| stop_driver(error.to_string()))?;
+        spawned.expect("a thread can be started");
         Ok(Self {
             address,
             driver,
@@ -240,14 +249,6 @@ impl Drop for BrowserReader {
         let _ = self.driver.kill();
         let _ = self.driver.wait();
     }
-}
-
-fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-    listener
-        .local_addr()
-        .map(|address| address.port())
-        .map_err(|error| error.to_string())
 }
 
 struct Request {
@@ -306,7 +307,8 @@ fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
         if reader.read_line(&mut size).ok()? == 0 {
             return None;
         }
-        let size = usize::from_str_radix(size.split(';').next()?.trim(), 16).ok()?;
+        let size =
+            usize::from_str_radix(size.split(';').next().unwrap_or_default().trim(), 16).ok()?;
         if size == 0 {
             loop {
                 let mut trailer = String::new();
@@ -323,10 +325,20 @@ fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 
 /// One request to chromedriver; its status and body, chunked or not.
 fn call(upstream: SocketAddr, method: &str, path: &str, body: &[u8]) -> Option<(u16, Vec<u8>)> {
-    let mut stream = TcpStream::connect(upstream).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
-        .ok()?;
+    let stream = TcpStream::connect(upstream).ok()?;
+    // A connected socket takes a timeout: only an unconnected one refuses.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    exchange(stream, upstream, method, path, body)
+}
+
+/// [`call`] over a stream already open to chromedriver.
+fn exchange(
+    mut stream: impl Read + Write,
+    upstream: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Option<(u16, Vec<u8>)> {
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: {upstream}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -379,7 +391,18 @@ fn read_response(reader: &mut impl BufRead) -> Option<(u16, Vec<u8>)> {
 static REGIONS: AtomicU64 = AtomicU64::new(0);
 
 fn relay(stream: TcpStream, upstream: SocketAddr, token: &str) -> Option<()> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let reader = BufReader::new(stream.try_clone().expect("a socket can be cloned"));
+    answer(reader, stream, upstream, token)
+}
+
+/// One request read from `reader`, passed on, and its answer written to
+/// `writer`.
+fn answer(
+    mut reader: impl BufRead,
+    mut writer: impl Write,
+    upstream: SocketAddr,
+    token: &str,
+) -> Option<()> {
     let request = read_request(&mut reader)?;
     // `/e/<hex evidence directory>/<WebDriver path>`.
     let rest = request.path.strip_prefix("/e/")?;
@@ -428,15 +451,14 @@ fn relay(stream: TcpStream, upstream: SocketAddr, token: &str) -> Option<()> {
             install.to_string().as_bytes(),
         );
     }
-    let mut stream = stream;
     let reason = if status == 200 { "OK" } else { "Error" };
-    write!(
-        stream,
+    let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )
-    .ok()?;
-    stream.write_all(&body).ok()?;
+    .into_bytes();
+    response.extend_from_slice(&body);
+    writer.write_all(&response).ok()?;
     Some(())
 }
 
@@ -466,8 +488,8 @@ fn take_regions(upstream: SocketAddr, session: &str, evidence: &Path, token: &st
         if crate::rust_worker::region_token(&bytes) != Some(token) {
             continue;
         }
-        let _ = std::fs::create_dir_all(evidence);
-        let _ = std::fs::write(
+        let _ = crate::fault_fs::create_dir_all(evidence);
+        let _ = crate::fault_fs::write(
             evidence.join(format!(
                 "{token}-browser-{}-{}.region",
                 std::process::id(),
@@ -481,6 +503,114 @@ fn take_regions(upstream: SocketAddr, session: &str, evidence: &Path, token: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the other side sends, and what is sent to it, failing at the
+    /// `left`th read or write and every one after, a byte read at a time.
+    struct Failing<'a> {
+        input: &'a [u8],
+        output: Vec<u8>,
+        left: usize,
+        failed: bool,
+    }
+
+    impl Failing<'_> {
+        fn spend(&mut self) -> std::io::Result<()> {
+            if self.left == 0 {
+                self.failed = true;
+                return Err(std::io::Error::other("closed"));
+            }
+            self.left -= 1;
+            Ok(())
+        }
+    }
+
+    impl Read for Failing<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.spend()?;
+            let end = buffer.len().min(1);
+            self.input.read(&mut buffer[..end])
+        }
+    }
+
+    impl Write for Failing<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.spend()?;
+            self.output.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `read` over `input` failing at each call in turn: every failure
+    /// reads nothing, and the run no failure reaches reads `expected`.
+    fn fails_each_read<T: PartialEq + std::fmt::Debug>(
+        input: &[u8],
+        read: impl Fn(&mut Failing<'_>) -> Option<T>,
+        expected: T,
+    ) {
+        for left in 0.. {
+            let mut stream = Failing {
+                input,
+                output: Vec::new(),
+                left,
+                failed: false,
+            };
+            let got = read(&mut stream);
+            if !stream.failed {
+                assert_eq!(got, Some(expected));
+                assert!(left > 3, "{left}");
+                return;
+            }
+            assert_eq!(got, None, "failing at {left}");
+        }
+    }
+
+    #[test]
+    fn a_message_whose_stream_fails_anywhere_reads_as_nothing() {
+        fails_each_read(
+            b"POST /e/2f/session HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3;x=1\r\nabc\r\n0\r\nT: t\r\n\r\n",
+            |stream| read_request(&mut BufReader::with_capacity(1, stream)).map(|r| r.body),
+            b"abc".to_vec(),
+        );
+        fails_each_read(
+            b"GET /e/2f/status HTTP/1.1\r\nContent-Length: 2\r\n\r\nok",
+            |stream| read_request(&mut BufReader::with_capacity(1, stream)).map(|r| r.body),
+            b"ok".to_vec(),
+        );
+        for (response, body) in [
+            (
+                &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n"[..],
+                &b"ok"[..],
+            ),
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", b"ok"),
+            (b"HTTP/1.1 200 OK\r\n\r\nall of it", b"all of it"),
+        ] {
+            fails_each_read(
+                response,
+                |stream| read_response(&mut BufReader::with_capacity(1, stream)),
+                (200, body.to_vec()),
+            );
+            let upstream: SocketAddr = "127.0.0.1:9515".parse().unwrap();
+            fails_each_read(
+                response,
+                |stream| exchange(stream, upstream, "POST", "/session", b"{}"),
+                (200, body.to_vec()),
+            );
+        }
+        // A line that is no request, a length that is no number and a
+        // status that is none read as nothing too.
+        for broken in [
+            &b"\r\n"[..],
+            b"GET\r\n",
+            b"GET / HTTP/1.1\r\nContent-Length: x\r\n\r\n",
+        ] {
+            assert!(read_request(&mut &broken[..]).is_none());
+        }
+        assert!(read_response(&mut &b"HTTP/1.1 OK\r\n\r\n"[..]).is_none());
+        assert!(read_chunked(&mut &b"z\r\n"[..]).is_none());
+    }
 
     #[test]
     fn the_runner_s_browser_is_picked_as_it_picks_it() {
@@ -505,6 +635,17 @@ mod tests {
         assert_eq!(
             browser(&env(&[("CHROMEDRIVER_REMOTE", "http://x/")])),
             Some(Browser::Other("a remote chromedriver".into()))
+        );
+        // The arguments wasm-pack gives chromedriver go with it.
+        assert_eq!(
+            browser(&env(&[
+                ("CHROMEDRIVER", "/c/chromedriver"),
+                ("CHROMEDRIVER_ARGS", "--verbose  --port=9"),
+            ])),
+            Some(Browser::Chrome(
+                PathBuf::from("/c/chromedriver"),
+                vec!["--verbose".into(), "--port=9".into()]
+            ))
         );
     }
 
@@ -650,6 +791,9 @@ mod tests {
                     }
                     ("POST", "/session") => (200, json!({"value": {"sessionId": "s1"}})),
                     ("POST", "/session/s1/execute/sync") => (200, regions.clone()),
+                    // Regions refused, sent as no JSON, or none at all.
+                    ("POST", "/session/s3/execute/sync") => (500, json!({"value": null})),
+                    ("POST", "/session/s4/execute/sync") => (200, json!("{")),
                     ("GET", "/status") => (500, json!({"value": "down"})),
                     _ => (200, json!({"value": null})),
                 };
@@ -699,6 +843,8 @@ mod tests {
         assert_eq!(ask("POST", "/session", "nameless").0, 200);
         let (status, body) = ask("GET", "/status", "");
         assert_eq!((status, body), (500, br#"{"value":"down"}"#.to_vec()));
+        // A command posted inside a session installs nothing.
+        assert_eq!(ask("POST", "/session/s1/url", "{}").0, 200);
         assert_eq!(ask("DELETE", "/session/s1/window", "").0, 200);
         assert_eq!(ask("DELETE", "/session/other/deeper", "").0, 200);
         let seen = seen.lock().unwrap().clone();
@@ -713,17 +859,83 @@ mod tests {
                 "POST /session",
                 "POST /session",
                 "GET /status",
+                "POST /session/s1/url",
                 "POST /session/s1/execute/sync",
                 "DELETE /session/s1/window",
                 "DELETE /session/other/deeper",
             ]
         );
+        // A session whose regions cannot be read still closes, writing none.
+        for id in ["s3", "s4", "s5"] {
+            assert_eq!(ask("DELETE", &format!("/session/{id}"), "").0, 200);
+        }
+        // A path outside the relay's, or naming an evidence directory that is
+        // no text, is not passed on; hex cut short drops its last digit.
+        let raw = |path: &str| {
+            let mut client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+            write!(client, "GET {path} HTTP/1.1\r\nContent-Length: 0\r\n\r\n").unwrap();
+            let (stream, _) = proxy.accept().unwrap();
+            relay(stream, address, token)
+        };
+        assert!(raw("/status").is_none());
+        assert!(raw("/e/ff/status").is_none());
+        assert!(raw("/e/616/status").is_some());
+        // A client that hangs up before asking anything, and a driver that
+        // no longer listens, are passed nothing.
+        {
+            let client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+            client.shutdown(std::net::Shutdown::Both).unwrap();
+            let (stream, _) = proxy.accept().unwrap();
+            assert!(relay(stream, address, token).is_none());
+        }
+        let gone = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
+        write!(
+            client,
+            "GET /e/{hex}/status HTTP/1.1\r\nContent-Length: 0\r\n\r\n"
+        )
+        .unwrap();
+        let (stream, _) = proxy.accept().unwrap();
+        assert!(relay(stream, gone, token).is_none());
+        // A client that is gone by the time the answer is written is
+        // written nothing more.
+        struct Gone;
+        impl Write for Gone {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let request = format!("GET /e/{hex}/status HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+        assert!(answer(request.as_bytes(), Gone, address, token).is_none());
         let written = std::fs::read_dir(&evidence)
             .unwrap()
             .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(written, [ours]);
         std::fs::remove_dir_all(evidence).unwrap();
+    }
+
+    /// A reader with no port for its driver, or none of its own to listen
+    /// on, starts nothing.
+    #[test]
+    fn a_reader_without_its_ports_starts_nothing() {
+        for fault in ["local-listener", "local-listener@2"] {
+            let started = crate::fault::during(fault, || {
+                BrowserReader::start_within(
+                    Path::new("/nonexistent/chromedriver"),
+                    &[],
+                    "0123456789ab",
+                    Duration::from_millis(100),
+                )
+            });
+            assert!(started.unwrap_err().contains("injected fault"), "{fault}");
+        }
     }
 
     /// A driver that never listens is stopped, not left running past the

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -386,7 +387,7 @@ impl Cache {
             .join(".supercov")
             .join("assertions")
             .join("answers.json");
-        let answers = std::fs::read(&path)
+        let answers = supercov_engine::fault_fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(|v| v["version"] == CACHE_VERSION)
@@ -394,17 +395,18 @@ impl Cache {
             .unwrap_or_default();
         Cache { path, answers }
     }
+    #[track_caller]
     fn save(&self) -> Result<(), String> {
         let dir = self
             .path
             .parent()
             .expect("answers.json sits in .supercov/assertions");
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        supercov_engine::fault_fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec(&json!({"version": CACHE_VERSION, "answers": self.answers}))
-            .map_err(|e| e.to_string())?;
+            .expect("plain data serializes");
         let temp = self.path.with_extension("json.tmp");
-        std::fs::write(&temp, bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(&temp, &self.path).map_err(|e| e.to_string())
+        supercov_engine::fault_fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+        supercov_engine::fault_fs::rename(&temp, &self.path).map_err(|e| e.to_string())
     }
 }
 
@@ -455,22 +457,25 @@ impl Pass<'_> {
         if cache.answers.is_empty() {
             return reused;
         }
-        for s in 0..self.population.statements.len() {
-            for t in self.orders[s].clone() {
+        // Each statement is run by a test, so each has an order to walk.
+        (0..self.population.statements.len()).for_each(|s| {
+            let _ = self.orders[s].clone().into_iter().try_for_each(|t| {
                 if self.answers[s].iter().any(|(x, _)| *x == t) {
-                    continue;
+                    return ControlFlow::Continue(());
                 }
                 let key = self.key(s, t);
                 let Some(&p) = cache.answers.get(&key) else {
-                    continue;
+                    return ControlFlow::Continue(());
                 };
                 self.answers[s].push((t, p));
                 reused += 1;
                 if p >= THRESHOLD {
-                    break;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
                 }
-            }
-        }
+            });
+        });
         reused
     }
     /// Before a statement is called not asserted, more of the tests that run
@@ -505,16 +510,17 @@ impl Pass<'_> {
             if !self.undecided(s) {
                 continue;
             }
-            for &t in &self.orders[s] {
+            self.orders[s].iter().for_each(|&t| {
                 if !self.answers[s].iter().any(|(x, _)| *x == t) && !self.refused.contains(&(s, t))
                 {
                     eligible.entry(t).or_default().push(s);
                 }
-            }
+            });
         }
         let mut taken = BTreeSet::new();
         let mut batch = Vec::new();
-        while batch.len() < requests {
+        // At least one request is asked for.
+        loop {
             let best = eligible
                 .iter()
                 .map(|(t, ss)| {
@@ -538,6 +544,9 @@ impl Pass<'_> {
                 .collect::<Vec<_>>();
             taken.extend(asked.iter().copied());
             batch.push((t, asked));
+            if batch.len() == requests {
+                break;
+            }
         }
         batch
     }
@@ -553,8 +562,8 @@ struct Asking {
 }
 
 /// What one request came back with: the answer to each of its questions in
-/// the order asked, where it gave one, and the input tokens it was charged.
-type Reply = Result<(Vec<Option<f64>>, u64), String>;
+/// the order asked and the input tokens it was charged.
+type Reply = Result<(Vec<f64>, u64), String>;
 
 struct Sent {
     requests: usize,
@@ -616,32 +625,36 @@ fn run_pass(
             continue;
         }
         let replies = ask(pass, &batch)?;
-        for ((t, asked), reply) in batch.iter().zip(replies) {
-            sent.requests += 1;
-            let (answers, tokens) = match reply {
-                Ok(reply) => reply,
-                Err(e) => {
-                    failures += 1;
-                    if failures > MAX_FAILURES {
-                        // Only the pass that sends requests has one fail,
-                        // and it keeps its answers.
-                        cache.save()?;
-                        return Err(format!("stopped after {failures} failed requests: {e}"));
+        // The batch is some, and each request asks of a statement at least.
+        batch
+            .iter()
+            .zip(replies)
+            .try_for_each(|((t, asked), reply)| {
+                sent.requests += 1;
+                let (answers, tokens) = match reply {
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        failures += 1;
+                        if failures > MAX_FAILURES {
+                            // Only the pass that sends requests has one fail,
+                            // and it keeps its answers.
+                            cache.save()?;
+                            return Err(format!("stopped after {failures} failed requests: {e}"));
+                        }
+                        return Ok(());
                     }
-                    continue;
-                }
-            };
-            failures = 0;
-            sent.tokens += tokens;
-            for (&s, p) in asked.iter().zip(answers) {
-                let Some(p) = p else { continue };
-                pass.answers[s].push((*t, p));
-                if asking.keep {
-                    let k = pass.key(s, *t);
-                    cache.answers.insert(k, p);
-                }
-            }
-        }
+                };
+                failures = 0;
+                sent.tokens += tokens;
+                asked.iter().zip(answers).for_each(|(&s, p)| {
+                    pass.answers[s].push((*t, p));
+                    if asking.keep {
+                        let k = pass.key(s, *t);
+                        cache.answers.insert(k, p);
+                    }
+                });
+                Ok(())
+            })?;
         if asking.keep {
             cache.save()?;
         }
@@ -661,12 +674,8 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             )
         })?;
         let stored = maps::load_manifest(run)?;
-        let Some(language) = coverage::Language::from_manifest(&stored.manifest.language) else {
-            return Err(format!(
-                "unsupported language: {}",
-                stored.manifest.language
-            ));
-        };
+        let language = coverage::Language::from_manifest(&stored.manifest.language)
+            .expect("a run is in one of the languages Supercov measures");
         let input = narrowed(run, assessment_input(run)?, &options.filter)?;
         let sources = snapshot
             .iter()
@@ -674,7 +683,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             .map(|(f, t)| (f.clone(), t.clone()))
             .collect();
         let population =
-            coverage::population_from(root, &input, &sources, language)?.with_files(snapshot);
+            coverage::population_from(root, &input, &sources, language).with_files(snapshot);
         return assess_changed(root, run, options, &population);
     }
     let input = narrowed(run, assessment_input(run)?, &options.filter)?;
@@ -691,13 +700,9 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         .chain(input.tests.iter().filter_map(|test| test.file.as_deref()))
         .collect::<BTreeSet<_>>();
     let inputs = maps::load_inputs_for(root, run, |file| needed.contains(file))?;
-    let Some(language) = coverage::Language::from_manifest(&inputs.inputs.language) else {
-        return Err(format!(
-            "Assertion coverage supports JavaScript, TypeScript, Python, Ruby, Go, Rust, Java and Kotlin runs; this run is {}",
-            inputs.inputs.language
-        ));
-    };
-    let population = coverage::population_from(root, &input, &inputs.inputs.files, language)?;
+    let language = coverage::Language::from_manifest(&inputs.inputs.language)
+        .expect("a run is in one of the languages Supercov measures");
+    let population = coverage::population_from(root, &input, &inputs.inputs.files, language);
     let n = population.statements.len();
     let mut pass = Pass {
         population: &population,
@@ -750,12 +755,13 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                     .iter()
                     .map(|(t, asked)| {
                         let request = pass.population.request(*t, asked, pass.model);
-                        Ok((vec![Some(0.0); asked.len()], tokens(&request) as u64))
+                        Ok((vec![0.0; asked.len()], tokens(&request) as u64))
                     })
                     .collect())
             },
             |_, _| {},
-        )?;
+        )
+        .expect("an estimate's every request is answered and nothing is kept");
         let most_requests = most.requests.max(plan.len());
         let most_tokens = (most.tokens as usize).max(bytes);
         let cost = |tokens: usize| tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS;
@@ -790,14 +796,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                 .map(|(result, (_, asked))| {
                     let response = result?;
                     let answers = (0..asked.len())
-                        .map(|i| {
-                            (0..2)
-                                .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
-                                    Some(quality::Answer::Noul { noul }) => Some(*noul),
-                                    _ => None,
-                                })
-                                .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))))
-                        })
+                        .map(|i| statement_answer(&response, i))
                         .collect();
                     Ok((answers, response.usage.input_tokens))
                 })
@@ -823,7 +822,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         result["filterArgs"] = json!(filter_args(&options.filter));
         filtered_result_file(&options.filter)
     };
-    let _ = std::fs::write(
+    let _ = supercov_engine::fault_fs::write(
         run.directory.join(saved_as),
         serde_json::to_vec(&result).unwrap_or_default(),
     );
@@ -885,7 +884,7 @@ fn assess_changed(
     let mut keys = BTreeMap::<(usize, usize), String>::new();
     let mut reused = 0;
     for &s in &changed {
-        for t in population.order(s, IMPACT_TESTS) {
+        population.order(s, IMPACT_TESTS).into_iter().for_each(|t| {
             let key = population.pair_key(s, t, model);
             match cache.answers.get(&key).filter(|_| !options.refresh) {
                 Some(&p) => {
@@ -895,7 +894,7 @@ fn assess_changed(
                 None => wanted.entry(t).or_default().push(s),
             }
             keys.insert((s, t), key);
-        }
+        });
     }
     let plan = wanted
         .into_iter()
@@ -930,26 +929,33 @@ fn assess_changed(
         let endpoint = quality::endpoint()?;
         let agent = quality::client();
         let results = send_all(&agent, endpoint, &key, &bodies, options.workers);
-        for ((t, asked), result) in plan.iter().zip(results) {
-            let Ok(response) = result else {
-                failed += 1;
-                continue;
+        let mut reason = None;
+        // Each request of the plan asks of a statement at least.
+        plan.iter().zip(results).for_each(|((t, asked), result)| {
+            let response = match result {
+                Ok(response) => response,
+                Err(error) => {
+                    failed += 1;
+                    reason = Some(error);
+                    return;
+                }
             };
             tokens += response.usage.input_tokens;
-            for (i, &s) in asked.iter().enumerate() {
-                let p = (0..2)
-                    .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
-                        Some(quality::Answer::Noul { noul }) => Some(*noul),
-                        _ => None,
-                    })
-                    .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))));
-                let Some(p) = p else { continue };
+            asked.iter().enumerate().for_each(|(i, &s)| {
+                let p = statement_answer(&response, i);
                 answers.entry(s).or_default().push((*t, p));
                 // Every pair planned was keyed above.
                 cache.answers.insert(keys[&(s, *t)].clone(), p);
-            }
-        }
+            });
+        });
         cache.save()?;
+        // Not one answer: nothing for `tests affected` to go on.
+        if failed == plan.len() {
+            return Err(format!(
+                "none of the {failed} request(s) was answered: {}",
+                reason.expect("a failed request says why")
+            ));
+        }
     }
     let statements = changed
         .iter()
@@ -978,7 +984,7 @@ fn assess_changed(
         "inputTokens": tokens, "costUsd": tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS,
         "statements": statements,
     });
-    let _ = std::fs::write(
+    let _ = supercov_engine::fault_fs::write(
         run.directory.join(IMPACT_FILE),
         serde_json::to_vec(&result).unwrap_or_default(),
     );
@@ -987,9 +993,26 @@ fn assess_changed(
 
 /// `assess --changed`'s saved answers for a run, if any.
 pub(crate) fn impact(run: &StoredRun) -> Option<Value> {
-    std::fs::read(run.directory.join(IMPACT_FILE))
+    stored(&run.directory.join(IMPACT_FILE))
+}
+
+/// A result saved beside a run. One that does not read as a JSON object,
+/// edited or cut short, is none at all: it is asked again.
+fn stored(path: &Path) -> Option<Value> {
+    supercov_engine::fault_fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(Value::is_object)
+}
+
+/// The answer for the `i`th statement a request asked: the stronger of its
+/// one or two questions. A validated response answers every question it was
+/// asked, each a Noul.
+fn statement_answer(response: &quality::ApiResponse, i: usize) -> f64 {
+    (0..2)
+        .filter_map(|j| quality::noul(response, &format!("q{i}_{j}")))
+        .reduce(f64::max)
+        .expect("a statement is asked one question at least")
 }
 
 fn send_all(
@@ -1003,7 +1026,8 @@ fn send_all(
     let next = AtomicUsize::new(0);
     let out = std::sync::Mutex::new((0..bodies.len()).map(|_| None).collect::<Vec<_>>());
     std::thread::scope(|scope| {
-        for _ in 0..workers.min(bodies.len()) {
+        // Some bodies: a batch is sent only when it has a request.
+        (0..workers.min(bodies.len())).for_each(|_| {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
@@ -1012,7 +1036,7 @@ fn send_all(
                     out.lock().expect("results are only locked to store one")[i] = Some(r);
                 }
             });
-        }
+        });
     });
     out.into_inner()
         .expect("results are only locked to store one")
@@ -1069,11 +1093,11 @@ fn summary(
             let not_asked = (!pass.asserted(s) && pass.answers[s].len() < st.tests.len()).then(|| {
                 let asked = pass.answers[s].iter().map(|(t, _)| *t).collect::<BTreeSet<_>>();
                 let mut files = BTreeMap::<&str, (usize, usize)>::new();
-                for t in &st.tests {
+                st.tests.iter().for_each(|t| {
                     let entry = files.entry(population.tests[*t].file.as_str()).or_default();
                     entry.0 += 1;
                     entry.1 += usize::from(asked.contains(t));
-                }
+                });
                 let mut untouched = files
                     .iter()
                     .filter(|(_, (_, asked))| *asked == 0)
@@ -1268,14 +1292,17 @@ fn narrow_result(
                 Value::Null
             } else {
                 let mut files = BTreeMap::<&str, usize>::new();
-                for test in tests.iter().filter(|test| {
-                    !answers.iter().any(|a| {
-                        a["name"].as_str() == Some(test.name.as_str())
-                            && a["file"].as_str() == test.file.as_deref()
+                tests
+                    .iter()
+                    .filter(|test| {
+                        !answers.iter().any(|a| {
+                            a["name"].as_str() == Some(test.name.as_str())
+                                && a["file"].as_str() == test.file.as_deref()
+                        })
                     })
-                }) {
-                    *files.entry(test.file.as_deref().unwrap_or("")).or_default() += 1;
-                }
+                    .for_each(|test| {
+                        *files.entry(test.file.as_deref().unwrap_or("")).or_default() += 1;
+                    });
                 json!({
                     "tests": tests.len() - answers.len(),
                     "files": files.iter().map(|(file, tests)| json!({"file": file, "tests": tests})).collect::<Vec<_>>(),
@@ -1315,9 +1342,7 @@ fn narrow_result(
 }
 
 pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
-    std::fs::read(run.directory.join(RESULT_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    stored(&run.directory.join(RESULT_FILE))
 }
 
 /// The lines of the statements judged asserted in a run, by file; `None`
@@ -1408,9 +1433,7 @@ fn read(run: &StoredRun, runs: &[StoredRun], options: &Options) -> Result<Value,
         // An assessment of exactly these tests, else the whole one read for
         // them; the filter is checked against the run either way.
         let picked = crate::picked_tests(run, &options.filter)?;
-        let own = std::fs::read(run.directory.join(filtered_result_file(&options.filter)))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let own = stored(&run.directory.join(filtered_result_file(&options.filter)));
         let result = match own {
             Some(result) => Some(result),
             None => saved(run)
@@ -1491,16 +1514,14 @@ fn view(
     offset: usize,
     limit: Option<usize>,
 ) -> Result<Value, String> {
-    let all = result["statements"]
-        .take()
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
     let run = result["run"].as_str().unwrap_or("").to_owned();
     let data = result
         .as_object_mut()
-        .ok_or("the saved assessment is not a JSON object")?;
-    data.remove("statements");
+        .expect("a saved assessment is read only as an object");
+    let all = data
+        .remove("statements")
+        .and_then(|statements| statements.as_array().cloned())
+        .unwrap_or_default();
     match target {
         Target::Overview | Target::Weak => {
             let by_weak = *target == Target::Weak;
@@ -1822,8 +1843,12 @@ fn render(data: &Value) -> String {
                 "asked of the tests that ran them, {IMPACT_TESTS} at most each ({capped} ran under more)"
             )
         };
+        let failed = match s["failedRequests"].as_u64().unwrap_or(0) {
+            0 => String::new(),
+            n => format!(" ({n} failed: their statements were not asked)"),
+        };
         return format!(
-            "Run {}: {} changed statement(s) {asked}: {}, ${:.4}; {} reused.\n`{} runs {} tests affected` now says which affected tests catch the change.\n",
+            "Run {}: {} changed statement(s) {asked}: {}{failed}, ${:.4}; {} reused.\n`{} runs {} tests affected` now says which affected tests catch the change.\n",
             data["run"].as_str().unwrap_or(""),
             s["changed"],
             counted(&s["requests"], "request", "requests"),
@@ -1997,14 +2022,14 @@ fn render_files(run: &str, data: &Value) -> String {
     out.push_str(&format!(
         "\nFiles, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to {MAX_TESTS} of the tests that run a statement are asked, so a test never asked can still catch it.\n NOT ASSERTED  ASSERTED  FILE\n",
     ));
-    for file in &files {
+    files.iter().for_each(|file| {
         out.push_str(&format!(
             " {:>12}  {:>8}  {}\n",
             file["notAsserted"].as_u64().unwrap_or(0),
             format!("{}/{}", file["asserted"], file["statements"]),
             file["file"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
@@ -2055,14 +2080,14 @@ fn render_weak(run: &str, data: &Value) -> String {
         return out;
     };
     out.push_str("\nAn asserted statement is one some test was judged to catch; the judgment is the test's strongest answer. Checked by applying each change, a verdict on an answer under 75% was wrong about 1 time in 20, and one on a stronger answer about 1 in 50. Files, most such statements first:\n  WEAK  ASSERTED  FILE\n");
-    for file in &files {
+    files.iter().for_each(|file| {
         out.push_str(&format!(
             " {:>5}  {:>8}  {}\n",
             file["weaklyAsserted"].as_u64().unwrap_or(0),
             file["asserted"].as_u64().unwrap_or(0),
             file["file"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
@@ -2100,7 +2125,7 @@ fn render_weak_file(run: &str, data: &Value) -> String {
         return out;
     };
     out.push_str("\nThe least certain first. Each was settled by the test named, at the answer shown; the tests not asked were not judged.\n  LINE  STATEMENT  (change)  answer  tests asked  test\n");
-    for st in &weak {
+    weak.iter().for_each(|st| {
         out.push_str(&format!(
             " {:>5}  {}  ({})  {:.0}%  {} of {}  {}\n",
             st["line"].as_u64().unwrap_or(0),
@@ -2111,7 +2136,7 @@ fn render_weak_file(run: &str, data: &Value) -> String {
             st["testsRunningIt"],
             st["test"]["name"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
@@ -2163,7 +2188,7 @@ fn render_file(run: &str, data: &Value) -> String {
         return out;
     };
     out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MAX_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
-    for st in &not {
+    not.iter().for_each(|st| {
         let closest = st["test"]["name"]
             .as_str()
             .map(|name| {
@@ -2186,7 +2211,7 @@ fn render_file(run: &str, data: &Value) -> String {
             st["text"].as_str().unwrap_or(""),
             st["change"].as_str().unwrap_or("")
         ));
-    }
+    });
     out.push_str(&page_footer(
         data,
         &format!(
@@ -2465,6 +2490,30 @@ mod tests {
         assert!(view(result, &Target::Test("o".into()), 0, None).is_err());
     }
 
+    /// A saved assessment's odd shapes -- no statements, a statement with no
+    /// answers or none listed, an answer with no name -- read as nothing.
+    #[test]
+    fn a_reading_skips_what_a_saved_assessment_leaves_out() {
+        assert!(asserted_in(&json!({})).is_empty());
+        let result = json!({"run": "run_x", "summary": {}, "statements": [
+            {"file": "a.js", "line": 1, "text": "x;", "change": "skipped", "asserted": false, "answers": []},
+            {"file": "a.js", "line": 2, "text": "y;", "change": "flipped", "asserted": true, "replacement": "!y",
+             "answers": [{"file": "t.js", "p": 0.9}, {"file": "t.js", "name": "one", "p": 0.9}]},
+            {"file": "a.js", "line": 3, "text": "z;", "change": "skipped", "asserted": false},
+        ]});
+        let line = view(result.clone(), &Target::Line("a.js".into(), 1), 0, None).unwrap();
+        assert_eq!(line["statements"][0]["answers"], json!([]));
+        let replaced =
+            render(&view(result.clone(), &Target::Line("a.js".into(), 2), 0, None).unwrap());
+        assert!(replaced.contains(" -> `!y`"), "{replaced}");
+        let test = view(result.clone(), &Target::Test("one".into()), 0, None).unwrap();
+        assert_eq!(test["testSummary"]["asked"], 1);
+        let unknown = view(result.clone(), &Target::Test("two".into()), 0, None).unwrap_err();
+        assert!(unknown.contains("  one (t.js)"), "{unknown}");
+        let file = render(&view(result, &Target::File("a.js".into()), 0, None).unwrap());
+        assert!(file.contains("x;  (skipped)\n"), "{file}");
+    }
+
     /// From a real assessment: 98.7% asserted, and twelve of the asserted
     /// were noticed by no test when the change was made. Each had been
     /// settled by one to three tests on an answer between 0.51 and 0.77.
@@ -2565,6 +2614,28 @@ mod tests {
         let line = view(result, &Target::Line("request.js".into(), 75), 0, None).unwrap();
         let text = render(&line);
         assert!(text.contains("    Not asked: 130 test(s). No test was asked from 7 file(s) that run it: relay.test.js (40), safety.test.js (22), a.test.js (9), b.test.js (8), c.test.js (7), and 2 more\n"), "{text}");
+    }
+
+    /// A line with no statement, and a statement no test answered, render
+    /// as such; each change has its name.
+    #[test]
+    fn an_empty_statement_view_and_each_change_name_render() {
+        let none = render(
+            &json!({"view": "statement", "run": "r", "file": "a.js", "line": 3, "statements": []}),
+        );
+        assert!(none.contains("a.js"), "{none}");
+        let unanswered = render(
+            &json!({"view": "statement", "run": "r", "file": "a.js", "line": 3,
+            "statements": [{"line": 3, "text": "x()", "change": "skipped", "asserted": false, "answers": []}]}),
+        );
+        assert!(unanswered.contains("x()"), "{unanswered}");
+        for (change, name) in [
+            (Change::Skip, "skipped"),
+            (Change::Flip, "boolean flipped"),
+            (Change::BareError, "throws a bare Error"),
+        ] {
+            assert_eq!(change_name_js(change), name);
+        }
     }
 
     /// Each option is refused where it does not belong, without its value,

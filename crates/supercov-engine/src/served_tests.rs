@@ -173,7 +173,7 @@ fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Ve
         ended_at_ms: Option<i64>,
     }
     let mut served = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(evidence_directory) else {
+    let Ok(entries) = crate::fault_fs::read_dir(evidence_directory) else {
         return Vec::new();
     };
     let mut files = entries
@@ -187,7 +187,7 @@ fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Ve
         .collect::<Vec<_>>();
     files.sort();
     for file in files {
-        let Ok(text) = std::fs::read_to_string(&file) else {
+        let Ok(text) = crate::fault_fs::read_to_string(&file) else {
             continue;
         };
         for attempt in text

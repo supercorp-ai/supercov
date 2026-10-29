@@ -96,10 +96,7 @@ pub(crate) fn rewritten_contents(
                 }
                 kept = true;
                 rewrite_scope_run_ids(&mut value, merged_run_id);
-                rewritten.extend(
-                    serde_json::to_vec(&value)
-                        .map_err(|error| format!("failed to rewrite merged evidence: {error}"))?,
-                );
+                rewritten.extend(serde_json::to_vec(&value).expect("plain data serializes"));
             }
             Err(error) => {
                 return Err(format!(
@@ -172,7 +169,7 @@ fn recorded_files(
         .find(|entry| entry.path == crate::source_capture::ARCHIVE_PATH)?;
     Some((
         entry.contents.as_slice(),
-        serde_json::from_slice(&entry.contents).ok()?,
+        serde_json::from_slice(&entry.contents).expect("a run's captured sources are JSON"),
     ))
 }
 
@@ -228,16 +225,21 @@ fn judged_against_latest(
         .iter()
         .map(|archive| recorded_files(archive))
         .collect::<Vec<_>>();
-    // Without a record of the files, the domains are all there is to say.
+    // Without a record of the files, the domains are all there is to say;
+    // where another run holds one, the record itself is one of them.
     let unrecorded = |run: &StoredRun| {
         let other = inputs
             .iter()
             .find(|other| other.id != run.id)
             .expect("at least two runs");
+        let mut dimensions = incompatible_dimensions(other, run);
+        if files.iter().any(Option::is_some) {
+            dimensions.push("recorded files");
+        }
         format!(
             "Cannot merge incompatible run {}: differing domains: {}",
             run.id,
-            incompatible_dimensions(other, run).join(", ")
+            dimensions.join(", ")
         )
     };
     let Some((_, into)) = &files[latest] else {
@@ -247,19 +249,20 @@ fn judged_against_latest(
     // reached -- is not gone: it is judged by what the checkout holds now,
     // and the merge's record keeps it.
     let mut into = into.clone();
-    for (_, recorded) in files.iter().flatten() {
+    // The latest run's record is one of them.
+    files.iter().flatten().for_each(|(_, recorded)| {
         for file in recorded.files.keys() {
             if into.files.contains_key(file) {
                 continue;
             }
-            if let Ok(text) = std::fs::read_to_string(root.join(file)) {
+            if let Ok(text) = crate::fault_fs::read_to_string(root.join(file)) {
                 into.files.insert(
                     file.clone(),
                     crate::source_manifest::FileFingerprint::of(&text),
                 );
             }
         }
-    }
+    });
     let into = &into;
     // Every file known to hold tests, from every run there is: a file of some
     // other test changing takes nothing from this run.
@@ -271,17 +274,15 @@ fn judged_against_latest(
     let checkout = crate::run_currency::Checkout::new(root, &tests);
     let merged = |index: usize| inputs[index].metadata.merged == Some(true);
     let reference = crate::run_currency::Ran::from_entries(&archives[latest], merged(latest));
-    // A file's text, where the checkout holds what the latest run recorded.
-    let text = |file: &str| {
-        let text = std::fs::read_to_string(root.join(file)).ok()?;
-        (crate::source_manifest::FileFingerprint::of(&text).sha256 == into.files.get(file)?.sha256)
-            .then_some(text)
-    };
+    // A file's text in the checkout; judged only where it is what the
+    // latest run recorded.
+    let text = |file: &str| crate::fault_fs::read_to_string(root.join(file)).ok();
     let mut across = Vec::new();
     let mut superseded = BTreeMap::new();
-    for (index, input) in inputs.iter().enumerate() {
+    // A merge is of two runs at least: one is not the latest.
+    inputs.iter().enumerate().try_for_each(|(index, input)| -> Result<(), String> {
         if index == latest {
-            continue;
+            return Ok(());
         }
         let Some((_, recorded)) = &files[index] else {
             return Err(unrecorded(input));
@@ -332,13 +333,13 @@ fn judged_against_latest(
                     input.id,
                 ));
             }
-            for file in &files {
-                across.push(format!(
+            across.extend(files.iter().map(|file| {
+                format!(
                     "{file} (the {} test(s) of `{}` that reached it were measured again)",
                     judgment.reached[file].len(),
                     input.metadata.command.join(" ")
-                ));
-            }
+                )
+            }));
             superseded.insert(index, reached);
         }
         if !judgment.outdated.is_empty() {
@@ -357,10 +358,11 @@ fn judged_against_latest(
             ));
         }
         across.extend(judgment.across);
-    }
+        Ok(())
+    })?;
     Ok(Some(Grown {
         latest,
-        files: Some(serde_json::to_vec(into).map_err(|error| error.to_string())?),
+        files: Some(serde_json::to_vec(into).expect("plain data serializes")),
         across: crate::run_currency::across(across),
         superseded,
     }))
@@ -431,7 +433,10 @@ fn settle_unrun_workers(manifests: &[Option<&[u8]>]) -> (Vec<Option<Vec<u8>>>, B
 /// The language a run measured, from its frontend declaration.
 fn measured_language(run: &StoredRun) -> Option<String> {
     let entries = read_archive(&run.evidence_path).ok()?;
-    let entry = entries.iter().find(|entry| entry.path == "frontend.json")?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == "frontend.json")
+        .expect("a stored run's archive holds its frontend declaration");
     serde_json::from_slice::<FrontendRunDeclaration>(&entry.contents)
         .ok()
         .map(|declaration| declaration.language)
@@ -507,7 +512,8 @@ pub fn merge_coverage_runs(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let first = inputs[0];
-    for input in inputs.iter().skip(1) {
+    // A merge is of two runs at least.
+    inputs.iter().skip(1).try_for_each(|input| -> Result<(), String> {
         let dimensions = incompatible_dimensions(first, input);
         // Another release instruments differently, and nothing else is worth
         // saying about the difference: the run has to be measured again.
@@ -560,7 +566,8 @@ pub fn merge_coverage_runs(
                 dimensions.join(", ")
             ));
         }
-    }
+        Ok(())
+    })?;
 
     let archives = inputs
         .iter()
@@ -581,31 +588,34 @@ pub fn merge_coverage_runs(
             })
             .collect::<Vec<_>>(),
     );
-    let manifests = manifests.iter().map(Option::as_deref).collect::<Vec<_>>();
-    let Some(mut manifest) = manifests[0] else {
-        return Err("Cannot merge runs with different coverage denominators".into());
-    };
+    // Every archive Supercov writes holds its manifest, model and frontend.
+    const HELD: &str = "a stored run's archive holds its manifest and coverage model";
+    let manifests = manifests
+        .iter()
+        .map(|manifest| manifest.as_deref().expect(HELD))
+        .collect::<Vec<_>>();
+    let mut manifest = manifests[0];
     if let Some(Grown { latest, .. }) = grown {
         // A test file added since is one more entry in the scope's list of
         // what is not source. What is measured has to be the same.
-        let measured = |manifest: Option<&[u8]>| {
-            let mut value = serde_json::from_slice::<Value>(manifest?).ok()?;
-            value.as_object_mut()?.remove("scope");
-            Some(value)
+        let measured = |manifest: &[u8]| {
+            let mut value =
+                serde_json::from_slice::<Value>(manifest).expect("a stored manifest is JSON");
+            value
+                .as_object_mut()
+                .expect("a stored manifest is an object")
+                .remove("scope");
+            value
         };
         let first = measured(manifests[0]);
-        if first.is_none()
-            || manifests
-                .iter()
-                .any(|candidate| measured(*candidate) != first)
+        if manifests
+            .iter()
+            .any(|candidate| measured(candidate) != first)
         {
             return Err("Cannot merge runs with different coverage denominators".into());
         }
-        manifest = manifests[latest].expect("measured above");
-    } else if manifests
-        .iter()
-        .any(|candidate| *candidate != Some(manifest))
-    {
+        manifest = manifests[latest];
+    } else if manifests.iter().any(|candidate| *candidate != manifest) {
         return Err("Cannot merge runs with different coverage denominators".into());
     }
     let models = archives
@@ -617,9 +627,7 @@ pub fn merge_coverage_runs(
                 .map(|entry| entry.contents.as_slice())
         })
         .collect::<Vec<_>>();
-    let Some(model) = models[0] else {
-        return Err("Cannot merge runs without a coverage model".into());
-    };
+    let model = models[0].expect(HELD);
     if models.iter().any(|candidate| *candidate != Some(model)) {
         return Err("Cannot merge runs with different coverage models".into());
     }
@@ -629,7 +637,7 @@ pub fn merge_coverage_runs(
             let contents = entries
                 .iter()
                 .find(|entry| entry.path == "frontend.json")
-                .ok_or_else(|| "Cannot merge runs without a frontend declaration".to_owned())?;
+                .expect("a stored run's archive was read with its frontend declaration");
             let mut declaration = serde_json::from_slice::<FrontendRunDeclaration>(
                 &contents.contents,
             )
@@ -642,7 +650,8 @@ pub fn merge_coverage_runs(
         .collect::<Result<Vec<_>, _>>()?;
     let mut merged_declaration = declarations[0].clone();
     let mut runners = BTreeMap::new();
-    for declaration in declarations {
+    // A declaration for each run, with a runner at least each.
+    declarations.into_iter().try_for_each(|declaration| {
         if declaration.protocol_version != merged_declaration.protocol_version
             || declaration.frontend_id != merged_declaration.frontend_id
             || declaration.frontend_version != merged_declaration.frontend_version
@@ -650,9 +659,9 @@ pub fn merge_coverage_runs(
             || declaration.structural_source != merged_declaration.structural_source
             || declaration.structural_limitations != merged_declaration.structural_limitations
         {
-            return Err("Cannot merge runs with different frontend declarations".into());
+            return Err("Cannot merge runs with different frontend declarations".to_owned());
         }
-        for runner in declaration.runners {
+        declaration.runners.into_iter().try_for_each(|runner| {
             if let Some(existing) = runners.get(&runner.runner) {
                 if existing != &runner {
                     return Err(format!(
@@ -663,8 +672,9 @@ pub fn merge_coverage_runs(
             } else {
                 runners.insert(runner.runner.clone(), runner);
             }
-        }
-    }
+            Ok(())
+        })
+    })?;
     merged_declaration.runners = runners.into_values().collect();
 
     let mut lock = ProjectLock::acquire(root, merged_run_id, started_at)
@@ -678,43 +688,55 @@ pub fn merge_coverage_runs(
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&merged_declaration)
-                    .map_err(|error| format!("Could not encode merged frontend: {error}"))?,
+                contents: serde_json::to_vec(&merged_declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
                 contents: manifest.to_vec(),
             },
         ];
-        for (shard, archive) in archives.iter().enumerate() {
-            for entry in archive.iter().filter(|entry| {
-                !matches!(
-                    entry.path.as_str(),
-                    "coverage-model.json" | "frontend.json" | "manifest.json"
-                )
-            }) {
-                // One record of the files for the whole merge: the latest
-                // run's, which holds every file the others were recorded with.
-                let superseded = grown
-                    .as_ref()
-                    .and_then(|grown| grown.superseded.get(&shard));
-                let contents = match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
-                    Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
-                        files.clone()
-                    }
-                    _ => match rewritten_contents(&entry.contents, merged_run_id, superseded)? {
-                        Some(contents) => contents,
-                        // Every record of the entry was of a test measured
-                        // again elsewhere.
-                        None => continue,
-                    },
-                };
-                entries.push(EvidenceArchiveEntry {
-                    path: merged_path(&entry.path, shard),
-                    contents,
-                });
-            }
-        }
+        // Two runs at least, each with evidence besides its three files of
+        // the whole run.
+        archives
+            .iter()
+            .enumerate()
+            .try_for_each(|(shard, archive)| {
+                archive
+                    .iter()
+                    .filter(|entry| {
+                        !matches!(
+                            entry.path.as_str(),
+                            "coverage-model.json" | "frontend.json" | "manifest.json"
+                        )
+                    })
+                    .try_for_each(|entry| -> Result<(), String> {
+                        // One record of the files for the whole merge: the latest
+                        // run's, which holds every file the others were recorded with.
+                        let superseded = grown
+                            .as_ref()
+                            .and_then(|grown| grown.superseded.get(&shard));
+                        let contents = match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
+                            Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
+                                files.clone()
+                            }
+                            _ => match rewritten_contents(
+                                &entry.contents,
+                                merged_run_id,
+                                superseded,
+                            )? {
+                                Some(contents) => contents,
+                                // Every record of the entry was of a test measured
+                                // again elsewhere.
+                                None => return Ok(()),
+                            },
+                        };
+                        entries.push(EvidenceArchiveEntry {
+                            path: merged_path(&entry.path, shard),
+                            contents,
+                        });
+                        Ok(())
+                    })
+            })?;
         let archive_path = work.join("evidence.raw.gz");
         let raw = write_archive(entries, &archive_path)
             .map_err(|error| format!("Could not write merged evidence: {error}"))?;
@@ -924,6 +946,34 @@ mod tests {
         assert_eq!(
             error,
             "Cannot merge incompatible run run-b: differing domains: source, tests, configuration"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A server's record torn as it was written is kept in its run, counted
+    /// as corrupt; a merge cannot carry it, and says so.
+    #[test]
+    fn a_run_holding_a_torn_record_is_not_merged() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        rewrite_entry(
+            &root,
+            "run-b",
+            "server/background/worker.jsonl",
+            Some(b"{\"type\":\"hit\",\"id\":\"statement\"}\n{\"type\":\"hi".to_vec()),
+        );
+        let error = merge_coverage_runs(
+            &root,
+            &["run-a".into(), "run-b".into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot merge malformed recognized JSON evidence"),
+            "{error}"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1297,12 +1347,17 @@ mod tests {
                 "Cannot merge run run-a with run run-b: mocks/a.js; mocks/b.js changed, and 1 of its tests reached them through a server that served them and were not measured again: t9.".into(),
             ),
             (
-                "grown, the first run's denominator unreadable",
+                "grown, the recorded file gone since",
                 Box::new(|root| {
                     grown_from_a_recorded_file(root);
-                    rewrite_entry(root, "run-a", "manifest.json", Some(b"[]".to_vec()));
+                    fs::remove_file(root.join("test/data.json")).unwrap();
                 }),
-                "Cannot merge runs with different coverage denominators".into(),
+                "Cannot merge run run-a with run run-b: test/data.json is gone. Measure it again, or pass --allow-changed if the change alters nothing its tests ran.".into(),
+            ),
+            (
+                "grown, the earlier run without a record of its files",
+                Box::new(|root| record_files(root, "run-b", &[])),
+                "Cannot merge incompatible run run-a: differing domains: recorded files".into(),
             ),
             (
                 "grown, the later run's denominator another",
@@ -1573,7 +1628,9 @@ mod tests {
         let tests = measured_tests(&[
             entry(b"{\"testId\":\"t1\",\"test\":\"adds\"}\n{\"testId\":\"t3\"}\nnot \"testId\" json\nplain\n"),
             entry(&[0xff, 0xfe]),
+            entry(b""),
         ]);
+        assert!(measured_tests(&[]).is_empty());
         assert_eq!(
             tests,
             [("t1".to_owned(), "adds".to_owned())].into_iter().collect()

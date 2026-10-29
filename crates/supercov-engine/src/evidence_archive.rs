@@ -5,11 +5,11 @@
 //! paths must be canonical and sorted, headers must use the exact canonical
 //! JSON encoding, and a gzip member may not hide trailing data.
 
+use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -35,8 +35,6 @@ pub enum EvidenceArchiveError {
     Truncated(&'static str),
     TrailingCompressedData,
     UnsupportedSource(PathBuf),
-    PathOutsideSource { source: PathBuf, path: PathBuf },
-    SizeOverflow,
 }
 
 impl std::fmt::Display for EvidenceArchiveError {
@@ -93,13 +91,6 @@ impl std::fmt::Display for EvidenceArchiveError {
                     path.display()
                 )
             }
-            Self::PathOutsideSource { source, path } => write!(
-                formatter,
-                "evidence path {} is outside source {}",
-                path.display(),
-                source.display(),
-            ),
-            Self::SizeOverflow => write!(formatter, "evidence archive size exceeds its format"),
         }
     }
 }
@@ -200,10 +191,8 @@ impl<W: Write> Write for FaultingWriter<W> {
             None => buffer.len(),
         };
         let written = self.inner.write(&buffer[..allowed])?;
-        self.written = self
-            .written
-            .checked_add(written as u64)
-            .ok_or_else(|| io::Error::other("evidence archive size overflow"))?;
+        // A count of bytes written is far below what a u64 holds.
+        self.written += written as u64;
         Ok(written)
     }
 
@@ -221,10 +210,8 @@ impl<W> CountingWriter<W> {
 impl<W: Write> Write for CountingWriter<W> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let written = self.inner.write(buffer)?;
-        self.written = self
-            .written
-            .checked_add(written as u64)
-            .ok_or_else(|| io::Error::other("evidence archive size overflow"))?;
+        // A count of bytes written is far below what a u64 holds.
+        self.written += written as u64;
         Ok(written)
     }
 
@@ -252,24 +239,16 @@ fn validate_prefix(prefix: &str) -> Result<(), EvidenceArchiveError> {
     validate_archive_path(prefix)
 }
 
+/// A walked file's path below the directory walked, as the archive names
+/// it: its parts, each a name (a walk meets no `..` or root), joined by `/`;
+/// refused where a part is not UTF-8 or not a name the archive allows.
 fn path_from_relative(path: &Path) -> Result<String, EvidenceArchiveError> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part
-                    .to_str()
-                    .ok_or_else(|| EvidenceArchiveError::InvalidPath(path.display().to_string()))?;
-                parts.push(part);
-            }
-            _ => {
-                return Err(EvidenceArchiveError::InvalidPath(
-                    path.display().to_string(),
-                ));
-            }
-        }
-    }
-    let archive_path = parts.join("/");
+    let archive_path = path
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| EvidenceArchiveError::InvalidPath(path.display().to_string()))?
+        .join("/");
     validate_archive_path(&archive_path)?;
     Ok(archive_path)
 }
@@ -292,18 +271,15 @@ fn collect_directory(
         if !metadata.is_file() {
             return Err(EvidenceArchiveError::UnsupportedSource(path));
         }
-        let relative =
+        let relative = path_from_relative(
             path.strip_prefix(root)
-                .map_err(|_| EvidenceArchiveError::PathOutsideSource {
-                    source: root.to_owned(),
-                    path: path.clone(),
-                })?;
-        let relative = path_from_relative(relative)?;
+                .expect("a walked file lies under the directory walked"),
+        )?;
+        // A valid prefix and a valid path make a valid path.
         let archive_path = match prefix {
             Some(prefix) => format!("{prefix}/{relative}"),
             None => relative,
         };
-        validate_archive_path(&archive_path)?;
         entries.push(EvidenceArchiveEntry {
             path: archive_path,
             contents: fs::read(path)?,
@@ -377,18 +353,19 @@ fn write_framed_with_magic<W: Write>(
     for entry in entries {
         let header = EntryHeader {
             path: entry.path.clone(),
-            bytes: u64::try_from(entry.contents.len())
-                .map_err(|_| EvidenceArchiveError::SizeOverflow)?,
+            // Lossless: `usize` is 64 bits on every target Supercov builds for.
+            bytes: entry.contents.len() as u64,
         };
-        let mut encoded = serde_json::to_vec(&header)?;
+        let mut encoded = serde_json::to_vec(&header).expect("plain data serializes");
         encoded.push(b'\n');
-        let header_size =
-            u32::try_from(encoded.len()).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
+        let header_size = u32::try_from(encoded.len())
+            .expect("an entry header, a path and a size, is shorter than 4 GiB");
         writer.write_all(&header_size.to_be_bytes())?;
         writer.write_all(&encoded)?;
         writer.write_all(&entry.contents)?;
     }
-    writer.flush()?;
+    // Flushing is the caller's: an archive's compressor flushes as it
+    // finishes, and a flush here as well only wrote a sync marker first.
     Ok((writer.inner, writer.written))
 }
 
@@ -401,7 +378,7 @@ fn temporary_path(destination: &Path, sequence: u64) -> Result<PathBuf, Evidence
 }
 
 fn sync_directory(directory: &Path) {
-    if let Ok(directory) = File::open(directory) {
+    if let Ok(directory) = fs::open(directory) {
         let _ = directory.sync_all();
     }
 }
@@ -470,11 +447,7 @@ fn write_archive_version(
     let (temporary, file) = loop {
         let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary = temporary_path(destination, sequence)?;
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
+        match fs::open_with(OpenOptions::new().write(true).create_new(true), &temporary) {
             Ok(file) => break (temporary, file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -493,8 +466,8 @@ fn write_archive_version(
             .into_inner()
             .map_err(|error| EvidenceArchiveError::Io(error.into_error()))?;
         let file = faulting.inner;
-        file.sync_all()?;
-        let compressed_bytes = file.metadata()?.len();
+        fs::sync_all(&file)?;
+        let compressed_bytes = fs::file_metadata(&file)?.len();
         drop(file);
         fs::rename(&temporary, destination)?;
         sync_directory(parent);
@@ -557,7 +530,7 @@ fn read_framed_entries<R: Read>(
         }
         let header: EntryHeader =
             serde_json::from_slice(&encoded_header[..encoded_header.len() - 1])?;
-        let mut canonical = serde_json::to_vec(&header)?;
+        let mut canonical = serde_json::to_vec(&header).expect("plain data serializes");
         canonical.push(b'\n');
         if encoded_header != canonical {
             return Err(EvidenceArchiveError::InvalidHeader(
@@ -578,8 +551,7 @@ fn read_framed_entries<R: Read>(
         }
         // Each path follows the one before in order, so none is seen twice.
         seen.insert(header.path.clone());
-        let payload_size =
-            usize::try_from(header.bytes).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
+        let payload_size = header.bytes as usize;
         previous = Some(header.path.clone());
         if retain(&header.path) {
             // Read as the bytes arrive: a damaged header's size is never
@@ -662,7 +634,7 @@ struct Hashing<R> {
 
 impl<R: Read> Read for Hashing<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = self.inner.read(buffer)?;
+        let read = fs::read_from(&mut self.inner, buffer)?;
         sha2::Digest::update(&mut self.hash, &buffer[..read]);
         self.bytes += read as u64;
         Ok(read)
@@ -682,7 +654,7 @@ pub(crate) fn read_archive_each(
     let input = BufReader::with_capacity(
         128 * 1024,
         Hashing {
-            inner: File::open(path)?,
+            inner: fs::open(path)?,
             hash: sha2::Digest::new(),
             bytes: 0,
         },
@@ -713,7 +685,7 @@ fn schema_version_from_magic(magic: &[u8]) -> Result<u32, EvidenceArchiveError> 
 }
 
 pub fn read_archive_schema_version(path: &Path) -> Result<u32, EvidenceArchiveError> {
-    let input = BufReader::new(File::open(path)?);
+    let input = BufReader::new(fs::open(path)?);
     let mut decoder = GzDecoder::new(input);
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
@@ -778,6 +750,30 @@ mod tests {
         path
     }
 
+    /// No sources make no entries, and an archive of none has no manifest.
+    #[test]
+    fn no_sources_are_refused_for_the_manifest_they_lack() {
+        assert!(matches!(
+            collect_sources(&[]),
+            Err(EvidenceArchiveError::MissingManifest)
+        ));
+    }
+
+    /// An entry the reader does not keep is read past whatever its size, an
+    /// empty one included.
+    #[test]
+    fn an_empty_entry_left_unread_is_read_past() {
+        let root = temporary_directory("archive-empty-skipped");
+        let mut entries = identity_entries();
+        entries.push(entry("results/empty.json", b""));
+        entries.push(entry("results/kept.json", b"[1]"));
+        let path = root.join("archive.gz");
+        write_archive(entries, &path).unwrap();
+        let kept = read_archive_selected(&path, |name| name == "results/kept.json").unwrap();
+        assert_eq!(kept, [entry("results/kept.json", b"[1]")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn round_trips_binary_evidence_in_canonical_unicode_order() {
         let root = temporary_directory("archive-roundtrip");
@@ -836,6 +832,16 @@ mod tests {
             fs::write(&path, &compressed[..end]).unwrap();
             assert!(read_archive_selected(&path, |_| false).is_err());
         }
+        // A stream shorter than the magic names what it lacks.
+        fs::write(&path, gzip(b"SC")).unwrap();
+        assert!(matches!(
+            read_archive_selected(&path, |_| false),
+            Err(EvidenceArchiveError::Truncated("magic"))
+        ));
+        assert!(matches!(
+            read_archive_schema_version(&path),
+            Err(EvidenceArchiveError::Truncated("magic"))
+        ));
         let second_member = [compressed.as_slice(), gzip(b"hidden").as_slice()].concat();
         fs::write(&path, second_member).unwrap();
         assert!(matches!(
@@ -871,6 +877,139 @@ mod tests {
         ));
         assert!(!destination.exists());
         assert!(fs::read_dir(&root).unwrap().next().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Each step of writing an archive failing -- its directory, its
+    /// temporary file, the bytes wherever the disk fills, the sync, the size,
+    /// the rename -- or a destination with no name, leaves nothing behind.
+    #[test]
+    fn each_step_of_writing_an_archive_failing_leaves_nothing() {
+        let root = temporary_directory("archive-steps");
+        let destination = root.join("evidence.raw.gz");
+        for fault in [
+            "fs.create_dir_all",
+            "fs.open_with",
+            "fs.sync_all",
+            "fs.file_metadata",
+            "fs.rename",
+        ] {
+            assert!(
+                crate::fault::during(fault, || write_archive(identity_entries(), &destination))
+                    .is_err(),
+                "{fault}"
+            );
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0, "{fault}");
+        }
+        for nameless in [Path::new(""), &root.join("..")] {
+            assert!(
+                matches!(
+                    write_archive(identity_entries(), nameless),
+                    Err(EvidenceArchiveError::InvalidPath(_))
+                ),
+                "{}",
+                nameless.display()
+            );
+        }
+        // Bytes that do not compress, so the disk can fill at any point of
+        // the stream: while it is written, as it is finished, as it is
+        // flushed.
+        let mut noise = Vec::with_capacity(96 * 1024);
+        let mut state = 0x2545_f491_u32;
+        for _ in 0..noise.capacity() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            noise.push(state as u8);
+        }
+        let mut entries = identity_entries();
+        entries.push(entry("noise.bin", &noise));
+        let mut written = None;
+        for limit in (0..110_000).step_by(1_009) {
+            match write_archive_with_fault(
+                entries.clone(),
+                &destination,
+                EvidenceArchiveWriteFault::NoSpaceAfterBytes(limit),
+            ) {
+                Ok(metadata) => {
+                    written = Some(limit);
+                    assert!(metadata.compressed_bytes <= limit);
+                    fs::remove_file(&destination).unwrap();
+                }
+                Err(EvidenceArchiveError::Io(error)) => {
+                    assert_eq!(error.kind(), io::ErrorKind::StorageFull, "{limit}");
+                }
+                Err(other) => panic!("{limit}: {other}"),
+            }
+            let left = fs::read_dir(&root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert!(left.is_empty(), "{limit}: {left:?}");
+        }
+        assert!(written.is_some());
+        // The stream's last bytes, a byte at a time: the disk filling as the
+        // compressor finishes, or as the buffer under it is flushed.
+        let size = write_archive(entries.clone(), &destination)
+            .unwrap()
+            .compressed_bytes;
+        fs::remove_file(&destination).unwrap();
+        // The compressor's last block is larger than the buffer under it,
+        // so the disk can fill while it finishes, before the final flush:
+        // limits across the stream's end, closer apart than the buffer.
+        for limit in (size.saturating_sub(24 * 1024)..size.saturating_sub(64))
+            .step_by(61)
+            .chain(size.saturating_sub(64)..size)
+        {
+            assert!(
+                matches!(
+                    write_archive_with_fault(
+                        entries.clone(),
+                        &destination,
+                        EvidenceArchiveWriteFault::NoSpaceAfterBytes(limit),
+                    ),
+                    Err(EvidenceArchiveError::Io(ref error)) if error.kind() == io::ErrorKind::StorageFull
+                ),
+                "{limit}"
+            );
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0, "{limit}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Reading an archive fails where its file cannot be opened or read --
+    /// as its stream is decoded, or as the end is checked -- and where the
+    /// reader refuses an entry it is handed.
+    #[test]
+    fn an_archive_that_cannot_be_read_or_whose_entry_is_refused_fails() {
+        let root = temporary_directory("archive-unread");
+        let destination = root.join("evidence.raw.gz");
+        write_archive(identity_entries(), &destination).unwrap();
+        for fault in ["fs.read_from", "fs.read_from@2"] {
+            assert!(
+                matches!(
+                    crate::fault::during(fault, || read_archive_each(
+                        &destination,
+                        |_| false,
+                        |_| Ok(())
+                    )),
+                    Err(EvidenceArchiveError::Io(_))
+                ),
+                "{fault}"
+            );
+        }
+        assert!(matches!(
+            read_archive_each(
+                &destination,
+                |_| true,
+                |_| Err(EvidenceArchiveError::MissingManifest)
+            ),
+            Err(EvidenceArchiveError::MissingManifest)
+        ));
+        assert!(matches!(
+            read_archive_schema_version(&root.join("missing.raw.gz")),
+            Err(EvidenceArchiveError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -974,16 +1113,24 @@ mod tests {
     fn rejects_unsafe_duplicate_and_missing_manifest_entries_without_debris() {
         let root = temporary_directory("archive-safety");
         let destination = root.join("evidence.raw.gz");
+        // Beside the identity an archive needs, so the path is what is refused.
         for invalid in ["", "/absolute", "../escape", "a/../escape", "a\\b"] {
-            assert!(write_archive(vec![entry(invalid, b"")], &destination).is_err());
+            let mut entries = identity_entries();
+            entries.push(entry(invalid, b""));
+            assert!(
+                matches!(
+                    write_archive(entries, &destination),
+                    Err(EvidenceArchiveError::InvalidPath(path)) if path == invalid
+                ),
+                "{invalid}"
+            );
         }
-        assert!(
-            write_archive(
-                vec![entry("manifest.json", b"{}"), entry("manifest.json", b"{}")],
-                &destination,
-            )
-            .is_err(),
-        );
+        let mut doubled = identity_entries();
+        doubled.push(entry("manifest.json", b"{}"));
+        assert!(matches!(
+            write_archive(doubled, &destination),
+            Err(EvidenceArchiveError::DuplicatePath(path)) if path == "manifest.json"
+        ));
         assert!(write_archive(vec![entry("result.json", b"{}")], &destination).is_err());
         assert!(!destination.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
@@ -1142,6 +1289,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["manifest.json", "server/worker/result.jsonl"],
         );
+        // Each read failing fails the collection: the directory listed, an
+        // entry of it, a child's kind, one below it, a file in it, and the
+        // named file's kind and bytes.
+        let sources = [
+            EvidenceArchiveSource::Directory {
+                directory: root.join("evidence"),
+                prefix: Some("server".to_owned()),
+            },
+            EvidenceArchiveSource::File {
+                file: root.join("manifest.json"),
+                path: "manifest.json".to_owned(),
+            },
+        ];
+        for fault in [
+            "fs.read_dir",
+            "fs.read_dir entry",
+            "fs.symlink_metadata@2",
+            "fs.symlink_metadata@3",
+            "fs.read",
+            "fs.symlink_metadata@4",
+            "fs.read@2",
+        ] {
+            assert!(
+                crate::fault::during(fault, || collect_sources(&sources)).is_err(),
+                "{fault}"
+            );
+        }
+        // A prefix or a file's path the archive cannot carry is refused.
+        for (prefix, path) in [
+            ("../server", "manifest.json"),
+            ("server", "../manifest.json"),
+        ] {
+            let refused = collect_sources(&[
+                EvidenceArchiveSource::Directory {
+                    directory: root.join("evidence"),
+                    prefix: Some(prefix.to_owned()),
+                },
+                EvidenceArchiveSource::File {
+                    file: root.join("manifest.json"),
+                    path: path.to_owned(),
+                },
+            ]);
+            assert!(
+                matches!(refused, Err(EvidenceArchiveError::InvalidPath(_))),
+                "{prefix} {path}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1163,6 +1357,37 @@ mod tests {
             Err(EvidenceArchiveError::UnsupportedSource(_))
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A file whose name the archive cannot carry -- a backslash in it, or,
+    /// where the system allows one, a name that is not UTF-8 -- is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_named_what_the_archive_cannot_carry_is_refused() {
+        let collect = |name: &std::ffi::OsStr| {
+            let root = temporary_directory("archive-names");
+            let evidence = root.join("evidence");
+            fs::create_dir_all(&evidence).unwrap();
+            fs::write(evidence.join(name), b"{}\n").unwrap();
+            let collected = collect_sources(&[EvidenceArchiveSource::Directory {
+                directory: evidence,
+                prefix: None,
+            }]);
+            fs::remove_dir_all(root).unwrap();
+            collected
+        };
+        assert!(matches!(
+            collect(std::ffi::OsStr::new("a\\b")),
+            Err(EvidenceArchiveError::InvalidPath(_))
+        ));
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(matches!(
+                collect(std::ffi::OsStr::from_bytes(b"\xff")),
+                Err(EvidenceArchiveError::InvalidPath(_))
+            ));
+        }
     }
 
     #[test]
@@ -1274,5 +1499,195 @@ mod tests {
         // into place, so a parent that cannot be opened must not fail it.
         sync_directory(Path::new("/proc/self/no-such-directory"));
         sync_directory(Path::new("/proc/self"));
+    }
+
+    #[test]
+    fn each_archive_error_says_what_failed() {
+        let messages = [
+            EvidenceArchiveError::from(io::Error::other("disk full")),
+            EvidenceArchiveError::from(serde_json::from_str::<u8>("x").unwrap_err()),
+            EvidenceArchiveError::InvalidMagic,
+            EvidenceArchiveError::InvalidHeader("version"),
+            EvidenceArchiveError::InvalidPath("../x".into()),
+            EvidenceArchiveError::DuplicatePath("a".into()),
+            EvidenceArchiveError::UnsortedPath {
+                previous: "b".into(),
+                current: "a".into(),
+            },
+            EvidenceArchiveError::MissingManifest,
+            EvidenceArchiveError::MissingFrontend,
+            EvidenceArchiveError::MissingCoverageModel,
+            EvidenceArchiveError::Truncated("header"),
+            EvidenceArchiveError::TrailingCompressedData,
+            EvidenceArchiveError::UnsupportedSource(PathBuf::from("raw/link")),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "disk full",
+                "expected value at line 1 column 1",
+                "unsupported Supercov evidence archive",
+                "invalid Supercov evidence archive header: version",
+                "invalid Supercov evidence archive path: \"../x\"",
+                "duplicate Supercov evidence archive path: a",
+                "unsorted Supercov evidence archive paths: b before a",
+                "Supercov evidence archive is missing manifest.json",
+                "Supercov evidence archive is missing frontend.json",
+                "Supercov evidence archive is missing coverage-model.json",
+                "truncated Supercov evidence archive header",
+                "Supercov evidence archive contains trailing compressed data",
+                "unsupported raw evidence entry: raw/link",
+            ]
+        );
+    }
+
+    /// A stream that fails at its `left`th call and every one after, a byte
+    /// read at a time.
+    struct Failing<'a> {
+        input: &'a [u8],
+        left: usize,
+        failed: bool,
+    }
+
+    impl Failing<'_> {
+        fn spend(&mut self) -> io::Result<()> {
+            if self.left == 0 {
+                self.failed = true;
+                return Err(io::Error::other("closed"));
+            }
+            self.left -= 1;
+            Ok(())
+        }
+    }
+
+    impl Read for Failing<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.spend()?;
+            let end = buffer.len().min(1);
+            self.input.read(&mut buffer[..end])
+        }
+    }
+
+    impl Write for Failing<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.spend()?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.spend()
+        }
+    }
+
+    /// The writers under an archive pass a flush on to what they wrap.
+    #[test]
+    fn the_writers_under_an_archive_pass_a_flush_on() {
+        let mut counting = CountingWriter::new(Vec::new());
+        counting.write_all(b"ab").unwrap();
+        counting.flush().unwrap();
+        assert_eq!((counting.written, counting.inner), (2, b"ab".to_vec()));
+        let mut faulting = FaultingWriter::new(Vec::new(), None);
+        faulting.write_all(b"ab").unwrap();
+        faulting.flush().unwrap();
+        assert_eq!(faulting.inner, b"ab");
+        // And a write the file under them refuses.
+        let mut refused = FaultingWriter::new(
+            Failing {
+                input: b"",
+                left: 0,
+                failed: false,
+            },
+            None,
+        );
+        assert!(refused.write(b"ab").is_err());
+    }
+
+    /// Framing an archive's entries, and reading them back keeping all or
+    /// none, over a stream that fails at each call in turn, and from the
+    /// framed bytes cut short anywhere: every failure is an error and every
+    /// cut a refusal, and the whole reads back as written.
+    #[test]
+    fn framed_entries_whose_stream_fails_or_is_cut_are_refused() {
+        let entries = vec![
+            entry("coverage-model.json", b"{}"),
+            entry("frontend.json", b"{}"),
+            entry("manifest.json", b"{}"),
+        ];
+        let (framed, _) = write_framed_with_magic(&entries, Vec::new(), "").unwrap();
+        // A stream that takes nothing fails at the archive's magic.
+        assert!(
+            write_framed_with_magic(
+                &entries,
+                &mut Failing {
+                    input: b"",
+                    left: 0,
+                    failed: false,
+                },
+                EVIDENCE_ARCHIVE_MAGIC,
+            )
+            .is_err()
+        );
+        // No entry frames to nothing.
+        assert!(
+            write_framed_with_magic(&[], Vec::new(), "")
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        for left in 0.. {
+            let mut stream = Failing {
+                input: b"",
+                left,
+                failed: false,
+            };
+            let written = write_framed_with_magic(&entries, &mut stream, "").map(|_| ());
+            if !stream.failed {
+                assert!(written.is_ok());
+                break;
+            }
+            assert!(written.is_err(), "failing at {left}");
+        }
+        for keep in [true, false] {
+            for left in 0.. {
+                let mut stream = Failing {
+                    input: &framed,
+                    left,
+                    failed: false,
+                };
+                let read = read_framed_entries(&mut stream, |_| keep, |_| Ok(()));
+                if !stream.failed {
+                    assert!(read.is_ok());
+                    break;
+                }
+                assert!(
+                    matches!(read, Err(EvidenceArchiveError::Io(_))),
+                    "{left}: {read:?}"
+                );
+            }
+        }
+        for cut in 0..framed.len() {
+            assert!(
+                read_framed_entries(&mut &framed[..cut], |_| true, |_| Ok(())).is_err(),
+                "cut at {cut}"
+            );
+        }
+        let mut read = Vec::new();
+        read_framed_entries(
+            &mut &framed[..],
+            |_| true,
+            |entry| {
+                read.push(entry);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(read, entries);
+        // A header that is no JSON, and one naming a path no archive holds.
+        for header in [&b"not json\n"[..], b"{\"path\":\"../x\",\"bytes\":0}\n"] {
+            let mut bytes = (header.len() as u32).to_be_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            assert!(read_framed_entries(&mut &bytes[..], |_| true, |_| Ok(())).is_err());
+        }
     }
 }

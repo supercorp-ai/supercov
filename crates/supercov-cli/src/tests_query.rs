@@ -203,13 +203,16 @@ pub fn command(args: &[String]) -> ExitCode {
                             .as_str()
                             .is_some_and(|v| dropped.contains(&v))
                     })
-                    .filter_map(|t| {
-                        let value = t[key].as_str()?;
-                        Some(if names {
+                    .map(|t| {
+                        // Every affected test is named by its file and name.
+                        let value = t[key]
+                            .as_str()
+                            .expect("an affected test has a file and a name");
+                        if names {
                             runner_filter_name(t["file"].as_str().unwrap_or(""), value)
                         } else {
                             value.to_owned()
-                        })
+                        }
                     })
                     .collect::<Vec<_>>();
                 // Ranked when there is an assessment (most likely to catch
@@ -486,7 +489,7 @@ impl<'r> CurrentLines<'r> {
     fn get(&mut self, file: &str) -> &[String] {
         let root = self.root;
         self.files.entry(file.to_owned()).or_insert_with(|| {
-            std::fs::read_to_string(root.join(file))
+            supercov_engine::fault_fs::read_to_string(root.join(file))
                 .unwrap_or_default()
                 .lines()
                 .map(|l| l.trim().to_owned())
@@ -556,13 +559,12 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
         match agent_json::success("runs.tests.affected", &data, None) {
             Ok(output) => return Ok(output),
             Err(size) => {
-                let mut notes = Vec::new();
-                match step {
+                let note = match step {
                     0 => {
                         let count = data["unaffected"].as_array().map_or(0, Vec::len);
                         data["unaffected"] = json!([]);
                         data["unaffectedCount"] = json!(count);
-                        notes.push("unaffected tests are counted, not listed");
+                        "unaffected tests are counted, not listed"
                     }
                     1 => {
                         for bucket in ["affected", "undetermined"] {
@@ -573,7 +575,7 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
                                     .truncate(3);
                             }
                         }
-                        notes.push("each test keeps its first three reasons");
+                        "each test keeps its first three reasons"
                     }
                     _ => {
                         // A change to hundreds of files no test ran affects
@@ -593,34 +595,30 @@ fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
                                 "the changed statements not asserted keep their first entries",
                             ),
                         ];
-                        let mut shortened = None;
-                        for (within, key, note) in lists {
+                        let shortened = lists.into_iter().find_map(|(within, key, note)| {
                             let at = match within {
                                 Some(within) => &mut data[within],
                                 None => &mut data,
                             };
                             let listed = at[key].as_array().map_or(0, Vec::len);
-                            if listed > 0 {
+                            (listed > 0).then(|| {
                                 let count = format!("{key}Count");
                                 let total = at[&count].as_u64().unwrap_or(listed as u64);
                                 at[&count] = json!(total);
                                 at[key] = json!(at[key].as_array().unwrap()[..listed / 2]);
-                                shortened = Some(note);
-                                break;
-                            }
-                        }
+                                note
+                            })
+                        });
                         let Some(note) = shortened else {
                             return Err(size);
                         };
-                        notes.push(note);
+                        note
                     }
-                }
+                };
                 step += 1;
                 let mut all = data["truncated"].as_array().cloned().unwrap_or_default();
-                for note in notes {
-                    if !all.iter().any(|n| n == note) {
-                        all.push(json!(note));
-                    }
+                if !all.iter().any(|n| n == note) {
+                    all.push(json!(note));
                 }
                 data["truncated"] = json!(all);
             }
@@ -675,7 +673,7 @@ fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
         .iter()
         .filter(|(file, _)| supercov_engine::run_currency::configuration_file(file))
         .filter(|(file, was)| {
-            std::fs::read_to_string(root.join(file))
+            supercov_engine::fault_fs::read_to_string(root.join(file))
                 .ok()
                 .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
                 != Some(was.sha256.clone())
@@ -718,10 +716,11 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
                 all.push(test);
             }
         }
-        for test in &mut all {
+        // Every test of the run, and a run has one at least.
+        all.iter_mut().for_each(|test| {
             let reasons = test["reasons"].as_array_mut().unwrap();
             reasons.insert(0, json!(reason));
-        }
+        });
         all.sort_by(|a, b| {
             (a["file"].as_str(), a["name"].as_str()).cmp(&(b["file"].as_str(), b["name"].as_str()))
         });
@@ -869,7 +868,8 @@ fn render(data: &Value) -> String {
         out.push_str("\nNo captured file has changed.\n");
     } else {
         out.push_str("\nChanged files:\n");
-        for file in &files {
+        // Some: no file is the case above.
+        files.iter().for_each(|file| {
             out.push_str(&format!(
                 "  {}  {}{}\n",
                 file["file"].as_str().unwrap_or(""),
@@ -879,7 +879,7 @@ fn render(data: &Value) -> String {
                     .map(|d| format!("  {d}"))
                     .unwrap_or_default()
             ));
-        }
+        });
     }
     let tree = &data["workingTree"];
     match tree["stale"] {
@@ -902,6 +902,23 @@ fn render(data: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// A changed declaration that is gone now puts every statement of its
+    /// own lines in play, in order; one outside them is not.
+    #[test]
+    fn a_declaration_gone_now_puts_all_its_statements_in_play() {
+        let root = Path::new("/nonexistent");
+        let mut current = CurrentLines::new(root);
+        let code = serde_json::json!({"file": "a.js", "own": [[2, 4]], "now": null});
+        let statements = [5, 3, 2]
+            .map(|line| serde_json::json!({"line": line, "text": "x"}))
+            .to_vec();
+        let lines = in_changed_code(&mut current, &code, statements)
+            .iter()
+            .map(|statement| statement["line"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, [2, 3]);
+    }
+
     /// Statements still standing are the longest run matching the current
     /// lines in order, so a repeated line counts where it is; past the size
     /// a table fits, each statement is looked for anywhere.
@@ -914,6 +931,7 @@ mod tests {
             [true, true, false, false, true]
         );
         assert_eq!(aligned(&statements, &[]), [false; 5]);
+        assert!(aligned(&[], &words("x")).is_empty());
         assert_eq!(aligned(&["x", "y"], &words("x")), [true, false]);
         assert_eq!(aligned(&["y", "x"], &words("x y")), [false, true]);
         let many = (0..2001).map(|i| format!("s{i}")).collect::<Vec<_>>();
@@ -1052,5 +1070,14 @@ mod tests {
         );
         assert!(text.contains("  src/a.js  bodies  add (line 1)"), "{text}");
         assert!(text.contains("matches the run"), "{text}");
+        // A test with no reason listed, a tree that differs with none given,
+        // and one that could not be compared.
+        let mut data = data;
+        data["affected"][0]["reasons"] = json!([]);
+        data["workingTree"] = json!({"stale": true});
+        let text = render(&data);
+        assert!(text.contains("differs from the run:\n"), "{text}");
+        data["workingTree"] = json!({});
+        assert!(render(&data).contains("could not be compared"));
     }
 }

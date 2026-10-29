@@ -8,10 +8,11 @@
 //! keeps its own scheduling and retries and this program serves as its target
 //! runner (`rust_owned_nextest`), recording each attempt it launches.
 
+use crate::fault_fs as fs;
+use crate::fault_process::Launch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
     io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Output},
@@ -54,7 +55,7 @@ pub struct RustFrontendRun {
 }
 
 impl RustFrontendRun {
-    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Vec<EvidenceArchiveEntry> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
@@ -65,24 +66,25 @@ impl RustFrontendRun {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&model)?,
+                contents: serde_json::to_vec(&model).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
-                contents: serde_json::to_vec(&self.declaration)?,
+                contents: serde_json::to_vec(&self.declaration).expect("plain data serializes"),
             },
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
-                contents: serde_json::to_vec(&self.request.manifest)?,
+                contents: serde_json::to_vec(&self.request.manifest)
+                    .expect("plain data serializes"),
             },
         ];
         for (index, result) in self.request.raw_results.iter().enumerate() {
             entries.push(EvidenceArchiveEntry {
                 path: format!("results/{index:08}/mcdc.json"),
-                contents: serde_json::to_vec(result)?,
+                contents: serde_json::to_vec(result).expect("plain data serializes"),
             });
         }
-        Ok(entries)
+        entries
     }
 }
 
@@ -208,8 +210,9 @@ fn shown_without_capture(line: &[u8]) -> bool {
     let text = String::from_utf8_lossy(line);
     let text = text.trim();
     !(text.is_empty()
-        || text.starts_with("running ") && text.ends_with(" test")
-        || text.starts_with("running ") && text.ends_with(" tests")
+        || text
+            .strip_prefix("running ")
+            .is_some_and(|count| count.ends_with(" test") || count.ends_with(" tests"))
         || text.starts_with("test result: "))
 }
 
@@ -923,10 +926,9 @@ fn build_owned_arguments(arguments: Vec<String>) -> Result<Vec<String>, RustTest
 
 fn build_test_artifacts(
     project: &PreparedRustProject,
-    command: &[String],
+    lint_invocation: &CargoTestInvocation,
 ) -> Result<Vec<TestArtifact>, RustTestRunnerError> {
-    let mut invocation = cargo_invocation(&project.workspace_root, command)?;
-    let lint_invocation = invocation.clone();
+    let mut invocation = lint_invocation.clone();
     invocation.arguments = build_owned_arguments(invocation.arguments)?;
     invocation
         .arguments
@@ -941,8 +943,8 @@ fn build_test_artifacts(
         .args(invocation.arguments)
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
-        .env("RUSTFLAGS", capped_rustflags(project, &lint_invocation))
-        .output()
+        .env("RUSTFLAGS", capped_rustflags(project, lint_invocation))
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
         // With --message-format=json the compiler's diagnostics travel on
@@ -965,49 +967,52 @@ fn build_test_artifacts(
     let canonical_target = fs::canonicalize(&project.target_directory)
         .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
     let mut artifacts = Vec::new();
-    for line in output
+    // Cargo ends its messages with `build-finished`, so there is a line.
+    output
         .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-    {
-        let message: CargoMessage = serde_json::from_slice(line)
-            .map_err(|error| RustTestRunnerError::CargoJson(error.to_string()))?;
-        if message.reason != "compiler-artifact"
-            || !message.profile.as_ref().is_some_and(|profile| profile.test)
-        {
-            continue;
-        }
-        let (Some(executable), Some(target)) = (message.executable, message.target) else {
-            continue;
-        };
-        let executable = fs::canonicalize(&executable)
-            .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-        if !executable.starts_with(&canonical_target)
-            || !fs::metadata(&executable).is_ok_and(|metadata| metadata.is_file())
-        {
-            return Err(RustTestRunnerError::UnsafeArtifact(
-                executable.display().to_string(),
-            ));
-        }
-        let source = fs::canonicalize(target.src_path)
-            .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-        let package_directory = message
-            .manifest_path
-            .as_deref()
-            .and_then(Path::parent)
-            .map_or_else(|| project.workspace_root.clone(), Path::to_path_buf);
-        artifacts.push(TestArtifact {
-            executable,
-            package_directory,
-            name: target.name,
-            kind: if target.kind.iter().any(|kind| kind == "test") {
-                "integration".into()
-            } else {
-                "unit".into()
-            },
-            source: relative_source(&project.workspace_root, &source)?,
-        });
-    }
+        .try_for_each(|line| -> Result<(), RustTestRunnerError> {
+            let message: CargoMessage = serde_json::from_slice(line)
+                .map_err(|error| RustTestRunnerError::CargoJson(error.to_string()))?;
+            if message.reason != "compiler-artifact"
+                || !message.profile.as_ref().is_some_and(|profile| profile.test)
+            {
+                return Ok(());
+            }
+            let (Some(executable), Some(target)) = (message.executable, message.target) else {
+                return Ok(());
+            };
+            let executable = fs::canonicalize(&executable)
+                .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+            if !executable.starts_with(&canonical_target)
+                || !fs::metadata(&executable).is_ok_and(|metadata| metadata.is_file())
+            {
+                return Err(RustTestRunnerError::UnsafeArtifact(
+                    executable.display().to_string(),
+                ));
+            }
+            let source = fs::canonicalize(target.src_path)
+                .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+            let package_directory = message
+                .manifest_path
+                .as_deref()
+                .and_then(Path::parent)
+                .unwrap_or(&project.workspace_root)
+                .to_path_buf();
+            artifacts.push(TestArtifact {
+                executable,
+                package_directory,
+                name: target.name,
+                kind: if target.kind.iter().any(|kind| kind == "test") {
+                    "integration".into()
+                } else {
+                    "unit".into()
+                },
+                source: relative_source(&project.workspace_root, &source)?,
+            });
+            Ok(())
+        })?;
     artifacts.sort_by(|left, right| left.executable.cmp(&right.executable));
     artifacts.dedup_by(|left, right| left.executable == right.executable);
     if artifacts.is_empty() {
@@ -1260,7 +1265,7 @@ fn list_tests(
         .args(["--list", "--format", "terse"])
         .args(filters)
         .envs(environment.iter().map(|(key, value)| (key, value)))
-        .output()
+        .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
         // A libtest binary that dies on a signal writes nothing to stderr, so
@@ -1542,7 +1547,7 @@ fn rustc_print_path(
         .args(selector)
         .args(["--print", request])
         .current_dir(&project.workspace_root)
-        .output()
+        .launch_output()
         .map_err(|error| {
             RustTestRunnerError::Launch(format!("rustc --print {request}: {error}"))
         })?;
@@ -1731,24 +1736,24 @@ fn running_line(
 /// none.
 fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
     use std::io::IsTerminal;
-    let asked =
-        colour_flag(&invocation.arguments).or_else(|| std::env::var("CARGO_TERM_COLOR").ok());
     cargo_colour_choice(
-        asked.as_deref(),
+        colour_flag(&invocation.arguments).as_deref(),
         &|name| std::env::var(name).ok(),
         std::io::stderr().is_terminal(),
     )
 }
 
-/// What Cargo decides from what was asked, its environment, and whether its
-/// lines go to a terminal.
+/// What Cargo decides from what was asked (`--color`, or else
+/// `CARGO_TERM_COLOR`), its environment, and whether its lines go to a
+/// terminal.
 fn cargo_colour_choice(
     asked: Option<&str>,
     variable: &dyn Fn(&str) -> Option<String>,
     terminal: bool,
 ) -> bool {
     let set = |name: &str| variable(name).filter(|value| !value.is_empty());
-    match asked {
+    let asked = asked.map(str::to_owned).or_else(|| set("CARGO_TERM_COLOR"));
+    match asked.as_deref() {
         Some("always") => true,
         Some("never") => false,
         // As Cargo decides it when left to: forced, refused, and otherwise
@@ -1934,22 +1939,23 @@ fn decline_uncompiled_sources(
         .and_then(|scope| scope.get_mut("entries"))
         .and_then(serde_json::Value::as_array_mut)
     {
-        for entry in entries
+        // Never empty: the declined files are sources the scope lists.
+        entries
             .iter_mut()
             .filter_map(serde_json::Value::as_object_mut)
-        {
-            let named = entry
-                .get("file")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|file| declined.contains(file));
-            if named {
-                entry.insert("status".into(), "excluded".into());
-                entry.insert(
-                    "reason".into(),
-                    crate::rust_project::RUST_NOT_COMPILED.into(),
-                );
-            }
-        }
+            .for_each(|entry| {
+                let named = entry
+                    .get("file")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|file| declined.contains(file));
+                if named {
+                    entry.insert("status".into(), "excluded".into());
+                    entry.insert(
+                        "reason".into(),
+                        crate::rust_project::RUST_NOT_COMPILED.into(),
+                    );
+                }
+            });
     }
     (manifest, declined)
 }
@@ -2124,13 +2130,16 @@ fn note_unrun_workers(
         .into_iter()
         .filter(|file| !ran.contains(file) && project.source_files.contains(file))
         .collect::<BTreeSet<_>>();
+    // A reused build's manifest carries the notes of the run that built it;
+    // which Workers ran, and why one did not, are this run's to say.
+    project.manifest.limitations.retain(|limitation| {
+        !limitation
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id.starts_with("rust-worker-not-run#"))
+    });
     for file in &unrun {
         let id = format!("rust-worker-not-run#{file}");
-        if project.manifest.limitations.iter().any(|limitation| {
-            limitation.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())
-        }) {
-            continue;
-        }
         // The whole file: the report takes it out of the denominator and
         // says why, rather than counting its lines as gaps.
         project.manifest.limitations.push(serde_json::json!({
@@ -2151,6 +2160,12 @@ fn note_unrun_workers(
         .collect()
 }
 
+/// The first three of `files`, and `, ...` after them when there are more.
+fn first_files<'a>(files: impl ExactSizeIterator<Item = &'a str>) -> String {
+    let more = if files.len() > 3 { ", ..." } else { "" };
+    format!("{}{more}", files.take(3).collect::<Vec<_>>().join(", "))
+}
+
 /// Says which files the build left out of the denominator.
 fn report_declined(
     declined: &BTreeSet<String>,
@@ -2161,15 +2176,9 @@ fn report_declined(
     }
     writeln!(
         diagnostics,
-        "[supercov] {} source file(s) this build did not compile are outside the denominator: {}{}",
+        "[supercov] {} source file(s) this build did not compile are outside the denominator: {}",
         declined.len(),
-        declined
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", "),
-        if declined.len() > 3 { ", ..." } else { "" }
+        first_files(declined.iter().map(String::as_str)),
     )
     .map_err(|error| RustTestRunnerError::Io(error.to_string()))
 }
@@ -2177,26 +2186,17 @@ fn report_declined(
 /// Says, after the tests' own output, which Worker files the run could not
 /// measure and why: they are out of the totals, and `runs check` refuses to
 /// judge a run that left them unmeasured.
-fn report_unmeasured_workers(
-    unmeasured: &[(String, String)],
-    diagnostics: &mut dyn Write,
-) -> Result<(), RustTestRunnerError> {
+/// A note that cannot be written takes nothing from the run it is about.
+fn report_unmeasured_workers(unmeasured: &[(String, String)], diagnostics: &mut dyn Write) {
     let Some((_, reason)) = unmeasured.first() else {
-        return Ok(());
+        return;
     };
-    writeln!(
+    let _ = writeln!(
         diagnostics,
-        "[supercov] not measured: {} Rust Worker file(s), {}{}. {reason}.",
+        "[supercov] not measured: {} Rust Worker file(s), {}. {reason}.",
         unmeasured.len(),
-        unmeasured
-            .iter()
-            .take(3)
-            .map(|(file, _)| file.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        if unmeasured.len() > 3 { ", ..." } else { "" }
-    )
-    .map_err(|error| RustTestRunnerError::Io(error.to_string()))
+        first_files(unmeasured.iter().map(|(file, _)| file.as_str())),
+    );
 }
 
 /// `rust_workers`: the stand-in for `wrangler` the test processes find
@@ -2218,7 +2218,7 @@ pub fn run_prepared_rust_tests(
     // nextest builds for itself; Cargo builds the libtest artifacts here.
     let artifacts = if selection.run_libtests && invocation.kind == RustCargoCommandKind::CargoTest
     {
-        build_test_artifacts(project, command)?
+        build_test_artifacts(project, &invocation)?
     } else {
         Vec::new()
     };
@@ -2239,8 +2239,7 @@ pub fn run_prepared_rust_tests(
     // A signal that reaches the runner alone must not leave the test
     // processes running: on 2026-09-07 an orphaned tokio test spun on two
     // cores for an hour. The guard covers every child spawned below.
-    let _signal_guard = crate::child_signal_guard::ChildSignalGuard::install()
-        .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
+    let _signal_guard = crate::child_signal_guard::ChildSignalGuard::install();
     let evidence_root = project
         .workspace_root
         .join(".supercov/rust-evidence")
@@ -2274,7 +2273,7 @@ pub fn run_prepared_rust_tests(
             manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
             ..project.clone()
         };
-        report_unmeasured_workers(&unmeasured_workers, diagnostics)?;
+        report_unmeasured_workers(&unmeasured_workers, diagnostics);
         return Ok(RustFrontendRun {
             declaration: FrontendRunDeclaration {
                 protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -2327,11 +2326,10 @@ pub fn run_prepared_rust_tests(
         ArtifactLauncher::for_invocation(project, &invocation, &evidence_root.join("hooks"))?
             .with_environment(runner_environment);
     if let Some(browser) = launcher.unmeasured_browser() {
-        writeln!(
+        let _ = writeln!(
             diagnostics,
             "[supercov] wasm tests run in {browser} are not measured: Supercov reads a browser's wasm through Chrome only (`wasm-pack test --chrome`)"
-        )
-        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+        );
     }
     let target_libdir = if artifacts.is_empty() {
         PathBuf::new()
@@ -2389,9 +2387,13 @@ pub fn run_prepared_rust_tests(
         .iter()
         .any(|argument| matches!(argument.as_str(), "--nocapture" | "--no-capture"));
     std::thread::scope(|scope| {
-        for _ in 0..workers {
+        (0..workers).for_each(|_| {
             scope.spawn(|| {
                 loop {
+                    // Past the run's deadline no other test is started.
+                    if crate::child_signal_guard::deadline_passed() {
+                        break;
+                    }
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     let Some(task) = tasks.get(index) else { break };
                     let run = |command: &mut Command| {
@@ -2452,11 +2454,11 @@ pub fn run_prepared_rust_tests(
                         .push(result);
                 }
             });
-        }
+        });
     });
     let mut outcomes = outcomes
         .into_inner()
-        .map_err(|_| RustTestRunnerError::Io("Rust test result lock poisoned".into()))?
+        .expect("Rust test result lock poisoned")
         .into_iter()
         .map(|result| result.map_err(RustTestRunnerError::Launch))
         .collect::<Result<Vec<_>, _>>()?;
@@ -2468,19 +2470,22 @@ pub fn run_prepared_rust_tests(
     let mut remote = false;
     let mut started = Vec::new();
     if rust_workers.is_some() {
-        for outcome in &outcomes {
-            remote |= crate::rust_worker::started_remote(&outcome.task.directory);
-            started.extend(crate::rust_worker::started_worker_configs(
-                &outcome.task.directory,
-            ));
-            built_crates.extend(
-                crate::rust_worker::materialize_worker_windows(
+        outcomes
+            .iter()
+            .try_for_each(|outcome| -> Result<(), RustTestRunnerError> {
+                remote |= crate::rust_worker::started_remote(&outcome.task.directory);
+                started.extend(crate::rust_worker::started_worker_configs(
                     &outcome.task.directory,
-                    &project.probes.token,
-                )
-                .map_err(RustTestRunnerError::Io)?,
-            );
-        }
+                ));
+                built_crates.extend(
+                    crate::rust_worker::materialize_worker_windows(
+                        &outcome.task.directory,
+                        &project.probes.token,
+                    )
+                    .map_err(RustTestRunnerError::Io)?,
+                );
+                Ok(())
+            })?;
     }
     let mut project = project.clone();
     let unmeasured_workers = note_unrun_workers(&mut project, &built_crates, remote, &started);
@@ -2619,8 +2624,10 @@ pub fn run_prepared_rust_tests(
             server: Vec::new(),
         });
     }
-    // A nextest run has returned above: this is `cargo test`.
-    let doctest_results = if selection.run_doctests {
+    // A nextest run has returned above: this is `cargo test`. Past the
+    // run's deadline its doctests are not started either.
+    let doctest_results = if selection.run_doctests && !crate::child_signal_guard::deadline_passed()
+    {
         crate::rust_owned_doctests::run_doctests(
             project,
             &invocation,
@@ -2650,7 +2657,7 @@ pub fn run_prepared_rust_tests(
         runners.push(rust_runner_declaration("rustdoc"));
     }
     let structural_limitations = structural_limitations(&project.manifest);
-    report_unmeasured_workers(&unmeasured_workers, diagnostics)?;
+    report_unmeasured_workers(&unmeasured_workers, diagnostics);
     Ok(RustFrontendRun {
         declaration: FrontendRunDeclaration {
             protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -2683,6 +2690,47 @@ pub fn run_prepared_rust_tests(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn each_test_runner_error_says_what_failed() {
+        use super::RustTestRunnerError as E;
+        let messages = [
+            E::UnsupportedCommand("cargo bench is not a test command".into()),
+            E::Launch("no cargo".into()),
+            E::CargoFailed("exit 101".into()),
+            E::CargoJson("eof".into()),
+            E::UnsafeArtifact("../t".into()),
+            E::ListFailed("exit 1".into()),
+            E::Probe("header".into()),
+            E::Context("collision".into()),
+            E::UnknownProbe("o".into()),
+            E::InvalidVector {
+                id: "d".into(),
+                expected: 2,
+                actual: 3,
+            },
+            E::from(serde_json::from_str::<u8>("x").unwrap_err()),
+            E::Io("disk full".into()),
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages,
+            [
+                "cargo bench is not a test command",
+                "could not launch Rust test process: no cargo",
+                "Cargo test build failed: exit 101",
+                "invalid Cargo JSON output: eof",
+                "Cargo emitted an unsafe test artifact: ../t",
+                "could not enumerate Rust tests: exit 1",
+                "invalid Rust probe evidence: header",
+                "invalid Rust test context: collision",
+                "Rust runtime emitted an unknown obligation: o",
+                "Rust decision d emitted vector width 3; expected 2",
+                "could not encode Rust evidence: expected value at line 1 column 1",
+                "disk full",
+            ]
+        );
+    }
 
     /// `--color` decides when given, in either spelling; otherwise Cargo
     /// follows CLICOLOR_FORCE, NO_COLOR and CLICOLOR, and both colour a
@@ -2741,6 +2789,19 @@ mod tests {
             (None, &[("TERM", "xterm")][..], false, false),
             (Some("auto"), &[("TERM", "dumb")][..], true, cfg!(windows)),
             (None, &[][..], true, cfg!(windows)),
+            (None, &[("CARGO_TERM_COLOR", "always")][..], false, true),
+            (
+                Some("never"),
+                &[("CARGO_TERM_COLOR", "always")][..],
+                false,
+                false,
+            ),
+            (
+                None,
+                &[("CARGO_TERM_COLOR", ""), ("TERM", "xterm")][..],
+                true,
+                true,
+            ),
         ] {
             assert_eq!(
                 cargo_colour_choice(asked, &env(pairs), terminal),
@@ -2751,6 +2812,17 @@ mod tests {
         assert!(!shows_colours(false, Some("xterm")));
         assert_eq!(shows_colours(true, Some("")), cfg!(windows));
         assert!(shows_colours(true, Some("xterm-256color")));
+        let libtest = |choice: &str| {
+            super::libtest_colours(
+                &super::cargo_invocation(
+                    &std::env::temp_dir(),
+                    &words(&format!("cargo test -- --color {choice}")),
+                )
+                .unwrap(),
+            )
+        };
+        assert!(libtest("always"));
+        assert!(!libtest("never"));
     }
 
     #[test]
@@ -2760,6 +2832,7 @@ mod tests {
             "file:///tmp/a%20b/%23hook.mjs"
         );
         assert_eq!(file_url(Path::new("/srv/hook.mjs")), "file:///srv/hook.mjs");
+        assert_eq!(file_url(Path::new("")), "file:///");
     }
 
     #[test]
@@ -2968,6 +3041,13 @@ mod tests {
             ambient(&[("GECKODRIVER", "/opt/geckodriver")]),
             Some("geckodriver".into())
         );
+        // No driver anywhere is no browser; a Chrome driver that cannot
+        // start is named with why.
+        assert_eq!(ambient(&[]), None);
+        assert!(
+            ambient(&[("CHROMEDRIVER", "/nonexistent/chromedriver")])
+                .is_some_and(|browser| browser.starts_with("Chrome (")),
+        );
         assert_eq!(
             ambient(&[
                 ("GECKODRIVER", "/opt/geckodriver"),
@@ -2994,6 +3074,12 @@ mod tests {
         assert_eq!(
             std::env::split_paths(&environment[0].1).collect::<Vec<_>>(),
             ["/", "/lib"].map(PathBuf::from)
+        );
+        // A directory the variable cannot hold leaves the loader as it was.
+        #[cfg(unix)]
+        assert_eq!(
+            library_path_environment(Path::new("/a:b"), Path::new("/fixture"), None),
+            []
         );
     }
 
@@ -3216,6 +3302,72 @@ mod tests {
         );
     }
 
+    /// A writer that takes nothing, as a closed standard error.
+    struct Closed;
+
+    impl Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_gate_left_out_takes_its_decisions_and_a_closed_writer_is_an_error() {
+        let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
+        let source = concat!(
+            "#[cfg(feature = \"f\")]\n",
+            "pub fn f(a: bool, b: bool) -> i32 { if a && b { 1 } else { 2 } }\n",
+            "#[cfg(feature = \"g\")]\n",
+            "pub fn g(a: bool, b: bool) -> i32 { if a || b { 1 } else { 2 } }\n",
+        );
+        let mut manifest = crate::rust_instrumenter::instrument_rust_file_numbered(
+            "src/lib.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            None,
+            &mut probes,
+        )
+        .unwrap()
+        .manifest;
+        assert_eq!(probes.cfgs.len(), 2, "{:?}", probes.cfgs);
+        manifest.unmeasured = manifest
+            .points
+            .iter()
+            .map(|point| point.id.clone())
+            .collect();
+        let (decisions, branches) = (manifest.decisions.len(), manifest.branches.len());
+        assert!(decisions >= 2 && branches >= 4, "{decisions} {branches}");
+        // The first gate was left out of every build, the second built.
+        let settled = settle_cfg_gates_with(&manifest, &probes, &[1, 2], &mut Vec::new()).unwrap();
+        let kept = |file_line: &dyn Fn(usize) -> bool| {
+            settled
+                .decisions
+                .iter()
+                .all(|decision| file_line(decision.line))
+                && settled.branches.iter().all(|branch| file_line(branch.line))
+        };
+        assert!(settled.decisions.len() < decisions);
+        assert!(settled.branches.len() < branches);
+        assert!(settled.unmeasured.len() < manifest.unmeasured.len());
+        assert!(kept(&|line| line >= probes.cfgs[1].line));
+        for gates in [[1, 2], [0, 2]] {
+            let error = settle_cfg_gates_with(&manifest, &probes, &gates, &mut Closed).unwrap_err();
+            assert!(matches!(error, RustTestRunnerError::Io(_)), "{error}");
+        }
+        let declined = BTreeSet::from(["a.rs".to_owned()]);
+        assert!(matches!(
+            report_declined(&declined, &mut Closed),
+            Err(RustTestRunnerError::Io(_))
+        ));
+        let workers = [("a.rs".to_owned(), "no test started it".to_owned())];
+        report_unmeasured_workers(&workers, &mut Closed);
+    }
+
     #[test]
     fn files_the_build_did_not_read_are_declined_only_on_this_builds_depinfo() {
         let root = scratch("declined-sources");
@@ -3235,10 +3387,24 @@ mod tests {
             {"file": "src/lib.rs", "status": "included"},
             "not an entry",
         ]}));
+        // A boundary in a file left out goes with it; one with no file stays.
+        project.manifest.limitations = vec![
+            serde_json::json!({"id": "gone", "file": "src/gone.rs"}),
+            serde_json::json!({"id": "kept", "file": "src/lib.rs"}),
+            serde_json::json!({"id": "anywhere"}),
+        ];
         // A Worker's crate that `wrangler dev` built counts.
         let also = BTreeSet::from(["src/worker.rs".to_owned()]);
         let (manifest, declined) = decline_uncompiled_sources(&project, &also);
         assert_eq!(declined, BTreeSet::from(["src/gone.rs".to_owned()]));
+        assert_eq!(
+            manifest
+                .limitations
+                .iter()
+                .map(|limitation| limitation["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["kept", "anywhere"]
+        );
         let entries = manifest.scope.unwrap()["entries"].clone();
         assert_eq!(entries[0]["status"], "excluded");
         assert_eq!(entries[1]["status"], "included");
@@ -3306,7 +3472,7 @@ mod tests {
             [("runners/src/lib.rs".to_owned(), reason.to_owned())]
         );
         let mut said = Vec::new();
-        report_unmeasured_workers(&unmeasured, &mut said).unwrap();
+        report_unmeasured_workers(&unmeasured, &mut said);
         assert_eq!(
             String::from_utf8(said).unwrap(),
             format!(
@@ -3314,7 +3480,7 @@ mod tests {
             )
         );
         let mut said = Vec::new();
-        report_unmeasured_workers(&[], &mut said).unwrap();
+        report_unmeasured_workers(&[], &mut said);
         assert!(said.is_empty());
         // Every Worker ran: nothing changes.
         let mut ran = empty.clone();
@@ -3328,6 +3494,36 @@ mod tests {
             .is_empty()
         );
         assert_eq!(ran, empty);
+        // A later run on the same build says its own: the first run's note
+        // on a Worker gives way to this one's, or to none where it ran.
+        let mut reused = project.clone();
+        note_unrun_workers(
+            &mut reused,
+            &BTreeSet::from(["plane".to_owned()]),
+            true,
+            &[],
+        );
+        let notes = reused
+            .manifest
+            .limitations
+            .iter()
+            .filter(|limitation| limitation["wholeFile"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("wrangler dev --remote"),
+            "{notes:?}"
+        );
+        note_unrun_workers(
+            &mut reused,
+            &BTreeSet::from(["plane".to_owned(), "runners".to_owned()]),
+            false,
+            &[],
+        );
+        assert_eq!(reused, empty);
         // Tests that did start `wrangler dev` are named, once each, with why
         // a configuration was not measured.
         let mut started = empty;
@@ -3396,7 +3592,11 @@ mod tests {
             .unwrap();
             build_test_artifacts(
                 &project,
-                &[root.join("cargo").display().to_string(), "test".into()],
+                &cargo_invocation(
+                    &root,
+                    &[root.join("cargo").display().to_string(), "test".into()],
+                )
+                .unwrap(),
             )
             .map(|artifacts| artifacts.len())
             .map_err(|error| error.to_string())
@@ -3418,6 +3618,46 @@ mod tests {
             built(&outside, false)
                 .unwrap_err()
                 .contains("Cargo emitted no libtest artifacts")
+        );
+        let read = |messages: &str| {
+            fs::write(root.join("messages"), messages).unwrap();
+            build_test_artifacts(
+                &project,
+                &cargo_invocation(
+                    &root,
+                    &[root.join("cargo").display().to_string(), "test".into()],
+                )
+                .unwrap(),
+            )
+            .map(|artifacts| artifacts.len())
+            .map_err(|error| error.to_string())
+        };
+        // A line that is no JSON is no message of Cargo's.
+        assert!(read("not json\n").unwrap_err().contains("expected"));
+        // A test target with no executable built nothing to run.
+        let unbuilt = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": {"name": "fixture", "kind": ["lib"], "src_path": root.join("src/lib.rs")},
+            "profile": {"test": true},
+        });
+        assert!(
+            read(&format!("{unbuilt}\n"))
+                .unwrap_err()
+                .contains("Cargo emitted no libtest artifacts")
+        );
+        // A test binary built from a source outside the workspace is refused.
+        let binary = root.join("target/debug/deps/fixture");
+        fs::write(&binary, "").unwrap();
+        let foreign = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": {"name": "fixture", "kind": ["test"], "src_path": "/bin/sh"},
+            "profile": {"test": true},
+            "executable": binary,
+        });
+        assert!(
+            read(&format!("{foreign}\n"))
+                .unwrap_err()
+                .contains(&outside.display().to_string())
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -3808,9 +4048,37 @@ mod tests {
             words("cargo test \\\n  --workspace \"a\\\nb\""),
             ["cargo", "test", "--workspace", "ab"]
         );
-        for broken in ["cargo test 'open", "cargo test \"open", r"cargo test \"] {
+        for broken in [
+            "cargo test 'open",
+            "cargo test \"open",
+            r"cargo test \",
+            "cargo test \"open\\",
+        ] {
             assert!(shell_words(broken).is_err(), "{broken}");
         }
+        // Nothing is no words, and no arguments build as none.
+        assert!(words("").is_empty());
+        assert!(build_owned_arguments(Vec::new()).unwrap().is_empty());
+    }
+
+    /// Each nextest option is read for whether it takes the next word as
+    /// its value: one written with `=` carries its own.
+    #[test]
+    fn each_nextest_option_says_whether_it_takes_a_value() {
+        for (argument, run_only, shared) in [
+            ("--retries", Some(true), None),
+            ("--retries=2", Some(false), None),
+            ("--fail-fast", Some(false), None),
+            ("-j4", Some(false), None),
+            ("--profile", None, Some(true)),
+            ("--profile=ci", None, Some(false)),
+            ("--no-pager", None, Some(false)),
+            ("name", None, None),
+        ] {
+            assert_eq!(nextest_run_only_option(argument), run_only, "{argument}");
+            assert_eq!(nextest_shared_option(argument), shared, "{argument}");
+        }
+        assert_eq!(nextest_unsupported_run_option("--no-run"), Some(false));
     }
 
     #[test]
@@ -3948,6 +4216,24 @@ mod tests {
                 "-Zunstable-options",
                 "--exclude-should-panic"
             ]
+        );
+    }
+
+    /// `-Z` and its feature as two words keep both, as one does.
+    #[test]
+    fn an_unstable_flag_and_its_feature_as_two_words_are_kept_together() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::CargoTest,
+            arguments: vec!["test".into()],
+            runner_arguments: ["-Z", "unstable-options", "--exclude-should-panic"]
+                .map(str::to_owned)
+                .to_vec(),
+        };
+        let selection = rust_libtest_selection(&invocation).unwrap();
+        assert_eq!(
+            selection.list_arguments,
+            ["-Z", "unstable-options", "--exclude-should-panic"]
         );
     }
 
@@ -4768,7 +5054,7 @@ mod tests {
         );
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let archive = root.join("evidence.raw.gz");
-        write_archive(run.archive_entries().unwrap(), &archive).unwrap();
+        write_archive(run.archive_entries(), &archive).unwrap();
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,
             run_id: "rust-fixture".into(),

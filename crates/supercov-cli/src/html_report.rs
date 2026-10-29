@@ -1,10 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
     io::{Write, stdout},
     path::{Component, Path, PathBuf},
     process::{Command, ExitCode, Stdio},
 };
+use supercov_engine::fault_fs::{self as fs, OpenOptions};
+use supercov_engine::fault_process::Launch;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::GzEncoder};
@@ -332,29 +333,28 @@ fn collect_sources(
     let mut sources = BTreeMap::new();
     let mut omitted = Vec::new();
     let mut total = 0_usize;
-    for file in files {
+    // A stored run measured a file at least.
+    files.iter().for_each(|file| {
         let Some(path) = safe_relative_source(root, &file.file) else {
             omitted.push(file.file.clone());
-            continue;
+            return;
         };
         let Ok(metadata) = fs::metadata(&path) else {
             omitted.push(file.file.clone());
-            continue;
+            return;
         };
-        let Ok(length) = usize::try_from(metadata.len()) else {
-            omitted.push(file.file.clone());
-            continue;
-        };
+        // A length no usize holds is beyond any limit below.
+        let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         if !metadata.is_file()
             || length > MAX_SOURCE_BYTES
             || total.saturating_add(length) > MAX_TOTAL_SOURCE_BYTES
         {
             omitted.push(file.file.clone());
-            continue;
+            return;
         }
         let Ok(contents) = fs::read_to_string(&path) else {
             omitted.push(file.file.clone());
-            continue;
+            return;
         };
         total += contents.len();
         sources.insert(
@@ -364,7 +364,7 @@ fn collect_sources(
                 contents,
             },
         );
-    }
+    });
     (sources, omitted)
 }
 
@@ -456,27 +456,28 @@ fn build_run(
                 limit: usize::MAX,
             },
         )
-        .map_err(|error| format!("could not read {} in run {}: {error:?}", file.file, run.id))?;
+        .expect("a file the run measured has its detail");
         file_details.insert(
             file.file.clone(),
-            serde_json::to_value(detail).map_err(|error| error.to_string())?,
+            serde_json::to_value(detail).expect("plain data serializes"),
         );
     }
 
     let mut file_totals: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for hit in read.points() {
+    // A stored run measured a file, and so a point, at least.
+    read.points().iter().for_each(|hit| {
+        // The index knows these three obligations only.
         let kind = match hit.obligation.as_str() {
             "statement" => "statements",
             "function" => "functions",
-            "branch" => "branches",
-            _ => continue,
+            _ => "branches",
         };
         *file_totals
             .entry(hit.file.clone())
             .or_default()
             .entry(kind.into())
             .or_default() += 1;
-    }
+    });
 
     let decisions = read.decisions();
     let tests = read
@@ -486,7 +487,7 @@ fn build_run(
             let total_lines = test.lines.len();
             let total_hits = test.hits.len();
             let total_decisions = test.decisions.len();
-            Ok(ReportTest {
+            ReportTest {
                 id: test.summary.id.clone(),
                 name: test.summary.name.clone(),
                 file: test.summary.file.clone(),
@@ -497,15 +498,14 @@ fn build_run(
                 kind: test.summary.provenance.kind.clone(),
                 project: test.summary.provenance.project.clone(),
                 retries: test.retries.clone(),
-                attempts: serde_json::to_value(&test.attempts)
-                    .map_err(|error| error.to_string())?,
-                lines: serde_json::to_value(&test.lines).map_err(|error| error.to_string())?,
+                attempts: serde_json::to_value(&test.attempts).expect("plain data serializes"),
+                lines: serde_json::to_value(&test.lines).expect("plain data serializes"),
                 total_lines,
                 total_hits,
                 total_decisions,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let lines = read
         .lines()
         .iter()
@@ -528,7 +528,7 @@ fn build_run(
             limit: usize::MAX,
         },
     ) {
-        Ok((scope, _)) => Some(serde_json::to_value(scope).map_err(|error| error.to_string())?),
+        Ok((scope, _)) => Some(serde_json::to_value(scope).expect("plain data serializes")),
         Err(supercov_engine::coverage_query::QueryError::ScopeUnavailable) => None,
         Err(error) => {
             return Err(format!(
@@ -551,11 +551,11 @@ fn build_run(
         source_fingerprint: Some(run.metadata.integrity.fingerprint.source.clone()),
         source_mode: if source_exact { "exact" } else { "snippets" },
         omitted_sources,
-        summary: serde_json::to_value(summary).map_err(|error| error.to_string())?,
+        summary: serde_json::to_value(summary).expect("plain data serializes"),
         files,
         file_details,
         file_totals,
-        decisions: serde_json::to_value(decisions).map_err(|error| error.to_string())?,
+        decisions: serde_json::to_value(decisions).expect("plain data serializes"),
         assertions: build_assertions(run),
         statement_spans: statement_spans(run),
         tests,
@@ -583,6 +583,7 @@ fn build_assertions(run: &StoredRun) -> Option<serde_json::Value> {
     let empty = Vec::new();
     let statements = result["statements"].as_array().unwrap_or(&empty);
     for statement in statements {
+        // A saved assessment edited by hand may leave a statement's file out.
         let Some(file) = statement["file"].as_str() else {
             continue;
         };
@@ -654,10 +655,7 @@ fn collect_quality_sources(
             omit(&mut omitted);
             continue;
         };
-        let Ok(length) = usize::try_from(metadata.len()) else {
-            omit(&mut omitted);
-            continue;
-        };
+        let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         if !metadata.is_file()
             || length > MAX_SOURCE_BYTES
             || total.saturating_add(length) > MAX_TOTAL_SOURCE_BYTES
@@ -891,17 +889,17 @@ fn attach_security(
     timeline.sort_by(|left, right| right.at.cmp(&left.at).then_with(|| right.id.cmp(&left.id)));
 }
 
-fn render_html(bundle: &ReportBundle) -> Result<Vec<u8>, String> {
-    let payload = serde_json::to_vec(bundle).map_err(|error| error.to_string())?;
+fn render_html(bundle: &ReportBundle) -> Vec<u8> {
+    let payload = serde_json::to_vec(bundle).expect("plain data serializes");
+    // Compressed in memory, where writing cannot fail.
     let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
-    gzip.write_all(&payload)
-        .map_err(|error| error.to_string())?;
-    let compressed = gzip.finish().map_err(|error| error.to_string())?;
+    gzip.write_all(&payload).expect("writing to memory");
+    let compressed = gzip.finish().expect("writing to memory");
     let encoded = STANDARD.encode(compressed);
     // The template holds one marker, which a unit test checks.
-    Ok(REPORT_TEMPLATE
+    REPORT_TEMPLATE
         .replacen(PAYLOAD_MARKER, &encoded, 1)
-        .into_bytes())
+        .into_bytes()
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -921,11 +919,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
             std::process::id(),
             attempt
         ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        match fs::open_with(OpenOptions::new().write(true).create_new(true), &candidate) {
             Ok(file) => {
                 temporary = Some((candidate, file));
                 break;
@@ -941,10 +935,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         )
     })?;
     let result = (|| -> Result<(), String> {
-        file.write_all(bytes)
+        fs::write_all(&mut file, bytes)
             .map_err(|error| format!("{}: {error}", temporary_path.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("{}: {error}", temporary_path.display()))?;
+        fs::sync_all(&file).map_err(|error| format!("{}: {error}", temporary_path.display()))?;
         drop(file);
         fs::rename(&temporary_path, path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -972,7 +965,7 @@ fn open_report(path: &Path) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .launch()
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -1076,7 +1069,7 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
         };
         // No size cap: a report is a local file, and refusing one after
         // preparing every run cost a large project three minutes.
-        let html = render_html(&bundle)?;
+        let html = render_html(&bundle);
         // The default lives inside the store, which carries its own
         // `.gitignore`, so a report cannot be committed by accident. An
         // explicit path is the user's and resolves against where they ran
@@ -1084,9 +1077,7 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
         let output = match &options.output {
             None => root.join(REPORT_DIRECTORY).join(DEFAULT_REPORT_NAME),
             Some(path) if path.is_absolute() => path.clone(),
-            Some(path) => std::env::current_dir()
-                .map_err(|error| format!("could not read the working directory: {error}"))?
-                .join(path),
+            Some(path) => root.join(path),
         };
         // A directory gets the report under its default name, as
         // `runs report --output <dir>` does; renaming onto it failed with
@@ -1196,6 +1187,41 @@ mod tests {
         let (sources, omitted) = collect_quality_sources(&root, &assessed);
         assert_eq!(sources.len(), 16);
         assert_eq!(omitted, ["f16.js"]);
+        // An entry that names no path or digest is no source; one outside the
+        // root, absent, a directory, unreadable as text or changed since the
+        // assessment is named as left out.
+        fs::create_dir_all(root.join("directory")).unwrap();
+        fs::write(root.join("binary.js"), [0xff, 0xfe]).unwrap();
+        let assessed = serde_json::json!([
+            {"path": "f0.js"},
+            {"path": "../outside.js", "sha256": sha256},
+            {"path": "absent.js", "sha256": sha256},
+            {"path": "directory", "sha256": sha256},
+            {"path": "binary.js", "sha256": sha256},
+            {"path": "f0.js", "sha256": "changed"},
+        ]);
+        let (sources, omitted) = collect_quality_sources(&root, &assessed);
+        assert!(sources.is_empty());
+        assert_eq!(
+            omitted,
+            [
+                "../outside.js",
+                "absent.js",
+                "directory",
+                "binary.js",
+                "f0.js"
+            ]
+        );
+        let gaps = ["../outside.js", "absent.js"]
+            .map(|name| IndexedFileGap {
+                file: name.to_owned(),
+                ..gaps[0].clone()
+            })
+            .to_vec();
+        assert_eq!(
+            collect_sources(&root, &gaps, true).1,
+            ["../outside.js", "absent.js"]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1218,6 +1244,12 @@ mod tests {
         write_atomic(&root.join("r.html"), b"report").unwrap();
         assert_eq!(fs::read_to_string(root.join("r.html")).unwrap(), "report");
         assert_eq!(fs::read_to_string(&held).unwrap(), "held");
+        // A path that ends in no file name names nothing to write.
+        let nameless = root.join("..");
+        assert_eq!(
+            write_atomic(&nameless, b"report"),
+            Err(format!("{} is not a file path", nameless.display()))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1287,6 +1319,41 @@ mod tests {
 
     /// A report is titled by the package's name when it has a usable one,
     /// and by its directory otherwise.
+    /// An assessment that lists no file, or one without its path or digest,
+    /// proves no source; none to collect is none collected.
+    #[test]
+    fn an_assessment_without_a_whole_file_list_names_no_source() {
+        use serde_json::json;
+        assert_eq!(assessment_source(&json!("files")), None);
+        assert_eq!(assessment_source(&json!([])), None);
+        for file in [
+            json!({"sha256": "x"}),
+            json!({"path": 1, "sha256": "x"}),
+            json!({"path": "a.js"}),
+            json!({"path": "a.js", "sha256": 1}),
+        ] {
+            assert_eq!(assessment_source(&json!([file])), None, "{file}");
+        }
+        assert_eq!(
+            assessment_source(&json!([{"path": "a.js", "sha256": "x"}])),
+            Some(BTreeMap::from([("a.js".to_owned(), "x".to_owned())]))
+        );
+        let (sources, omitted) = collect_quality_sources(Path::new("."), &json!([]));
+        assert!(sources.is_empty() && omitted.is_empty());
+        // A path outside the project and one that is not there are left out
+        // by name; an entry without a path or digest is not even named.
+        let (sources, omitted) = collect_quality_sources(
+            Path::new("."),
+            &json!([
+                {"path": "../outside.js", "sha256": "x"},
+                {"path": "no-such-file.js", "sha256": "x"},
+                {"path": "a.js"},
+            ]),
+        );
+        assert!(sources.is_empty());
+        assert_eq!(omitted, ["../outside.js", "no-such-file.js"]);
+    }
+
     #[test]
     fn a_report_is_titled_by_the_package_or_its_directory() {
         let root = std::env::temp_dir().join(format!(
@@ -1350,6 +1417,11 @@ mod tests {
         assert!(parse_options(&["--runs".into(), "0".into()]).is_err());
         assert!(parse_options(&["--runs".into(), "21".into()]).is_err());
         assert!(parse_options(&["--wat".into()]).is_err());
+        // Asked for help, the answer is the help.
+        assert_eq!(
+            parse_options(&["-h".into()]).err(),
+            Some(help().to_string())
+        );
     }
 
     #[test]
