@@ -55,7 +55,10 @@ fn tested(node: Node) -> Option<Node> {
     if !matches!(node.kind(), "if_statement" | "if_expression") {
         return None;
     }
-    let condition = node.child_by_field_name("condition")?;
+    // Both grammars require it, and recovery puts a missing node there.
+    let condition = node
+        .child_by_field_name("condition")
+        .expect("an if has its condition");
     Some(if condition.kind() == "parenthesized_expression" {
         condition.named_child(0).unwrap_or(condition)
     } else {
@@ -434,6 +437,31 @@ mod tests {
     use super::*;
 
     /// `@Nested` classes reuse method names: each test is found in its own.
+    /// Every prefix of a source with conditions, and the source missing any
+    /// one character, is read without a panic: however broken, an `if`
+    /// keeps a condition, if only a missing one.
+    #[test]
+    fn a_broken_source_is_read_without_a_panic() {
+        for (file, source) in [
+            (
+                "A.java",
+                "class A {\n    int f(int x) {\n        if (x > 1 && x < 9) {\n            return 1;\n        } else if (x == 0) {\n            return 2;\n        }\n        return 3;\n    }\n}\n",
+            ),
+            (
+                "A.kt",
+                "fun f(x: Int): Int {\n    val y = if (x > 1) 1 else 2\n    if (x == 0 || y == 1) {\n        return 2\n    }\n    return when { x > 3 -> 1\n else -> 0 }\n}\n",
+            ),
+        ] {
+            for end in 0..=source.len() {
+                let _ = statement_starts(file, &source[..end]);
+            }
+            for at in 0..source.len() {
+                let missing = format!("{}{}", &source[..at], &source[at + 1..]);
+                let _ = statement_starts(file, &missing);
+            }
+        }
+    }
+
     #[test]
     fn a_nested_test_is_found_in_its_own_class() {
         let text = "class CartTest {\n  @Nested\n  class WhenEmpty {\n    @Test\n    void total() {\n      assertEquals(0, cart.total());\n    }\n  }\n\n  @Nested\n  class WithItems {\n    @Test\n    void total() {\n      assertEquals(3, cart.total());\n    }\n  }\n}\n";
