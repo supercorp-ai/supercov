@@ -367,6 +367,47 @@ mod tests {
         }
     }
 
+    /// A server has a run only where it recorded windows and a browser test
+    /// reported; without either, or with evidence that cannot be read (an
+    /// error), its work is cleared.
+    #[test]
+    fn a_server_has_a_run_only_with_windows_and_a_test() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-has-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let server = |name: &str, windows: Option<&str>| {
+            let directory = root.join(".supercov/work/run/servers").join(name);
+            std::fs::create_dir_all(directory.join("evidence")).unwrap();
+            if let Some(text) = windows {
+                std::fs::write(directory.join("evidence/0.windows"), text).unwrap();
+            }
+            directory
+        };
+        let tests = [served("one", "passed", (0, 10))];
+        let line = r#"{"start":0,"end":10,"probes":[1],"vectors":[]}"#;
+        assert_eq!(
+            has_run(&root, &server("both", Some(line)), "go", &tests),
+            Ok(true)
+        );
+        assert_eq!(
+            has_run(&root, &server("untested", Some(line)), "go", &[]),
+            Ok(false)
+        );
+        assert_eq!(
+            has_run(&root, &server("silent", None), "go", &tests),
+            Ok(false)
+        );
+        let unreadable = server("unreadable", None);
+        std::fs::create_dir(unreadable.join("evidence/0.windows")).unwrap();
+        assert!(has_run(&root, &unreadable, "go", &tests).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     fn window(start: i64, end: i64, probes: &[u64], vectors: &[u64]) -> ServerWindow {
         ServerWindow {
             start,

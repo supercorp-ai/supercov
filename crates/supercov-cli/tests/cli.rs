@@ -17590,6 +17590,48 @@ fn a_server_no_browser_test_reached_publishes_no_run_beside_the_javascript() {
     );
     let runs = project.supercov(&["runs", "--json"]).json();
     assert_eq!(runs["data"]["runs"].as_array().unwrap().len(), 1, "{runs}");
+    // So does a Java server, and a Go one where Go is installed.
+    let mut servers: Vec<(&str, Vec<(&str, &str)>)> = vec![(
+        "javascript-beside-idle-java",
+        vec![
+            (
+                "pom.xml",
+                "<project><modelVersion>4.0.0</modelVersion><groupId>e</groupId><artifactId>w</artifactId><version>1</version></project>\n",
+            ),
+            (
+                "src/main/java/w/W.java",
+                "package w;\npublic class W { public static int one() { return 1; } }\n",
+            ),
+        ],
+    )];
+    if go().is_some() {
+        servers.push((
+            "javascript-beside-idle-go",
+            vec![
+                ("go.mod", "module example.com/w\n\ngo 1.22\n"),
+                (
+                    "main.go",
+                    "package main\n\nfunc hello() int { return 1 }\n\nfunc main() { hello() }\n",
+                ),
+            ],
+        ));
+    }
+    for (label, files) in servers {
+        let project = Project::cart(label);
+        project.write("playwright.config.js", "export default {};\n");
+        for (file, text) in files {
+            project.write(file, text);
+        }
+        project.commit("server");
+        let run = project.supercov(&["--", "node", "--test"]);
+        assert_eq!(run.code(), 0, "{label}: {}", run.stderr());
+        let runs = project.supercov(&["runs", "--json"]).json();
+        assert_eq!(
+            runs["data"]["runs"].as_array().unwrap().len(),
+            1,
+            "{label}: {runs}"
+        );
+    }
 }
 
 /// A Rust project whose Cargo metadata is no JSON, whose module file is a
