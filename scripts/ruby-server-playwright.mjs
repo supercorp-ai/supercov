@@ -200,6 +200,38 @@ try {
   ],
 };
 `,
+    // Each server alone: the other, prepared in the copy, never starts.
+    'ping.config.js': `export default {
+  testDir: 'ping',
+  workers: 1,
+  reporter: 'line',
+  webServer: [
+    { command: '${python} -m pinger.serve ${ping}', url: 'http://127.0.0.1:${ping}/ready', reuseExistingServer: false },
+  ],
+};
+`,
+    'ping/ping.spec.js': `import { expect, test } from '@playwright/test';
+
+test('the python server alone answers', async ({ request }) => {
+  expect(await (await request.get('http://127.0.0.1:${ping}/ping')).text()).toBe('pong');
+});
+`,
+    'grade.config.js': `export default {
+  testDir: 'grade',
+  workers: 1,
+  reporter: 'line',
+  use: { baseURL: 'http://127.0.0.1:${port}' },
+  webServer: [
+    { command: 'bundle exec puma -b tcp://127.0.0.1:${port} -t 1:4', url: 'http://127.0.0.1:${port}/ready', reuseExistingServer: false },
+  ],
+};
+`,
+    'grade/grade.spec.js': `import { expect, test } from '@playwright/test';
+
+test('the ruby server alone answers', async ({ request }) => {
+  expect(await (await request.get('/grade?score=95')).text()).toBe('A');
+});
+`,
     'both/both.spec.js': `import { expect, test } from '@playwright/test';
 
 test('both servers answer', async ({ page, request }) => {
@@ -234,6 +266,14 @@ test('a test that reaches no server', async () => {
   assert.deepEqual(companionsOf(bothId).map((companion) => [companion.id, companion.role]), [[beside, 'server']]);
   assert.deepEqual(companionsOf(beside).map((companion) => [companion.id, companion.role]), [[bothId, 'server']]);
   assert.match(run(binary, ['runs', bothId]).stdout, new RegExp(`(?:Python|Ruby) server: run ${beside}`, 'u'));
+  // One server started, the other prepared and never started: only the one
+  // that ran publishes a run.
+  for (const [config, ran, idle] of [['ping.config.js', 'Python', 'Ruby'], ['grade.config.js', 'Ruby', 'Python']]) {
+    const alone = run(binary, ['--', 'npx', 'playwright', 'test', '-c', config]);
+    assert.equal(alone.status, 0, `${config}\n${alone.stdout}${alone.stderr}`);
+    assert.match(alone.stderr, new RegExp(`${ran} server coverage: 1 test`, 'u'), `${config}\n${alone.stderr}`);
+    assert.doesNotMatch(alone.stderr, new RegExp(`${idle} server coverage`, 'u'), `${config}\n${alone.stderr}`);
+  }
   // Failures injected (SUPERCOV_TEST_FAULT): the copy taken by another run
   // after the servers were prepared for it, which prepares them again; a
   // server's run that cannot be published, which fails the run; and a failing
