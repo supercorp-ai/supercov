@@ -162,6 +162,13 @@ try {
   assert.notEqual(unselected.status, 0, unselected.stderr);
   assert.doesNotMatch(unselected.stderr, /Rust Worker coverage|panicked/u, unselected.stderr);
 
+  // The Worker run that cannot be published -- its work directory not
+  // made -- ends the run, saying where, and keeps its evidence.
+  const unpublished = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.create_dir_all#rust_wasm_evidence.rs:375' });
+  assert.notEqual(unpublished.status, 0, unpublished.stderr);
+  assert.ok(unpublished.stderr.includes('test fault at fs (rust_wasm_evidence.rs:375'), unpublished.stderr);
+  assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
+
   // The project's own configuration is untouched: only the copy was pointed
   // at Supercov's entry.
   const config = run(root, 'git', ['status', '--porcelain', '--untracked-files=no']).stdout;
