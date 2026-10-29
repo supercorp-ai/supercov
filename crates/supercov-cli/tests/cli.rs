@@ -15680,8 +15680,10 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all@19",
         "fs.create_dir_all@21",
         "fs.create_dir_all@23",
-        "fs.create_dir_all@29",
-        "fs.create_dir_all@30",
+        // The run's last state and its finalization, by place: how many
+        // directories come before them differs by platform.
+        "fs.create_dir_all#javascript_run.rs:1509",
+        "fs.create_dir_all#javascript_run.rs:1511",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
