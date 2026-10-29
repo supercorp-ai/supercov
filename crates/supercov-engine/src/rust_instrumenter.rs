@@ -3628,6 +3628,11 @@ fn main() {
         let instrumented =
             instrument_rust_file("src/w.rs", windows_only, "crate::rt", false, Some(&cfg)).unwrap();
         assert!(instrumented.manifest.points.is_empty());
+        // Nor does one whose only item left out probes nothing.
+        let constant = "#[cfg(windows)]\nconst A: u8 = 1;\n";
+        let instrumented =
+            instrument_rust_file("src/c.rs", constant, "crate::rt", false, Some(&cfg)).unwrap();
+        assert!(instrumented.manifest.points.is_empty());
     }
 
     #[test]
