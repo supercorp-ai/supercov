@@ -15692,6 +15692,42 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
 /// An HTML export shows each file's source beside its coverage, read from
 /// the checkout: a file that cannot be read is shown without it, and the
 /// export is still written. A run store that cannot be listed is refused.
+/// A run recorded before runs kept their source scope still has its HTML
+/// report, with no scope to show.
+#[test]
+fn an_html_export_of_a_run_without_a_source_scope_shows_none() {
+    use supercov_engine::evidence_archive::{read_archive, write_archive};
+    let project = Project::cart("export-unscoped");
+    project.write(".gitignore", "out/\nnode_modules/\n");
+    project.commit("ignore");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let run = project.supercov(&["runs", "--json"]).json()["data"]["runs"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let directory = project.root.join(".supercov/runs").join(&run);
+    let mut entries = read_archive(&directory.join("evidence.raw.gz")).unwrap();
+    let manifest = entries
+        .iter_mut()
+        .find(|entry| entry.path == "manifest.json")
+        .expect("the run keeps its manifest");
+    let mut value: serde_json::Value = serde_json::from_slice(&manifest.contents).unwrap();
+    value.as_object_mut().unwrap().remove("scope");
+    manifest.contents = serde_json::to_vec(&value).unwrap();
+    let written = write_archive(entries, &directory.join("evidence.raw.gz")).unwrap();
+    let record = format!(".supercov/runs/{run}/run.json");
+    let mut metadata: serde_json::Value = serde_json::from_str(&project.read(&record)).unwrap();
+    metadata["rawEvidence"]["compressedBytes"] = written.compressed_bytes.into();
+    metadata["rawEvidence"]["uncompressedBytes"] = written.uncompressed_bytes.into();
+    metadata["rawEvidence"]["files"] = written.files.into();
+    project.write(&record, &metadata.to_string());
+    project
+        .supercov(&["report", "--no-open", "--output", "out/r.html"])
+        .succeeds();
+    let data = report_data(&project.read("out/r.html"));
+    assert!(data["runs"][0]["scope"].is_null(), "{}", data["runs"][0]);
+}
+
 #[test]
 fn an_html_export_leaves_out_a_source_it_cannot_read() {
     let project = Project::cart("export-unreadable");
