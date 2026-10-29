@@ -15279,7 +15279,40 @@ fn a_run_whose_source_record_cannot_be_read_back_is_refused() {
         let ran = project.supercov(&["runs", "latest", "source", "src/cart.js"]);
         assert_ne!(ran.code(), 0, "{said}: {}", ran.stderr());
         assert!(ran.stderr().contains(said), "{said}: {}", ran.stderr());
+        // A line no obligation holds is read from the checkout, which with
+        // no record to compare against is taken as current.
+        if number == 0 {
+            let line = project
+                .supercov(&["runs", "latest", "line", "src/cart.js:10", "--json"])
+                .json();
+            assert_eq!(
+                line["data"]["sourceOrigin"], "working-tree-current",
+                "{line}"
+            );
+        }
     }
+    // So is one of a file the record does not name.
+    let project = Project::cart("source-record-unnamed");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    rewrite_evidence(&project, |entries| {
+        let record = entries
+            .iter_mut()
+            .find(|entry| entry.path == "source-inputs.json")
+            .expect("the run keeps its source record");
+        let mut manifest: serde_json::Value = serde_json::from_slice(&record.contents).unwrap();
+        manifest["files"]
+            .as_object_mut()
+            .unwrap()
+            .remove("src/cart.js");
+        record.contents = serde_json::to_vec(&manifest).unwrap();
+    });
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:10", "--json"])
+        .json();
+    assert_eq!(
+        line["data"]["sourceOrigin"], "working-tree-current",
+        "{line}"
+    );
 }
 
 /// `tests affected` answers from what a run recorded. A run without its
