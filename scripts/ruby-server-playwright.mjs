@@ -274,6 +274,12 @@ test('a test that reaches no server', async () => {
     assert.match(alone.stderr, new RegExp(`${ran} server coverage: 1 test`, 'u'), `${config}\n${alone.stderr}`);
     assert.doesNotMatch(alone.stderr, new RegExp(`${idle} server coverage`, 'u'), `${config}\n${alone.stderr}`);
   }
+  // The Ruby server's evidence that cannot be listed: its run is not
+  // published, its evidence is kept, and the run fails.
+  const unlistedRuby = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'grade.config.js'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#ruby_evidence.rs:329' });
+  assert.notEqual(unlistedRuby.status, 0, unlistedRuby.stdout + unlistedRuby.stderr);
+  assert.ok(unlistedRuby.stderr.includes('test fault at fs (ruby_evidence.rs:329'), unlistedRuby.stderr);
+  assert.match(unlistedRuby.stderr, /their evidence is kept at/u, unlistedRuby.stderr);
   // Failures injected (SUPERCOV_TEST_FAULT): the copy taken by another run
   // after the servers were prepared for it, which prepares them again; a
   // server's run that cannot be published, which fails the run; and a failing

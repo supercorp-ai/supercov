@@ -112,6 +112,12 @@ try {
   assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
   assert.match(refused.stderr, /Go server's run could not be published/u, refused.stderr);
   assert.doesNotMatch(refused.stderr, /panicked/u, refused.stderr);
+  // A window file of the server's that cannot be read keeps its evidence
+  // and fails the run.
+  const unread = run(binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_to_string#owned_server.rs:79' });
+  assert.notEqual(unread.status, 0, unread.stdout + unread.stderr);
+  assert.ok(unread.stderr.includes('test fault at fs (owned_server.rs:79'), unread.stderr);
+  assert.match(unread.stderr, /their evidence is kept at|evidence is kept/u, unread.stderr);
   console.log('[go-server-playwright] a Go server under browser tests is measured, each window credited by time to the test it fell in');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'go-server-playwright-'))) rmSync(root, { recursive: true, force: true });
