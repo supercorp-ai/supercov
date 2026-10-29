@@ -13910,6 +13910,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // build, rustc's libdir and sysroot, a test binary's listing,
             // the test processes and the doctests'.
             "spawn#rust_project.rs:181 => rust_project.rs:181",
+            // The copy's own path, resolved to read its module tree.
+            "fs.canonicalize#rust_project.rs:319 => rust_project.rs:319",
             "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
             "spawn#rust_test_runner.rs:1548 => rust_test_runner.rs:1548",
             "spawn#rust_test_runner.rs:1548@2 => rust_test_runner.rs:1548",
