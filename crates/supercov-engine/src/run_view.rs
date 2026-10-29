@@ -878,8 +878,12 @@ mod tests {
         assert!(file.conditions.is_empty() && file.missing_conditions.is_empty());
         assert_eq!(file.functions.len(), 1);
 
+        // A decision alone, too.
         coverage.points.clear();
         coverage.branches.clear();
+        let built = build("run_1", "now", &coverage, true, false, Vec::new());
+        assert!(built.file("src/a.js").is_some());
+
         coverage.decisions.clear();
         let built = build("run_1", "now", &coverage, true, false, Vec::new());
         assert!(built.files.is_empty());
