@@ -777,6 +777,24 @@ mod tests {
     /// An index of no sections opens and verifies; a read past a section,
     /// or one whose end overflows, is refused; a write that fails, and a
     /// destination with no directory or no name, publish nothing.
+    /// A regular file that cannot be mapped -- one of Linux's process
+    /// files -- is an error, not an index.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_that_cannot_be_mapped_is_no_index() {
+        let expected = QueryIndexIdentity {
+            evidence_sha256: [0; 32],
+            evidence_bytes: 0,
+            analysis_sha256: [0; 32],
+            producer_sha256: [0; 32],
+            archive_schema_version: 0,
+        };
+        assert!(matches!(
+            QueryIndex::open(Path::new("/proc/self/status"), &expected),
+            Err(QueryIndexError::Io(_))
+        ));
+    }
+
     #[test]
     fn an_empty_index_opens_and_a_read_or_write_past_its_limits_is_refused() {
         let root = root("limits");
@@ -880,6 +898,7 @@ mod tests {
         longer.extend_from_slice(&[0; 8]);
         let cases: Vec<(Vec<u8>, &str)> = vec![
             (valid[..100].to_vec(), "InvalidHeader(\"truncated\")"),
+            (Vec::new(), "InvalidHeader(\"truncated\")"),
             (signed(&|b| b[0] = b'X'), "InvalidHeader(\"magic\")"),
             (
                 signed(&|b| put32(b, 8, 99)),
