@@ -2750,6 +2750,10 @@ mod tests {
             TAKE_PATIENCE,
             move |socket, stop, _| {
                 assert_eq!(receive(socket)["method"], "Runtime.enable");
+                // A frame that is no text is passed over.
+                socket
+                    .send(tungstenite::Message::binary(vec![1, 2]))
+                    .unwrap();
                 // Notices without the id they are about change nothing.
                 answer(
                     socket,
