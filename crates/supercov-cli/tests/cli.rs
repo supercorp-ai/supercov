@@ -12858,6 +12858,7 @@ case "$mode" in
     [ -f "$fake/vanish" ] && rm -f "$0"
     exit 0 ;;
   merged)
+    [ -f "$fake/merged-no-run" ] && exit 0
     "$tool" __doctest-runner "$pkg" merged "$fake/../bin/harness"
     exit $? ;;
   named)
@@ -13003,7 +13004,21 @@ fn a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select() 
             a.to_owned(),
             "the merged doctest harness ran a different selection than its arguments describe: src/lib.rs - b (line 5)",
         ),
+        // A harness that names no case, and one rustdoc never ran.
+        (
+            "silent",
+            String::new(),
+            "the merged doctest harness ran a different selection than its arguments describe: src/lib.rs - a (line 1), src/lib.rs - b (line 5)",
+        ),
+        (
+            "unrun",
+            String::new(),
+            "the merged doctest harness ran a different selection than its arguments describe: src/lib.rs - a (line 1), src/lib.rs - b (line 5)",
+        ),
     ] {
+        if scenario == "unrun" {
+            project.write(&format!("{scenario}/merged-no-run"), "");
+        }
         let (ran, recorded) = wrap_rustdoc(
             &project,
             scenario,
@@ -13013,6 +13028,21 @@ fn a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select() 
         ran.exits(101);
         assert_eq!(recorded, error, "{scenario}");
     }
+    // The package's failure that cannot be written down ends the pass,
+    // saying where.
+    let (ran, _) = wrap_rustdoc_with(
+        &project,
+        "unrecorded",
+        &[("merged", listed), ("merged.out", a)],
+        &["--test", "src/lib.rs"],
+        &[("SUPERCOV_TEST_FAULT", "fs.write#rust_owned_doctests.rs:926")],
+    );
+    let said = ran.stderr();
+    assert_ne!(ran.code(), 0, "{said}");
+    assert!(
+        said.contains("test fault at fs (rust_owned_doctests.rs:926"),
+        "{said}"
+    );
     // A harness that failed may have stopped short: it is not held to its
     // selection, and its exit is the package's.
     let (ran, recorded) = wrap_rustdoc(
@@ -13073,6 +13103,38 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
         ran.exits(101);
         assert_eq!(recorded, error, "{scenario}");
     }
+    // Two doctests run by one pass, and two no filter can tell apart.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "both",
+        &[
+            ("standalone", listed),
+            (
+                "named.out",
+                "test src/lib.rs - s (line 3) ... ok\ntest src/lib.rs - s (line 3) ... ok\n",
+            ),
+        ],
+        &["--test", "src/lib.rs"],
+    );
+    ran.exits(101);
+    assert!(
+        recorded.starts_with("the pass for doctest src/lib.rs - s (line 3) ran 2 doctest(s)"),
+        "{recorded}"
+    );
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "alike",
+        &[(
+            "standalone",
+            "src/lib.rs - a b (line 3): test\nsrc/lib.rs - b a (line 3): test\n",
+        )],
+        &["--test", "src/lib.rs"],
+    );
+    ran.exits(101);
+    assert_eq!(
+        recorded,
+        "doctest src/lib.rs - a b (line 3) cannot be told apart from another doctest by a filter"
+    );
     // Under `--ignored` a pass that runs and reports nothing passed over a
     // doctest that is not ignored...
     let (ran, recorded) = wrap_rustdoc(
@@ -13143,7 +13205,7 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
 #[test]
 fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
     let project = fake_rustdoc_project("doctest-runtool");
-    let runtool = |package: &str, mode: &str, binary: &str, files: &[(&str, &str)]| {
+    let runtool = |package: &str, mode: &str, binary: &str, files: &[(&str, &str)], fault: &str| {
         for (file, contents) in files {
             project.write(&format!("{package}/{file}"), contents);
         }
@@ -13163,6 +13225,7 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
                 ("SUPERCOV_DOCTEST_WRAPPER_ROOT", directory.to_str().unwrap()),
                 ("RUSTDOC_DOCTEST_RUN_NB_TEST", "0"),
                 ("SUPERCOV_RUST_PROBE_TOKEN", "0123456789abcdef"),
+                ("SUPERCOV_TEST_FAULT", fault),
             ],
         );
         let record = std::fs::read_to_string(directory.join("invocations/00000000.json"))
@@ -13171,7 +13234,7 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         (ran, record)
     };
     // A binary listing nothing leaves no listing behind.
-    let (ran, record) = runtool("empty-list", "list", "bin/doctest", &[]);
+    let (ran, record) = runtool("empty-list", "list", "bin/doctest", &[], "");
     ran.succeeds();
     assert_eq!(record, serde_json::json!({"kind": "listed"}));
     assert!(!project.root.join("empty-list/listed").exists());
@@ -13181,9 +13244,23 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         "named",
         "bin/doctest",
         &[("doctest.out", "\nrunning 0 tests\n")],
+        "",
     );
     ran.succeeds();
     assert_eq!(record, serde_json::json!({"kind": "empty-harness"}));
+    // Its record that cannot be written fails the pass.
+    let (ran, _) = runtool(
+        "empty-harness-unrecorded",
+        "named",
+        "bin/doctest",
+        &[("doctest.out", "\nrunning 0 tests\n")],
+        "fs.write#rust_owned_doctests.rs:1260",
+    );
+    let output = ran.exits(101);
+    assert!(
+        output.contains("test fault at fs (rust_owned_doctests.rs:1260"),
+        "{output}"
+    );
     // A merged harness whose children's records went missing reports its
     // cases without evidence.
     let order = r#"["src/lib.rs - a (line 1)"]"#;
@@ -13196,6 +13273,7 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
             ("merged.sh", "rm -rf \"$SUPERCOV_DOCTEST_CHILD_DIR\"\n"),
             ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
         ],
+        "",
     );
     ran.succeeds();
     assert_eq!(
@@ -13215,12 +13293,32 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
             ),
             ("merged.out", "test src/lib.rs - a (line 1) ... ok\n"),
         ],
+        "",
     );
     let output = ran.exits(101);
     assert!(
         output.contains("merged doctest child 5 ran for a case the harness did not report"),
         "{output}"
     );
+    // The order the wrapper wrote, or a child's record, that does not read
+    // as one fails the pass.
+    for (package, files) in [
+        ("order-garbled", vec![("merged-order.json", "not json")]),
+        (
+            "child-garbled",
+            vec![
+                ("merged-order.json", order),
+                (
+                    "merged.sh",
+                    "printf 'not json' > \"$SUPERCOV_DOCTEST_CHILD_DIR/00000000.json\"\n",
+                ),
+            ],
+        ),
+    ] {
+        let (ran, _) = runtool(package, "merged", "bin/harness", &files, "");
+        let output = ran.exits(101);
+        assert!(output.contains("expected"), "{package}: {output}");
+    }
 }
 
 #[test]
