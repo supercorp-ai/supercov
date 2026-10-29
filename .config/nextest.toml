@@ -20,6 +20,13 @@ test-group = "jvm-builds"
 filter = "binary(cli) & test(/_file_operation_fails/)"
 test-group = "fault-sweeps"
 
+# The #176 reproduction prepares and removes two 4,400-file workspaces.
+# Reserve the pool while it runs so its disk traffic does not push the
+# trash-cleanup and other timing-sensitive tests past their deadlines.
+[[profile.default.overrides]]
+filter = "binary(cli) & test(bun_bootstraps_a_large_project_even_with_a_browser_config_in_a_test_fixture)"
+threads-required = "num-test-threads"
+
 # On Windows a CLI test that waits on something that never comes held its
 # slot for the job's whole budget, and the tests behind it never ran: stop it
 # after ten minutes, so it fails by name and the rest still run. The longest

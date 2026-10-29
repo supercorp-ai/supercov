@@ -391,6 +391,7 @@ pub fn expanded_command(root: &Path, command: &[String]) -> String {
         });
     let joined = command.join(" ");
     if ["npm", "pnpm", "yarn", "bun"].contains(&executable.as_str())
+        && !(executable == "bun" && command.get(1).is_some_and(|arg| arg == "test"))
         && let Some(script_name) = script_name
     {
         return format!("{joined} {}", script(&manifest, script_name).unwrap_or(""));
@@ -719,6 +720,7 @@ fn reachable_script_tokens(manifest: &Value, tokens: &[String]) -> Vec<String> {
                 let next = all.get(index + 1).map(String::as_str);
                 match next {
                     Some("run" | "run-script") => all.get(index + 2).cloned(),
+                    Some("test") if runner == "bun" => None,
                     Some("test" | "t") => Some("test".to_owned()),
                     Some(name) if runner != "npm" => Some(name.to_owned()),
                     _ => None,
@@ -842,7 +844,7 @@ pub fn discover_coverage_project_of_any_size(
     let uses_jest =
         jest_config.is_some() || has_tool(&tokens, "jest") || manifest.get("jest").is_some();
     let script_tokens = reachable_script_tokens(&manifest, &tokens);
-    let browser_runner = ["karma", "testem", "airtap", "zuul", "mochify"]
+    let browser_runner = ["playwright", "karma", "testem", "airtap", "zuul", "mochify"]
         .iter()
         .any(|tool| has_tool(&script_tokens, tool));
     let source_transforming_runner = has_tool(&tokens, "jest") || has_tool(&tokens, "vitest");
@@ -1207,6 +1209,43 @@ mod tests {
         let node_only = ["npm".to_owned(), "run".to_owned(), "test:node".to_owned()];
         let discovered = discover_coverage_project(&root, &BTreeMap::new(), &node_only).unwrap();
         assert!(!discovered.browser_runner);
+    }
+
+    #[test]
+    fn browser_config_and_commands_select_the_runtime_for_the_suite() {
+        let root = project(
+            "browser-and-unit",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"test":"npm run unit && npm run browser","unit":"bun test","browser":"playwright test"}}"#,
+                ),
+                ("src/main.ts", "export const ready = true"),
+                ("playwright.config.ts", "export default {}"),
+            ],
+        );
+        let discover = |args: &[&str]| {
+            discover_coverage_project(&root, &BTreeMap::new(), &command(args)).unwrap()
+        };
+        assert!(discover(&["npm", "test"]).browser_runner);
+        assert!(!discover(&["bun", "test"]).browser_runner);
+        assert!(!discover(&["node", "--test"]).browser_runner);
+        // Config discovery retains browser initialization even for an opaque
+        // wrapper, without pretending to know which runner it invokes.
+        let opaque = discover(&["./run-tests"]);
+        assert!(opaque.playwright_config.is_some());
+        assert!(!opaque.browser_runner);
+        // A package's "test" script can name an unrelated browser suite
+        // even when no browser config exists. `bun test` runs Bun itself;
+        // `bun run test` and `npm test` run that script.
+        fs::remove_file(root.join("playwright.config.ts")).unwrap();
+        assert_eq!(
+            expanded_command(&root, &command(&["bun", "test"])),
+            "bun test"
+        );
+        assert!(!discover(&["bun", "test"]).browser_runner);
+        assert!(discover(&["bun", "run", "test"]).browser_runner);
+        assert!(discover(&["npm", "test"]).browser_runner);
     }
 
     #[test]

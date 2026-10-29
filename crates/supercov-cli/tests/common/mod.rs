@@ -196,8 +196,12 @@ impl Project {
     }
 
     /// The command `supercov_with` runs, for a test that starts it its own way.
+    /// An explicit binary lets the same regression run against a released
+    /// version without changing its fixture or assertions.
     pub fn supercov_command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_supercov"));
+        let binary = std::env::var_os("SUPERCOV_TEST_BINARY")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_supercov").into());
+        let mut command = Command::new(binary);
         command.args(args).current_dir(&self.root);
         for name in [
             "TYPESAFE_API_KEY",

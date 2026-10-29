@@ -4565,6 +4565,57 @@ test("a builder", () => {
     );
 }
 
+/// The shape of #176 without Bun: a guest process starts from a project that
+/// also has a Playwright config, with none of the run's environment. Its
+/// source has to bootstrap the runtime itself or the first probe throws.
+/// The host loader must read the run's settings before the browser fallback
+/// initializes a runtime, so the guest's coverage reaches the run too.
+#[cfg(unix)]
+#[test]
+fn a_guest_in_a_project_with_a_browser_config_bootstraps_its_source() {
+    let project = Project::empty("guest-browser-config");
+    project.write(
+        "package.json",
+        r#"{ "name": "guest-browser", "type": "module" }"#,
+    );
+    project.write("src/cart.js", common::CART);
+    project.write("test/playwright.config.js", "export default {};\n");
+    project.write(
+        "guest/describe.mjs",
+        "import { describe } from \"../src/cart.js\";\nif (describe([{ name: \"pen\" }]) !== \"pen\") process.exit(1);\n",
+    );
+    project.write(
+        "test/guest.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+
+test("the guest describes the cart", () => {
+  const result = spawnSync(process.execPath, ["guest/describe.mjs"], {
+    cwd: process.cwd(),
+    env: { PATH: process.env.PATH },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+"#,
+    );
+    project.git(&["init", "-q"]);
+    project.commit("guest beside a browser config");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:20"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "Status\n  COVERED",
+            "the guest describes the cart [",
+            "unit/node:test",
+        ],
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_guest_started_with_none_of_supercovs_settings_runs_and_is_counted() {
@@ -4632,6 +4683,480 @@ test("the guest describes the cart", () => {
         text.contains("  Guests           1 process(es) ran the workspace in a container or VM without Supercov's settings"),
         "{text}"
     );
+}
+
+/// Executes instrumented TypeScript in a page and a worker, including when
+/// Playwright is launched by an opaque child of node:test. Set the dependency
+/// directory to use dependencies outside the repository's node_modules.
+#[cfg(unix)]
+#[test]
+fn a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test() {
+    let modules = std::env::var_os("SUPERCOV_BROWSER_NODE_MODULES")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules")
+        });
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("browser-worker-bootstrap");
+    std::os::unix::fs::symlink(modules, project.root.join("node_modules")).unwrap();
+    project.write(
+        "package.json",
+        r#"{"type":"module","scripts":{"test":"playwright test"}}"#,
+    );
+    project.write(
+        "index.html",
+        "<script type=\"module\" src=\"/src/main.ts\"></script>",
+    );
+    project.write("src/main.ts", "export function choose(v: boolean): number { return v ? 3 : 4; }\n(globalThis as any).ready = choose(true);\n");
+    project.write("src/worker.ts", "export function choose(v: boolean): number { return v ? 7 : 8; }\npostMessage(choose(true));\n");
+    project.write(
+        "src/classic.js",
+        "function choose(v) { return v ? 9 : 10; }\npostMessage(choose(true));\n",
+    );
+    project.write("playwright.config.mjs", &format!(r#"import {{ defineConfig }} from '@playwright/test';
+export default defineConfig({{ testDir: './tests', testMatch: '*.spec.js', workers: 1,
+  use: {{ baseURL: 'http://127.0.0.1:{port}' }},
+  webServer: {{ command: './node_modules/.bin/vite --host 127.0.0.1 --strictPort --port {port}', url: 'http://127.0.0.1:{port}', timeout: 30000 }} }});
+"#));
+    project.write(
+        "tests/browser.spec.js",
+        r#"import { test, expect } from '@playwright/test';
+test('page and worker', async ({ page }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => globalThis.ready)).toBe(3);
+  const value = await page.evaluate(() => new Promise((resolve, reject) => {
+    const worker = new Worker('/src/worker.ts', { type: 'module' });
+    worker.onmessage = event => resolve(event.data);
+    worker.onerror = event => reject(event.message);
+  }));
+  expect(value).toBe(7);
+  const classic = await page.evaluate(() => new Promise((resolve, reject) => {
+    const worker = new Worker('/src/classic.js');
+    worker.onmessage = event => resolve(event.data);
+    worker.onerror = event => reject(event.message);
+  }));
+  expect(classic).toBe(9);
+});
+"#,
+    );
+    project.write(
+        "tests/wrapper.cjs",
+        r#"const test = require('node:test');
+const { spawnSync } = require('node:child_process');
+const assert = require('node:assert/strict');
+test('run browser', () => {
+  const result = spawnSync('./node_modules/.bin/playwright', ['test'], { stdio: 'inherit' });
+  assert.equal(result.status, 0);
+});
+"#,
+    );
+    project.git(&["init", "-q"]);
+    project.commit("browser worker");
+    for command in [
+        vec!["--", "npm", "test"],
+        vec!["--", "node", "--test", "tests/wrapper.cjs"],
+    ] {
+        project.supercov(&command).succeeds();
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        contains_all(&summary, &["Lines      100.00% (6/6)", "Exact for"]);
+    }
+}
+
+fn bun_is_available() -> bool {
+    let available = std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    assert!(
+        available || std::env::var_os("SUPERCOV_REQUIRE_BUN").is_none(),
+        "Bun is required"
+    );
+    available
+}
+
+/// A Bun test project: one source module, one `bun:test` file, and, where a
+/// browser suite is asked for, a Playwright config in the shape discovery
+/// finds. Bun ignores `NODE_OPTIONS`, so Supercov's preload never reaches it.
+fn bun_project(label: &str, beside_a_browser_config: bool) -> Project {
+    let project = Project::empty(label);
+    project.write(
+        "package.json",
+        r#"{ "name": "bun-clamp", "private": true, "type": "module", "scripts": { "test": "bun test" } }"#,
+    );
+    project.write(
+        "src/clamp.ts",
+        "export function clamp(n: number, lo: number, hi: number): number {\n  if (n < lo || Number.isNaN(n)) return lo\n  return n > hi ? hi : n\n}\n",
+    );
+    project.write(
+        "src/clamp.test.ts",
+        "import { expect, test } from \"bun:test\"\nimport { clamp } from \"./clamp\"\ntest(\"clamps below\", () => expect(clamp(-1, 0, 10)).toBe(0))\n",
+    );
+    if beside_a_browser_config {
+        project.write("tests/e2e/playwright.config.ts", "export default {};\n");
+    }
+    project.git(&["init", "-q"]);
+    project.commit("bun");
+    project
+}
+
+/// The instrumented copy of a project file, while the workspace is kept.
+fn kept_workspace_source(project: &Project, relative: &str) -> String {
+    let name = project.root.file_name().unwrap();
+    let path = project
+        .root
+        .join(".supercov/workspaces/workspace")
+        .join(name)
+        .join(relative);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
+/// A Playwright config is a file in the project, not a statement that the
+/// measured command runs in a browser. A unit-test command beside one still
+/// needs the source loader: under Bun the preload never arrives, and this is
+/// the failure class in #176, where sources threw at their first probe.
+#[test]
+fn a_unit_suite_beside_a_playwright_config_keeps_the_source_loader() {
+    let project = Project::cart("loader-beside-browser-config");
+    project.write("test/playwright.config.js", "export default {};\n");
+    project.commit("playwright");
+    project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_KEEP_WORKSPACE", "1")],
+        )
+        .succeeds();
+    let source = kept_workspace_source(&project, "src/cart.js");
+    assert!(
+        source.contains("if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"),
+        "a unit suite beside a Playwright config lost its source loader"
+    );
+}
+
+/// Reproduce the reported crash through a discovered browser config. The
+/// reporter's precise project configuration is not available in #176.
+#[cfg(unix)]
+#[test]
+fn a_bun_unit_suite_beside_a_playwright_config_runs_and_measures() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    let project = bun_project("bun-beside-playwright", true);
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Lines      66.67% (2/3)", "Branches   25.00% (1/4)"],
+    );
+}
+
+/// `bun test` runs Bun's test runner, not package.json's "test" script.
+/// In 4.20.3, a browser runner in that unused script suppressed source
+/// bootstrapping even in a project with no browser configuration.
+#[cfg(unix)]
+#[test]
+fn bun_sources_bootstrap_when_an_unused_package_script_names_a_browser_runner() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    // The Bun-only script is the control: changing only an unused script to
+    // name a browser runner must not change how the measured sources start.
+    for runner in ["bun test", "karma", "testem", "airtap", "zuul", "mochify"] {
+        let project = bun_project("bun-unused-browser-script", false);
+        project.write(
+            "src/core/runtime/clock.ts",
+            "export function clock(v: boolean): number {\n  if (v) return 1;\n  return 0;\n}\n",
+        );
+        project.write("src/core/runtime/slug.test.ts", "import { test, expect } from 'bun:test';\nimport { clock } from './clock';\ntest('clock', () => expect(clock(true)).toBe(1));\n");
+        project.write(
+            "package.json",
+            &format!(
+                r#"{{"type":"module","scripts":{{"test":"npm run browser","browser":"{runner}"}}}}"#
+            ),
+        );
+        project.commit("an unrelated package test script");
+        project
+            .supercov_with(
+                &["--", "bun", "test", "src/core/runtime/slug.test.ts"],
+                &[
+                    ("SUPERCOV_KEEP_WORKSPACE", "1"),
+                    ("SUPERCOV_SOURCE_ROOTS", "src"),
+                ],
+            )
+            .succeeds();
+        let source = kept_workspace_source(&project, "src/core/runtime/clock.ts");
+        assert!(
+            source.contains("__supercovMcdcBegin_c101cf5a"),
+            "the fixture should reproduce the source path and helper name shown in #176"
+        );
+        assert!(
+            source.contains("if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"),
+            "{runner}: the unused package script suppressed the source loader"
+        );
+        assert!(
+            !source.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
+            "{runner}: an unused browser runner added its fallback to a Bun-only source"
+        );
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        contains_all(
+            &summary,
+            &["Lines      33.33% (2/6)", "Branches   16.67% (1/6)"],
+        );
+    }
+}
+
+/// Reproduce the source/test split in #176 at the reported project size.
+/// A config in a test fixture must not disable host source initialization;
+/// assertion-bearing tests have a separate bootstrap insertion path.
+#[cfg(unix)]
+#[test]
+fn bun_bootstraps_a_large_project_even_with_a_browser_config_in_a_test_fixture() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    let project = Project::empty("bun-large-project-bootstrap");
+    project.write(".gitignore", ".supercov/\n");
+    project.write(
+        "package.json",
+        r#"{"type":"module","scripts":{"test":"bun test"}}"#,
+    );
+    project.write(
+        "front/package.json",
+        r#"{"type":"module","devDependencies":{"vite":"*","vitest":"*"}}"#,
+    );
+    project.write("front/vite.config.ts", "export default {};\n");
+    project.write("front/vitest.config.ts", "export default {};\n");
+    project.write(
+        "src/core/runtime/clock.ts",
+        "export function clock(v: boolean): number {\n  if (v) return 1;\n  return 0;\n}\n",
+    );
+    project.write("src/core/runtime/slug.test.ts", "import { test } from 'bun:test';\nimport assert from 'node:assert/strict';\nimport { clock } from './clock';\ntest('clock', () => assert.equal(clock(true), 1));\n");
+    let sources = std::iter::once("src/core/runtime/clock.ts".to_owned())
+        .chain((0..2599).map(|index| format!("src/modules/module{index}.ts")))
+        .collect::<Vec<_>>();
+    for source in &sources[1..] {
+        project.write(
+            source,
+            "export function value(v: boolean): number { return v ? 1 : 0; }\n",
+        );
+    }
+    let assertion_tests = std::iter::once("src/core/runtime/slug.test.ts".to_owned())
+        .chain((0..1093).map(|index| format!("tests/cases/check{index}.test.ts")))
+        .collect::<Vec<_>>();
+    for test in &assertion_tests[1..] {
+        project.write(
+            test,
+            "import { test, expect } from 'vitest';\ntest('fixture', () => expect(1).toBe(1));\n",
+        );
+    }
+    let other_tests = (0..706)
+        .map(|index| format!("tests/cases/fixture{index}.test.ts"))
+        .collect::<Vec<_>>();
+    for test in &other_tests {
+        project.write(test, "export const fixture = true;\n");
+    }
+    project.git(&["init", "-q"]);
+    project.commit("reported project size without browser configuration");
+    for fixture_config in [false, true] {
+        if fixture_config {
+            project.write(
+                "tests/fixtures/browser/playwright.config.ts",
+                "export default {};\n",
+            );
+            project.commit("an unused browser fixture config");
+        }
+        let run = project.supercov_with(
+            &["--", "bun", "test", "src/core/runtime/slug.test.ts"],
+            &[
+                ("SUPERCOV_KEEP_WORKSPACE", "1"),
+                ("SUPERCOV_SOURCE_ROOTS", "src"),
+            ],
+        );
+        let has_loader = |file: &&String| {
+            kept_workspace_source(&project, file)
+                .contains("if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {")
+        };
+        let source_loaders = sources.iter().filter(has_loader).count();
+        let assertion_loaders = assertion_tests.iter().filter(has_loader).count();
+        let other_loaders = other_tests.iter().filter(has_loader).count();
+        eprintln!(
+            "browser fixture={fixture_config}: source loaders {source_loaders}/2600, assertion-test loaders {assertion_loaders}/1094, other-test loaders {other_loaders}/706"
+        );
+        assert_eq!(
+            assertion_loaders, 1094,
+            "assertion instrumentation has its own bootstrap path"
+        );
+        assert_eq!(
+            other_loaders, 0,
+            "tests with no assertions need no assertion bootstrap"
+        );
+        assert_eq!(
+            source_loaders,
+            2600,
+            "the unused browser fixture suppressed source bootstrapping; {}",
+            run.stderr()
+        );
+        run.succeeds();
+    }
+}
+
+/// Source modules evaluate before the importing test's bootstrap. Local
+/// bindings must not shadow the loader's host check, including in a mixed
+/// browser/unit project. Check every module in the graph, not just the entry.
+#[cfg(unix)]
+#[test]
+fn bun_source_imports_bootstrap_before_probes_even_with_shadowed_host_names() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    let project = bun_project("bun-source-import-graph", true);
+    project.write(
+        "src/leaf.mjs",
+        "const process = { versions: {} };\nexport function leaf(v) { return v ? 3 : 4; }\n",
+    );
+    project.write("src/common.cjs", "const process = { versions: {} };\nmodule.exports = function common(v) { return v ? 5 : 6; };\n");
+    project.write("src/middle.ts", "import { leaf } from './leaf.mjs';\nimport common from './common.cjs';\nconst process = { versions: {} };\nexport function middle(v: boolean): number { return leaf(v) + common(v); }\n");
+    project.write("src/clamp.test.ts", "import { test, expect } from 'bun:test';\nimport { middle } from './middle';\ntest('imports initialize before the test body', () => { expect(middle(true)).toBe(8); expect(middle(false)).toBe(10); });\n");
+    project.commit("shadowed globals in imported sources");
+    project
+        .supercov_with(
+            &["--", "bun", "test", "src/clamp.test.ts"],
+            &[
+                ("SUPERCOV_KEEP_WORKSPACE", "1"),
+                ("SUPERCOV_SOURCE_ROOTS", "src"),
+            ],
+        )
+        .succeeds();
+    for file in ["src/leaf.mjs", "src/common.cjs", "src/middle.ts"] {
+        let source = kept_workspace_source(&project, file);
+        let loader = source
+            .find("new Function(\"stack\", \"specifier\"")
+            .unwrap();
+        let fallback = source
+            .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
+            .unwrap();
+        assert!(
+            loader < fallback,
+            "{file}: the host must load run settings before the browser fallback initializes"
+        );
+        let line = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "line",
+                &format!("{file}:{}", if file.ends_with(".ts") { 4 } else { 2 }),
+            ])
+            .succeeds();
+        contains_all(&line, &["Status\n  COVERED"]);
+    }
+}
+
+/// Exercise the project features listed in #176 both with and without a
+/// browser config. None may leave an instrumented source dependent on the
+/// bootstrap in the test that imports it.
+#[cfg(unix)]
+#[test]
+fn bun_bootstraps_sources_with_nested_frontend_aliases_and_preloads() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    for browser_config in [false, true] {
+        let project = bun_project("bun-project-shape", browser_config);
+        project.write(
+            "front/package.json",
+            r#"{"type":"module","devDependencies":{"vite":"*","vitest":"*"}}"#,
+        );
+        project.write("front/vite.config.ts", "export default {};\n");
+        project.write("front/vitest.config.ts", "export default {};\n");
+        project.write(
+            "tsconfig.json",
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./src/*","./*"]}}}"#,
+        );
+        project.write("bunfig.toml", "[test]\npreload = [\"./tests/preload0.ts\", \"./tests/preload1.ts\", \"./tests/preload2.ts\", \"./tests/preload3.ts\", \"./tests/compat.ts\"]\n");
+        for index in 0..4 {
+            project.write(&format!("tests/preload{index}.ts"), "import { clamp } from '@/clamp';\nif (clamp(-1, 0, 10) !== 0) throw new Error('preload source did not execute');\n");
+        }
+        project.write("tests/compat.ts", "import { mock } from 'bun:test';\nimport * as native from 'bun:test';\nmock.module('vitest', () => native);\n");
+        project.write("src/clamp.test.ts", "import { test, expect } from 'vitest';\nimport { clamp } from '@/clamp';\ntest('alias import after preloads', () => expect(clamp(11, 0, 10)).toBe(10));\n");
+        for index in 0..64 {
+            project.write(
+                &format!("src/core/runtime/clock{index}.ts"),
+                "export function clock(v: boolean): number { return v ? 1 : 0; }\n",
+            );
+        }
+        project.commit("nested frontend and five preloads");
+        for explicit_roots in [false, true] {
+            let mut environment = vec![("SUPERCOV_KEEP_WORKSPACE", "1")];
+            if explicit_roots {
+                environment.push(("SUPERCOV_SOURCE_ROOTS", "src"));
+            }
+            project
+                .supercov_with(&["--", "bun", "test", "src/clamp.test.ts"], &environment)
+                .succeeds();
+            for file in std::iter::once("src/clamp.ts".to_owned())
+                .chain((0..64).map(|index| format!("src/core/runtime/clock{index}.ts")))
+            {
+                let code = kept_workspace_source(&project, &file);
+                let loader = code.find("new Function(\"stack\", \"specifier\"").unwrap_or_else(|| panic!("{file} has no source bootstrap (browser={browser_config}, explicit roots={explicit_roots})"));
+                let helper = code
+                    .find(" = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin")
+                    .unwrap();
+                assert!(
+                    loader < helper,
+                    "{file}: runtime initialization follows the first read"
+                );
+            }
+            let summary = project.supercov(&["runs", "latest"]).succeeds();
+            assert!(!summary.contains("diagnostic"), "{summary}");
+            let line = project
+                .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
+                .succeeds();
+            assert!(!line.contains("UNCOVERED"), "{line}");
+            contains_all(&line, &["Background / unattributed"]);
+        }
+    }
+}
+
+/// Host tests still record coverage when a command selects browser initialization.
+/// The echo makes discovery select that path without requiring a browser installation.
+#[cfg(unix)]
+#[test]
+fn a_bun_test_with_browser_initialization_runs_and_measures() {
+    if !bun_is_available() {
+        eprintln!("skipping: no Bun found");
+        return;
+    }
+    let project = bun_project("bun-mixed-browser", true);
+    project.write(
+        "package.json",
+        r#"{ "name": "bun-clamp", "private": true, "type": "module", "scripts": { "test": "bun test && echo playwright" } }"#,
+    );
+    project.commit("mixed script");
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Lines      66.67% (2/3)"]);
 }
 
 #[cfg(unix)]
@@ -14116,7 +14641,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2462 => main.rs:2462",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1665 => javascript_frontend.rs:1665",
+            "fs.read_to_string#javascript_frontend.rs:1672 => javascript_frontend.rs:1672",
         ],
     );
 }
@@ -16223,12 +16748,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1794@2",
+            "fs.read_to_string#javascript_frontend.rs:1801@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1794"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1801"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
