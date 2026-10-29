@@ -4165,6 +4165,7 @@ fn absolute_source_roots_name_the_same_rust_code_in_the_workspace() {
 /// leaves out and nothing built there: the run names the files the project
 /// has and the copy lacks, by `import` and by `require`, and says why. With
 /// the build in the measured command, it says nothing.
+#[cfg(unix)]
 #[test]
 fn tests_that_load_build_output_the_copy_left_out_are_told_why() {
     let project = Project::empty("left-out-build");
@@ -12785,6 +12786,7 @@ fn a_run_listed_whose_index_cannot_be_read_carries_the_error() {
 
 /// A run whose index cannot be built is still published, without one; a
 /// query that cannot build it either says so, and one that can answers.
+#[cfg(unix)]
 #[test]
 fn a_run_whose_index_cannot_be_built_is_published_and_built_when_asked() {
     let project = Project::cart("index-unbuilt");
@@ -12806,6 +12808,7 @@ fn a_run_whose_index_cannot_be_built_is_published_and_built_when_asked() {
 
 /// An index whose header or file cannot be read when a query opens it is
 /// built again from the run's evidence, and the query answers.
+#[cfg(unix)]
 #[test]
 fn an_index_that_cannot_be_opened_is_built_again() {
     let project = Project::cart("index-reopened");
@@ -14027,6 +14030,7 @@ fn each_step_of_a_run_fails(label: &str, write: fn(&Project), command: &[&str], 
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_python_run_whose_own_step_fails_says_so() {
     each_step_of_a_run_fails(
@@ -14070,6 +14074,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_javascript_run_whose_own_step_fails_says_so() {
     each_step_of_a_run_fails(
@@ -14143,6 +14148,7 @@ fn a_rust_run_that_cannot_write_its_tests_reports_says_so() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_rust_run_whose_own_step_fails_says_so() {
     each_step_of_a_run_fails(
@@ -14368,6 +14374,7 @@ fn a_rust_run_that_cannot_put_its_wrangler_in_place_says_so() {
 /// suite starts. Each step of that failing -- the evidence and inspector
 /// directories made, the inspector hook, registry and entry written, the
 /// configuration read and rewritten -- ends the run and says what failed.
+#[cfg(unix)]
 #[test]
 fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
     for (fault, said) in [
@@ -15150,6 +15157,7 @@ fn each_query_refuses_when_a_read_or_write_it_makes_fails() {
 /// fails: reading the tracefile, the project's lock, the evidence archived,
 /// copied and hashed, and the run published and recorded. Each case on a
 /// project measured the same way, so its fault names the same call.
+#[cfg(unix)]
 #[test]
 fn an_import_whose_step_fails_says_so() {
     for fault in [
@@ -15443,6 +15451,7 @@ fn a_workspace_whose_git_repository_cannot_be_made_runs_without_one() {
 /// its directory. A step of that failing -- the copy walked, a directory
 /// below it, a written file read, the destination made, written or copied --
 /// ends the run, naming the file.
+#[cfg(unix)]
 #[test]
 fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
@@ -15666,6 +15675,7 @@ fn a_run_that_cannot_reuse_the_last_copy_says_so() {
 /// state at each phase, the runtime's settings, the parent-death watchdog,
 /// the evidence gathered and archived, the trash, the publication -- each
 /// failing ends the run and names what failed, and the next run is clean.
+#[cfg(unix)]
 #[test]
 fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
@@ -15845,6 +15855,7 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 /// instrumented form, the authored-source map, the statement exclusions, the
 /// manifest, the completion mark, a cached artifact -- each failing ends the
 /// run naming the file, and the next run is clean.
+#[cfg(unix)]
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
@@ -16009,10 +16020,12 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         )
         .exits(2);
     assert!(refused.contains("could not read run"), "{refused}");
+    // Every name taken: the system's "already exists", by its number there.
+    let exists = if cfg!(windows) { 80 } else { 17 };
     let crowded = project
         .supercov_with(
             &["report", "--no-open", "--output", "crowded.html"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open_with:17")],
+            &[("SUPERCOV_TEST_FAULT", &format!("fs.open_with:{exists}"))],
         )
         .exits(2);
     assert!(
@@ -16064,6 +16077,7 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 /// A browser suite beside servers in other languages prepares each before
 /// the suite starts: its runtime and evidence directories, its runtime, its
 /// plan. Each step failing ends the run, and says where.
+#[cfg(unix)]
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
@@ -16239,6 +16253,7 @@ fn a_javascript_run_that_cannot_write_its_diagnostics_says_so() {
 /// A browser suite beside a Python server reads the server's project before
 /// the suite starts: its sources, digested and captured, and the plan the
 /// server's probes are given. Each failing ends the run, naming the file.
+#[cfg(unix)]
 #[test]
 fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
@@ -16280,6 +16295,7 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
 /// A browser suite beside a Ruby server reads the server's project and writes
 /// its runtime and plan before the suite starts: each failing ends the run,
 /// naming the file.
+#[cfg(unix)]
 #[test]
 fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
@@ -16322,6 +16338,7 @@ fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
 /// Supercov forwards the user's signals to the command and waits on it: a
 /// run, and the supervisor alone, that cannot install the forwarding or wait
 /// for the command end, saying which.
+#[cfg(unix)]
 #[test]
 fn a_run_that_cannot_forward_signals_or_wait_for_its_command_says_so() {
     for (fault, said) in [
@@ -18433,6 +18450,7 @@ fn a_run_whose_execution_record_cannot_be_written_is_not_published() {
 
 /// The index publication writes beside the run is a cache: one that cannot
 /// be written leaves the run published, and a query builds it.
+#[cfg(unix)]
 #[test]
 fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");

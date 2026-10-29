@@ -3102,6 +3102,7 @@ mod tests {
     /// order it takes them: hashing the evidence, its staging directory,
     /// the copy and its hash, `run.json` written, the staging directory
     /// synced, `runs` made, the move into it, and `runs` synced.
+    #[cfg(unix)]
     #[test]
     fn a_publication_refuses_each_step_that_fails() {
         let id = "2026-01-01T00-00-00-100Z";
@@ -3368,11 +3369,12 @@ mod tests {
         // A lock left by a process that is gone is cleared, unless it cannot be.
         fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
         assert!(crate::fault::during("fs.remove_file", || sweep_trash(&root)).is_err());
-        // Cleared, it is taken first by another sweeper (17 is EEXIST), or
-        // cannot be made again.
+        // Cleared, it is taken first by another sweeper (the system's
+        // "already exists", by its number there), or cannot be made again.
+        let exists = if cfg!(windows) { 80 } else { 17 };
         fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
         assert_eq!(
-            crate::fault::during("trash-lock:17@2", || sweep_trash(&root)).unwrap(),
+            crate::fault::during(&format!("trash-lock:{exists}@2"), || sweep_trash(&root)).unwrap(),
             0
         );
         assert!(trash.join("old").exists());

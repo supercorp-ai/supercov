@@ -1407,6 +1407,7 @@ mod tests {
     /// naming the file: a source, a test, a manifest, the configuration, and
     /// the frontend's instrumenter and runtime; for a project discovered, and
     /// for inputs a language names itself.
+    #[cfg(unix)]
     #[test]
     fn each_input_domain_that_cannot_be_read_names_its_file() {
         let (root, shim) = fixture();
