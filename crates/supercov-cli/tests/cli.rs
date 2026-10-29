@@ -14358,6 +14358,28 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
     assert!(stderr.contains("wrangler.toml"), "{stderr}");
 }
 
+/// A run started with no PATH at all puts no launchers on one: the suite
+/// runs as it would have, from the program it names.
+#[cfg(unix)]
+#[test]
+fn a_javascript_run_with_no_path_runs_its_suite_as_named() {
+    let project = Project::cart("no-path");
+    let node = String::from_utf8(
+        std::process::Command::new("sh")
+            .args(["-c", "command -v node"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let mut command = project.supercov_command(&["--", node.trim(), "--test"]);
+    command.env_remove("PATH");
+    let output = command.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("running in isolated workspace"), "{stderr}");
+}
+
 /// What a run digests to judge later whether it is current -- the tests,
 /// the dependency manifests, the configuration -- unreadable: the run ends
 /// and names the file.

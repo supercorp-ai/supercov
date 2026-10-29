@@ -500,11 +500,11 @@ pub fn go_integrity_inputs(files: &GoFiles, command: &[String]) -> ExplicitInteg
 /// `//go:build go1.N` line above its package clause sets an older one.
 fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
     let minor = |text: &str| -> Option<u32> {
-        text.strip_prefix("1.")?
-            .split(|c: char| !c.is_ascii_digit())
-            .next()?
-            .parse()
-            .ok()
+        let rest = text.strip_prefix("1.")?;
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
     };
     let mut directory = root.join(relative);
     let module = loop {
