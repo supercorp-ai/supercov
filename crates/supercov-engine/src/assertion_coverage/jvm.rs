@@ -532,6 +532,13 @@ mod tests {
             change_at(&kotlin, 4, "if (b) {\n        h()\n    }", j),
             Some(Change::Invert)
         );
+        // A `throw` in an `if` that ends a lambda nobody takes the value of
+        // ends no function.
+        let lambda = statement_starts(
+            "B.kt",
+            "fun f(c: Boolean) {\n    run {\n        if (c) {\n            throw E()\n        }\n    }\n}\n",
+        );
+        assert_eq!(change_at(&lambda, 4, "throw E()", j), Some(Change::Skip));
         let java = statement_starts(
             "A.java",
             "class A {\n  int f(int x) {\n    switch (x) {\n      case 1:\n        try { g(); } finally { h(); }\n    }\n    return 0;\n  }\n  A() {\n    try { g(); } finally { h(); }\n  }\n}\n",
