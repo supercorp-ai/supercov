@@ -262,11 +262,13 @@ fn on_final_path(node: Node, source: &str) -> bool {
 }
 
 /// Whether a statement is the last in a block whose value is used: a branch
-/// of an `if`, `when` or `try` that is itself a value.
+/// of an `if`, `when` or `try` that is itself a value. Every Kotlin statement
+/// asked about is in a block: the grammar hides the statements of a lambda,
+/// which are never asked about.
 fn yields_value(node: Node) -> bool {
-    let Some(block) = node.parent().filter(|p| p.kind() == "block") else {
-        return false;
-    };
+    let block = node
+        .parent()
+        .expect("a Kotlin statement asked about is in a block");
     let mut cursor = block.walk();
     let last = block
         .named_children(&mut cursor)

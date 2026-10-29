@@ -1865,6 +1865,7 @@ mod replacement_tests {
         let i = match n {};
         let j = (unknown)(n);
         let k = Self { n };
+        let l = <Unknown>(n);
         n
     }
 }
