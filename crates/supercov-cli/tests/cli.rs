@@ -14137,8 +14137,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "spawn#rust_test_runner.rs:1550 => rust_test_runner.rs:1550",
             "spawn#rust_test_runner.rs:1550@2 => rust_test_runner.rs:1550",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:232 => child_signal_guard.rs:232",
-            "spawn#child_signal_guard.rs:232@2 => child_signal_guard.rs:232",
+            "spawn#child_signal_guard.rs:231 => child_signal_guard.rs:231",
+            "spawn#child_signal_guard.rs:231@2 => child_signal_guard.rs:231",
             "spawn",
             // The store of copies made.
             "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
@@ -14175,7 +14175,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
                 "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
                 "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:305 => child_signal_guard.rs:305",
+                "spawn#child_signal_guard.rs:304 => child_signal_guard.rs:304",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
                 "__nextest-runner/spawn#rust_owned_nextest.rs:603",
