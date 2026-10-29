@@ -179,7 +179,9 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
 /// create_dir_all)`), so a test can check it failed the call it meant to.
 /// Written to the descriptor itself: a child forked to exec a command may not
 /// allocate or take the lock `eprintln!` takes, so the line is written as
-/// digits from the stack.
+/// digits from the stack. Windows writes to the handle for the same reason:
+/// the run holds standard error's lock for its diagnostics while it waits on
+/// the thread a fault fires on, and `eprint!` there waited for it for good.
 #[cfg(any(test, debug_assertions))]
 fn announce(site: &str, place: Option<Place>) {
     let mut digits = [0_u8; 10];
@@ -223,15 +225,23 @@ fn announce(site: &str, place: Option<Place>) {
             // SAFETY: a write of a live buffer to standard error.
             unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
         });
-    #[cfg(not(unix))]
-    eprint!(
-        "[supercov] test fault at {site}{}",
-        placed
-            .iter()
-            .chain([&closing])
-            .map(|part| String::from_utf8_lossy(part))
-            .collect::<String>()
-    );
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        // SAFETY: this process's standard error, borrowed for the write and
+        // never closed here.
+        let mut stderr = std::mem::ManuallyDrop::new(unsafe {
+            std::fs::File::from_raw_handle(std::io::stderr().as_raw_handle())
+        });
+        [b"[supercov] test fault at ".as_slice(), site.as_bytes()]
+            .into_iter()
+            .chain(placed)
+            .chain([closing])
+            .for_each(|part| {
+                let _ = stderr.write_all(part);
+            });
+    }
 }
 
 /// Of the faults `faults`, whether the one at `site` fails this time, and
