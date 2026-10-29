@@ -143,51 +143,55 @@ pub(crate) fn publish(
     let mut by_test = BTreeMap::<usize, Vec<Vec<RustProbeEntry>>>::new();
     let mut background = Vec::<Vec<RustProbeEntry>>::new();
     let mut overlapped = BTreeSet::new();
-    for record in &records {
-        let running = match &record.owner {
-            Owner::Window(start, end) => served
-                .iter()
-                .enumerate()
-                .filter(|(_, test)| {
-                    test.window
-                        .is_some_and(|(first, last)| first <= *end && *start <= last)
-                })
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>(),
-            Owner::Attempt(attempt) => served
-                .iter()
-                .position(|test| test.attempt_id.as_deref() == Some(attempt.as_str()))
-                .into_iter()
-                .collect(),
-            Owner::Nobody => Vec::new(),
-        };
-        let mut entries_of_record = Vec::new();
-        for (_, bytes) in &record.regions {
-            let entries = parse_rust_region(bytes, None, &probes.token, probes)
-                .map_err(|error| error.to_string())?;
-            for (slot, bits) in settled
-                .iter_mut()
-                .zip(parse_rust_region_cfgs(bytes, &probes.token, probes).unwrap_or_default())
-            {
-                *slot |= bits;
-            }
-            if !entries.is_empty() {
-                entries_of_record.push(entries);
-            }
-        }
-        if entries_of_record.is_empty() {
-            continue;
-        }
-        match running.as_slice() {
-            [owner] => by_test.entry(*owner).or_default().extend(entries_of_record),
-            _ => {
-                if running.len() > 1 {
-                    overlapped.extend(running);
+    // There is a record at least.
+    records
+        .iter()
+        .try_for_each(|record| -> Result<(), String> {
+            let running = match &record.owner {
+                Owner::Window(start, end) => served
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, test)| {
+                        test.window
+                            .is_some_and(|(first, last)| first <= *end && *start <= last)
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>(),
+                Owner::Attempt(attempt) => served
+                    .iter()
+                    .position(|test| test.attempt_id.as_deref() == Some(attempt.as_str()))
+                    .into_iter()
+                    .collect(),
+                Owner::Nobody => Vec::new(),
+            };
+            let mut entries_of_record = Vec::new();
+            for (_, bytes) in &record.regions {
+                let entries = parse_rust_region(bytes, None, &probes.token, probes)
+                    .map_err(|error| error.to_string())?;
+                for (slot, bits) in settled
+                    .iter_mut()
+                    .zip(parse_rust_region_cfgs(bytes, &probes.token, probes).unwrap_or_default())
+                {
+                    *slot |= bits;
                 }
-                background.extend(entries_of_record);
+                if !entries.is_empty() {
+                    entries_of_record.push(entries);
+                }
             }
-        }
-    }
+            if entries_of_record.is_empty() {
+                return Ok(());
+            }
+            match running.as_slice() {
+                [owner] => by_test.entry(*owner).or_default().extend(entries_of_record),
+                _ => {
+                    if running.len() > 1 {
+                        overlapped.extend(running);
+                    }
+                    background.extend(entries_of_record);
+                }
+            }
+            Ok(())
+        })?;
     let manifest = crate::rust_test_runner::settle_cfg_gates_with(
         &wasm.project.manifest,
         probes,
@@ -206,52 +210,56 @@ pub(crate) fn publish(
     let background_runner = names.iter().next().cloned().unwrap_or_default();
     let run_id = &metadata.id;
     let mut raw_results = Vec::new();
-    for (index, test) in served.iter().enumerate() {
-        let attempt_id = format!("{run_id}:worker:{index:08}");
-        let credited = by_test.remove(&index);
-        let attributed = credited.is_some();
-        let evidence = crate::rust_test_runner::snapshot_regions(
-            &manifest,
-            credited.unwrap_or_default(),
-            &attempt_id,
-        )
-        .map_err(|error| error.to_string())?;
-        let test_id = format!("{}::{}", test.file, test.test_id);
-        raw_results.push(RawTestResult {
-            test_id: Some(test_id.clone()),
-            scope: Some(ExecutionScope {
-                version: 1,
-                run_id: run_id.clone(),
-                worker_id: test.worker.clone(),
-                test_id: test_id.clone(),
-                test_key: test_id.clone(),
-                retry: test.retry,
-                attempt_id,
-            }),
-            test: test.name.clone(),
-            test_file: Some(test.file.clone()),
-            title: Some(test.title.clone()),
-            retry: Some(test.retry),
-            status: Some(test.status.clone()),
-            expected_status: Some(test.expected_status.clone()),
-            flaky: false,
-            span: None,
-            provenance: provenance_of(test),
-            role: "test".into(),
-            attribution: if attributed && by_time {
-                crate::coverage_report::ATTRIBUTION_BY_TIME
-            } else if attributed {
-                crate::coverage_report::ATTRIBUTION_EXACT
-            } else {
-                crate::coverage_report::ATTRIBUTION_RUN_WIDE
-            }
-            .into(),
-            phases: evidence.phases,
-            runtime: vec![evidence.snapshot],
-            browser: Vec::new(),
-            server: Vec::new(),
-        });
-    }
+    served
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, test)| -> Result<(), String> {
+            let attempt_id = format!("{run_id}:worker:{index:08}");
+            let credited = by_test.remove(&index);
+            let attributed = credited.is_some();
+            let evidence = crate::rust_test_runner::snapshot_regions(
+                &manifest,
+                credited.unwrap_or_default(),
+                &attempt_id,
+            )
+            .map_err(|error| error.to_string())?;
+            let test_id = format!("{}::{}", test.file, test.test_id);
+            raw_results.push(RawTestResult {
+                test_id: Some(test_id.clone()),
+                scope: Some(ExecutionScope {
+                    version: 1,
+                    run_id: run_id.clone(),
+                    worker_id: test.worker.clone(),
+                    test_id: test_id.clone(),
+                    test_key: test_id.clone(),
+                    retry: test.retry,
+                    attempt_id,
+                }),
+                test: test.name.clone(),
+                test_file: Some(test.file.clone()),
+                title: Some(test.title.clone()),
+                retry: Some(test.retry),
+                status: Some(test.status.clone()),
+                expected_status: Some(test.expected_status.clone()),
+                flaky: false,
+                span: None,
+                provenance: provenance_of(test),
+                role: "test".into(),
+                attribution: if attributed && by_time {
+                    crate::coverage_report::ATTRIBUTION_BY_TIME
+                } else if attributed {
+                    crate::coverage_report::ATTRIBUTION_EXACT
+                } else {
+                    crate::coverage_report::ATTRIBUTION_RUN_WIDE
+                }
+                .into(),
+                phases: evidence.phases,
+                runtime: vec![evidence.snapshot],
+                browser: Vec::new(),
+                server: Vec::new(),
+            });
+            Ok(())
+        })?;
     if !background.is_empty() {
         // Whether it counts turns on whether what produced it passed, as
         // for every test: the producers cannot be named, so the run is
@@ -448,11 +456,28 @@ mod tests {
             serde_json::json!({"id": "a", "file": "src/lib.rs"}),
             serde_json::json!({"id": "b"}),
         ];
+        let site = project.manifest.points[0].clone();
+        project.manifest.assertion_sites.push(site);
+        project
+            .probes
+            .cfgs
+            .push(crate::rust_instrumenter::RustCfgGate {
+                file: "src/lib.rs".into(),
+                predicate: "unix".into(),
+                line: 1,
+                end_line: 1,
+                obligations: Vec::new(),
+            });
         root_paths(&mut project, Path::new(""));
         assert_eq!(project.source_files, ["src/lib.rs"]);
         root_paths(&mut project, Path::new("worker"));
         assert_eq!(project.source_files, ["worker/src/lib.rs"]);
         assert_eq!(project.manifest.points[0].file, "worker/src/lib.rs");
+        assert_eq!(
+            project.manifest.assertion_sites[0].file,
+            "worker/src/lib.rs"
+        );
+        assert_eq!(project.probes.cfgs[0].file, "worker/src/lib.rs");
         assert_eq!(
             project.manifest.limitations,
             [
@@ -461,6 +486,13 @@ mod tests {
             ]
         );
         assert!(project.manifest.scope.is_none());
+        // A scope of no entries has none to name.
+        project.manifest.scope = Some(serde_json::json!({"entries": []}));
+        root_paths(&mut project, Path::new("empty"));
+        assert_eq!(
+            project.manifest.scope,
+            Some(serde_json::json!({"entries": []}))
+        );
         project.manifest.scope = Some(serde_json::json!({
             "entries": [{"file": "src/lib.rs", "status": "included"}, {"status": "excluded"}]
         }));
@@ -701,6 +733,135 @@ mod tests {
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
+        }
+        // A take of no crate's region beside one of a region credits what
+        // the one holds.
+        let mut with_nothing = records();
+        with_nothing.push(WasmRecord {
+            owner: Owner::Nobody,
+            regions: Vec::new(),
+        });
+        assert!(
+            publish(
+                &fresh(),
+                wasm(),
+                with_nothing,
+                metadata(run_id, 0),
+                &tests,
+                &mut Vec::new()
+            )
+            .is_ok()
+        );
+        // A probe the manifest does not have, in a test's work or in the
+        // run's, is refused.
+        let mut unknown = PreparedRustProject::empty(root.clone());
+        unknown.source_files = vec!["src/lib.rs".into()];
+        unknown.probes.token = TOKEN.into();
+        unknown.probes.hits = vec![id.into()];
+        let unknown_run = || WasmRun {
+            language: "Rust wasm",
+            archive: "rust-wasm-evidence.raw.gz",
+            project: &unknown,
+            integrity: &integrity,
+            source_inputs: &inputs,
+            source_roots: None,
+        };
+        let alone = [served(0, (0, 10), "playwright")];
+        for tests in [&alone[..], &tests[..]] {
+            assert!(
+                publish(
+                    &fresh(),
+                    unknown_run(),
+                    records(),
+                    metadata(run_id, 0),
+                    tests,
+                    &mut Vec::new()
+                )
+                .is_err()
+            );
+        }
+        // A take that says a gate's code was left out of the build: its
+        // items leave the denominator, and a stream that refuses to hear so
+        // ends the run.
+        let mut gated = PreparedRustProject::empty(root.clone());
+        gated.source_files = project.source_files.clone();
+        gated.manifest = project.manifest.clone();
+        gated.probes = project.probes.clone();
+        gated
+            .probes
+            .cfgs
+            .push(crate::rust_instrumenter::RustCfgGate {
+                file: "src/lib.rs".into(),
+                predicate: "windows".into(),
+                line: 1,
+                end_line: 1,
+                obligations: Vec::new(),
+            });
+        let mut region = region_with_one_hit(&gated.probes);
+        region[72..76].copy_from_slice(&1u32.to_le_bytes());
+        region[256 + 8] = 1;
+        let gated_run = || WasmRun {
+            language: "Rust wasm",
+            archive: "rust-wasm-evidence.raw.gz",
+            project: &gated,
+            integrity: &integrity,
+            source_inputs: &inputs,
+            source_roots: None,
+        };
+        let gated_records = || {
+            vec![WasmRecord {
+                owner: Owner::Window(6, 7),
+                regions: vec![("crate".into(), region.clone())],
+            }]
+        };
+        let mut said = Vec::new();
+        publish(
+            &fresh(),
+            gated_run(),
+            gated_records(),
+            metadata(run_id, 0),
+            &alone,
+            &mut said,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8_lossy(&said).contains("outside the denominator"),
+            "{}",
+            String::from_utf8_lossy(&said)
+        );
+        assert!(
+            publish(
+                &fresh(),
+                gated_run(),
+                gated_records(),
+                metadata(run_id, 0),
+                &alone,
+                &mut Refusing("outside the denominator")
+            )
+            .is_err()
+        );
+        // Each step of publication failing: the report refused as one
+        // Supercov got wrong, the work directory, the archive, the run moved
+        // into place.
+        for fault in [
+            "report-request",
+            "fs.create_dir_all@1",
+            "fs.rename#evidence_archive.rs:471",
+            "fs.rename#lifecycle.rs:1114",
+        ] {
+            let attempt = fresh();
+            assert!(
+                crate::fault::during(fault, || publish(
+                    &attempt,
+                    wasm(),
+                    records(),
+                    metadata(run_id, 0),
+                    &tests,
+                    &mut Vec::new()
+                ))
+                .is_err(),
+                "{fault}"
+            );
         }
         for refused in ["coverage:", "of those test(s)"] {
             assert!(
