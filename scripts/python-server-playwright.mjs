@@ -278,9 +278,9 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
   const unread = run(mixed, binary, ['--', 'npx', 'playwright', 'test', 'tests/grades.spec.js'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#python_evidence.rs:359' });
   assert.equal(unread.status, 0, unread.stdout + unread.stderr);
   assert.match(unread.stderr, /the Python server's run could not be published/u, unread.stderr);
-  const unfinished = run(mixed, binary, ['--', 'npx', 'playwright', 'test', 'tests/grades.spec.js'], { SUPERCOV_TEST_FAULT: 'fs.symlink_metadata#javascript_run.rs:1479' });
+  const unfinished = run(mixed, binary, ['--', 'npx', 'playwright', 'test', 'tests/grades.spec.js'], { SUPERCOV_TEST_FAULT: 'fs.symlink_metadata#javascript_run.rs:1480' });
   assert.notEqual(unfinished.status, 0, unfinished.stdout + unfinished.stderr);
-  assert.match(unfinished.stderr, /test fault at fs \(javascript_run\.rs:1479/u, unfinished.stderr);
+  assert.match(unfinished.stderr, /test fault at fs \(javascript_run\.rs:1480/u, unfinished.stderr);
 
   // Frameworks and servers, from a virtual environment in the project.
   if (process.platform !== 'win32' && !process.env.SUPERCOV_SKIP_PYTHON_FRAMEWORKS) {

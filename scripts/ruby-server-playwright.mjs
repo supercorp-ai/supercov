@@ -255,11 +255,11 @@ test('a test that reaches no server', async () => {
   // finished, the evidence cleared, the run's state written, the first run
   // finished -- that fails ends the run, saying where.
   for (const [fault, place] of [
-    ['fs.symlink_metadata#javascript_run.rs:1291', 'javascript_run.rs:1291'],
-    ['fs.symlink_metadata#javascript_run.rs:1307', 'javascript_run.rs:1307'],
-    ['fs.symlink_metadata#javascript_run.rs:1309', 'javascript_run.rs:1309'],
-    ['fs.read#javascript_run.rs:1335', 'javascript_run.rs:1335'],
-    ['fs.symlink_metadata#javascript_run.rs:1347', 'javascript_run.rs:1347'],
+    ['fs.symlink_metadata#javascript_run.rs:1292', 'javascript_run.rs:1292'],
+    ['fs.symlink_metadata#javascript_run.rs:1308', 'javascript_run.rs:1308'],
+    ['fs.symlink_metadata#javascript_run.rs:1310', 'javascript_run.rs:1310'],
+    ['fs.read#javascript_run.rs:1336', 'javascript_run.rs:1336'],
+    ['fs.symlink_metadata#javascript_run.rs:1348', 'javascript_run.rs:1348'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
@@ -269,8 +269,8 @@ test('a test that reaches no server', async () => {
   // directory, its archive, its run moved into place -- is said, and never
   // panics; the first server's failing ends the run.
   for (const [fault, place] of [
-    ['fs.create_dir_all#python_run.rs:812', 'python_run.rs:812'],
-    ['fs.create_dir_all#ruby_run.rs:645', 'ruby_run.rs:645'],
+    ['fs.create_dir_all#python_run.rs:809', 'python_run.rs:809'],
+    ['fs.create_dir_all#ruby_run.rs:642', 'ruby_run.rs:642'],
     ['fs.rename#evidence_archive.rs:471', 'evidence_archive.rs:471'],
     ['fs.rename#evidence_archive.rs:471@2', 'evidence_archive.rs:471'],
     ['fs.rename#lifecycle.rs:1114', 'lifecycle.rs:1114'],

@@ -1229,7 +1229,8 @@ pub fn run_direct_javascript(
         // latest` reads, and the rest under ids that sort after it.
         let mut built = Vec::new();
         let mut failure = None;
-        for server in servers {
+        // Never empty: a project with no source and no server was refused.
+        servers.into_iter().for_each(|server| {
             let language = server.language();
             let prepared = crate::fault::or(
                 "server-unpublished",
@@ -1253,7 +1254,7 @@ pub fn run_direct_javascript(
                     failure.get_or_insert(error);
                 }
             }
-        }
+        });
         let named = built
             .iter()
             .enumerate()

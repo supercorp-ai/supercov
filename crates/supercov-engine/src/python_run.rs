@@ -799,14 +799,11 @@ impl PythonServer {
                     // The evidence was recorded under the browser run's id; a run
                     // published beside it has its own.
                     run.request.run_id = metadata.id.clone();
-                    for scope in run
-                        .request
+                    run.request
                         .raw_results
                         .iter_mut()
                         .filter_map(|raw| raw.scope.as_mut())
-                    {
-                        scope.run_id = metadata.id.clone();
-                    }
+                        .for_each(|scope| scope.run_id = metadata.id.clone());
                     run.request.integrity = serde_json::to_value(&self.integrity).ok();
                     let work = root.join(".supercov/work").join(&metadata.id);
                     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
@@ -838,12 +835,11 @@ impl PythonServer {
                         },
                     )
                     .map_err(|error| error.to_string())?;
-                    writeln!(
-                    diagnostics,
-                    "[supercov] Python server coverage: {tests} test(s) across {} source file(s)",
-                    self.project.plan.files.len()
-                )
-                .map_err(|error| error.to_string())?;
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] Python server coverage: {tests} test(s) across {} source file(s)",
+                        self.project.plan.files.len()
+                    );
                     Ok((run_directory, metadata))
                 })();
                 let result = result.map_err(|error| {
