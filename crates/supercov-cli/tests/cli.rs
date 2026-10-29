@@ -17245,6 +17245,39 @@ fn standalone_doctests_named_alike_are_each_run_alone() {
 }
 
 /// A Maven project with one class and its test.
+/// A JVM test whose class is declared in a file of another name has no
+/// file to name, and is listed without evidence all the same.
+#[test]
+fn a_jvm_test_without_evidence_whose_class_names_no_file_is_listed() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-no-file");
+    small_maven_project(&project);
+    project.write(
+        "src/test/java/w/Tests.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport org.junit.jupiter.api.Test;\n\nclass HiddenTest {\n    @Test\n    void nothing() {\n        assertTrue(true);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project.supercov(&["--", "mvn", "-q", "test"]).succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "tests", "without-evidence", "--json"])
+        .json();
+    let tests = listed["data"]["tests"].as_array().unwrap();
+    assert!(
+        tests.iter().any(|test| test["name"]
+            .as_str()
+            .is_some_and(|name| name.contains("nothing"))
+            && test["file"].is_null()),
+        "{listed}"
+    );
+}
+
 fn small_maven_project(project: &Project) {
     project.write("pom.xml", "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>example</groupId>\n  <artifactId>w</artifactId>\n  <version>1.0</version>\n  <properties>\n    <maven.compiler.source>17</maven.compiler.source>\n    <maven.compiler.target>17</maven.compiler.target>\n    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n  </properties>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n      <scope>test</scope>\n    </dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin>\n        <groupId>org.apache.maven.plugins</groupId>\n        <artifactId>maven-surefire-plugin</artifactId>\n        <version>3.2.5</version>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n");
     project.write(
