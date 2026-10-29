@@ -1617,6 +1617,23 @@ fn main() {
         );
     }
 
+    /// A decision slot marked as written but holding no first sighting --
+    /// torn as it was written -- reads as nothing.
+    #[test]
+    fn a_decision_slot_with_no_first_sighting_reads_as_nothing() {
+        let probes = layout(&[], &["rs:decision:d"]);
+        let mut region = empty_region(&probes);
+        // One slot a decision, its body past the page map.
+        region[28..32].copy_from_slice(&1u32.to_le_bytes());
+        region[32..36].copy_from_slice(&256u32.to_le_bytes());
+        region[128] |= 1;
+        region[256] = 2;
+        assert_eq!(
+            parse_rust_region(&region, None, TOKEN, &probes),
+            Ok(Vec::new())
+        );
+    }
+
     #[test]
     fn a_region_directory_that_cannot_be_read_is_an_error() {
         let probes = layout(&["rs:point:a"], &[]);
