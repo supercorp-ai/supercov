@@ -1134,7 +1134,7 @@ mod tests {
         let root = fixture();
         fs::write(
             root.join(".cargo/config.toml"),
-            "[target.x86_64-unknown-linux-gnu]\nrunner='../../outside/run'\n[target.aarch64-apple-darwin]\nrunner='../../outside/run'\n[target.x86_64-pc-windows-msvc]\nrunner='../../outside/run'\n",
+            "[target.'cfg(all())']\nrunner='../../outside/run'\n",
         )
         .unwrap();
         let mut real_host = model_inputs();
@@ -2581,7 +2581,7 @@ mod tests {
                 "rustflags",
             ),
             (
-                "[target.x86_64-unknown-linux-gnu]\nrunner=''\n[target.aarch64-apple-darwin]\nrunner=''\n[target.x86_64-pc-windows-msvc]\nrunner=''\n",
+                "[target.'cfg(all())']\nrunner=''\n",
                 &["test"][..],
                 "cannot be empty",
             ),
