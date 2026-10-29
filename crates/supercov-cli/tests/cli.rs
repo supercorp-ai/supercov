@@ -12730,6 +12730,7 @@ fn a_run_listed_whose_index_cannot_be_read_carries_the_error() {
     project.measure(&[]);
     for fault in [
         "coverage-index",
+        "coverage-index@2",
         "coverage-index-read#run_query.rs:72",
         "coverage-index-read#run_query.rs:73",
     ] {
@@ -12745,6 +12746,27 @@ fn a_run_listed_whose_index_cannot_be_read_carries_the_error() {
         );
         assert!(run["lines"].is_null(), "{fault}: {run}");
     }
+}
+
+/// A run whose index cannot be built is still published, without one; a
+/// query that cannot build it either says so, and one that can answers.
+#[test]
+fn a_run_whose_index_cannot_be_built_is_published_and_built_when_asked() {
+    let project = Project::cart("index-unbuilt");
+    let fault = [("SUPERCOV_TEST_FAULT", "coverage-index-build")];
+    project
+        .supercov_with(&["--", "node", "--test"], &fault)
+        .succeeds();
+    let refused = project.supercov_with(&["runs", "latest"], &fault);
+    assert_ne!(refused.code(), 0, "{}", refused.stderr());
+    assert!(
+        format!("{}{}", refused.stdout(), refused.stderr())
+            .contains("coverage index exceeds format limits"),
+        "{}{}",
+        refused.stdout(),
+        refused.stderr()
+    );
+    project.supercov(&["runs", "latest"]).succeeds();
 }
 
 /// An index whose header or file cannot be read when a query opens it is

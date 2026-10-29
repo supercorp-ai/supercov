@@ -1975,6 +1975,12 @@ where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
     E: From<CoverageIndexError>,
 {
+    // A test fault stands in for a run past the format's limits, which no
+    // test can hold in memory, so each place that builds an index meets one
+    // it cannot build.
+    if crate::fault::injected("coverage-index-build") {
+        return Err(CoverageIndexError::SizeOverflow.into());
+    }
     let mut model_of_all = None;
     let mut strings = StringTable::default();
     let mut relations = StringRelations::default();
