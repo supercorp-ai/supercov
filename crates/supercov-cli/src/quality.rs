@@ -4090,9 +4090,9 @@ fn annotations(report: &Value) -> String {
             .expect("each file a report lists has its path");
         let line = file["line"].as_u64().unwrap_or(1).max(1);
         for finding in file["present"].as_array().unwrap_or(&empty) {
-            let Some(check) = finding["check"].as_str() else {
-                continue;
-            };
+            let check = finding["check"]
+                .as_str()
+                .expect("each finding a report lists names its check");
             let value = finding["value"].as_f64().unwrap_or(0.0);
             out.push_str(&format!(
                 "::warning file={path},line={line},title=quality: {check}::{}\n",
