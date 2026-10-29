@@ -6692,6 +6692,15 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
         )),
         "{refused}"
     );
+    // A run whose archive cannot be read for its language is refused as
+    // another build's, the most it can be said to be.
+    let unread = project
+        .supercov_with(
+            &["merge", &javascript, &python],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:657")],
+        )
+        .exits(2);
+    assert!(unread.contains("recorded by another build"), "{unread}");
 }
 
 #[cfg(unix)]
