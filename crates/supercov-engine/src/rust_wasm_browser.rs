@@ -391,7 +391,18 @@ fn read_response(reader: &mut impl BufRead) -> Option<(u16, Vec<u8>)> {
 static REGIONS: AtomicU64 = AtomicU64::new(0);
 
 fn relay(stream: TcpStream, upstream: SocketAddr, token: &str) -> Option<()> {
-    let mut reader = BufReader::new(stream.try_clone().expect("a socket can be cloned"));
+    let reader = BufReader::new(stream.try_clone().expect("a socket can be cloned"));
+    answer(reader, stream, upstream, token)
+}
+
+/// One request read from `reader`, passed on, and its answer written to
+/// `writer`.
+fn answer(
+    mut reader: impl BufRead,
+    mut writer: impl Write,
+    upstream: SocketAddr,
+    token: &str,
+) -> Option<()> {
     let request = read_request(&mut reader)?;
     // `/e/<hex evidence directory>/<WebDriver path>`.
     let rest = request.path.strip_prefix("/e/")?;
@@ -440,15 +451,14 @@ fn relay(stream: TcpStream, upstream: SocketAddr, token: &str) -> Option<()> {
             install.to_string().as_bytes(),
         );
     }
-    let mut stream = stream;
     let reason = if status == 200 { "OK" } else { "Error" };
-    write!(
-        stream,
+    let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )
-    .ok()?;
-    stream.write_all(&body).ok()?;
+    .into_bytes();
+    response.extend_from_slice(&body);
+    writer.write_all(&response).ok()?;
     Some(())
 }
 
@@ -833,6 +843,8 @@ mod tests {
         assert_eq!(ask("POST", "/session", "nameless").0, 200);
         let (status, body) = ask("GET", "/status", "");
         assert_eq!((status, body), (500, br#"{"value":"down"}"#.to_vec()));
+        // A command posted inside a session installs nothing.
+        assert_eq!(ask("POST", "/session/s1/url", "{}").0, 200);
         assert_eq!(ask("DELETE", "/session/s1/window", "").0, 200);
         assert_eq!(ask("DELETE", "/session/other/deeper", "").0, 200);
         let seen = seen.lock().unwrap().clone();
@@ -847,6 +859,7 @@ mod tests {
                 "POST /session",
                 "POST /session",
                 "GET /status",
+                "POST /session/s1/url",
                 "POST /session/s1/execute/sync",
                 "DELETE /session/s1/window",
                 "DELETE /session/other/deeper",
@@ -887,6 +900,19 @@ mod tests {
         .unwrap();
         let (stream, _) = proxy.accept().unwrap();
         assert!(relay(stream, gone, token).is_none());
+        // A client that is gone by the time the answer is written is
+        // written nothing more.
+        struct Gone;
+        impl Write for Gone {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let request = format!("GET /e/{hex}/status HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+        assert!(answer(request.as_bytes(), Gone, address, token).is_none());
         let written = std::fs::read_dir(&evidence)
             .unwrap()
             .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
