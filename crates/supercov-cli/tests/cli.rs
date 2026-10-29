@@ -597,6 +597,21 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
         Some(0),
         "{runs}"
     );
+    // The interrupted run's state that cannot be read to be marked so ends
+    // the run, saying where.
+    let mut terminal = common::OnTerminal::start_with(
+        &project,
+        &["--", "node", "ask.mjs"],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1072")],
+    );
+    terminal.wait_for("asking");
+    terminal.press("\u{3}");
+    let (code, seen) = terminal.finish();
+    assert_ne!(code, 0, "{seen}");
+    assert!(
+        seen.contains("test fault at fs (javascript_run.rs:1072"),
+        "{seen}"
+    );
 }
 
 #[cfg(unix)]
