@@ -292,7 +292,9 @@ fn now_ms() -> i64 {
 }
 
 fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
-    while !stop.load(Ordering::Acquire) {
+    // Looked at once at least, so a relay stopped as soon as it started ends
+    // the same way as one stopped later.
+    loop {
         match listener.accept() {
             Ok((client, _)) => {
                 let _ = client.set_nonblocking(false);
@@ -306,6 +308,9 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
             // Nothing waiting, or a connection that failed before it was
             // taken: look again shortly.
             Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+        if stop.load(Ordering::Acquire) {
+            break;
         }
     }
 }
