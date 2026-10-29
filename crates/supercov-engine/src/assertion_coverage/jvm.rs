@@ -291,7 +291,6 @@ fn used(expression: Node) -> bool {
     match parent.kind() {
         // A statement of its own, unless it ends a block that is a value.
         "block" => yields_value(expression),
-        "statements" | "source_file" | "class_body" => false,
         // The lambda's value, when it ends the lambda and the lambda's value
         // is taken.
         "lambda_literal" => ends(parent, expression) && lambda_value_used(parent),
@@ -517,6 +516,33 @@ mod tests {
             Some(Change::ReturnUndefined)
         );
         assert_eq!(change_at(&kotlin, 18, "throw E()", j), Some(Change::Skip));
+    }
+
+    /// A Kotlin `else if` is asked of by itself, as the branch it is; a Java
+    /// `try` that is a switch case's statement or a constructor's ends no
+    /// function with a result, and is skipped.
+    #[test]
+    fn an_else_if_and_a_try_outside_a_block_are_read() {
+        let j = Language::Jvm;
+        let kotlin = statement_starts(
+            "A.kt",
+            "fun f(a: Boolean, b: Boolean) {\n    if (a) {\n        g()\n    } else if (b) {\n        h()\n    }\n}\n",
+        );
+        assert_eq!(
+            change_at(&kotlin, 4, "if (b) {\n        h()\n    }", j),
+            Some(Change::Invert)
+        );
+        let java = statement_starts(
+            "A.java",
+            "class A {\n  int f(int x) {\n    switch (x) {\n      case 1:\n        try { g(); } finally { h(); }\n    }\n    return 0;\n  }\n  A() {\n    try { g(); } finally { h(); }\n  }\n}\n",
+        );
+        for line in [5, 10] {
+            assert_eq!(
+                change_at(&java, line, "try { g(); } finally { h(); }", j),
+                Some(Change::Skip),
+                "{line}"
+            );
+        }
     }
 
     /// A class is found by its whole name at the start of a line, and not
