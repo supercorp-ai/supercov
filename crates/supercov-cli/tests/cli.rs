@@ -15678,20 +15678,20 @@ fn a_run_that_cannot_reuse_the_last_copy_says_so() {
 #[cfg(unix)]
 #[test]
 fn a_javascript_run_whose_record_step_fails_says_so() {
+    // Each by its place: counted, a step's number moved with the platform
+    // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all@2",
-        "fs.create_dir_all@9",
-        "fs.write@4",
-        "fs.canonicalize@11",
-        "fs.create_dir_all@16",
-        "fs.create_dir_all@17",
-        "fs.read_dir@59",
-        "fs.create_dir_all@18",
-        "fs.create_dir_all@19",
-        "fs.create_dir_all@21",
-        "fs.create_dir_all@23",
-        // The run's last state and its finalization, by place: how many
-        // directories come before them differs by platform.
+        "fs.create_dir_all#lifecycle.rs:1278",
+        "fs.create_dir_all#javascript_run.rs:670",
+        "fs.write#javascript_run.rs:955",
+        "fs.canonicalize#process_supervision.rs:1719",
+        "fs.create_dir_all#javascript_run.rs:1026",
+        "fs.create_dir_all#javascript_run.rs:1181",
+        "fs.read_dir#evidence_archive.rs:262",
+        "fs.create_dir_all#evidence_archive.rs:445",
+        "fs.create_dir_all#javascript_run.rs:1416",
+        "fs.create_dir_all#javascript_run.rs:1418",
+        "fs.create_dir_all#lifecycle.rs:989",
         "fs.create_dir_all#javascript_run.rs:1509",
         "fs.create_dir_all#javascript_run.rs:1511",
     ] {
