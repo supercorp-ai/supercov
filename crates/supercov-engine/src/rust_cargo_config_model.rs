@@ -490,11 +490,10 @@ fn validate_cli_dotted_key(argument: &str) -> Result<(), CargoConfigModelError> 
 
 fn load_cli_value(cwd: &Path, argument: &str) -> Result<CargoConfigValue, CargoConfigModelError> {
     validate_cli_dotted_key(argument)?;
-    let parsed = toml::from_str(argument).map_err(|error| {
-        CargoConfigModelError::Invalid(format!(
-            "failed to parse --config argument {argument:?}: {error}"
-        ))
-    })?;
+    // `toml` reads TOML with the parser `toml_edit` just read it with, and
+    // any document is a TOML value.
+    let parsed: toml::Value =
+        toml::from_str(argument).expect("an argument toml_edit parsed is TOML");
     reject_cli_secrets(&parsed)?;
     let mut value = CargoConfigValue::from_toml(parsed, &CargoConfigDefinition::CliValue)?;
     // One assignment: either `include`, which leaves nothing beside the
