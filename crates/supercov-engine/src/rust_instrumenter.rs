@@ -2474,7 +2474,10 @@ fn numbered_file(
     let (mut manifest, gated) = RustObligationCollector::new(file, source)
         .leaving_out(tests.clone(), compiled_out.clone())
         .gating(gates.iter().map(|(range, _)| *range).collect())
-        .collect_gated(&parsed.tree, &parsed.assertions, &parsed.matches)?;
+        .collect_gated(&parsed.tree, &parsed.assertions, &parsed.matches)
+        // The tree is of this source, or of its expression view, which keeps
+        // every offset: no range of it falls outside the text.
+        .expect("the parsed tree's ranges are in its source");
     for ((range, predicate), obligations) in gates.iter().zip(gated) {
         if obligations.is_empty() {
             continue;
