@@ -289,6 +289,11 @@ test('a test that reaches no server', async () => {
   assert.match(moved.stderr, /test fault at copy-moved/u, moved.stderr);
   assert.match(moved.stderr, /Python server coverage: 1 test/u, moved.stderr);
   assert.match(moved.stderr, /Ruby server coverage: 1 test/u, moved.stderr);
+  // Prepared again for the copy that moved, the Python server's plan that
+  // cannot be written ends the run.
+  const reprepared = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'copy-moved,fs.write#python_run.rs:677@2' });
+  assert.notEqual(reprepared.status, 0, reprepared.stdout + reprepared.stderr);
+  assert.ok(reprepared.stderr.includes('test fault at fs (python_run.rs:677'), reprepared.stderr);
   const unpublishable = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'server-publish' });
   assert.notEqual(unpublishable.status, 0, unpublishable.stdout + unpublishable.stderr);
   assert.match(unpublishable.stderr, /test fault at server-publish/u, unpublishable.stderr);
