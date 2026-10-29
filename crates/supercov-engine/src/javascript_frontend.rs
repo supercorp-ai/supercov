@@ -2476,6 +2476,20 @@ mod tests {
         assert!(read_javascript_frontend_cache(&workspace, "cache-test").is_none());
         fs::write(workspace.join(FRONTEND_CACHE_FILE), "{").unwrap();
         assert!(read_javascript_frontend_cache(&workspace, "cache-test").is_none());
+        // A project whose scope lists nothing -- servers measured, no
+        // JavaScript of its own -- prepares with nothing to arm.
+        let bare = CoverageProject {
+            source_files: Vec::new(),
+            source_scope: crate::source_discovery::SourceScope {
+                entries: Vec::new(),
+                ..project.source_scope.clone()
+            },
+            ..project.clone()
+        };
+        let empty =
+            prepare_javascript_frontend(&workspace, &bare, "collector-bare", "cache-bare", &[])
+                .unwrap();
+        assert!(empty.manifest.points.is_empty());
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();
     }
