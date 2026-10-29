@@ -14344,6 +14344,8 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@22",
             // The project's Go listed again as the run prepares it.
             "fs.read_dir#go_project.rs:139@2 => go_project.rs:139",
+            // The harness a test package is given.
+            "fs.write#go_run.rs:513 => go_run.rs:513",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",

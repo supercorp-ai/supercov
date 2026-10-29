@@ -112,6 +112,12 @@ try {
   assert.deepEqual(lines(together, 'one at once'), [], 'work done while two tests ran was given to one');
   assert.deepEqual(lines(together, 'another at once'), []);
   assert.match(run(binary, ['runs', together]).stdout, /no test {20}lines/u);
+  // A window file of the server's that cannot be read keeps its evidence
+  // and fails the run.
+  const unread = run(binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_to_string#owned_server.rs:79' });
+  assert.notEqual(unread.status, 0, unread.stdout + unread.stderr);
+  assert.ok(unread.stderr.includes('test fault at fs (owned_server.rs:79'), unread.stderr);
+  assert.match(unread.stderr, /evidence is kept/u, unread.stderr);
   console.log('[jvm-server-playwright] a Java server under browser tests is measured, each window credited by time to the test it fell in');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'jvm-server-playwright-'))) rmSync(root, { recursive: true, force: true });
