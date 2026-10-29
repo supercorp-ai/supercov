@@ -156,6 +156,12 @@ try {
   const coverage = JSON.parse(run(root, binary, ['runs', id, '--json']).stdout).data.coverage;
   assert.ok(coverage.lines.covered > 0 && coverage.lines.covered < coverage.lines.total, JSON.stringify(coverage.lines));
 
+  // A run whose Worker answered only `wrangler dev`'s readiness check, as
+  // no test was selected, has no test to credit and publishes no Worker run.
+  const unselected = run(root, binary, ['--', 'npx', 'playwright', 'test', '-g', 'no test has this name']);
+  assert.notEqual(unselected.status, 0, unselected.stderr);
+  assert.doesNotMatch(unselected.stderr, /Rust Worker coverage|panicked/u, unselected.stderr);
+
   // The project's own configuration is untouched: only the copy was pointed
   // at Supercov's entry.
   const config = run(root, 'git', ['status', '--porcelain', '--untracked-files=no']).stdout;
