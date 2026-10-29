@@ -614,6 +614,32 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     );
 }
 
+/// A terminal Supercov cannot open to lend is not lent: the command that
+/// asks for the keyboard waits for it, as it would have behind Supercov,
+/// and Ctrl-C still ends the run.
+#[cfg(unix)]
+#[test]
+fn a_terminal_supercov_cannot_open_is_not_lent() {
+    let project = Project::cart("terminal-unopened");
+    project.write("ask.mjs", ASKS);
+    project.commit("asks");
+    let mut terminal = common::OnTerminal::start_with(
+        &project,
+        &["--", "node", "ask.mjs"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.open_with#process_supervision.rs:1538",
+        )],
+    );
+    terminal.wait_for("asking");
+    terminal.press("first\n");
+    terminal.wait_for("test fault at fs (process_supervision.rs:1538");
+    terminal.press("\u{3}");
+    let (code, seen) = terminal.finish();
+    assert_eq!(code, 130, "{seen}");
+    assert!(!seen.contains("line 1: first"), "{seen}");
+}
+
 #[cfg(unix)]
 #[test]
 fn ctrl_z_at_a_command_that_reads_the_keyboard_stops_supercov_too() {

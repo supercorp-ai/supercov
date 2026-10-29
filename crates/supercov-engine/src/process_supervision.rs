@@ -1535,11 +1535,11 @@ impl Keyboard {
     fn give(&mut self, group: libc::pid_t, ours_to_give: bool) -> bool {
         use std::os::fd::AsRawFd;
         if self.terminal.is_none() {
-            self.terminal = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/tty")
-                .ok();
+            self.terminal = crate::fault_fs::open_with(
+                fs::OpenOptions::new().read(true).write(true),
+                "/dev/tty",
+            )
+            .ok();
         }
         let Some(terminal) = &self.terminal else {
             return false;
