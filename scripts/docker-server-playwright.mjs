@@ -162,16 +162,19 @@ try {
       assert.ok(measured.stderr.includes(`test fault at ${fault}`), `${fault} was never reached:\n${measured.stderr}`);
     }
   }
-  // An image an earlier run built from another copy of the source, started
-  // again with no build: a file the image does not take changes the
-  // source, and the run says the image is from an earlier copy and leaves
-  // it alone.
+  // An image another copy of the source built, started again with no build:
+  // the run says the image is from an earlier copy and leaves it alone. The
+  // registry is given the image under another copy's fingerprint, as a run
+  // of that copy would have left it; rebuilding to the same image without
+  // changing it depends on the engine.
   if (!process.env.ONLY || process.env.ONLY === 'Python') {
     const cwd = resolve(root, 'python');
-    // Its containers removed, so compose creates them again; the image stays.
     const project = `supercov-docker-gate-${process.pid}-${cases.findIndex((entry) => entry.language === 'Python')}`;
+    // Its containers removed, so compose creates them again; the image stays.
     spawnSync('docker', ['compose', '-p', project, 'rm', '-f', '-s'], { cwd, stdio: 'ignore' });
-    writeFileSync(resolve(cwd, 'tools.py'), 'X = 1\n');
+    const image = spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', `${project}-api`], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(image, `no image ${project}-api`);
+    writeFileSync(resolve(cwd, '.supercov/cache/docker-images.json'), `${JSON.stringify({ [image]: 'an-earlier-copy' })}\n`);
     const config = resolve(cwd, 'playwright.config.js');
     writeFileSync(config, readFileSync(config, 'utf8').replace('docker compose up --build', 'docker compose up'));
     const measured = run(cwd, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'compose-context-outside' });
