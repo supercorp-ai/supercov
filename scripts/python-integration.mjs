@@ -194,10 +194,10 @@ try {
     const unpublished = spawnSync(
       binary,
       ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests', '--ignore=tests/test_patterns.py'],
-      { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1114' }, encoding: 'utf8' },
+      { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1125' }, encoding: 'utf8' },
     );
     assert.notEqual(unpublished.status, 0, unpublished.stderr);
-    assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1114/u, unpublished.stderr);
+    assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1125/u, unpublished.stderr);
     assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
   }
   // A command that fails before any test runs keeps its own status:

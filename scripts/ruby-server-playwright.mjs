@@ -332,8 +332,8 @@ test('a test that reaches no server', async () => {
     ['fs.create_dir_all#ruby_run.rs:642', 'ruby_run.rs:642'],
     ['fs.rename#evidence_archive.rs:471', 'evidence_archive.rs:471'],
     ['fs.rename#evidence_archive.rs:471@2', 'evidence_archive.rs:471'],
-    ['fs.rename#lifecycle.rs:1114', 'lifecycle.rs:1114'],
-    ['fs.rename#lifecycle.rs:1114@2', 'lifecycle.rs:1114'],
+    ['fs.rename#lifecycle.rs:1125', 'lifecycle.rs:1125'],
+    ['fs.rename#lifecycle.rs:1125@2', 'lifecycle.rs:1125'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);

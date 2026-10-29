@@ -412,39 +412,50 @@ struct TrashLock {
 impl TrashLock {
     fn acquire(trash: &Path) -> Result<Option<Self>, LifecycleError> {
         let path = trash.join(".deleter.lock");
-        for _ in 0..2 {
-            match crate::fault::io("trash-lock", io::ErrorKind::PermissionDenied, || {
+        let create = || {
+            crate::fault::io("trash-lock", io::ErrorKind::PermissionDenied, || {
                 fs::open_with(OpenOptions::new().write(true).create_new(true), &path)
-            }) {
-                Ok(mut file) => {
-                    fs::write_all(&mut file, std::process::id().to_string().as_bytes())
-                        .and_then(|_| fs::sync_all(&file))
-                        .map_err(|source| io_error(&path, source))?;
-                    return Ok(Some(Self { path }));
+            })
+        };
+        let mut file = match create() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if !Self::stale(&path) {
+                    return Ok(None);
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let owner = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|value| value.parse::<u32>().ok());
-                    if owner.is_some_and(process_exists) {
-                        return Ok(None);
-                    }
-                    if owner.is_none() {
-                        let age = fs::metadata(&path)
-                            .and_then(|metadata| metadata.modified())
-                            .ok()
-                            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                            .unwrap_or_default();
-                        if age < INCOMPLETE_LOCK_GRACE {
-                            return Ok(None);
-                        }
-                    }
-                    fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+                fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+                match create() {
+                    Ok(file) => file,
+                    // Another sweeper found it stale too, and took it first.
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+                    Err(source) => return Err(io_error(&path, source)),
                 }
-                Err(source) => return Err(io_error(&path, source)),
+            }
+            Err(source) => return Err(io_error(&path, source)),
+        };
+        fs::write_all(&mut file, std::process::id().to_string().as_bytes())
+            .and_then(|_| fs::sync_all(&file))
+            .map_err(|source| io_error(&path, source))?;
+        Ok(Some(Self { path }))
+    }
+
+    /// Whether the lock at `path` was left by a sweeper that is gone: its
+    /// process no longer runs, or it never finished writing whose it is.
+    fn stale(path: &Path) -> bool {
+        let owner = fs::read_to_string(path)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        match owner {
+            Some(owner) => !process_exists(owner),
+            None => {
+                let age = fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                    .unwrap_or_default();
+                age >= INCOMPLETE_LOCK_GRACE
             }
         }
-        Ok(None)
     }
 }
 
@@ -1553,7 +1564,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1432", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1443", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1578,7 +1589,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1167", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1178", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1586,7 +1597,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1242", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1253", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()
@@ -3357,6 +3368,16 @@ mod tests {
         // A lock left by a process that is gone is cleared, unless it cannot be.
         fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
         assert!(crate::fault::during("fs.remove_file", || sweep_trash(&root)).is_err());
+        // Cleared, it is taken first by another sweeper (17 is EEXIST), or
+        // cannot be made again.
+        fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
+        assert_eq!(
+            crate::fault::during("trash-lock:17@2", || sweep_trash(&root)).unwrap(),
+            0
+        );
+        assert!(trash.join("old").exists());
+        fs::write(trash.join(".deleter.lock"), u32::MAX.to_string()).unwrap();
+        assert!(crate::fault::during("trash-lock@2", || sweep_trash(&root)).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

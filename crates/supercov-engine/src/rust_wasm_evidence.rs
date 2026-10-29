@@ -847,7 +847,7 @@ mod tests {
             "report-request",
             "fs.create_dir_all@1",
             "fs.rename#evidence_archive.rs:471",
-            "fs.rename#lifecycle.rs:1114",
+            "fs.rename#lifecycle.rs:1125",
         ] {
             let attempt = fresh();
             assert!(
