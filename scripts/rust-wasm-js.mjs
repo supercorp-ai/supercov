@@ -176,6 +176,21 @@ try {
     // what the tests took from it, that fails ends the run, saying where:
     // the project's inputs listed, its sources captured, its integrity
     // recorded, a test process's record read.
+    // The wasm run without a test, and a test that never loads the wasm:
+    // neither has anything to credit, and with no JavaScript source there
+    // is no run to publish.
+    if (entry.suite === 'node:test') {
+      writeFileSync(resolve(cwd, 'test/plain.test.mjs'), 'import test from "node:test";\ntest("needs no wasm", () => {});\n');
+      for (const command of [
+        ['sh', '-c', 'sh build.sh && node -e "require(\'./pkg/grades.js\').grade(1, false)"'],
+        ['sh', '-c', 'sh build.sh && node --test test/plain.test.mjs'],
+      ]) {
+        const ran = run(cwd, binary, ['--', ...command]);
+        assert.notEqual(ran.status, 0, `${command.at(-1)}\n${ran.stderr}`);
+        assert.match(ran.stderr, /there was nothing to measure, and no run was published/u, `${command.at(-1)}\n${ran.stderr}`);
+      }
+      rmSync(resolve(cwd, 'test/plain.test.mjs'));
+    }
     if (entry.suite === 'node:test') {
       for (const [fault, place] of [
         ['fs.read_dir#rust_run.rs:88', 'rust_run.rs:88'],
