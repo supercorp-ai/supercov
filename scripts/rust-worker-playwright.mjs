@@ -169,6 +169,18 @@ try {
   assert.ok(unpublished.stderr.includes('test fault at fs (rust_wasm_evidence.rs:375'), unpublished.stderr);
   assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
 
+  // A Worker whose windows cannot be listed read none, and with no
+  // JavaScript source nothing is published; a window file that cannot be
+  // read keeps the run's evidence and says so.
+  const unlisted = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#rust_worker.rs:832' });
+  assert.notEqual(unlisted.status, 0, unlisted.stderr);
+  assert.ok(unlisted.stderr.includes('test fault at fs (rust_worker.rs:832'), unlisted.stderr);
+  assert.match(unlisted.stderr, /there was nothing to measure, and no run was published/u, unlisted.stderr);
+  const unread = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_to_string#rust_worker.rs:848' });
+  assert.notEqual(unread.status, 0, unread.stderr);
+  assert.match(unread.stderr, /Rust Worker server's run could not be published/u, unread.stderr);
+  assert.match(unread.stderr, /their evidence is kept at/u, unread.stderr);
+
   // The project's own configuration is untouched: only the copy was pointed
   // at Supercov's entry.
   const config = run(root, 'git', ['status', '--porcelain', '--untracked-files=no']).stdout;
