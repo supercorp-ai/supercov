@@ -1136,7 +1136,12 @@ impl CargoTestWorkers {
         let Some(real) = on_path(&path, "wrangler") else {
             return Ok(None);
         };
-        let supercov = std::env::current_exe().map_err(|error| error.to_string())?;
+        let supercov = crate::fault::io(
+            "worker-exe",
+            std::io::ErrorKind::NotFound,
+            std::env::current_exe,
+        )
+        .map_err(|error| error.to_string())?;
         fs::create_dir_all(tools).map_err(|error| format!("{}: {error}", tools.display()))?;
         write_stand_in(tools, &supercov)?;
         let hook = write_hook(tools)?;
@@ -2518,6 +2523,35 @@ mod tests {
         ] {
             assert!(window_from(&wrong).is_none(), "{wrong}");
         }
+    }
+
+    /// A Worker whose Cargo workspace lies above the measured root has no
+    /// server of its own here: its workspace is not one this run instruments.
+    #[test]
+    fn a_worker_whose_cargo_workspace_is_above_the_root_has_no_server() {
+        let outer = temporary("outer-workspace");
+        fs::write(
+            outer.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"inner/worker\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let root = outer.join("inner");
+        fs::create_dir_all(root.join("worker/src")).unwrap();
+        fs::write(
+            root.join("worker/Cargo.toml"),
+            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("worker/src/lib.rs"), "").unwrap();
+        fs::write(
+            root.join("worker/wrangler.toml"),
+            "main = \"build/worker/shim.mjs\"\n\n[build]\ncommand = \"worker-build\"\n",
+        )
+        .unwrap();
+        let mut said = Vec::new();
+        let servers = RustWorkerServer::prepare(&root, &root, "run", &[], &mut said).unwrap();
+        assert!(servers.is_empty() && said.is_empty());
+        fs::remove_dir_all(outer).unwrap();
     }
 
     /// A workspace with no Worker has no server to prepare, and one whose

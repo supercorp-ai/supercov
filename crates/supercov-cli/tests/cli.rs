@@ -14154,6 +14154,41 @@ fn a_rust_run_that_cannot_put_its_wrangler_in_place_says_so() {
         );
         assert_eq!(ran.code(), 0, "{}", ran.stderr());
     }
+    // Supercov's own program not found, and a project whose path cannot go
+    // on a PATH: neither leaves a stand-in to put first.
+    for (label, fault, expected) in [
+        ("worker-exe", "worker-exe", "injected fault at worker-exe"),
+        ("worker:colon", "", "separator"),
+    ] {
+        let project = Project::empty(label);
+        small_crate(&project);
+        project.write(
+            "worker/Cargo.toml",
+            "[package]\nname = \"edge\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        project.write("worker/src/lib.rs", "pub fn edge() {}\n");
+        project.write(
+            "worker/wrangler.toml",
+            "name = \"edge\"\nmain = \"build/worker/shim.mjs\"\n\n[build]\ncommand = \"worker-build --release\"\n",
+        );
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        // Installed where a PATH can name it.
+        let tools = Project::empty("worker-tools");
+        tools.write_script("wrangler", "#!/bin/sh\necho wrangler\n");
+        let path = format!(
+            "{}:{}",
+            tools.root.display(),
+            std::env::var("PATH").unwrap()
+        );
+        let ran = project.supercov_with(
+            &["--", "cargo", "test", "-q"],
+            &[("SUPERCOV_TEST_FAULT", fault), ("PATH", &path)],
+        );
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 1, "{label}: {said}");
+        assert!(said.contains(expected), "{label}: {said}");
+    }
 }
 
 /// A browser suite beside a Rust Worker: the run instruments the Worker in
@@ -14176,6 +14211,10 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
         ("fs.canonicalize@12", "injected fault at fs"),
         ("fs.open@6", "worker/src/lib.rs"),
         ("fs.canonicalize@20", "injected fault at fs"),
+        // The Worker workspace's inputs walked, and a port found for its
+        // inspector.
+        ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
+        ("local-listener", "injected fault at local-listener"),
     ] {
         let project = Project::cart("worker-server-steps");
         project.write("playwright.config.js", "export default {};\n");
@@ -14198,6 +14237,27 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
             "{fault}: {stderr}"
         );
     }
+    // A Worker that names its own inspector port is polled there, and its
+    // configuration is rewritten for its entry alone.
+    let project = Project::cart("worker-server-port");
+    project.write("playwright.config.js", "export default {};\n");
+    project.write(
+        "worker/Cargo.toml",
+        "[package]\nname = \"edge\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write("worker/src/lib.rs", "pub fn edge() {}\n");
+    project.write(
+        "worker/wrangler.toml",
+        "name = \"edge\"\nmain = \"build/worker/shim.mjs\"\n\n[build]\ncommand = \"worker-build --release\"\n\n[dev]\ninspector_port = 9339\n",
+    );
+    project.commit("worker");
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_TEST_FAULT", "fs.write@9")],
+    );
+    let stderr = ran.stderr();
+    assert_eq!(ran.code(), 1, "{stderr}");
+    assert!(stderr.contains("wrangler.toml"), "{stderr}");
 }
 
 /// What a run digests to judge later whether it is current -- the tests,

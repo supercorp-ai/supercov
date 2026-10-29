@@ -161,6 +161,11 @@ try {
   const unselected = run(root, binary, ['--', 'npx', 'playwright', 'test', '-g', 'no test has this name']);
   assert.notEqual(unselected.status, 0, unselected.stderr);
   assert.doesNotMatch(unselected.stderr, /Rust Worker coverage|panicked/u, unselected.stderr);
+  // Nor does one whose Worker ran but whose tests' journals cannot be
+  // listed: there is no test to credit what it ran to.
+  const unjournaled = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#served_tests.rs:176' });
+  assert.ok(unjournaled.stderr.includes('test fault at fs (served_tests.rs:176'), unjournaled.stderr);
+  assert.doesNotMatch(unjournaled.stderr, /Rust Worker coverage|panicked/u, unjournaled.stderr);
 
   // The Worker run that cannot be published -- its work directory not
   // made -- ends the run, saying where, and keeps its evidence.
