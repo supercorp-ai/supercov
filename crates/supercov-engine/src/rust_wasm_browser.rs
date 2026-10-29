@@ -626,6 +626,17 @@ mod tests {
             browser(&env(&[("CHROMEDRIVER_REMOTE", "http://x/")])),
             Some(Browser::Other("a remote chromedriver".into()))
         );
+        // The arguments wasm-pack gives chromedriver go with it.
+        assert_eq!(
+            browser(&env(&[
+                ("CHROMEDRIVER", "/c/chromedriver"),
+                ("CHROMEDRIVER_ARGS", "--verbose  --port=9"),
+            ])),
+            Some(Browser::Chrome(
+                PathBuf::from("/c/chromedriver"),
+                vec!["--verbose".into(), "--port=9".into()]
+            ))
+        );
     }
 
     fn bytes(text: &str) -> std::io::Cursor<Vec<u8>> {
