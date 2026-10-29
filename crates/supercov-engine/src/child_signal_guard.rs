@@ -19,7 +19,7 @@
 //! registered child is placed in a Job Object that kills its members when its
 //! handle closes, so the test processes die with the runner however it ends.
 
-use crate::fault_process::Launch;
+use crate::fault_process::{Launch, Reap};
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -291,7 +291,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
             err.join().unwrap_or_default(),
         )
     });
-    let status = child.wait()?;
+    let status = child.reap()?;
     Ok(Output {
         status,
         stdout,
@@ -421,6 +421,14 @@ mod tests {
         assert_eq!(output.stdout, b"kept\ndropped\ntail");
         assert_eq!(output.stderr, b"err\n");
         assert!(output_streamed(&mut Command::new("/no/such/program"), |_| true).is_err());
+        // A child whose end cannot be waited for is an error, though it ran.
+        assert!(
+            crate::fault::during("wait", || output_streamed(
+                Command::new("sh").args(["-c", "echo ran"]),
+                |_| true
+            ))
+            .is_err()
+        );
     }
 
     /// Past its deadline a child that ignores SIGTERM is killed once the

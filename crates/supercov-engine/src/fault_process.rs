@@ -32,3 +32,15 @@ impl Launch for Command {
         crate::fault::io_here("spawn", "status", io::ErrorKind::NotFound, || self.status())
     }
 }
+
+/// [`Child`]'s `wait`, a fault site (`wait`) at the place it is called from.
+pub trait Reap {
+    fn reap(&mut self) -> io::Result<ExitStatus>;
+}
+
+impl Reap for Child {
+    #[track_caller]
+    fn reap(&mut self) -> io::Result<ExitStatus> {
+        crate::fault::io_here("wait", "wait", io::ErrorKind::Other, || self.wait())
+    }
+}
