@@ -364,7 +364,8 @@ fn write_framed_with_magic<W: Write>(
         writer.write_all(&encoded)?;
         writer.write_all(&entry.contents)?;
     }
-    writer.flush()?;
+    // Flushing is the caller's: an archive's compressor flushes as it
+    // finishes, and a flush here as well only wrote a sync marker first.
     Ok((writer.inner, writer.written))
 }
 
@@ -953,7 +954,13 @@ mod tests {
             .unwrap()
             .compressed_bytes;
         fs::remove_file(&destination).unwrap();
-        for limit in size.saturating_sub(64)..size {
+        // The compressor's last block is larger than the buffer under it,
+        // so the disk can fill while it finishes, before the final flush:
+        // limits across the stream's end, closer apart than the buffer.
+        for limit in (size.saturating_sub(24 * 1024)..size.saturating_sub(64))
+            .step_by(61)
+            .chain(size.saturating_sub(64)..size)
+        {
             assert!(
                 matches!(
                     write_archive_with_fault(
@@ -1573,6 +1580,29 @@ mod tests {
         }
     }
 
+    /// The writers under an archive pass a flush on to what they wrap.
+    #[test]
+    fn the_writers_under_an_archive_pass_a_flush_on() {
+        let mut counting = CountingWriter::new(Vec::new());
+        counting.write_all(b"ab").unwrap();
+        counting.flush().unwrap();
+        assert_eq!((counting.written, counting.inner), (2, b"ab".to_vec()));
+        let mut faulting = FaultingWriter::new(Vec::new(), None);
+        faulting.write_all(b"ab").unwrap();
+        faulting.flush().unwrap();
+        assert_eq!(faulting.inner, b"ab");
+        // And a write the file under them refuses.
+        let mut refused = FaultingWriter::new(
+            Failing {
+                input: b"",
+                left: 0,
+                failed: false,
+            },
+            None,
+        );
+        assert!(refused.write(b"ab").is_err());
+    }
+
     /// Framing an archive's entries, and reading them back keeping all or
     /// none, over a stream that fails at each call in turn, and from the
     /// framed bytes cut short anywhere: every failure is an error and every
@@ -1585,6 +1615,19 @@ mod tests {
             entry("manifest.json", b"{}"),
         ];
         let (framed, _) = write_framed_with_magic(&entries, Vec::new(), "").unwrap();
+        // A stream that takes nothing fails at the archive's magic.
+        assert!(
+            write_framed_with_magic(
+                &entries,
+                &mut Failing {
+                    input: b"",
+                    left: 0,
+                    failed: false,
+                },
+                EVIDENCE_ARCHIVE_MAGIC,
+            )
+            .is_err()
+        );
         // No entry frames to nothing.
         assert!(
             write_framed_with_magic(&[], Vec::new(), "")

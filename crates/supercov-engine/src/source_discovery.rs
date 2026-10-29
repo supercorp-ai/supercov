@@ -1488,6 +1488,22 @@ mod tests {
 
     use super::*;
 
+    /// A name under `app/` that is not text names no file the App Router
+    /// serves, nor does the `app/` directory itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_under_app_that_is_not_text_is_no_app_router_file() {
+        use std::os::unix::ffi::OsStrExt;
+        let app = PathBuf::from("/project/app");
+        let unreadable = app.join(std::ffi::OsStr::from_bytes(b"route\xff.ts"));
+        assert!(!next_app_file(std::slice::from_ref(&app), &unreadable));
+        assert!(!next_app_file(std::slice::from_ref(&app), &app));
+        assert!(next_app_file(
+            std::slice::from_ref(&app),
+            &app.join("route.ts")
+        ));
+    }
+
     /// A directory a walk cannot list, or look at, or an entry it cannot
     /// read, fails discovery; a directory it may not enter, where the system
     /// enforces that, fails the source walk.
