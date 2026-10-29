@@ -9,7 +9,7 @@
 // A listed file that now parses is said, so the list only shrinks. A file the
 // grammar cannot read is a file Supercov leaves unmeasured.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const repository = resolve(import.meta.dirname, '..');
@@ -31,17 +31,30 @@ const run = (cwd, command, args, env = {}) => {
   return result.stdout.trim();
 };
 
+// Git never looks above the corpus for a repository: a project whose `.git`
+// the CI cache restored unusable was taken for Supercov's own checkout, and
+// the forced checkout replaced it with the project on 2026-10-27.
+const git = (directory, args) => run(directory, 'git', args, { GIT_CEILING_DIRECTORIES: corpus });
+const head = (directory) => {
+  try {
+    return git(directory, ['rev-parse', 'HEAD']);
+  } catch {
+    return null;
+  }
+};
+
 mkdirSync(corpus, { recursive: true });
 for (const [name, url, commit] of PROJECTS) {
   const directory = resolve(corpus, name);
-  if (existsSync(resolve(directory, '.git'))) {
-    if (run(directory, 'git', ['rev-parse', 'HEAD']) === commit) continue;
-  } else {
+  const at = head(directory);
+  if (at === commit) continue;
+  if (at === null) {
+    rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: true });
-    run(directory, 'git', ['init', '-q']);
+    git(directory, ['init', '-q']);
   }
-  run(directory, 'git', ['fetch', '-q', '--depth', '1', url, commit]);
-  run(directory, 'git', ['checkout', '-q', '--force', 'FETCH_HEAD']);
+  git(directory, ['fetch', '-q', '--depth', '1', url, commit]);
+  git(directory, ['checkout', '-q', '--force', 'FETCH_HEAD']);
 }
 
 run(repository, 'cargo', ['test', '-q', '--release', '-p', 'supercov-engine', '--test', 'kotlin_corpus', '--', '--ignored'], {

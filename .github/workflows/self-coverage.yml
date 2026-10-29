@@ -85,6 +85,12 @@ jobs:
           for attempt in 1 2 3; do
             timeout 8m npx -y "playwright@$(echo "$versions" | tail -1)" install-deps && break
             echo "attempt $attempt did not finish; trying again"
+            # The timeout ends npx, not the apt-get it started under sudo:
+            # left running, that holds dpkg's lock, and the next attempt
+            # failed at once on 2026-10-26. End what holds the locks, then
+            # let dpkg finish what was stopped part way.
+            sudo fuser -k /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
+            sleep 2
             sudo dpkg --configure -a || true
             [ "$attempt" = 3 ] && exit 1
           done
