@@ -17531,7 +17531,22 @@ fn the_quality_scope_reads_past_what_it_cannot_use() {
     project.write("lib/index.js", "x\n");
     project.write("bin/y.js", "x\n");
     project.write("a/b/c/d/e/f/g/package.json", "{}");
-    let scope = project.supercov(&["quality", "scope"]).succeeds();
+    // An ignored directory that cannot be listed holds no package.
+    use std::os::unix::fs::PermissionsExt;
+    project.write(".gitignore", "locked/\n");
+    std::fs::create_dir(project.root.join("locked")).unwrap();
+    std::fs::set_permissions(
+        project.root.join("locked"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let scope = project.supercov(&["quality", "scope"]);
+    std::fs::set_permissions(
+        project.root.join("locked"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let scope = scope.succeeds();
     assert!(scope.contains("Roots: bin, lib"), "{scope}");
     std::os::unix::fs::symlink("lib", project.root.join("linked")).unwrap();
     let linked = project
