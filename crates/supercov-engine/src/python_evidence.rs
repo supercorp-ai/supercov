@@ -3514,6 +3514,18 @@ pub(crate) mod tests {
             TransportStats::none(),
         )
         .unwrap();
+        // A request whose results are another run's is refused.
+        assert!(
+            analyze_frontend_request(
+                &run.declaration,
+                &CoverageReportRequest {
+                    run_id: "another-run".into(),
+                    ..run.request.clone()
+                },
+                TransportStats::none(),
+            )
+            .is_err()
+        );
         fs::remove_dir_all(directory).unwrap();
         assert_eq!(
             serde_json::to_value(&in_memory).unwrap(),
