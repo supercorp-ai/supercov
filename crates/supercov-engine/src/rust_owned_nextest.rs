@@ -1415,8 +1415,10 @@ exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
     }
 
     /// Diagnostics that cannot be written.
+    #[cfg(unix)]
     struct Closed;
 
+    #[cfg(unix)]
     impl std::io::Write for Closed {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
             Err(std::io::Error::other("closed"))
