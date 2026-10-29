@@ -3399,7 +3399,7 @@ mod tests {
             crate::fault::during(rustc, || worker_build_cfg(&package, &BTreeMap::new())).is_none()
         );
         assert_eq!(
-            crate::fault::during("spawn#rust_worker.rs:1839", || cargo_workspace_root(
+            crate::fault::during("spawn#rust_worker.rs:1844", || cargo_workspace_root(
                 &package
             )),
             None

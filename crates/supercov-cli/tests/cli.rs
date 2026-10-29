@@ -15941,8 +15941,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1063", "go_run.rs:1063"),
-        ("fs.create_dir_all#go_run.rs:1073", "go_run.rs:1073"),
+        ("fs.write#go_run.rs:1062", "go_run.rs:1062"),
+        ("fs.create_dir_all#go_run.rs:1072", "go_run.rs:1072"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -15976,11 +15976,11 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2007", "jvm_run.rs:2007"),
-        ("fs.create_dir_all#jvm_run.rs:2023", "jvm_run.rs:2023"),
-        ("fs.create_dir_all#jvm_run.rs:2033", "jvm_run.rs:2033"),
-        ("fs.write#jvm_run.rs:2007", "jvm_run.rs:2007"),
-        ("fs.write#jvm_run.rs:2023", "jvm_run.rs:2023"),
+        ("fs.create_dir_all#jvm_run.rs:2006", "jvm_run.rs:2006"),
+        ("fs.create_dir_all#jvm_run.rs:2022", "jvm_run.rs:2022"),
+        ("fs.create_dir_all#jvm_run.rs:2032", "jvm_run.rs:2032"),
+        ("fs.write#jvm_run.rs:2006", "jvm_run.rs:2006"),
+        ("fs.write#jvm_run.rs:2022", "jvm_run.rs:2022"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
