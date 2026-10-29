@@ -2046,6 +2046,14 @@ mod tests {
         fs::write(staging.join("leftover"), b"from an interrupted attempt").unwrap();
         let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
         assert!(!published.join("leftover").exists());
+        // A run's work directory that is a file holds no staging.
+        let other = "2026-01-02T00-00-00-000Z";
+        fs::write(root.join(".supercov/work").join(other), b"not a directory").unwrap();
+        assert!(matches!(
+            publish_run(&root, &metadata(other, bytes), &evidence),
+            Err(LifecycleError::UnsafePath(_))
+        ));
+        assert!(!root.join(".supercov/runs").join(other).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
