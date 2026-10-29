@@ -22,14 +22,14 @@
 use crate::fault_process::Launch;
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// How many children can be registered at once. The runner runs at most one
 /// child per worker thread, and machines with more cores than this are rare;
 /// a child that finds no free slot is simply not tracked.
 const SLOTS: usize = 512;
-static CHILDREN: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
+static CHILDREN: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 static GUARDS: AtomicUsize = AtomicUsize::new(0);
 
 /// Send `signal` to every registered child. Safe to call from a signal
@@ -39,9 +39,10 @@ pub fn signal_registered_children(signal: i32) {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
             #[cfg(unix)]
-            // SAFETY: `kill` with a positive pid signals that process only.
+            // SAFETY: `kill` with a positive pid signals that process only;
+            // a Unix pid is a positive `pid_t`, whatever type it is read as.
             unsafe {
-                libc::kill(pid, signal);
+                libc::kill(pid.cast_signed(), signal);
             }
             #[cfg(not(unix))]
             let _ = signal;
@@ -164,9 +165,7 @@ impl Drop for RegisteredChild {
 
 /// Register a running child so a signal to the runner reaches it.
 pub fn register(child: &Child) -> RegisteredChild {
-    let Ok(pid) = i32::try_from(child.id()) else {
-        return RegisteredChild { slot: None };
-    };
+    let pid = child.id();
     #[cfg(windows)]
     windows_job::assign(child);
     RegisteredChild {
@@ -511,10 +510,7 @@ mod tests {
         let registration = register(&child);
         let slot = registration.slot.unwrap();
         drop(RegisteredChild { slot: None });
-        assert_eq!(
-            CHILDREN[slot].load(Ordering::SeqCst),
-            i32::try_from(child.id()).unwrap()
-        );
+        assert_eq!(CHILDREN[slot].load(Ordering::SeqCst), child.id());
         drop(registration);
         child.kill().unwrap();
         child.wait().unwrap();
