@@ -1708,14 +1708,7 @@ fn go(source: &str) -> Option<Outline> {
 
 /// `name(Type, Type)`: overloads are different declarations and are told
 /// apart by what they take, not by the order they appear in.
-fn with_parameters(
-    name: String,
-    parameters: Option<tree_sitter::Node<'_>>,
-    source: &str,
-) -> String {
-    let Some(parameters) = parameters else {
-        return name;
-    };
+fn with_parameters(name: String, parameters: tree_sitter::Node<'_>, source: &str) -> String {
     let mut cursor = parameters.walk();
     let types = parameters
         .named_children(&mut cursor)
@@ -1775,11 +1768,14 @@ fn java(source: &str) -> Option<Outline> {
             "constructor_declaration" => "constructor",
             _ => return,
         };
-        let Some(name) = field_text(node, "name", source) else {
-            return;
-        };
+        // A declaration that parses names itself, and a method its
+        // parameters: a file that does not parse has no outline.
+        let name = field_text(node, "name", source).expect("a Java declaration names itself");
         let name = if matches!(kind, "method" | "constructor") {
-            with_parameters(name, node.child_by_field_name("parameters"), source)
+            let parameters = node
+                .child_by_field_name("parameters")
+                .expect("a Java method has its parameters");
+            with_parameters(name, parameters, source)
         } else {
             name
         };
@@ -1829,7 +1825,8 @@ fn kotlin(source: &str) -> Option<Outline> {
                 field_text(node, "name", source).map(|n| {
                     with_parameters(
                         n,
-                        first_child_of_kind(node, "function_value_parameters"),
+                        first_child_of_kind(node, "function_value_parameters")
+                            .expect("a Kotlin function has its parameters"),
                         source,
                     )
                 }),
@@ -1839,7 +1836,8 @@ fn kotlin(source: &str) -> Option<Outline> {
             "secondary_constructor" => (
                 Some(with_parameters(
                     "constructor".to_owned(),
-                    first_child_of_kind(node, "function_value_parameters"),
+                    first_child_of_kind(node, "function_value_parameters")
+                        .expect("a Kotlin constructor has its parameters"),
                     source,
                 )),
                 "constructor",
