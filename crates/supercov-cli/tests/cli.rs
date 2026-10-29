@@ -16631,6 +16631,38 @@ fn go_project(project: &Project) {
     std::fs::create_dir_all(project.root.join("testdata/empty")).unwrap();
 }
 
+/// A workspace whose member lives outside the project is refused, naming
+/// the member: its code is outside what the run copies and measures.
+#[test]
+fn a_rust_workspace_with_a_member_outside_the_project_is_refused() {
+    let project = Project::empty("outside-member");
+    let lib = "pub fn f() -> u32 {\n    1\n}\n";
+    project.write(
+        "proj/Cargo.toml",
+        "[package]\nname = \"proj\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"../member\"]\nresolver = \"2\"\n",
+    );
+    project.write("proj/src/lib.rs", lib);
+    project.write(
+        "member/Cargo.toml",
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\nworkspace = \"../proj\"\n",
+    );
+    project.write("member/src/lib.rs", lib);
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args(["--", "cargo", "test", "-q"])
+        .current_dir(project.root.join("proj"))
+        .env_remove("SUPERCOV_SOURCE_ROOTS")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert_ne!(ran.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains("Cargo reported an unsafe workspace path") && said.contains("member"),
+        "{said}"
+    );
+}
+
 /// A crate with a unit test and a doctest.
 fn small_crate(project: &Project) {
     project.write(
