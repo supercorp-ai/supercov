@@ -885,31 +885,35 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             exit_code = output.status.code().unwrap_or(1);
         }
         let mut reported = BTreeSet::new();
-        for (_, invocation) in read_invocations(&package_dir)? {
-            if let Invocation::Merged { cases: merged } = invocation {
-                for case in merged {
-                    if !merged_set.contains(&case.name) {
-                        return fail_package(
-                            &package_dir,
-                            format!(
-                                "the merged doctest harness reported a case the listing lacks: {}",
-                                case.name
-                            ),
-                        );
-                    }
-                    if !reported.insert(case.name.clone()) {
-                        return fail_package(
-                            &package_dir,
-                            format!("doctest {} was reported more than once", case.name),
-                        );
-                    }
-                    cases.push(DoctestCase {
-                        name: case.name,
-                        status: case.status,
-                        evidence: case.evidence,
-                    });
-                }
+        // The merged harness's cases, from each record the pass left: the
+        // listing's comes first, and names none.
+        let merged = read_invocations(&package_dir)?
+            .into_iter()
+            .flat_map(|(_, invocation)| match invocation {
+                Invocation::Merged { cases } => cases,
+                _ => Vec::new(),
+            });
+        for case in merged {
+            if !merged_set.contains(&case.name) {
+                return fail_package(
+                    &package_dir,
+                    format!(
+                        "the merged doctest harness reported a case the listing lacks: {}",
+                        case.name
+                    ),
+                );
             }
+            if !reported.insert(case.name.clone()) {
+                return fail_package(
+                    &package_dir,
+                    format!("doctest {} was reported more than once", case.name),
+                );
+            }
+            cases.push(DoctestCase {
+                name: case.name,
+                status: case.status,
+                evidence: case.evidence,
+            });
         }
         // libtest's selection and the wrapper's reading of it must agree, or
         // a doctest could run unattributed; when they differ, say so.

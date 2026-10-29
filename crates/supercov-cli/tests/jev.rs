@@ -364,12 +364,12 @@ fn security_reads_a_coverage_run_beside_its_findings() {
     // store of runs, listed before either.
     for (fault, place) in [
         (
-            "fs.read_from#evidence_archive.rs:636",
-            "evidence_archive.rs:636",
+            "fs.read_from#evidence_archive.rs:637",
+            "evidence_archive.rs:637",
         ),
         (
-            "fs.read_from#evidence_archive.rs:636@3",
-            "evidence_archive.rs:636",
+            "fs.read_from#evidence_archive.rs:637@3",
+            "evidence_archive.rs:637",
         ),
         ("fs.read_dir#run_store.rs:662", "run_store.rs:662"),
     ] {
@@ -5876,7 +5876,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let project = Project::cart("assess-unread");
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
-    let unread = "fs.open#run_store.rs:1311,fs.read_from#evidence_archive.rs:636";
+    let unread = "fs.open#run_store.rs:1316,fs.read_from#evidence_archive.rs:637";
     let refused = |args: &[&str], fault: &str| {
         let mut full = vec!["runs", run.as_str(), "assertions"];
         full.extend_from_slice(args);
@@ -5885,7 +5885,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         project.supercov_with(&full, &env).exits(2)
     };
     let said = refused(&["assess"], unread);
-    assert!(said.contains("evidence_archive.rs:636"), "{said}");
+    assert!(said.contains("evidence_archive.rs:637"), "{said}");
     project
         .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
         .succeeds();
@@ -5895,14 +5895,14 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         .supercov(&["runs", &run, "assertions", "--title", "total"])
         .succeeds();
     let said = refused(&["--title", "total"], unread);
-    assert!(said.contains("evidence_archive.rs:636"), "{said}");
+    assert!(said.contains("evidence_archive.rs:637"), "{said}");
     project.edit(
         "src/cart.js",
         "return express ? 15 : 5;",
         "return express ? 20 : 5;",
     );
     for (fault, place) in [
-        (unread, "evidence_archive.rs:636"),
+        (unread, "evidence_archive.rs:637"),
         ("fs.open#source_manifest.rs:359", "source_manifest.rs:359"),
         (
             "fs.read#source_manifest.rs:766",

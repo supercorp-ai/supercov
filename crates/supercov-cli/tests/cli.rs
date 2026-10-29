@@ -232,7 +232,7 @@ fn a_measured_suite_reads_back_through_every_query() {
             ],
             &[(
                 "SUPERCOV_TEST_FAULT",
-                "fs.read_from#evidence_archive.rs:636",
+                "fs.read_from#evidence_archive.rs:637",
             )],
         )
         .exits(2);
@@ -851,12 +851,12 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_from#evidence_archive.rs:636",
+            "fs.read_from#evidence_archive.rs:637",
         )],
     );
     let said = refused.stderr();
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "evidence_archive.rs:636"), "{said}");
+    assert!(fired_at(&said, "evidence_archive.rs:637"), "{said}");
 }
 
 /// Quality snapshots are read as far as they hold: a catalog entry or finding
@@ -1228,7 +1228,7 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
             "Cannot read local coverage runs",
         ),
         (
-            "fs.read_from#evidence_archive.rs:636",
+            "fs.read_from#evidence_archive.rs:637",
             "Cannot merge coverage run",
         ),
         ("copy-release", "Could not release merge lock"),
@@ -5427,7 +5427,7 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     let unread = project
         .supercov_with(
             &["runs", "latest", "tests", "without-evidence", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:656=50")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:657=50")],
         )
         .json();
     assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
@@ -12067,7 +12067,7 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // With no record of the runners the run used, or of its files, the
     // change cannot be put on other runners: it reaches every test.
     for fault in [
-        "fs.open#evidence_archive.rs:656=50",
+        "fs.open#evidence_archive.rs:657=50",
         "fs.open#source_manifest.rs:359@2",
     ] {
         let unjudged = project
@@ -13098,12 +13098,12 @@ fn a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select() 
         "unrecorded",
         &[("merged", listed), ("merged.out", a)],
         &["--test", "src/lib.rs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.write#rust_owned_doctests.rs:926")],
+        &[("SUPERCOV_TEST_FAULT", "fs.write#rust_owned_doctests.rs:930")],
     );
     let said = ran.stderr();
     assert_ne!(ran.code(), 0, "{said}");
     assert!(
-        said.contains("test fault at fs (rust_owned_doctests.rs:926"),
+        said.contains("test fault at fs (rust_owned_doctests.rs:930"),
         "{said}"
     );
     // A harness that failed may have stopped short: it is not held to its
@@ -13317,11 +13317,11 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         "named",
         "bin/doctest",
         &[("doctest.out", "\nrunning 0 tests\n")],
-        "fs.write#rust_owned_doctests.rs:1260",
+        "fs.write#rust_owned_doctests.rs:1264",
     );
     let output = ran.exits(101);
     assert!(
-        output.contains("test fault at fs (rust_owned_doctests.rs:1260"),
+        output.contains("test fault at fs (rust_owned_doctests.rs:1264"),
         "{output}"
     );
     // A merged harness whose children's records went missing reports its
@@ -14101,7 +14101,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2447 => main.rs:2447",
+            "fs.canonicalize#main.rs:2462 => main.rs:2462",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:1665 => javascript_frontend.rs:1665",
         ],
@@ -15844,7 +15844,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:636",
+        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:637",
         // The runs listed again for the details.
         "fs.read_dir#run_store.rs:662@2",
     ] {
@@ -15907,11 +15907,11 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1298,fs.read_from#evidence_archive.rs:636",
+            "fs.read#run_store.rs:1303,fs.read_from#evidence_archive.rs:637",
         )],
     );
     assert!(
-        fired_at(&spanless.stderr(), "evidence_archive.rs:636"),
+        fired_at(&spanless.stderr(), "evidence_archive.rs:637"),
         "{}",
         spanless.stderr()
     );
@@ -17155,43 +17155,43 @@ fn a_doctest_runtool_step_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1184",
-            "rust_owned_doctests.rs:1184",
+            "fs.create_dir_all#rust_owned_doctests.rs:1188",
+            "rust_owned_doctests.rs:1188",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1189",
-            "rust_owned_doctests.rs:1189",
+            "spawn#rust_owned_doctests.rs:1193",
+            "rust_owned_doctests.rs:1193",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1197",
-            "rust_owned_doctests.rs:1197",
+            "fs.read#rust_owned_doctests.rs:1201",
+            "rust_owned_doctests.rs:1201",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1208",
-            "rust_owned_doctests.rs:1208",
+            "fs.read#rust_owned_doctests.rs:1212",
+            "rust_owned_doctests.rs:1212",
         ),
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1153",
-            "rust_owned_doctests.rs:1153",
+            "fs.create_dir_all#rust_owned_doctests.rs:1157",
+            "rust_owned_doctests.rs:1157",
         ),
         (
             "2024",
-            "fs.write#rust_owned_doctests.rs:1243",
-            "rust_owned_doctests.rs:1243",
+            "fs.write#rust_owned_doctests.rs:1247",
+            "rust_owned_doctests.rs:1247",
         ),
         (
             "2021",
-            "spawn#rust_owned_doctests.rs:1253",
-            "rust_owned_doctests.rs:1253",
+            "spawn#rust_owned_doctests.rs:1257",
+            "rust_owned_doctests.rs:1257",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1166",
-            "rust_owned_doctests.rs:1166",
+            "spawn#rust_owned_doctests.rs:1170",
+            "rust_owned_doctests.rs:1170",
         ),
     ] {
         let project = Project::empty("doctest-runtool-steps");
@@ -18452,8 +18452,8 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         ),
         (
             "2024",
-            format!("{stand_in}fs.read#rust_owned_doctests.rs:1099@1"),
-            "rust_owned_doctests.rs:1099",
+            format!("{stand_in}fs.read#rust_owned_doctests.rs:1103@1"),
+            "rust_owned_doctests.rs:1103",
         ),
         // The stand-in's own path, and the merged harness runner's: each
         // resolves itself first.
@@ -18470,13 +18470,13 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         // The merged harness's order, and a child's record, read back.
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1197".to_owned(),
-            "rust_owned_doctests.rs:1197",
+            "__doctest-runner/fs.read#rust_owned_doctests.rs:1201".to_owned(),
+            "rust_owned_doctests.rs:1201",
         ),
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1208".to_owned(),
-            "rust_owned_doctests.rs:1208",
+            "__doctest-runner/fs.read#rust_owned_doctests.rs:1212".to_owned(),
+            "rust_owned_doctests.rs:1212",
         ),
     ] {
         let project = Project::empty("doctest-stand-in-steps");

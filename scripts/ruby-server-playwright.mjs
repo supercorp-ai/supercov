@@ -330,8 +330,8 @@ test('a test that reaches no server', async () => {
   for (const [fault, place] of [
     ['fs.create_dir_all#python_run.rs:809', 'python_run.rs:809'],
     ['fs.create_dir_all#ruby_run.rs:642', 'ruby_run.rs:642'],
-    ['fs.rename#evidence_archive.rs:471', 'evidence_archive.rs:471'],
-    ['fs.rename#evidence_archive.rs:471@2', 'evidence_archive.rs:471'],
+    ['fs.rename#evidence_archive.rs:472', 'evidence_archive.rs:472'],
+    ['fs.rename#evidence_archive.rs:472@2', 'evidence_archive.rs:472'],
     ['fs.rename#lifecycle.rs:1125', 'lifecycle.rs:1125'],
     ['fs.rename#lifecycle.rs:1125@2', 'lifecycle.rs:1125'],
   ]) {
