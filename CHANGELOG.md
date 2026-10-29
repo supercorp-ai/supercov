@@ -37,6 +37,7 @@
 - `merge` refused a run that holds no record of its files, where the latest run holds one and nothing else differs, with an empty list ("differing domains: "); it names the record ("differing domains: recorded files").
 - `import` said a file of the project that is not UTF-8 text was "no such file in the project"; it says the file is not a text file.
 - A browser suite whose `SUPERCOV_SOURCE_ROOTS` named only its JavaScript was refused when the project also held Go, Java or Kotlin source outside those roots (`SUPERCOV_SOURCE_ROOTS=src left no Go source to measure`). Such a server is left unmeasured, as a Python or Ruby one already was.
+- Supercov panicked as it started when its own path was not UTF-8 text, as a directory name on Linux can be, and when an argument was not. It starts, and refuses such an argument by name; a `cargo nextest run` that has to name Supercov as its runner says the path is not UTF-8.
 
 ## 4.20.3
 
