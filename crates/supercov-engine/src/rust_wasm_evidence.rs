@@ -125,8 +125,8 @@ pub(crate) struct WasmRun<'a> {
     pub source_roots: Option<Vec<String>>,
 }
 
-/// Publish the records as a Rust run, each credited to its test. None when
-/// there is nothing to publish or no test to credit.
+/// Publish the records as a Rust run, each credited to its test. Called with
+/// a record and a test to credit at least: without them there is no run.
 pub(crate) fn publish(
     root: &Path,
     wasm: WasmRun,
@@ -134,10 +134,7 @@ pub(crate) fn publish(
     metadata: RunMetadata,
     served: &[ServedTest],
     diagnostics: &mut dyn Write,
-) -> Result<Option<(PathBuf, RunMetadata)>, String> {
-    if served.is_empty() || records.is_empty() {
-        return Ok(None);
-    }
+) -> Result<(PathBuf, RunMetadata), String> {
     let probes = &wasm.project.probes;
     let by_time = records
         .iter()
@@ -423,7 +420,7 @@ pub(crate) fn publish(
         )
         .map_err(|error| error.to_string())?;
     }
-    Ok(Some((run_directory, metadata)))
+    Ok((run_directory, metadata))
 }
 
 #[cfg(test)]
@@ -621,29 +618,6 @@ mod tests {
         let tests = [served(0, (0, 10), "playwright"), served(1, (5, 15), "")];
         let run_id = "2026-01-01T00-00-00-000Z";
         let mut diagnostics = Vec::new();
-        assert_eq!(
-            publish(
-                &root,
-                wasm(),
-                records(),
-                metadata(run_id, 1),
-                &[],
-                &mut diagnostics
-            ),
-            Ok(None)
-        );
-        assert_eq!(
-            publish(
-                &root,
-                wasm(),
-                Vec::new(),
-                metadata(run_id, 1),
-                &tests,
-                &mut diagnostics
-            ),
-            Ok(None)
-        );
-        assert!(diagnostics.is_empty());
         let (directory, _) = publish(
             &root,
             wasm(),
@@ -652,7 +626,6 @@ mod tests {
             &tests,
             &mut diagnostics,
         )
-        .unwrap()
         .unwrap();
         let diagnostics = String::from_utf8(diagnostics).unwrap();
         assert!(

@@ -726,34 +726,42 @@ impl PythonServer {
         ])
     }
 
-    /// Publish what the server ran as a Python run of its own, credited to
-    /// the browser tests that sent each request. None when no measured
-    /// Python process ran, or when none answered a test's request: Python a
-    /// suite only ran in passing (a build tool, a seed script) is not a
-    /// server's coverage.
-    #[allow(clippy::too_many_arguments)]
-    pub fn publish(
+    /// Build what the server ran as a Python run of its own, credited to the
+    /// browser tests that sent each request, to be published under the
+    /// metadata the returned step is given. None when no measured Python
+    /// process ran, or when none answered a test's request: Python a suite
+    /// only ran in passing (a build tool, a seed script) is not a server's
+    /// coverage.
+    pub fn build_run<'a>(
         self,
-        root: &Path,
+        root: &'a Path,
         evidence_run_id: &str,
-        metadata: RunMetadata,
+        run: &RunMetadata,
         served: &[crate::served_tests::ServedTest],
         diagnostics: &mut dyn Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
         let started = Instant::now();
         let evidence_directory = self.directory.join("evidence");
-        let result = (|| {
+        let kept = |error| {
+            note_kept_evidence(
+                root,
+                &evidence_directory,
+                &metadata_id_hint(evidence_run_id),
+                error,
+            )
+        };
+        let built = (|| {
             // No browser test reported: the suite was not Playwright's, or
             // never got to its tests.
             if served.is_empty() {
                 return Ok(None);
             }
-            let mut run = match crate::python_evidence::build_python_server_run(
+            let run = match crate::python_evidence::build_python_server_run(
                 &self.project.manifest,
                 &evidence_directory,
                 evidence_run_id,
-                &metadata.started_at,
-                metadata.test_exit_code.unwrap_or_default(),
+                &run.started_at,
+                run.test_exit_code.unwrap_or_default(),
                 Path::new(&self.project.plan.root),
                 served,
             ) {
@@ -776,66 +784,83 @@ impl PythonServer {
             }
             validate_frontend_report_request(&run.declaration, &run.request)
                 .map_err(|error| error.to_string())?;
-            // The evidence was recorded under the browser run's id; a run
-            // published beside it has its own.
-            run.request.run_id = metadata.id.clone();
-            for scope in run
-                .request
-                .raw_results
-                .iter_mut()
-                .filter_map(|raw| raw.scope.as_mut())
-            {
-                scope.run_id = metadata.id.clone();
-            }
-            run.request.integrity = serde_json::to_value(&self.integrity).ok();
-            let work = root.join(".supercov/work").join(&metadata.id);
-            fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-            let archive_path = work.join("python-evidence.raw.gz");
-            let Archive { raw, analysed, .. } =
-                archive_python_run(&run, &self.source_inputs, &archive_path, started, 0.0)?;
-            let tests = run.tests;
-            drop(run);
-            let metadata = RunMetadata {
-                integrity: self.integrity.clone(),
-                raw_evidence: RawEvidenceMetadata {
-                    schema_version: raw.schema_version,
-                    format: raw.format.into(),
-                    file: raw.file.into(),
-                    files: raw.files,
-                    uncompressed_bytes: raw.uncompressed_bytes,
-                    compressed_bytes: raw.compressed_bytes,
-                },
-                source_roots: self.source_roots.clone(),
-                ..metadata
-            };
-            let run_directory = publish_archived_run(
-                root,
-                &metadata,
-                &archive_path,
-                Archived {
-                    report: analysed,
-                    inputs: Some(self.source_inputs.manifest()),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            writeln!(
-                diagnostics,
-                "[supercov] Python server coverage: {tests} test(s) across {} source file(s)",
-                self.project.plan.files.len()
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(Some((run_directory, metadata)))
+            Ok(Some(run))
         })();
-        let result = result.map_err(|error| {
-            note_kept_evidence(
-                root,
-                &evidence_directory,
-                &metadata_id_hint(evidence_run_id),
-                error,
-            )
-        });
-        let _ = remove_stored_tree_deferred(root, &self.directory);
-        result
+        let mut run = match built {
+            Ok(Some(run)) => run,
+            other => {
+                let result = other.map(|_| None).map_err(kept);
+                let _ = remove_stored_tree_deferred(root, &self.directory);
+                return result;
+            }
+        };
+        let evidence_run_id = evidence_run_id.to_owned();
+        Ok(Some(Box::new(
+            move |metadata: RunMetadata, diagnostics: &mut dyn Write| {
+                let evidence_directory = self.directory.join("evidence");
+                let result = (|| {
+                    // The evidence was recorded under the browser run's id; a run
+                    // published beside it has its own.
+                    run.request.run_id = metadata.id.clone();
+                    for scope in run
+                        .request
+                        .raw_results
+                        .iter_mut()
+                        .filter_map(|raw| raw.scope.as_mut())
+                    {
+                        scope.run_id = metadata.id.clone();
+                    }
+                    run.request.integrity = serde_json::to_value(&self.integrity).ok();
+                    let work = root.join(".supercov/work").join(&metadata.id);
+                    fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+                    let archive_path = work.join("python-evidence.raw.gz");
+                    let Archive { raw, analysed, .. } =
+                        archive_python_run(&run, &self.source_inputs, &archive_path, started, 0.0)?;
+                    let tests = run.tests;
+                    drop(run);
+                    let metadata = RunMetadata {
+                        integrity: self.integrity.clone(),
+                        raw_evidence: RawEvidenceMetadata {
+                            schema_version: raw.schema_version,
+                            format: raw.format.into(),
+                            file: raw.file.into(),
+                            files: raw.files,
+                            uncompressed_bytes: raw.uncompressed_bytes,
+                            compressed_bytes: raw.compressed_bytes,
+                        },
+                        source_roots: self.source_roots.clone(),
+                        ..metadata
+                    };
+                    let run_directory = publish_archived_run(
+                        root,
+                        &metadata,
+                        &archive_path,
+                        Archived {
+                            report: analysed,
+                            inputs: Some(self.source_inputs.manifest()),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                    writeln!(
+                    diagnostics,
+                    "[supercov] Python server coverage: {tests} test(s) across {} source file(s)",
+                    self.project.plan.files.len()
+                )
+                .map_err(|error| error.to_string())?;
+                    Ok((run_directory, metadata))
+                })();
+                let result = result.map_err(|error| {
+                    note_kept_evidence(
+                        root,
+                        &evidence_directory,
+                        &metadata_id_hint(&evidence_run_id),
+                        error,
+                    )
+                });
+                let _ = remove_stored_tree_deferred(root, &self.directory);
+                result
+            },
+        )))
     }
 }
 
@@ -1135,7 +1160,7 @@ mod tests {
         let metadata = server_metadata(&server);
         assert!(
             server
-                .publish(&root, run_id, metadata, &[], &mut Vec::new())
+                .build_run(&root, run_id, &metadata, &[], &mut Vec::new())
                 .unwrap()
                 .is_none()
         );
@@ -1155,7 +1180,7 @@ mod tests {
         let mut diagnostics = Vec::new();
         assert!(
             server
-                .publish(&root, run_id, metadata, &[served_test()], &mut diagnostics)
+                .build_run(&root, run_id, &metadata, &[served_test()], &mut diagnostics)
                 .unwrap()
                 .is_none()
         );

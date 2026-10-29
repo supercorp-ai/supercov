@@ -1094,34 +1094,43 @@ impl GoServer {
     /// credited, by time, to the one browser test whose span it falls in;
     /// what no single test's does is no test's. None when no instrumented
     /// server ran, or no window fell in a test.
-    pub fn publish(
+    /// Build what the server ran as a run of its own, to be published under
+    /// the metadata the returned step is given. None when no instrumented
+    /// server ran, or no browser test reported.
+    pub fn build_run<'a>(
         self,
-        root: &Path,
+        root: &'a Path,
         _evidence_run_id: &str,
-        metadata: RunMetadata,
+        _run: &RunMetadata,
         served: &[crate::served_tests::ServedTest],
-        diagnostics: &mut dyn Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
-        crate::owned_server::publish(
-            root,
-            crate::owned_server::OwnedServer {
-                language: "Go",
-                declaration: go_declaration(),
-                environment: "go",
-                coverage_model: go_coverage_model(),
-                manifest: &self.project.manifest,
-                probes: &self.project.probes,
-                widths: &self.project.decision_widths,
-                integrity: &self.integrity,
-                source_inputs: &self.source_inputs,
-                source_roots: self.source_roots.clone(),
-                directory: &self.directory,
-                source_files: self.project.instrumented.len(),
-            },
-            metadata,
-            served,
-            diagnostics,
-        )
+        _diagnostics: &mut dyn Write,
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
+        if !crate::owned_server::has_run(root, &self.directory, "go", served)? {
+            return Ok(None);
+        }
+        let served = served.to_vec();
+        Ok(Some(Box::new(move |metadata, diagnostics| {
+            crate::owned_server::publish(
+                root,
+                crate::owned_server::OwnedServer {
+                    language: "Go",
+                    declaration: go_declaration(),
+                    environment: "go",
+                    coverage_model: go_coverage_model(),
+                    manifest: &self.project.manifest,
+                    probes: &self.project.probes,
+                    widths: &self.project.decision_widths,
+                    integrity: &self.integrity,
+                    source_inputs: &self.source_inputs,
+                    source_roots: self.source_roots.clone(),
+                    directory: &self.directory,
+                    source_files: self.project.instrumented.len(),
+                },
+                metadata,
+                &served,
+                diagnostics,
+            )
+        })))
     }
 }
 

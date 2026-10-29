@@ -58,9 +58,27 @@ function noteLoaded(url) {
         // Not recorded: the file counts for every test, as before.
     }
 }
+// Where this process notes a file a test asked for by its path and Node did
+// not find, in the copy: a file the copy left out, build output above all,
+// fails a test as a missing module, and Supercov can say why (`register.mjs`
+// names it, and does the same for `require`).
+let missingFile;
+function noteMissing(specifier, parentURL) {
+    if (!missingFile || !/^(?:\.{1,2}\/|\/|file:)/.test(specifier))
+        return;
+    try {
+        const file = fileURLToPath(new URL(specifier, parentURL ?? pathToFileURL(`${process.cwd()}/`)));
+        if (projectFile(file))
+            appendFileSync(missingFile, `${JSON.stringify({ missing: file })}\n`);
+    }
+    catch {
+        // Not noted: the run says nothing of it, as before.
+    }
+}
 export function initialize(data) {
     typescriptRequireHook = data?.typescriptRequireHook === true;
     supportFile = typeof data?.supportFile === "string" ? data.supportFile : undefined;
+    missingFile = typeof data?.missingFile === "string" ? data.missingFile : undefined;
 }
 const packageTypes = new Map();
 function packageType(directory) {
@@ -141,7 +159,14 @@ export async function resolve(specifier, context, nextResolve) {
         }
         return nextResolve(REPLACEMENT, context);
     }
-    return throughRequireHook(await nextResolve(specifier, context));
+    try {
+        return throughRequireHook(await nextResolve(specifier, context));
+    }
+    catch (error) {
+        if (error?.code === "ERR_MODULE_NOT_FOUND")
+            noteMissing(specifier, context.parentURL);
+        throw error;
+    }
 }
 
 // Node's own test coverage filters files by `--test-coverage-include` and

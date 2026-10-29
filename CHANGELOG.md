@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+**Added**
+
+- A run whose tests failed loading files the project has and its isolated copy does not, such as `dist/` an earlier build made, names those files and says why: the copy leaves out build output, and nothing built it there. The failures read as broken tests before, with `build=0ms` in the timings the only sign.
+
 **Fixed**
 
+- A browser suite with no JavaScript source whose tests drove servers in two languages, such as Puma beside a Python server, published a run per server that named neither of the others: `runs <id>` said nothing of the run beside it. Each names the other now, as a browser run and its servers' runs already did.
+- `supercov -- cargo test` ran the tests without a target runner Cargo is configured with when Supercov could not read the runner, such as one that leads to the crate itself, and they passed where plain `cargo test` fails. The run is refused, naming the configuration, as `cargo nextest run` already was.
 - A Kotlin file with a class body on one line (`class C { val x = 1 }`), two members on one line, or a line starting with an identifier that begins with a keyword (`set_value = ...`) was read as not parsing and left unmeasured; Supercov now builds the Kotlin grammar itself with upstream's unreleased fixes for these. A file ending inside an annotation could stop the run for good; it now ends.
 - Kotlin files using context parameters, `when` guards, multi-dollar strings, `suspend { }`, `fun interface`, `actual constructor`, annotated accessors, and two dozen other constructs were read as not parsing and left unmeasured. Supercov now keeps its own copy of the grammar and checks it against every Kotlin file of six real projects (Exposed, kotlinx.coroutines, ktor, moshi, Now in Android, OkHttp): 165 of their 5,429 files were left unmeasured, now 3, two of them templates that are not Kotlin.
 - `assertions assess` and its `--dry-run` estimate took minutes before printing anything on a run whose tests share most of what they run, as a merged or end-to-end run's do: each request and each cache key worked out its test's code and its files' functions again. They are worked out once, and the requests are the same: 400 tests sharing 6,000 statements went from 166 s to 4 s on one core.

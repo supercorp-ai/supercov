@@ -222,6 +222,12 @@ test('a test that reaches no server', async () => {
   assert.ok(beside, both.stderr);
   assert.equal(ids[1], beside, `the first server's run is the latest, the other's beside it: ${ids}`);
   const bothId = ids[0];
+  // Each server's run names the other: the latest names the run beside it,
+  // and that run names the latest.
+  const companionsOf = (id) => JSON.parse(run(binary, ['runs', id, '--json']).stdout).data.companions ?? [];
+  assert.deepEqual(companionsOf(bothId).map((companion) => [companion.id, companion.role]), [[beside, 'server']]);
+  assert.deepEqual(companionsOf(beside).map((companion) => [companion.id, companion.role]), [[bothId, 'server']]);
+  assert.match(run(binary, ['runs', bothId]).stdout, new RegExp(`(?:Python|Ruby) server: run ${beside}`, 'u'));
   // Failures injected (SUPERCOV_TEST_FAULT): the copy taken by another run
   // after the servers were prepared for it, which prepares them again; a
   // server's run that cannot be published, which fails the run; and a failing
