@@ -998,6 +998,13 @@ mod tests {
             recorded.fingerprint,
             "a first-party file changing does"
         );
+        // A file it cannot digest leaves no fingerprint to compare.
+        assert!(
+            crate::fault::during("fs.open#integrity.rs:427", || {
+                current_python_integrity(&root, &command, Some(&configured))
+            })
+            .is_err()
+        );
         fs::remove_dir_all(root).ok();
     }
 
