@@ -19,3 +19,11 @@ test-group = "jvm-builds"
 [[profile.default.overrides]]
 filter = "binary(cli) & test(/_file_operation_fails/)"
 test-group = "fault-sweeps"
+
+# On Windows a CLI test that waits on something that never comes held its
+# slot for the job's whole budget, and the tests behind it never ran: stop it
+# after six minutes, so it fails by name and the rest still run.
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = "binary(cli)"
+slow-timeout = { period = "120s", terminate-after = 3 }
