@@ -1256,7 +1256,12 @@ fn prune_filtered_indexes(kept: &Path) {
             let name = name.to_string_lossy();
             name.starts_with("filtered-") && name.ends_with(".index")
         })
-        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        // One gone since it was listed is no longer there to prune.
+        .filter_map(|entry| {
+            let path = entry.path();
+            let modified = fs::metadata(&path).and_then(|metadata| metadata.modified());
+            Some((modified.ok()?, path))
+        })
         .collect::<Vec<_>>();
     filtered.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     for (_, path) in filtered.into_iter().skip(KEPT_FILTERED_INDEXES) {
@@ -1655,6 +1660,9 @@ mod tests {
         crate::fault::during("fs.read_dir#run_store.rs:1249", || {
             prune_filtered_indexes(&kept)
         });
+        assert!(root.join("filtered-01.index").exists());
+        // Indexes whose times cannot be read are left where they are.
+        crate::fault::during("fs.metadata", || prune_filtered_indexes(&kept));
         assert!(root.join("filtered-01.index").exists());
         prune_filtered_indexes(&kept);
         let mut left = fs::read_dir(&root)
