@@ -7553,6 +7553,29 @@ fn many_lines_are_answered_in_one_call_and_every_gap_says_what_is_missing() {
     }
     assert!(offset > 0, "200 lines take more than one reply");
     assert_eq!(answered, (1..=200).collect::<Vec<_>>());
+    // Lines that hold only their statements' anchors are cut the same way.
+    let mut source = String::new();
+    for value in 0..200 {
+        source.push_str(&format!(
+            "export function f{value}(x) {{\n  if (x) {{\n    return {value};\n  }}\n  return 0;\n}}\n"
+        ));
+    }
+    project.write("src/blocks.js", &source);
+    project.write(
+        "test/blocks.test.js",
+        "import test from \"node:test\";\nimport { f0 } from \"../src/blocks.js\";\ntest(\"one\", () => f0(true));\n",
+    );
+    let blocks_run = project.measure(&["test/blocks.test.js"]);
+    let mut arguments = vec!["runs".to_owned(), blocks_run, "line".into()];
+    arguments.extend((0..200).map(|block| format!("src/blocks.js:{}", block * 6 + 4)));
+    arguments.push("--json".into());
+    let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    let page = project.supercov(&arguments).json();
+    assert_eq!(page["ok"], true, "{page}");
+    assert!(
+        page["pagination"]["nextOffset"].as_u64().is_some(),
+        "{page}"
+    );
 }
 
 #[test]
