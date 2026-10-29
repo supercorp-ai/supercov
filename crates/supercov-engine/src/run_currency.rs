@@ -472,13 +472,15 @@ pub fn judge(
                 .push(format!("{file} (`{label}` does not load it)"));
             continue;
         }
-        if gone {
+        let Some(is) = now.get(&file) else {
             refuse(&mut judgment, &file, format!("{file} is gone"));
             continue;
-        }
+        };
         let before = recorded.get(&file).and_then(|was| was.code.as_ref());
-        let after = now.get(&file).and_then(|is| is.code.as_ref());
-        if let (Some(before), Some(source)) = (before, text(&file))
+        let after = is.code.as_ref();
+        // Read as the checkout holds it, where that is what `now` recorded.
+        let source = text(&file).filter(|source| FileFingerprint::of(source).sha256 == is.sha256);
+        if let (Some(before), Some(source)) = (before, source)
             && let Some(added) = only_added(before, &file, &source)
         {
             judgment

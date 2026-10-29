@@ -1591,9 +1591,11 @@ fn start_docker_relay(
     let settings = crate::docker_proxy::ProxySettings {
         copy: workspace.to_owned(),
         mount: root.join(".supercov"),
-        environment: names
+        // Each server's settings went into the overrides as it was prepared.
+        environment: overrides
             .iter()
-            .filter_map(|name| Some((name.clone(), overrides.get(name)?.clone())))
+            .filter(|(name, _)| names.contains(*name))
+            .map(|(name, value)| (name.clone(), value.clone()))
             .collect(),
         fingerprint: servers
             .iter()

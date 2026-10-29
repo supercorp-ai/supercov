@@ -274,12 +274,9 @@ fn judged_against_latest(
     let checkout = crate::run_currency::Checkout::new(root, &tests);
     let merged = |index: usize| inputs[index].metadata.merged == Some(true);
     let reference = crate::run_currency::Ran::from_entries(&archives[latest], merged(latest));
-    // A file's text, where the checkout holds what the latest run recorded.
-    let text = |file: &str| {
-        let text = crate::fault_fs::read_to_string(root.join(file)).ok()?;
-        (crate::source_manifest::FileFingerprint::of(&text).sha256 == into.files.get(file)?.sha256)
-            .then_some(text)
-    };
+    // A file's text in the checkout; judged only where it is what the
+    // latest run recorded.
+    let text = |file: &str| crate::fault_fs::read_to_string(root.join(file)).ok();
     let mut across = Vec::new();
     let mut superseded = BTreeMap::new();
     // A merge is of two runs at least: one is not the latest.
