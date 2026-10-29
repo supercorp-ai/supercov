@@ -4170,6 +4170,35 @@ fn tests_that_load_build_output_the_copy_left_out_are_told_why() {
         "{}",
         rebuilt.stderr()
     );
+    // More than four left out are named by count; a file the copy has by
+    // the time the run looks, as a test wrote it there after failing to
+    // load it, is not left out.
+    let many = Project::empty("left-out-many");
+    many.write(
+        "package.json",
+        r#"{ "name": "many", "private": true, "type": "module" }"#,
+    );
+    many.write("src/x.js", "export const x = 1;\n");
+    many.write(
+        "test/many.test.js",
+        "import test from \"node:test\";\nimport { mkdirSync, writeFileSync } from \"node:fs\";\ntest(\"loads what was built\", async () => {\n  for (const name of [\"m0\", \"m1\", \"m2\", \"m3\", \"m4\", \"m5\", \"late\"]) {\n    await import(`../dist/${name}.js`).catch(() => {});\n  }\n  mkdirSync(\"dist\", { recursive: true });\n  writeFileSync(\"dist/late.js\", \"export const late = 1;\\n\");\n  throw new Error(\"nothing was built\");\n});\n",
+    );
+    many.write(".gitignore", "dist/\n");
+    many.git(&["init", "-q"]);
+    many.commit("fixture");
+    for name in ["m0", "m1", "m2", "m3", "m4", "m5", "late"] {
+        many.write(&format!("dist/{name}.js"), "export const built = 1;\n");
+    }
+    let ran = many.supercov(&["--", "node", "--test"]);
+    let stderr = ran.stderr();
+    assert_ne!(ran.code(), 0, "{stderr}");
+    assert!(
+        stderr.contains(
+            "could not load dist/m0.js, dist/m1.js, dist/m2.js, dist/m3.js and 2 more, which the project has"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("late.js"), "{stderr}");
 }
 
 /// A target runner configuration Supercov cannot read -- here a runner that
