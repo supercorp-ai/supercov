@@ -125,7 +125,6 @@ pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
         fs::create_dir_all(state)?;
         return Ok(preferred);
     }
-    use std::os::unix::fs::DirBuilderExt;
     let directory = PathBuf::from("/tmp").join(format!(
         "supercov-docker-{}-{}",
         std::process::id(),
@@ -134,7 +133,7 @@ pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0)
     ));
-    fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    fs::create_private_dir(&directory)?;
     Ok(directory.join("docker.sock"))
 }
 
@@ -172,6 +171,8 @@ struct Shared {
     created: Mutex<Vec<CreatedContainer>>,
     /// Compose services already built from the copy in this run.
     built: Mutex<BTreeSet<(String, String)>>,
+    /// The Docker CLI compose is asked through.
+    docker: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +203,7 @@ impl DockerProxy {
             started_ms: now_ms(),
             created: Mutex::new(Vec::new()),
             built: Mutex::new(BTreeSet::new()),
+            docker: PathBuf::from("docker"),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -867,7 +869,7 @@ impl Shared {
         if let Some(directory) = &working_dir {
             arguments.extend(["--project-directory".into(), directory.clone()]);
         }
-        let mut config = Command::new("docker");
+        let mut config = Command::new(&self.docker);
         config
             .args(&arguments)
             .args(["config", "--format", "json"])
@@ -891,7 +893,7 @@ impl Shared {
             "compose-build",
             || Some(false),
             || {
-                Command::new("docker")
+                Command::new(&self.docker)
                     .args(&arguments)
                     .args(["build", service])
                     .env("DOCKER_HOST", format!("unix://{}", self.upstream.display()))
@@ -1954,6 +1956,7 @@ mod tests {
             started_ms: now_ms(),
             created: Mutex::default(),
             built: Mutex::default(),
+            docker: PathBuf::from("docker"),
         };
         // An empty name in the list is skipped; the file named is missing.
         let files = format!("{},", directory.join("missing.yml").display());
@@ -1962,6 +1965,44 @@ mod tests {
             None
         );
         assert!(shared.built.lock().unwrap().is_empty());
+        // Compose that cannot be started, that says something other than
+        // JSON, or that can be asked but not built with: none of it builds.
+        let stand_in = |name: &str, script: &str| {
+            let path = directory.join(name);
+            fs::write(&path, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            Shared {
+                docker: path,
+                settings: settings(&directory),
+                upstream: directory.join("d.sock"),
+                socket: directory.join("p.sock"),
+                started_ms: now_ms(),
+                created: Mutex::default(),
+                built: Mutex::default(),
+            }
+        };
+        let absent = Shared {
+            docker: directory.join("no-docker"),
+            ..stand_in("unused", "#!/bin/sh\n")
+        };
+        let context = directory.join("copy/api").display().to_string();
+        for shared in [
+            absent,
+            stand_in("garbled", "#!/bin/sh\necho not json\n"),
+            stand_in(
+                "unbuildable",
+                &format!(
+                    "#!/bin/sh\nrm \"$0\"\necho '{{\"services\":{{\"api\":{{\"build\":{{\"context\":\"{context}\"}}}}}}}}'\n"
+                ),
+            ),
+        ] {
+            assert_eq!(
+                shared.build_compose_service("shop", "api", None, None),
+                None
+            );
+            assert!(shared.built.lock().unwrap().is_empty());
+        }
         // Empty binds and mounts have nothing to rewrite, and no settings
         // add only what marks the container as the run's.
         let mut config = json!({"HostConfig": {"Binds": [], "Mounts": []}});
@@ -2043,8 +2084,16 @@ mod tests {
             })
             .is_err()
         );
+        // A run directory too deep for a socket address gets a private
+        // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:196", || {
+            crate::fault::during("fs.create_dir#docker_proxy.rs:136", || {
+                socket_path(&directory.join("state").join("d".repeat(120)))
+            })
+            .is_err()
+        );
+        assert!(
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:197", || {
                 DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
             })
             .is_err()
@@ -2292,6 +2341,7 @@ mod tests {
             started_ms: now_ms(),
             created: Mutex::default(),
             built: Mutex::default(),
+            docker: PathBuf::from("docker"),
         };
         let create = br#"{"Image":"shop"}"#;
         let client = [
@@ -2360,6 +2410,20 @@ mod tests {
     /// Relaying a message whose stream fails at each read in turn, and then
     /// at each write: every failure is an error, and with none the message
     /// crosses whole.
+    /// What the client sent ahead of a handed-over stream that the daemon,
+    /// gone already, cannot take ends the stream with that error.
+    #[test]
+    fn a_handed_over_stream_whose_daemon_has_gone_ends_with_an_error() {
+        let (client, mut sent) = UnixStream::pair().unwrap();
+        sent.write_all(b"raw bytes").unwrap();
+        let mut client_reader = BufReader::new(client.try_clone().unwrap());
+        assert!(!client_reader.fill_buf().unwrap().is_empty());
+        let (upstream, daemon) = UnixStream::pair().unwrap();
+        drop(daemon);
+        let upstream_reader = BufReader::new(upstream.try_clone().unwrap());
+        assert!(splice(client_reader, client, upstream_reader, upstream).is_err());
+    }
+
     #[test]
     fn a_stream_that_fails_anywhere_fails_the_relay_and_never_panics() {
         let chunked = head("HTTP/1.1 200 OK", &[("Transfer-Encoding", "chunked")]);

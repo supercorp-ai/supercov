@@ -29,6 +29,17 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     checked("create_dir", || std::fs::create_dir(path))
 }
 
+/// A directory only its owner can enter, made so in one call: there is no
+/// moment when another user could open it.
+#[cfg(unix)]
+#[track_caller]
+pub fn create_private_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    checked("create_dir", || {
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    })
+}
+
 #[track_caller]
 pub fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
     checked("create_dir_all", || std::fs::create_dir_all(path))

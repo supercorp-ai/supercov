@@ -12444,13 +12444,13 @@ fn a_docker_relay_that_cannot_start_leaves_the_daemon_as_it_was() {
             ("RELAYED", "0"),
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.create_dir_all#docker_proxy.rs:188",
+                "fs.create_dir_all#docker_proxy.rs:189",
             ),
         ],
     );
     let said = unrelayed.stderr();
     assert_eq!(unrelayed.code(), 0, "{}{said}", unrelayed.stdout());
-    assert!(fired_at(&said, "docker_proxy.rs:188"), "{said}");
+    assert!(fired_at(&said, "docker_proxy.rs:189"), "{said}");
     assert!(
         said.contains(
             "containers the tests start are not measured: the Docker relay could not start"
