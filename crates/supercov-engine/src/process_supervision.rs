@@ -457,7 +457,7 @@ fn relay(
         };
         let mut pending = Vec::new();
         let mut buffer = [0_u8; 8192];
-        loop {
+        'relay: loop {
             let read = match pipe.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => read,
@@ -470,18 +470,18 @@ fn relay(
                 // Whoever reads this has gone: the command is told so by
                 // its next write, as it would have been.
                 if pass(&pending[passed..=passed + end]).is_err() {
-                    let _ = ended.send(());
-                    return;
+                    pending.clear();
+                    break 'relay;
                 }
                 passed += end + 1;
             }
             pending.drain(..passed);
             if pending.len() > RELAY_LINE_LIMIT {
-                if pass(&pending).is_err() {
-                    let _ = ended.send(());
-                    return;
-                }
+                let gone = pass(&pending).is_err();
                 pending.clear();
+                if gone {
+                    break;
+                }
             }
         }
         if !pending.is_empty() {

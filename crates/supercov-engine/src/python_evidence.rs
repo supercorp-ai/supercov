@@ -1986,7 +1986,12 @@ fn build_from_evidence(
                             ),
                             error: None,
                         });
-                        runtime.push(take(identity)?);
+                        // What it holds the call phase holds too, and that
+                        // phase was read above without a fault.
+                        runtime.push(
+                            take(identity)
+                                .expect("an assertion's evidence reads as its call phase's did"),
+                        );
                     }
                     Ok::<(), PythonEvidenceError>(())
                 },
@@ -3777,8 +3782,8 @@ pub(crate) mod tests {
             run_with("unknown-hit", &[json!({"t":"hit","ctx":1,"id":"nowhere"})]),
             Err(PythonEvidenceError::UnknownObligation(id)) if id == "nowhere"
         ));
-        // And one hit before the test's first assertion, which is that
-        // assertion's evidence.
+        // And one hit before the test's first assertion: the call phase
+        // holds it too, and is refused for it first.
         let directory = temporary("unknown-asserted");
         write_transport(
             &directory.join("main.1.mmap"),

@@ -1133,7 +1133,11 @@ mod tests {
         };
         // A run that keeps no scope, or one that lists no entries, leaves
         // nothing out.
-        for (scope, run_id) in [(Value::Null, "run-none"), (json!({}), "run-unlisted")] {
+        for (scope, run_id) in [
+            (Value::Null, "run-none"),
+            (json!({}), "run-unlisted"),
+            (json!({"entries": "none"}), "run-not-a-list"),
+        ] {
             scoped(scope);
             assert_eq!(
                 import(run_id).added_files,
