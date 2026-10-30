@@ -784,6 +784,21 @@ pub fn run_direct_javascript(
         .join(format!("missing-loads-{run_id}.jsonl"));
     let mut overrides: BTreeMap<String, String> = BTreeMap::from([
         ("NODE_OPTIONS".into(), node_options(&frontend.preload_path)),
+        (
+            "BUN_OPTIONS".into(),
+            format!(
+                "{} {}",
+                serde_json::to_string(&format!(
+                    "--preload={}",
+                    frontend
+                        .preload_path
+                        .with_file_name("bunTest.mjs")
+                        .display()
+                ))
+                .expect("a preload argument is a JSON string"),
+                environment.get("BUN_OPTIONS").map_or("", String::as_str)
+            ),
+        ),
         ("SUPERCOV_CJS_INTERCEPT".into(), "1".into()),
         ("SUPERCOV_DIRECT_INSTRUMENTATION".into(), "1".into()),
         // tap measures its own coverage and fails a run short of 100%. Under

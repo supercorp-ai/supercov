@@ -46,6 +46,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "atomic.mjs",
     "ava.mjs",
     "bootstrap.cjs",
+    "bunTest.mjs",
     "capability.mjs",
     "jest.cjs",
     "jest.config.mjs",
@@ -1979,9 +1980,9 @@ mod tests {
             "fs.rename@34",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1683",
-            "javascript-source-path#javascript_frontend.rs:1799",
+            "javascript-source-path#javascript_frontend.rs:464",
+            "javascript-source-path#javascript_frontend.rs:1684",
+            "javascript-source-path#javascript_frontend.rs:1800",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));

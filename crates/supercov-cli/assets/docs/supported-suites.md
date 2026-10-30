@@ -52,6 +52,7 @@ Supercov reports the level it actually observed. It does not guess.
 | Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
 | Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept |
 | `node:test` | Exact per test |
+| `bun:test` (Bun 1.2.17 and 1.4.4 verified) | Exact test-body coverage, including concurrent and parameterized tests; lifecycle hooks recorded as setup |
 | Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate |
 | AVA | Exact per test, concurrent tests included, in worker threads or child processes |
 | node-tap 15 and newer | Exact per subtest, nested and parallel (`t.jobs`) subtests included |
@@ -60,6 +61,28 @@ Supercov reports the level it actually observed. It does not guess.
 
 One command may launch several runners. Supercov combines their evidence into
 one run and preserves runner identity wherever the runner exposes it.
+
+### Bun
+
+Run `supercov -- bun test` or the package script that launches it. Supercov
+loads a native Bun adapter through `BUN_OPTIONS`, preserving existing Bun
+options, configured preloads, and the project's files. Named ESM imports,
+namespace imports, and CommonJS `require('bun:test')` are supported. Bun ignores
+Node's preload settings, so the Node adapter alone cannot attribute its tests.
+
+Synchronous `describe` boundaries form the test title. Parameterized rows use
+the registration's title template and original row index in Supercov's queries;
+Bun keeps its own formatted reporter titles. Async test bodies retain their
+identity across `await`, including concurrent execution. Lifecycle hooks have
+separate setup identities and do not credit their coverage to the test body.
+
+Callback completion supplies the recorded outcome. If Bun interrupts a callback
+before it completes, Supercov preserves its named coverage with an **unknown**
+outcome. Bun's final runner verdict can additionally reflect a timeout, hook
+failure, assertion-count check, or unhandled error outside that callback; those
+verdicts are not inferred from callback completion. The measured command's exit
+status remains Bun's own. Coverage from an API copied by a module mock before
+adaptation may remain unattributed.
 
 ### Vitest Browser Mode
 

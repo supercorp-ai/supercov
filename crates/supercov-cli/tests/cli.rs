@@ -602,14 +602,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1072")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1087")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1072"),
+        seen.contains("test fault at fs (javascript_run.rs:1087"),
         "{seen}"
     );
 }
@@ -5134,7 +5134,14 @@ fn bun_bootstraps_sources_with_nested_frontend_aliases_and_preloads() {
                 .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
                 .succeeds();
             assert!(!line.contains("UNCOVERED"), "{line}");
-            contains_all(&line, &["Background / unattributed"]);
+            // This fixture deliberately mocks Vitest with a copied bun:test
+            // namespace. Some Bun versions copy the native exports before the
+            // adapter; either identity is valid for this bootstrap regression.
+            assert!(
+                line.contains("alias import after preloads")
+                    || line.contains("Background / unattributed"),
+                "{line}"
+            );
         }
     }
 }
@@ -5143,7 +5150,6 @@ fn bun_bootstraps_sources_with_nested_frontend_aliases_and_preloads() {
 /// crediting the combined coverage to an unnamed process.
 #[cfg(unix)]
 #[test]
-#[ignore = "#177: Bun needs a per-test lifecycle adapter; independent of the #176 source bootstrap fix"]
 fn bun_tests_have_separate_test_attribution() {
     if !bun_is_available() {
         eprintln!("skipping: no Bun found");
@@ -5165,6 +5171,263 @@ test("above", () => expect(clamp(11, 0, 10)).toBe(10));
         &summary,
         &["Exact for 2 test(s)", "Total       2", "Passed      2"],
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_concurrent_async_tests_keep_exact_coverage_and_complete_all_metrics() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-concurrent-attribution", false);
+    project.write(
+        "src/clamp.test.ts",
+        r#"import { describe, test, expect } from 'bun:test';
+import { clamp } from './clamp';
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+describe('bounds', () => {
+  const run = test.concurrent ?? test;
+  run('below', async () => { await pause(30); expect(clamp(-1,0,10)).toBe(0); await pause(5); });
+  run('nan', async () => { await pause(5); expect(clamp(NaN,0,10)).toBe(0); await pause(20); });
+  run('above', async () => { await pause(20); expect(clamp(11,0,10)).toBe(10); });
+  run('inside', async () => { await pause(10); expect(clamp(5,0,10)).toBe(5); });
+});
+"#,
+    );
+    project.commit("overlapping async tests");
+    let native = std::process::Command::new("bun")
+        .args(["test"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(
+        native.status.success(),
+        "native Bun: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Exact for 4 test(s)",
+            "Total       4",
+            "Passed      4",
+            "Lines      100.00%",
+            "Branches   100.00%",
+            "MC/DC      100.00%",
+        ],
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
+        .succeeds();
+    contains_all(
+        &line,
+        &["bounds > above [", "bounds > inside [", "unit/bun:test"],
+    );
+    assert!(!line.contains("bounds > below ["), "{line}");
+    assert!(!line.contains("bounds > nan ["), "{line}");
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_preloads_namespace_and_commonjs_imports_keep_named_test_scopes() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun preload paths with spaces", false);
+    project.write("user-options.mjs", "import { beforeEach } from 'bun:test';\nglobalThis.optionsLoaded = true;\nbeforeEach(() => { globalThis.optionsHook = true; });\n");
+    project.write("user-config.mjs", "globalThis.configLoaded = true;\n");
+    project.write("bunfig.toml", "[test]\npreload = [\"./user-config.mjs\"]\n");
+    project.write("src/clamp.test.ts", "import * as suite from 'bun:test';\nimport { clamp } from './clamp';\nsuite.describe('namespace', () => suite.test('below', () => { suite.expect(globalThis.optionsLoaded && globalThis.configLoaded && globalThis.optionsHook).toBe(true); suite.expect(clamp(-1,0,10)).toBe(0); }));\n");
+    project.write("src/other.test.cjs", "const { describe, it, expect } = require('bun:test');\nconst { clamp } = require('./clamp.ts');\ndescribe('commonjs', () => it('above', () => { expect(globalThis.optionsLoaded && globalThis.configLoaded && globalThis.optionsHook).toBe(true); expect(clamp(11,0,10)).toBe(10); }));\n");
+    project.commit("preloads and both import styles");
+    project
+        .supercov_with(
+            &["--", "bun", "test"],
+            &[("BUN_OPTIONS", "--preload=./user-options.mjs --smol")],
+        )
+        .succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Exact for 2 test(s)", "Total       2", "Passed      2"],
+    );
+    let tests = project
+        .supercov(&["runs", "latest", "line", "src/clamp.ts:2"])
+        .succeeds();
+    contains_all(
+        &tests,
+        &["namespace > below", "commonjs > above", "bun:test"],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_parameterized_rows_callbacks_and_bound_registrations_keep_separate_scopes() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-parameterized", false);
+    project.write("src/clamp.test.ts", r#"import { test, describe, expect } from 'bun:test';
+import { clamp } from './clamp';
+describe('rows', () => {
+  test.each([[-1,0],[11,10],[5,5]])('clamp %# %d', (value, expected) => expect(clamp(value,0,10)).toBe(expected));
+  test.each([[() => -1]])('function data', fn => expect(clamp(fn(),0,10)).toBe(0));
+  test.each([[11]])('done row', (value, done) => { setTimeout(() => { expect(clamp(value,0,10)).toBe(10); done(); }, 1); });
+  test('done', done => { setTimeout(() => { expect(clamp(5,0,10)).toBe(5); done(); }, 1); });
+  test.bind(null)('bound', () => expect(clamp(-1,0,10)).toBe(0));
+  test.call(null, 'called', () => expect(clamp(11,0,10)).toBe(10));
+  test.apply(null, ['applied', () => expect(clamp(5,0,10)).toBe(5)]);
+});
+"#);
+    project.commit("parameterized and callback registrations");
+    let native = std::process::Command::new("bun")
+        .args(["test"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(
+        native.status.success(),
+        "native Bun: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Exact for 9 test(s)", "Total       9", "Passed      9"],
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "clamp %# %d [row 2]",
+            "clamp %# %d [row 3]",
+            "done row [row 1]",
+            "rows > done",
+            "rows > called",
+            "rows > applied",
+        ],
+    );
+    assert!(!line.contains("clamp %# %d [row 1]"), "{line}");
+    assert!(!line.contains("rows > bound ["), "{line}");
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_failure_and_skip_outcomes_do_not_become_passes() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-outcomes", false);
+    project.write(
+        "src/clamp.test.ts",
+        r#"import { test, describe, expect } from 'bun:test';
+import { clamp } from './clamp';
+test('throws false', () => { clamp(-1,0,10); throw false; });
+test('rejects zero', async () => { clamp(11,0,10); return Promise.reject(0); });
+test('done fails', done => { clamp(5,0,10); done(new Error('expected')); });
+test.skip('skipped', () => { throw new Error('skip executed'); });
+test.todo('todo');
+describe.skip('outer skip', () => test('nested', () => { throw new Error('nested executed'); }));
+test.if(false)('conditional', () => { throw new Error('conditional executed'); });
+test('passes', () => expect(clamp(5,0,10)).toBe(5));
+"#,
+    );
+    project.commit("failure and selection outcomes");
+    project.supercov(&["--", "bun", "test"]).exits(1);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Passed      1", "Failed      3", "Skipped     3"],
+    );
+    for name in ["throws false", "rejects zero", "done fails"] {
+        let test = project
+            .supercov(&["runs", "latest", "test", name])
+            .succeeds();
+        contains_all(&test, &["failed", name]);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_run_sources_do_not_require_a_native_test_api() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-run", false);
+    project.write("main.ts", "import { clamp } from './src/clamp';\nif (clamp(11,0,10) !== 10) throw new Error('wrong result');\n");
+    project.commit("ordinary bun program");
+    project
+        .supercov(&["--", "bun", "run", "main.ts"])
+        .succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Lines      100.00%"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_hooks_keep_setup_coverage_separate_from_test_bodies() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-hook-scopes", false);
+    project.write("src/clamp.test.ts", r#"import { test, describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'bun:test';
+import { clamp } from './clamp';
+describe('hooks', () => {
+  beforeAll(function initialize() { expect(clamp(-1,0,10)).toBe(0); });
+  beforeEach(async function arrange() { await Promise.resolve(); expect(clamp(NaN,0,10)).toBe(0); });
+  afterEach(function cleanup() { expect(clamp(11,0,10)).toBe(10); });
+  afterAll(function dispose() { expect(clamp(-1,0,10)).toBe(0); });
+  test('inside', () => expect(clamp(5,0,10)).toBe(5));
+});
+"#);
+    project.commit("native lifecycle hooks");
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Total       1",
+            "Passed      1",
+            "Lines      100.00%",
+            "Branches   100.00%",
+            "MC/DC      100.00%",
+        ],
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
+        .succeeds();
+    contains_all(&line, &["hooks > inside", "[afterEach] cleanup"]);
+    assert!(!line.contains("[beforeEach] arrange"), "{line}");
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_timed_out_callbacks_keep_their_named_coverage_without_claiming_a_pass() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-timeout-evidence", false);
+    project.write("src/clamp.test.ts", r#"import { test, expect } from 'bun:test';
+import { clamp } from './clamp';
+test('times out', async () => { expect(clamp(11,0,10)).toBe(10); await new Promise(() => {}); }, 30);
+"#);
+    project.commit("timeout after source execution");
+    project.supercov(&["--", "bun", "test"]).exits(1);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Exact for 1 test(s)", "Total       1", "Unknown     1"],
+    );
+    assert!(!summary.contains("Passed"), "{summary}");
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
+        .succeeds();
+    contains_all(&line, &["times out", "unit/bun:test"]);
 }
 
 /// Host tests still record coverage when a command selects browser initialization.
@@ -5209,7 +5472,7 @@ fn a_bun_unit_suite_is_not_reported_as_a_container_guest() {
         "the report assumes where the process ran: {summary}"
     );
     assert!(
-        summary.contains("No test recorded coverage") || summary.contains("Exact for 1 test(s)"),
+        summary.contains("Exact for 1 test(s)"),
         "the report must describe the available attribution: {summary}"
     );
 }
@@ -14696,7 +14959,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2462 => main.rs:2462",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1672 => javascript_frontend.rs:1672",
+            "fs.read_to_string#javascript_frontend.rs:1673 => javascript_frontend.rs:1673",
         ],
     );
 }
@@ -16261,17 +16524,17 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1278",
         "fs.create_dir_all#javascript_run.rs:670",
-        "fs.write#javascript_run.rs:955",
+        "fs.write#javascript_run.rs:970",
         "fs.canonicalize#process_supervision.rs:1719",
-        "fs.create_dir_all#javascript_run.rs:1026",
-        "fs.create_dir_all#javascript_run.rs:1181",
+        "fs.create_dir_all#javascript_run.rs:1041",
+        "fs.create_dir_all#javascript_run.rs:1196",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:445",
-        "fs.create_dir_all#javascript_run.rs:1416",
-        "fs.create_dir_all#javascript_run.rs:1418",
+        "fs.create_dir_all#javascript_run.rs:1431",
+        "fs.create_dir_all#javascript_run.rs:1433",
         "fs.create_dir_all#lifecycle.rs:989",
-        "fs.create_dir_all#javascript_run.rs:1509",
-        "fs.create_dir_all#javascript_run.rs:1511",
+        "fs.create_dir_all#javascript_run.rs:1524",
+        "fs.create_dir_all#javascript_run.rs:1526",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -16437,18 +16700,18 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@31", "runtime.d.mts"),
-        ("fs.rename@32", "playwright.mjs"),
-        ("fs.rename@34", "playwright.config.mjs"),
-        ("fs.rename@35", "vitest.config.mjs"),
-        ("fs.rename@38", "vitestCommands.mjs"),
+        ("fs.rename@32", "runtime.d.mts"),
+        ("fs.rename@33", "playwright.mjs"),
+        ("fs.rename@35", "playwright.config.mjs"),
+        ("fs.rename@36", "vitest.config.mjs"),
+        ("fs.rename@39", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@40", "test/cart.test.js"),
-        ("fs.rename@41", "authored-sources.json"),
-        ("fs.rename@42", "statement-exclusions.json"),
-        ("fs.rename@43", "manifest.json"),
-        ("fs.rename@44", "instrumentation-complete"),
-        ("fs.rename@45", "injected fault at fs"),
+        ("fs.rename@41", "test/cart.test.js"),
+        ("fs.rename@42", "authored-sources.json"),
+        ("fs.rename@43", "statement-exclusions.json"),
+        ("fs.rename@44", "manifest.json"),
+        ("fs.rename@45", "instrumentation-complete"),
+        ("fs.rename@46", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -16768,12 +17031,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:352",
-            "javascript_frontend.rs:352",
+            "fs.read#javascript_frontend.rs:353",
+            "javascript_frontend.rs:353",
         ),
         (
-            "fs.read#javascript_frontend.rs:364",
-            "javascript_frontend.rs:364",
+            "fs.read#javascript_frontend.rs:365",
+            "javascript_frontend.rs:365",
         ),
         ("fs.symlink_metadata#workspace.rs:1282", "workspace.rs:1282"),
     ] {
@@ -16803,12 +17066,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1801@2",
+            "fs.read_to_string#javascript_frontend.rs:1802@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1801"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1802"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -19408,5 +19671,46 @@ fn a_decision_names_a_condition_seen_both_ways_that_never_decided_alone() {
             "C1 MISSING: a (seen both ways, never deciding alone)",
             "C2 MISSING: b (never true)",
         ],
+    );
+}
+
+#[test]
+fn bun_native_callback_arity_is_preserved_inside_describe() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-arity-probe", false);
+    project.write(
+        "src/clamp.test.ts",
+        r#"import { test, describe } from 'bun:test';
+const run = test.concurrent ?? test;
+const callback = async () => { await new Promise(r => setTimeout(r, 1)); };
+function wrapped() { return Reflect.apply(callback, this, arguments); }
+Object.defineProperty(wrapped, 'length', {value:0});
+describe('group', () => { run('wrapped', wrapped); });
+"#,
+    );
+    let native = std::process::Command::new("bun")
+        .args(["test"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(
+        native.status.success(),
+        "native Bun: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/javascript/bunTest.mjs");
+    let adapted = std::process::Command::new("bun")
+        .args(["test", "--preload"])
+        .arg(adapter)
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(
+        adapted.status.success(),
+        "adapted Bun: {}",
+        String::from_utf8_lossy(&adapted.stderr)
     );
 }

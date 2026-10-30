@@ -139,7 +139,7 @@ function inferredProvenance({ runner, file, project, explicitKind, }) {
             source: "path",
         };
     }
-    const defaultKind = runner === "vitest" || runner === "jest" || runner === "node:test" || runner === "mocha" || runner === "ava" || runner === "tap"
+    const defaultKind = runner === "vitest" || runner === "jest" || runner === "node:test" || runner === "bun:test" || runner === "mocha" || runner === "ava" || runner === "tap"
         ? "unit"
         : "unknown";
     return {
