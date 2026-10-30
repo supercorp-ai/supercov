@@ -3417,25 +3417,45 @@ mod tests {
         fs::remove_dir_all(package).unwrap();
     }
 
-    /// A message that is no JSON, and one that is no text, are passed over.
+    /// Bad inspector frames must not discard a valid take already in flight.
     #[test]
     fn a_message_that_is_no_json_or_no_text_is_passed_over() {
         let stop = Arc::new(AtomicBool::new(false));
         let written = inspect_with(Arc::clone(&stop), TAKE_PATIENCE, |socket, stop, _| {
             assert_eq!(receive(socket)["method"], "Runtime.enable");
+            answer(
+                socket,
+                json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+            );
+            let take = receive(socket);
+            assert_eq!(take["method"], "Runtime.evaluate");
+            // Receiving the take proves the session is awaiting a response.
+            // Even when stopping, it must read past malformed frames first.
+            stop.store(true, Ordering::Release);
             socket
                 .send(tungstenite::Message::Text("not json".into()))
                 .unwrap();
             socket
                 .send(tungstenite::Message::Binary(vec![1, 2].into()))
                 .unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD.encode([7]);
             answer(
                 socket,
-                json!({"method": "Runtime.executionContextsCleared"}),
+                json!({"id": take["id"], "result": {"result": {"value": [["key", 1, [[0, bytes]]]]}}}),
             );
-            stop.store(true, Ordering::Release);
+            let last = receive(socket);
+            assert_eq!(last["method"], "Runtime.evaluate");
+            answer(
+                socket,
+                json!({"id": last["id"], "result": {"result": {"value": []}}}),
+            );
             while socket.read().is_ok() {}
         });
-        assert_eq!(written, "");
+        let windows = written
+            .lines()
+            .map(|line| window_from(&serde_json::from_str(line).unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(windows.len(), 1, "{written}");
+        assert_eq!(windows[0].regions, [("key".to_owned(), vec![7])]);
     }
 }

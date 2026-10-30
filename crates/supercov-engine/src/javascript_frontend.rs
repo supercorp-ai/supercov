@@ -2010,6 +2010,46 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
     }
 
+    #[test]
+    fn a_source_that_cannot_be_published_keeps_its_authored_copy_and_stops_preparation() {
+        let (source_root, workspace, project) = frontend_fixture();
+        let path = workspace.join("src/example.mjs");
+        let original = fs::read(&path).unwrap();
+        // Package and types, two Playwright adapters, two configurations,
+        // and the authored copy precede the source's own atomic publication.
+        let fault = format!("fs.rename@{}", RUNTIME_FILES.len() + 8);
+        let prepared = crate::fault::during(&fault, || {
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[])
+        });
+        assert!(
+            matches!(&prepared, Err(JavascriptFrontendError::Io { path: failed, .. }) if failed == &path),
+            "{prepared:?}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            fs::read(authored_path(&workspace, Path::new("src/example.mjs"))).unwrap(),
+            original
+        );
+        assert!(
+            !workspace
+                .join(".supercov/instrumentation-complete")
+                .exists()
+        );
+        assert_eq!(fs::read_dir(workspace.join("src")).unwrap().count(), 1);
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        assert!(
+            workspace
+                .join(".supercov/instrumentation-complete")
+                .exists()
+        );
+        assert_eq!(
+            fs::read(authored_path(&workspace, Path::new("src/example.mjs"))).unwrap(),
+            original
+        );
+        fs::remove_dir_all(source_root).unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
     /// A source path the test fault says is not the project's is refused;
     /// without it, a plain relative path is taken.
     #[test]
