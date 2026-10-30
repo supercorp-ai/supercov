@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { appendEvidenceRecord } from "./atomic.mjs";
+import { appendEvidenceRecord, atomicWriteFileSync } from "./atomic.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { serverEvidencePath } from "./transport.mjs";
 
@@ -105,7 +105,7 @@ export function readScopedServerEvidence(scope, evidencePath = serverEvidencePat
         return [];
     }
 }
-export function writeRunnerEvidence(identity, status, scope, evidenceDirectoryOverride, phases = [], serverEvidenceSource) {
+export function writeRunnerEvidence(identity, status, scope, evidenceDirectoryOverride, phases = [], serverEvidenceSource, snapshot = false) {
     const evidenceDirectory = evidenceDirectoryOverride ?? process.env["SUPERCOV_EVIDENCE_DIR"];
     if (!evidenceDirectory)
         return;
@@ -132,7 +132,11 @@ export function writeRunnerEvidence(identity, status, scope, evidenceDirectoryOv
             ? readScopedServerEvidence(scope, serverEvidenceSource)
             : readScopedServerEvidence(scope),
     };
-    appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), identity.runner.replace(/[^A-Za-z0-9_-]/g, "_"), payload);
+    if (snapshot) {
+        atomicWriteFileSync(resolve(process.cwd(), evidenceDirectory, `attempt-${scope.attemptId}`, "mcdc.json"), JSON.stringify(payload));
+    } else {
+        appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), identity.runner.replace(/[^A-Za-z0-9_-]/g, "_"), payload);
+    }
 }
 
 // A failing test's stack as its author would have seen it, for the runners

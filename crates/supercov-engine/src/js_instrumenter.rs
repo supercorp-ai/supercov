@@ -1170,8 +1170,13 @@ pub struct NodeAssertionInstrumentation {
     pub capability_imports: usize,
 }
 
-const CAPABILITY_IMPORT_EXCLUSIONS: &[&str] =
-    &["@jest/globals", "@playwright/test", "playwright", "vitest"];
+const CAPABILITY_IMPORT_EXCLUSIONS: &[&str] = &[
+    "@jest/globals",
+    "@playwright/test",
+    "playwright",
+    "vitest",
+    "bun:test",
+];
 
 fn capability_source_candidate(source: &str) -> bool {
     // A capability wrapper is useful only when an argument can establish a
@@ -2058,6 +2063,7 @@ struct NodeAssertionBindings {
     objects: HashMap<SymbolId, String>,
     direct: HashMap<SymbolId, String>,
     expects: HashSet<SymbolId>,
+    expect_namespaces: HashSet<SymbolId>,
     /// Jest (and Jasmine) inject `expect` as a global next to `test`, `it`
     /// and `describe`: a file that reaches for all of those unresolved is a
     /// test file whose bare `expect` is the assertion.
@@ -2093,6 +2099,15 @@ fn bind_expect(
     }
 }
 
+fn bind_expect_namespace(
+    bindings: &mut NodeAssertionBindings,
+    identifier: &oxc_ast::ast::BindingIdentifier<'_>,
+) {
+    if let Some(symbol) = identifier.symbol_id.get() {
+        bindings.expect_namespaces.insert(symbol);
+    }
+}
+
 struct NodeAssertionBindingCollector<'s> {
     bindings: NodeAssertionBindings,
     scoping: &'s oxc_semantic::Scoping,
@@ -2118,6 +2133,8 @@ impl<'a> Visit<'a> for NodeAssertionBindingCollector<'_> {
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
                     if let Some(module) = &assert_module {
                         bind_object(&mut self.bindings, &specifier.local, module.clone());
+                    } else if expect_module {
+                        bind_expect_namespace(&mut self.bindings, &specifier.local);
                     }
                 }
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
@@ -2207,11 +2224,17 @@ fn node_assertion_bindings(
         bindings: NodeAssertionBindings::default(),
         scoping,
         allow_contextual_expect,
-        expect_modules: ["vitest", "@jest/globals", "expect", "@playwright/test"]
-            .into_iter()
-            .map(str::to_owned)
-            .chain(extra_expect_modules.iter().cloned())
-            .collect(),
+        expect_modules: [
+            "vitest",
+            "@jest/globals",
+            "expect",
+            "@playwright/test",
+            "bun:test",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(extra_expect_modules.iter().cloned())
+        .collect(),
     };
     collector.visit_program(program);
     let unresolved = scoping.root_unresolved_references();
@@ -2306,7 +2329,16 @@ fn expect_operation(
         return None;
     };
     let recognized = match referenced_symbol(identifier, scoping) {
-        Some(symbol) => bindings.expects.contains(&symbol),
+        Some(symbol) => {
+            if bindings.expect_namespaces.contains(&symbol)
+                && prefix.first().is_some_and(|part| part == "expect")
+            {
+                prefix.remove(0);
+                true
+            } else {
+                bindings.expects.contains(&symbol)
+            }
+        }
         None => bindings.global_expect && identifier.name == "expect",
     };
     recognized.then(|| {
@@ -11381,6 +11413,56 @@ export function shapes(n: number): unknown {
     }
 
     #[test]
+    fn bun_assertion_imports_are_lexical_and_never_capability_proxies() {
+        for (file, source) in [
+            (
+                "tests/value.test.ts",
+                "import { expect as check } from 'bun:test'; check(value()).toBe(1);",
+            ),
+            (
+                "tests/value.test.ts",
+                "import * as suite from 'bun:test'; suite.expect(value()).toBe(1);",
+            ),
+            (
+                "tests/value.test.cjs",
+                "const { expect: check } = require('bun:test'); check(value()).toBe(1);",
+            ),
+        ] {
+            let output = instrument_node_assertion_phases_with_runtime_hooks(
+                source,
+                file,
+                &[],
+                Some("../.supercov/launchSupervisor.mjs"),
+            )
+            .unwrap();
+            assert_eq!(output.assertions, 1, "{}", output.code);
+            assert_eq!(output.capability_imports, 0, "{}", output.code);
+        }
+        // A namespace also exports non-assertion APIs. A mock's ordinary
+        // toString call must stay untouched beside a real expect matcher.
+        let output = instrument_node_assertion_phases(
+            "import * as suite from 'bun:test'; suite.mock(() => 1).toString(); suite.expect(value()).toBe(1);",
+            "tests/value.test.ts",
+        ).unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
+        let output = instrument_node_assertion_phases("import { expect } from 'bun:test'; function unrelated(expect) { expect(value()).toBe(1); }", "tests/value.test.ts").unwrap();
+        assert_eq!(output.assertions, 0);
+        for source in [
+            "import * as suite from 'bun:test'; suite.fake(value()).toBe(1);",
+            "import * as suite from 'bun:test'; suite(value()).toBe(1);",
+            "import * as suite from 'bun:test'; function unrelated(suite) { suite.expect(value()).toBe(1); }",
+            "import * as suite from './unrelated'; suite.expect(value()).toBe(1);",
+        ] {
+            assert_eq!(
+                instrument_node_assertion_phases(source, "tests/value.test.ts")
+                    .unwrap()
+                    .assertions,
+                0
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_imports_remain_byte_identical_without_a_capability_shape() {
         let source = "import { format } from './format.mjs';\nconsole.log(format('value'));";
         let output = instrument_node_assertion_phases_with_runtime_hooks(
@@ -13970,6 +14052,8 @@ export function shapes(n: number): unknown {
         bind_object(&mut bindings, &identifier, "node:assert".into());
         bind_direct(&mut bindings, &identifier, "ok".into());
         bind_expect(&mut bindings, &identifier);
+        bind_expect_namespace(&mut bindings, &identifier);
+        assert!(bindings.expect_namespaces.is_empty());
         assert!(bindings.objects.is_empty());
         assert!(bindings.direct.is_empty());
         assert!(bindings.expects.is_empty());

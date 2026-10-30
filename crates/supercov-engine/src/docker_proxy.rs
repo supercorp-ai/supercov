@@ -916,15 +916,15 @@ impl Shared {
     }
 
     fn record(&self, id: &str, context: CreateContext) {
-        // Never poisoned: nothing that holds it can panic.
-        self.created
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(CreatedContainer {
-                id: id.to_owned(),
-                measured: context.measured,
-                project: context.project.clone(),
-            });
+        // Keep the journal append under the same lock as the insertion.
+        // JSON Display writes several fragments, which concurrent container
+        // creations must not interleave and silently lose their diagnostics.
+        let mut created = self.created.lock().unwrap_or_else(PoisonError::into_inner);
+        created.push(CreatedContainer {
+            id: id.to_owned(),
+            measured: context.measured,
+            project: context.project.clone(),
+        });
         let line = json!({
             "id": id,
             "image": context.image,
@@ -1410,6 +1410,62 @@ mod tests {
         proxy.finish();
         let state = fs::read_to_string(directory.join("state/containers.jsonl")).unwrap();
         assert_eq!(state.lines().count(), 2, "{state}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_container_creation_keeps_every_note_as_a_complete_record() {
+        let directory = temporary("concurrent-records");
+        fs::create_dir_all(directory.join("state")).unwrap();
+        let shared = Arc::new(Shared {
+            settings: settings(&directory),
+            upstream: directory.join("d.sock"),
+            socket: directory.join("p.sock"),
+            started_ms: now_ms(),
+            created: Mutex::default(),
+            built: Mutex::default(),
+            docker: PathBuf::from("docker"),
+        });
+        let start = Arc::new(std::sync::Barrier::new(8));
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let shared = Arc::clone(&shared);
+                let start = Arc::clone(&start);
+                scope.spawn(move || {
+                    start.wait();
+                    for index in 0..32 {
+                        let id = format!("container-{worker}-{index}");
+                        shared.record(
+                            &id,
+                            CreateContext {
+                                measured: false,
+                                image: format!("image-{worker}-{index}"),
+                                project: Some("parallel-compose".into()),
+                                service: Some(format!("service-{worker}")),
+                                note: Some(format!(
+                                    "{id}: image was built from an earlier copy {}",
+                                    "x".repeat(2048)
+                                )),
+                            },
+                        );
+                    }
+                });
+            }
+        });
+        let text = fs::read_to_string(&shared.settings.state).unwrap();
+        let records = text
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("every container must publish a complete JSON record");
+        assert_eq!(records.len(), 256);
+        let ids = records
+            .iter()
+            .map(|record| record["id"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), 256);
+        assert_eq!(notes(&shared.settings.state).len(), 256);
+        assert_eq!(shared.created.lock().unwrap().len(), 256);
         fs::remove_dir_all(directory).unwrap();
     }
 

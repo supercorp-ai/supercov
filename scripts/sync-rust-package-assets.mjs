@@ -55,6 +55,7 @@ const mappings = [
     "atomic.mjs",
     "ava.mjs",
     "bootstrap.cjs",
+    "bunTest.mjs",
     "capability.mjs",
     "launchSupervisor.mjs",
     "mocha.mjs",

@@ -1251,6 +1251,8 @@ function withNodeAssertionPhase(operation, source, callback) {
   });
   attempt.phases.push(phase);
   attempt.phaseIds.add(phase.id);
+  const phaseObserver = runtimeGlobal.__SUPERCOV_ASSERTION_PHASE_STARTED__;
+  if (phaseObserver) phaseObserver(scope, phase);
   try {
     const result = withStackRoom(() => withCoverageCarrier({ version: 1, scope, phaseId: phase.id }, callback));
     if (result && typeof result.then === "function")
@@ -1326,6 +1328,8 @@ function openNodeAssertionPhase(operation, source) {
     });
     attempt.phases.push(phase);
     attempt.phaseIds.add(phase.id);
+    const phaseObserver = runtimeGlobal.__SUPERCOV_ASSERTION_PHASE_STARTED__;
+    if (phaseObserver) phaseObserver(scope, phase);
     carrier = { version: 1, scope, phaseId: phase.id };
     finish = (error) => finishAssertionPhase(phase, error);
   }
