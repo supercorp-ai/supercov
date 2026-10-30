@@ -974,7 +974,11 @@ fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
 /// run's settings and does nothing where the preload already has. The line
 /// goes in before the helper declarations, and the source map gains an empty
 /// line, so every mapped position still holds.
-fn bootstrap_loader(output: &mut crate::js_instrumenter::CandidateOutput, relative: &Path) {
+fn bootstrap_loader(
+    output: &mut crate::js_instrumenter::CandidateOutput,
+    relative: &Path,
+    browser_capable: bool,
+) {
     let Some(binding) = output.runtime.as_ref() else {
         return;
     };
@@ -987,8 +991,14 @@ fn bootstrap_loader(output: &mut crate::js_instrumenter::CandidateOutput, relati
     ) else {
         return;
     };
+    let guard = if browser_capable {
+        "if (globalThis.process?.versions?.node) "
+    } else {
+        ""
+    };
     let loader = format!(
-        "{}\n",
+        "{}{}\n",
+        guard,
         crate::js_instrumenter::runtime_loader(&runtime_specifier(relative, "bootstrap.cjs"))
     );
     let offset = output.code[..found]
@@ -1179,17 +1189,14 @@ fn bootstrap_runtime(
     let Some(binding) = output.runtime.as_ref() else {
         return;
     };
-    // A TypeScript file declares its helpers with their types. Its copy of
-    // the runtime costs a browser page what a JavaScript file's does, 55 KB
-    // a module, so it carries one where it may be run without Supercov: a
-    // server or a build in an image of the copy. Without one, a TypeScript
-    // server built in a container, or a page an image's build prerenders,
-    // stopped at its first probe ("reading 'mcdcBegin'").
+    // Browser sources can run without the preload, as can a server or build
+    // inside an image. TypeScript helpers carry type annotations, so these
+    // paths must recognize both typed and untyped declarations.
     let Some(found) = helper_declaration(
         &output.code,
         &binding.mcdc_begin,
         "globalThis.__supercovRuntime",
-        images,
+        images || browser_suite,
     )
     .or_else(|| {
         browser_suite
@@ -1198,7 +1205,7 @@ fn bootstrap_runtime(
                     &output.code,
                     &binding.mcdc_begin,
                     "globalThis.__SUPERCOV_DIRECT_RUNTIME__",
-                    images,
+                    true,
                 )
             })
             .flatten()
@@ -1666,8 +1673,8 @@ pub fn prepare_javascript_frontend(
     );
     // debug's karma bundles its sources with browserify and runs them in
     // Chrome, where nothing had installed the runtime: every file failed on
-    // its first line ("reading 'mcdcBegin'"). The browser's evidence has no
-    // adapter to reach the run, but its tests pass as they do without it.
+    // its first line ("reading 'mcdcBegin'"). An opaque child can start a
+    // browser even when the measured command is a unit-test runner.
     let browser_suite = project.playwright_config.is_some() || project.browser_runner;
     let images = builds_images(workspace);
     let mut authored = BTreeSet::new();
@@ -1739,10 +1746,10 @@ pub fn prepare_javascript_frontend(
                 &runtime_specifier(relative, "runtime.mjs"),
             );
         }
+        // Host processes need the settings-aware loader first; browser pages
+        // and workers fall back to the embedded runtime when no preload exists.
+        bootstrap_loader(&mut output, relative, browser_suite);
         bootstrap_runtime(&mut output, &standalone_runtime, browser_suite, images);
-        if !browser_suite {
-            bootstrap_loader(&mut output, relative);
-        }
         keep_directives_first(&source, &mut output);
         // The command can compile TypeScript itself (`npm test` may begin
         // with `tsc`), and a probe's own code is not the project's to have
@@ -1973,8 +1980,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1676",
-            "javascript-source-path#javascript_frontend.rs:1792",
+            "javascript-source-path#javascript_frontend.rs:1683",
+            "javascript-source-path#javascript_frontend.rs:1799",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2372,6 +2379,303 @@ mod tests {
         assert!(config.contains("...supercovBrowserTest(loaded?.config)"));
     }
 
+    /// A project whose `tests/e2e/playwright.config.ts` exists beside a
+    /// command that is not Playwright. The workspace is a copy of the source
+    /// project, prepared the way a run prepares it.
+    fn frontend_beside_a_browser_config(
+        command: &[&str],
+        source_name: &str,
+        source: &str,
+        environment: &BTreeMap<String, String>,
+    ) -> (PathBuf, PathBuf, CoverageProject) {
+        let source_root = temporary("browser-config-source");
+        let workspace = temporary("browser-config-workspace");
+        for root in [&source_root, &workspace] {
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join("tests/e2e")).unwrap();
+            fs::write(root.join("src").join(source_name), source).unwrap();
+            // Shapes the loader has to serve besides the file a test names:
+            // an ES module and a CommonJS script.
+            fs::write(
+                root.join("src/companion.mjs"),
+                "export const chosen = (a) => a ? 1 : 0;\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("src/companion.cjs"),
+                "module.exports = function chosen(a) { return a ? 1 : 0; };\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("tests/e2e/playwright.config.ts"),
+                "export default {};\n",
+            )
+            .unwrap();
+            fs::write(root.join("package.json"), "{\"type\":\"module\"}\n").unwrap();
+        }
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        let words = command
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect::<Vec<_>>();
+        let project = discover_coverage_project(&source_root, environment, &words).unwrap();
+        (source_root, workspace, project)
+    }
+
+    /// A source that may be run without the preload has to install the
+    /// runtime before its first probe: either the small loader that reads the
+    /// workspace's bootstrap, or an embedded copy of the runtime.
+    fn self_bootstraps(code: &str) -> bool {
+        code.contains(crate::js_instrumenter::RUNTIME_LOADER_START)
+            || code.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {")
+    }
+
+    /// A config in the project is not a command that runs in a browser. A
+    /// unit-test command in a project that also has a Playwright config runs
+    /// where no page does, so its sources need the loader that saves a
+    /// process the preload never reached -- the shape of a Bun suite, or a
+    /// guest process. Skipping it made every source throw at its first probe.
+    #[test]
+    fn a_browser_config_does_not_suppress_the_loader_for_a_unit_test_command() {
+        let source = "export function value(a: boolean, b: boolean): number {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        for command in [
+            vec!["node", "--test"],
+            vec!["npx", "vitest", "run"],
+            vec!["npx", "jest"],
+            vec!["bun", "test"],
+        ] {
+            let (_, workspace, project) =
+                frontend_beside_a_browser_config(&command, "example.ts", source, &BTreeMap::new());
+            assert!(
+                project.playwright_config.is_some(),
+                "the fixture's Playwright config was not discovered for {command:?}"
+            );
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+            let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
+            assert!(
+                transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
+                "{command:?} runs no browser, but its source cannot install the runtime itself; first line: {}",
+                transformed
+                    .lines()
+                    .nth(2)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect::<String>()
+            );
+        }
+    }
+
+    /// The loader is per language style, not per TypeScript: a JavaScript
+    /// source read from a global needs it for the same reason.
+    #[test]
+    fn a_browser_config_does_not_suppress_the_loader_for_javascript_sources() {
+        let source = "export function value(a, b) {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        let (_, workspace, project) = frontend_beside_a_browser_config(
+            &["node", "--test"],
+            "example.mjs",
+            source,
+            &BTreeMap::new(),
+        );
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        let transformed = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
+        assert!(
+            transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
+            "a JavaScript source beside a Playwright config lost its loader"
+        );
+    }
+
+    /// The rule is per source file, whatever its language style. Every
+    /// instrumented file that reads the runtime off a global, in a project
+    /// with a browser config but a unit-test command, has to be able to
+    /// install it itself.
+    #[test]
+    fn every_source_beside_a_browser_config_can_install_the_runtime() {
+        let source = "export function value(a: boolean, b: boolean): number {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        let (_, workspace, project) = frontend_beside_a_browser_config(
+            &["node", "--test"],
+            "example.ts",
+            source,
+            &BTreeMap::new(),
+        );
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        for file in &project.source_files {
+            let transformed = fs::read_to_string(workspace.join(file)).unwrap();
+            if !transformed.contains("globalThis.__SUPERCOV_DIRECT_RUNTIME__") {
+                continue;
+            }
+            assert!(
+                self_bootstraps(&transformed),
+                "{} reads the runtime off a global but cannot install it",
+                file
+            );
+        }
+    }
+
+    /// A package-manager command reaches the unit runner through a script;
+    /// the mode still belongs to the command, not the config file.
+    #[test]
+    fn a_browser_config_does_not_suppress_the_loader_behind_a_package_script() {
+        let source = "export function value(a: boolean, b: boolean): number {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        let source_root = temporary("script-browser-config-source");
+        let workspace = temporary("script-browser-config-workspace");
+        for root in [&source_root, &workspace] {
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join("tests/e2e")).unwrap();
+            fs::write(root.join("src/example.ts"), source).unwrap();
+            fs::write(
+                root.join("tests/e2e/playwright.config.ts"),
+                "export default {};\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("package.json"),
+                "{\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        let project = discover_coverage_project(
+            &source_root,
+            &BTreeMap::new(),
+            &["npm".into(), "test".into()],
+        )
+        .unwrap();
+        assert!(project.playwright_config.is_some());
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
+        assert!(
+            transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
+            "`npm test` runs node --test, but the Playwright config suppressed the loader"
+        );
+    }
+
+    /// The same rule for a config a caller names through the environment
+    /// rather than one the discovery finds in `tests/`.
+    #[test]
+    fn a_configured_browser_config_does_not_suppress_the_loader_for_a_unit_test_command() {
+        let source = "export function value(a: boolean, b: boolean): number {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "SUPERCOV_PLAYWRIGHT_CONFIG".into(),
+            "tests/e2e/playwright.config.ts".into(),
+        );
+        let (_, workspace, project) = frontend_beside_a_browser_config(
+            &["node", "--test"],
+            "example.ts",
+            source,
+            &environment,
+        );
+        assert!(project.playwright_config.is_some());
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
+        assert!(
+            transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
+            "a configured Playwright config beside a unit-test command left the source without a loader"
+        );
+    }
+
+    /// A real browser command must still give every source a runtime: the
+    /// inline copy a page loads, because `bootstrap.cjs` is not there to run.
+    /// TypeScript declarations are typed whatever the project's images are,
+    /// and asking for the untyped form skipped the copy for every `.ts`
+    /// file in a browser project with no Dockerfile.
+    #[test]
+    fn a_browser_command_gives_typescript_sources_a_runtime() {
+        let source = "export function value(a: boolean, b: boolean): number {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        for name in ["example.ts", "example.tsx", "example.mts", "example.cts"] {
+            let (_, workspace, project) = frontend_beside_a_browser_config(
+                &["npx", "playwright", "test"],
+                name,
+                source,
+                &BTreeMap::new(),
+            );
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+            let transformed = fs::read_to_string(workspace.join("src").join(name)).unwrap();
+            assert!(
+                transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
+                "{name}: a TypeScript browser source needs its inline fallback; first line: {}",
+                transformed
+                    .lines()
+                    .nth(2)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect::<String>()
+            );
+        }
+    }
+
+    /// A browser suite that builds images already asks for the typed helper
+    /// declaration, so its TypeScript sources get the embedded runtime; that
+    /// path must keep working.
+    #[test]
+    fn a_browser_command_with_images_gives_typescript_sources_a_runtime() {
+        let source = "export function value(a: boolean, b: boolean): number {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        let (_, workspace, project) = frontend_beside_a_browser_config(
+            &["npx", "playwright", "test"],
+            "example.ts",
+            source,
+            &BTreeMap::new(),
+        );
+        fs::write(workspace.join("Dockerfile"), "FROM scratch\n").unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
+        assert!(
+            transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
+            "a TypeScript source in an image-building browser suite cannot install the runtime"
+        );
+    }
+
+    /// The other half of the rule: a JavaScript source in a real browser
+    /// suite carries the embedded runtime and guards its host loader from
+    /// executing `Function` in a page.
+    #[test]
+    fn a_browser_command_gives_javascript_sources_a_guarded_loader_and_inline_runtime() {
+        let source = "export function value(a, b) {\n  if (a || b) return 1;\n  return 0;\n}\n";
+        let (_, workspace, project) = frontend_beside_a_browser_config(
+            &["npx", "playwright", "test"],
+            "example.mjs",
+            source,
+            &BTreeMap::new(),
+        );
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        let transformed = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
+        assert!(
+            transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
+            "a browser suite's JavaScript source lost its embedded runtime"
+        );
+        assert!(
+            transformed.contains("if (globalThis.process?.versions?.node)"),
+            "the host loader must be guarded in browser contexts"
+        );
+    }
+
+    /// A unit-test project with no browser config keeps the loader: the
+    /// guard for the tests above must not simply remove the condition.
+    #[test]
+    fn a_unit_test_project_keeps_the_loader_without_a_browser_config() {
+        let workspace = temporary("no-browser-config");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        fs::write(
+            workspace.join("src/example.ts"),
+            "export function value(a: boolean, b: boolean): number {\n  if (a || b) return 1;\n  return 0;\n}\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("package.json"), "{\"type\":\"module\"}\n").unwrap();
+        let project = discover_coverage_project(
+            &workspace,
+            &BTreeMap::new(),
+            &["node".into(), "--test".into()],
+        )
+        .unwrap();
+        assert!(project.playwright_config.is_none());
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
+        assert!(transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START));
+    }
+
     #[test]
     fn runtime_isolation_replaces_only_the_assignment_marker() {
         let source = concat!(
@@ -2674,7 +2978,7 @@ mod tests {
         // No runtime to load, or no helper to load it before: nothing goes in.
         let mut unprobed = output.clone();
         unprobed.runtime = None;
-        bootstrap_loader(&mut unprobed, Path::new("src/a.ts"));
+        bootstrap_loader(&mut unprobed, Path::new("src/a.ts"), false);
         assert_eq!(unprobed.code, output.code);
         bootstrap_runtime(&mut unprobed, "runtime", false, false);
         assert_eq!(unprobed.code, output.code);
@@ -2682,12 +2986,12 @@ mod tests {
         let begin = helperless.runtime.as_ref().unwrap().mcdc_begin.clone();
         helperless.code = helperless.code.replace(&begin, "renamed");
         let before = helperless.code.clone();
-        bootstrap_loader(&mut helperless, Path::new("src/a.ts"));
+        bootstrap_loader(&mut helperless, Path::new("src/a.ts"), false);
         assert_eq!(helperless.code, before);
         // Past the last line the map has, the map has nothing to move.
         output.map.as_mut().unwrap()["mappings"] = serde_json::Value::from("");
         output.code = format!("\n\n\n{}", output.code);
-        bootstrap_loader(&mut output, Path::new("src/a.ts"));
+        bootstrap_loader(&mut output, Path::new("src/a.ts"), false);
         assert_eq!(output.map.as_ref().unwrap()["mappings"], "");
         assert!(
             output

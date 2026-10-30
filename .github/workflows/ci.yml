@@ -64,6 +64,34 @@ jobs:
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
 
+  # Bun ignores the Node preload, so verify source bootstrapping with the
+  # reported version and an older Bun release on both host platforms.
+  bun-bootstrap:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        bun: [1.2.17, 1.4.4]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bun-bootstrap
+      - run: cargo test -p supercov --test cli bun_
+        env:
+          SUPERCOV_REQUIRE_BUN: "1"
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
+
   # `cargo fmt` and clippy, once: each Node's check job ran them again.
   lint:
     runs-on: ubuntu-latest
@@ -148,6 +176,10 @@ jobs:
       - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} 4
         env:
           SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
+      - if: matrix.group == 1
+        run: cargo test -p supercov --test cli a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test
+        env:
+          SUPERCOV_REQUIRE_BROWSER: "1"
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
