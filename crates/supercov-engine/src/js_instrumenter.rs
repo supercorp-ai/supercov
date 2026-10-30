@@ -11438,6 +11438,13 @@ export function shapes(n: number): unknown {
             assert_eq!(output.assertions, 1, "{}", output.code);
             assert_eq!(output.capability_imports, 0, "{}", output.code);
         }
+        // A namespace also exports non-assertion APIs. A mock's ordinary
+        // toString call must stay untouched beside a real expect matcher.
+        let output = instrument_node_assertion_phases(
+            "import * as suite from 'bun:test'; suite.mock(() => 1).toString(); suite.expect(value()).toBe(1);",
+            "tests/value.test.ts",
+        ).unwrap();
+        assert_eq!(output.assertions, 1, "{}", output.code);
         let output = instrument_node_assertion_phases("import { expect } from 'bun:test'; function unrelated(expect) { expect(value()).toBe(1); }", "tests/value.test.ts").unwrap();
         assert_eq!(output.assertions, 0);
         for source in [
