@@ -200,8 +200,9 @@ its settings with paths moved to the guest's mount, and the guest's coverage is
 credited to the test that launched it. A guest started any other way, with none
 of those settings, still runs the instrumented code: it reads the run's
 settings from the mounted workspace itself, and its coverage counts for the run
-as background coverage, credited to no test. The run summary's `Guests` line
-says how many processes did that.
+as background coverage, credited to no test. The run summary's `Unattributed`
+line counts processes whose coverage has no named test identity. Local processes
+can also appear here; this count does not establish container or VM execution.
 
 Dependencies stay out of the instrumented copy. The root `node_modules` is
 linked entry by entry to the project's own, so an environment that mounts the
