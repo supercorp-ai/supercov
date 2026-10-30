@@ -411,3 +411,4 @@ Ask questions, share what you measured, and talk to the people building Supercov
 - [@Uhbif2](https://github.com/Uhbif2)
 - [@maik-intellicoach](https://github.com/maik-intellicoach)
 - [@untitaker](https://github.com/untitaker)
+- [@artile](https://github.com/artile)

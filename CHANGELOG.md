@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.22.0
+
+**Added**
+
+- Native `bun:test` coverage attribution for individual test bodies, including async and concurrent tests, parameterized rows, and done callbacks. Lifecycle hooks are recorded separately as setup. Existing Bun options and configured preloads are preserved. Callback outcomes and native Bun verdict limitations are described in [supported suites](https://github.com/supercorp-ai/supercov/blob/v4.22.0/docs/supported-suites.md#bun).
+
+**Fixed**
+
+- Instrumented application modules initialize the runtime before their first probe under `bun test`, including projects with browser configs, nested frontends, aliases and preloads. TypeScript browser sources also receive the runtime fallback without requiring a Dockerfile. Native `bun test` no longer selects an unrelated browser runner from an unused package script ([#176](https://github.com/supercorp-ai/supercov/issues/176)).
+- Coverage without test attribution no longer implies that a process ran in a container or VM. Interrupted Bun callbacks retain their named coverage and assertion-phase metadata with an unknown outcome ([#177](https://github.com/supercorp-ai/supercov/issues/177)).
+- Concurrent Docker container creation no longer interleaves diagnostic journal records and loses warnings, including the warning about an image built from an earlier source copy.
+
+**Contributors**
+
+- [@artile](https://github.com/artile)
+
 ## 4.21.0
 
 **Added**
