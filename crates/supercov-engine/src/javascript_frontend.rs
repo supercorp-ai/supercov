@@ -1181,11 +1181,42 @@ pub fn builds_images(root: &Path) -> bool {
             })
 }
 
+const SHARED_BROWSER_RUNTIME: &str = "browser-runtime.mjs";
+
+/// The shared fallback runtime: what the inline copy runs, once per page. In
+/// Node the preload and the bootstrap loader install the runtime with the
+/// run's settings, and this module, evaluated before a source's own body,
+/// would come first, so there it does nothing.
+fn shared_browser_runtime_source(runtime_source: &str) -> String {
+    let export_start = runtime_source
+        .rfind("\nexport {")
+        .expect("the runtime lists its exports");
+    format!(
+        "if (!globalThis.process?.versions?.node) (() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} if (globalThis.__supercovRuntime == null) globalThis.__supercovRuntime = globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
+        &runtime_source[..export_start]
+    )
+}
+
+/// Whether a source is an ES module, which can import the shared runtime.
+fn is_es_module(path: &Path, code: &str) -> bool {
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("mjs" | "mts") => true,
+        Some("cjs" | "cts") => false,
+        _ => code.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("import ")
+                || line.starts_with("import{")
+                || line.starts_with("export ")
+        }),
+    }
+}
+
 fn bootstrap_runtime(
     output: &mut crate::js_instrumenter::CandidateOutput,
     runtime_source: &str,
     browser_suite: bool,
     images: bool,
+    shared: Option<&str>,
 ) {
     let Some(binding) = output.runtime.as_ref() else {
         return;
@@ -1220,10 +1251,13 @@ fn bootstrap_runtime(
     let offset = output.code[..found]
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
-    let prelude = format!(
-        "(() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} if (globalThis.__supercovRuntime == null) globalThis.__supercovRuntime = globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
-        &runtime_source[..export_start]
-    );
+    let prelude = match shared {
+        Some(specifier) => format!("import {specifier:?};\n"),
+        None => format!(
+            "(() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} if (globalThis.__supercovRuntime == null) globalThis.__supercovRuntime = globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
+            &runtime_source[..export_start]
+        ),
+    };
     let line = output.code[..offset].matches('\n').count();
     let added = prelude.matches('\n').count();
     edit_mappings(&mut output.map, |mappings| {
@@ -1678,6 +1712,17 @@ pub fn prepare_javascript_frontend(
     // browser even when the measured command is a unit-test runner.
     let browser_suite = project.playwright_config.is_some() || project.browser_runner;
     let images = builds_images(workspace);
+    // Experiment: one copy of the browser fallback runtime that ES modules
+    // import, instead of a copy inlined in every source.
+    let shared_browser_runtime = browser_suite
+        && std::env::var("SUPERCOV_SHARED_BROWSER_RUNTIME").is_ok_and(|value| value == "1");
+    if shared_browser_runtime {
+        let path = runtime_directory.join(SHARED_BROWSER_RUNTIME);
+        atomic_write(
+            &path,
+            shared_browser_runtime_source(&standalone_runtime).as_bytes(),
+        )?;
+    }
     let mut authored = BTreeSet::new();
     let sources_started = Instant::now();
     for file in &project.source_files {
@@ -1750,7 +1795,15 @@ pub fn prepare_javascript_frontend(
         // Host processes need the settings-aware loader first; browser pages
         // and workers fall back to the embedded runtime when no preload exists.
         bootstrap_loader(&mut output, relative, browser_suite);
-        bootstrap_runtime(&mut output, &standalone_runtime, browser_suite, images);
+        let shared = (shared_browser_runtime && is_es_module(&path, &output.code))
+            .then(|| runtime_specifier(relative, SHARED_BROWSER_RUNTIME));
+        bootstrap_runtime(
+            &mut output,
+            &standalone_runtime,
+            browser_suite,
+            images,
+            shared.as_deref(),
+        );
         keep_directives_first(&source, &mut output);
         // The command can compile TypeScript itself (`npm test` may begin
         // with `tsc`), and a probe's own code is not the project's to have
@@ -3021,7 +3074,7 @@ mod tests {
         unprobed.runtime = None;
         bootstrap_loader(&mut unprobed, Path::new("src/a.ts"), false);
         assert_eq!(unprobed.code, output.code);
-        bootstrap_runtime(&mut unprobed, "runtime", false, false);
+        bootstrap_runtime(&mut unprobed, "runtime", false, false, None);
         assert_eq!(unprobed.code, output.code);
         let mut helperless = output.clone();
         let begin = helperless.runtime.as_ref().unwrap().mcdc_begin.clone();
@@ -3046,6 +3099,7 @@ mod tests {
             "const runtime = 1;\nexport { runtime };\n",
             true,
             true,
+            None,
         );
         assert_eq!(runtime_only.map.as_ref().unwrap()["mappings"], "");
         assert!(runtime_only.code.contains("const runtime = 1;"));
