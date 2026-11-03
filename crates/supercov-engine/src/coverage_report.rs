@@ -127,7 +127,11 @@ pub struct LogicalSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RuntimeSnapshotWire"
+)]
 pub struct RuntimeSnapshot {
     #[serde(default)]
     pub decisions: Vec<DecisionSnapshot>,
@@ -144,6 +148,122 @@ pub struct RuntimeSnapshot {
     /// of the evidence. The analysis reads it exactly as those events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
+}
+
+/// A snapshot as a frontend writes it: its events either one record each, or
+/// as columns (`eventColumns`), which a page's thousands of hits per test make
+/// a quarter of the size. The columns decode to exactly the events they hold,
+/// so nothing that reads a snapshot sees which form it was written in.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeSnapshotWire {
+    #[serde(default)]
+    decisions: Vec<DecisionSnapshot>,
+    #[serde(default)]
+    hits: Vec<String>,
+    #[serde(default)]
+    events: Vec<RuntimeEvent>,
+    #[serde(default)]
+    event_columns: Option<EventColumns>,
+    #[serde(default)]
+    logicals: Vec<LogicalSnapshot>,
+    #[serde(default)]
+    phase_id: Option<String>,
+}
+
+/// Events by column. `type`, `phase` and `environment` index the tables of
+/// their names (a phase of -1 is none), `t` holds each timestamp as its
+/// difference from the one before it (the first from 0), and `vector` holds
+/// each decision event's vector under its position.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EventColumns {
+    types: Vec<String>,
+    phases: Vec<String>,
+    environments: Vec<String>,
+    id: Vec<String>,
+    #[serde(rename = "type")]
+    event_type: Vec<usize>,
+    phase: Vec<i64>,
+    environment: Vec<usize>,
+    t: Vec<i64>,
+    #[serde(default)]
+    vector: BTreeMap<usize, McdcVector>,
+}
+
+impl EventColumns {
+    fn decode(self) -> Result<Vec<RuntimeEvent>, String> {
+        let count = self.id.len();
+        if [
+            self.event_type.len(),
+            self.phase.len(),
+            self.environment.len(),
+            self.t.len(),
+        ]
+        .iter()
+        .any(|length| *length != count)
+        {
+            return Err("event columns of different lengths".into());
+        }
+        let mut vectors = self.vector;
+        let mut timestamp = 0_i64;
+        let mut events = Vec::with_capacity(count);
+        for (index, id) in self.id.into_iter().enumerate() {
+            timestamp = timestamp
+                .checked_add(self.t[index])
+                .ok_or("an event timestamp overflows")?;
+            let event_type = self
+                .types
+                .get(self.event_type[index])
+                .ok_or("an event type outside its table")?
+                .clone();
+            let phase_id = match self.phase[index] {
+                -1 => None,
+                phase => Some(
+                    usize::try_from(phase)
+                        .ok()
+                        .and_then(|phase| self.phases.get(phase))
+                        .ok_or("an event phase outside its table")?
+                        .clone(),
+                ),
+            };
+            let environment = self
+                .environments
+                .get(self.environment[index])
+                .ok_or("an event environment outside its table")?
+                .clone();
+            events.push(RuntimeEvent {
+                event_type,
+                id,
+                vector: vectors.remove(&index),
+                timestamp_ms: timestamp,
+                phase_id,
+                environment,
+            });
+        }
+        if !vectors.is_empty() {
+            return Err("an event vector without its event".into());
+        }
+        Ok(events)
+    }
+}
+
+impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
+    type Error = String;
+
+    fn try_from(wire: RuntimeSnapshotWire) -> Result<Self, Self::Error> {
+        let mut events = wire.events;
+        if let Some(columns) = wire.event_columns {
+            events.extend(columns.decode()?);
+        }
+        Ok(Self {
+            decisions: wire.decisions,
+            hits: wire.hits,
+            events,
+            logicals: wire.logicals,
+            phase_id: wire.phase_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3647,6 +3767,22 @@ impl TransportStats {
 
 #[cfg(test)]
 mod tests {
+
+    /// What the Playwright collector writes as columns (its own encoder made
+    /// this one) reads as exactly the events it was made of, in their order:
+    /// a phase or none, two environments, decisions with their vectors, and a
+    /// timestamp earlier than the one before it.
+    #[test]
+    fn columnar_events_read_as_the_events_they_were_made_of() {
+        let written: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"events":[{"type":"hit","id":"a","timestampMs":1793741378313,"phaseId":"p:1","environment":"browser"},{"type":"hit","id":"b","timestampMs":1793741378310,"environment":"browser"},{"type":"decision","id":"d","vector":{"values":[true,null,false],"outcome":true},"timestampMs":1793741378400,"phaseId":"p:2","environment":"browser"},{"type":"hit","id":"c","timestampMs":1793741378400,"phaseId":"p:1","environment":"server"},{"type":"decision","id":"d","vector":{"values":[false,null,false],"outcome":false},"timestampMs":1793741378401,"phaseId":null,"environment":"browser"}]}"#).unwrap();
+        let columnar: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"eventColumns":{"types":["hit","decision"],"phases":["p:1","p:2"],"environments":["browser","server"],"id":["a","b","d","c","d"],"type":[0,0,1,0,1],"phase":[0,-1,1,0,-1],"environment":[0,0,0,1,0],"t":[1793741378313,-3,90,0,1],"vector":{"2":{"values":[true,null,false],"outcome":true},"4":{"values":[false,null,false],"outcome":false}}}}"#).unwrap();
+        assert_eq!(columnar, written);
+        assert_eq!(columnar.events.len(), 5);
+        let uneven = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a","b"],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(uneven).is_err());
+        let stray = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"3":{"values":[true],"outcome":true}}}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(stray).is_err());
+    }
     /// No result passes or fails.
     #[test]
     fn no_result_passes_or_fails() {

@@ -1529,6 +1529,48 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
  * written to one uniquely named, one-shot evidence file in the runner's shared
  * directory as well. No test streams into this path.
  */
+/**
+ * A snapshot's events as columns (experiment: SUPERCOV_COMPACT_BROWSER_EVENTS=1).
+ * A page records each hit once per test as an event of five fields, and its
+ * thousands of them were most of a test's record. The engine decodes the
+ * columns into exactly these events, in this order.
+ */
+function columnarEvents(snapshot) {
+    const events = snapshot?.events;
+    if (process.env.SUPERCOV_COMPACT_BROWSER_EVENTS !== "1" || !Array.isArray(events) || events.length === 0)
+        return snapshot;
+    const tables = { types: new Map(), phases: new Map(), environments: new Map() };
+    const index = (table, value) => {
+        let found = table.get(value);
+        if (found === undefined) {
+            found = table.size;
+            table.set(value, found);
+        }
+        return found;
+    };
+    const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
+    let previous = 0;
+    events.forEach((event, position) => {
+        columns.id.push(event.id);
+        columns.type.push(index(tables.types, event.type));
+        columns.phase.push(event.phaseId == null ? -1 : index(tables.phases, event.phaseId));
+        columns.environment.push(index(tables.environments, event.environment));
+        columns.t.push(event.timestampMs - previous);
+        previous = event.timestampMs;
+        if (event.vector !== undefined)
+            columns.vector[position] = event.vector;
+    });
+    const { events: _events, ...rest } = snapshot;
+    return {
+        ...rest,
+        eventColumns: {
+            types: [...tables.types.keys()],
+            phases: [...tables.phases.keys()],
+            environments: [...tables.environments.keys()],
+            ...columns,
+        },
+    };
+}
 function appendEvidenceLine(serialized) {
     const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
         (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
@@ -1599,7 +1641,7 @@ const instrumentedFixtures = {
                     status: "unknown",
                     provenance: { runner: "background", kind: "background", source: "explicit" },
                     role: "background",
-                    browser: [carried],
+                    browser: [columnarEvents(carried)],
                 })}\n`);
             }
             const serverOutput = serverEvidencePath(scope);
@@ -1644,7 +1686,7 @@ const instrumentedFixtures = {
                         }),
                         phases: mergeCollectedPhases(controller.phases, directRuntime()?.takeNodeAssertionPhases(scope) ?? []),
                         ...(controller.workerEvidenceMissing ? { attribution: "partial" } : {}),
-                        browser,
+                        browser: browser.map(columnarEvents),
                         server,
                         span: [startedAtMs, endedAtMs],
                     };
