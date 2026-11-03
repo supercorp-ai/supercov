@@ -165,6 +165,10 @@ pub struct ServerRecord {
     pub record_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<DecisionMeta>,
+    /// A compact decision record's decision, by id: its metadata is the
+    /// frozen manifest's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector: Option<McdcVector>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2231,29 +2235,39 @@ fn create_coverage_view_with_model(
 
         for record in &raw.server {
             let (record_id, decision) = if record.record_type == "decision" {
-                let meta = record
-                    .meta
-                    .as_ref()
-                    .ok_or_else(|| ReportError::InvalidServerRecord("missing meta".into()))?;
                 let vector = record
                     .vector
                     .as_ref()
                     .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
-                let Some(index) = decision_indexes.get(&meta.id).copied() else {
-                    if manifest_files.contains(&meta.file) {
-                        return Err(ReportError::InvalidServerRecord(format!(
-                            "decision {} is absent from the frozen manifest",
-                            meta.id
-                        )));
+                let meta = match (&record.meta, &record.decision) {
+                    (Some(meta), _) => {
+                        let Some(index) = decision_indexes.get(&meta.id).copied() else {
+                            if manifest_files.contains(&meta.file) {
+                                return Err(ReportError::InvalidServerRecord(format!(
+                                    "decision {} is absent from the frozen manifest",
+                                    meta.id
+                                )));
+                            }
+                            continue;
+                        };
+                        if decision_metadata[index] != *meta {
+                            return Err(ReportError::InvalidServerRecord(format!(
+                                "decision {} metadata differs from the frozen manifest",
+                                meta.id
+                            )));
+                        }
+                        meta
                     }
-                    continue;
+                    // A compact record names only its decision: one the
+                    // manifest does not hold is of a file not measured.
+                    (None, Some(id)) => match decision_indexes.get(id).copied() {
+                        Some(index) => &decision_metadata[index],
+                        None => continue,
+                    },
+                    (None, None) => {
+                        return Err(ReportError::InvalidServerRecord("missing meta".into()));
+                    }
                 };
-                if decision_metadata[index] != *meta {
-                    return Err(ReportError::InvalidServerRecord(format!(
-                        "decision {} metadata differs from the frozen manifest",
-                        meta.id
-                    )));
-                }
                 let key = vector_key(vector);
                 let indexes = vector_indexes.entry(meta.id.clone()).or_default();
                 let observations = vectors_by_decision.entry(meta.id.clone()).or_default();
@@ -3185,6 +3199,43 @@ fn parse_server_json_lines<'a, T: for<'de> Deserialize<'de>>(
     parsed
 }
 
+/// An attempt's server records. A compact file names its scope on a
+/// writer's first line only, and each line without one is of the attempt of
+/// the line before it in the same file.
+fn parse_scoped_server_records<'a>(
+    entries: impl Iterator<Item = &'a EvidenceArchiveEntry>,
+) -> TolerantJsonLines<ServerRecord> {
+    let mut parsed = TolerantJsonLines {
+        records: Vec::new(),
+        corrupt_records: 0,
+        corrupt_files: 0,
+    };
+    for entry in entries {
+        let mut corrupt_here = 0;
+        let mut current: Option<ExecutionScope> = None;
+        for line in entry.contents.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice::<ServerRecord>(line) {
+                Ok(mut record) => {
+                    match &record.scope {
+                        Some(scope) => current = Some(scope.clone()),
+                        None => record.scope.clone_from(&current),
+                    }
+                    parsed.records.push(record);
+                }
+                Err(_) => corrupt_here += 1,
+            }
+        }
+        if corrupt_here > 0 {
+            parsed.corrupt_records += corrupt_here;
+            parsed.corrupt_files += 1;
+        }
+    }
+    parsed
+}
+
 fn is_mcdc_result(path: &str) -> bool {
     path == "mcdc.json" || path.ends_with("/mcdc.json")
 }
@@ -3291,7 +3342,7 @@ pub fn archive_request(
     };
     let manifest = parse_entry::<CoverageManifest>(held("manifest.json"))?;
 
-    let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+    let scoped = parse_scoped_server_records(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
             && !entry.path.starts_with("server/background/")
             && entry.path.ends_with(".jsonl")
@@ -3884,6 +3935,7 @@ mod tests {
             error: None,
         };
         let at = |timestamp: i64| ServerRecord {
+            decision: None,
             record_type: "hit".into(),
             meta: None,
             vector: None,
@@ -3969,6 +4021,7 @@ mod tests {
             result
         };
         let record = |kind: &str, id: &str, at: i64, request: Option<u64>| ServerRecord {
+            decision: None,
             record_type: kind.into(),
             meta: None,
             vector: None,
@@ -4279,6 +4332,7 @@ mod tests {
             outcome: true,
         };
         let record = |meta: Option<DecisionMeta>, vector: Option<McdcVector>| ServerRecord {
+            decision: None,
             record_type: "decision".into(),
             meta,
             vector,
@@ -5719,6 +5773,7 @@ mod tests {
         let manifest = manifest_of(Vec::new(), Vec::new());
         let mut test = raw("test", 0, "passed", &[]);
         test.server = vec![ServerRecord {
+            decision: None,
             record_type: "trace".into(),
             meta: None,
             vector: None,

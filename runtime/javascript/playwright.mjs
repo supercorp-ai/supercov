@@ -1468,6 +1468,7 @@ function executionScope(testInfo) {
     };
 }
 function readServerRecords(scope) {
+    let inherited;
     try {
         return readFileSync(serverEvidencePath(scope), "utf8")
             .split("\n")
@@ -1475,6 +1476,11 @@ function readServerRecords(scope) {
             .flatMap((line) => {
             try {
                 const record = JSON.parse(line);
+                // A compact file names its scope on a writer's first line.
+                if (record.scope)
+                    inherited = record.scope;
+                else if (inherited)
+                    record.scope = inherited;
                 return record.scope?.attemptId === scope.attemptId ? [record] : [];
             }
             catch {

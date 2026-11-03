@@ -5393,6 +5393,7 @@ mod tests {
                     error: None,
                 });
                 admin.server.push(crate::coverage_report::ServerRecord {
+                    decision: None,
                     record_type: "hit".into(),
                     meta: None,
                     vector: None,

@@ -468,6 +468,22 @@ function persistBrowser() {
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
 }
+// Experiment (SUPERCOV_COMPACT_SERVER_EVIDENCE=1): an attempt's file says
+// its scope once per writing process, and a decision names its id; the
+// engine takes the rest from the file and from the frozen manifest.
+var compactServerEvidence = typeof process !== "undefined" && process.env != null && process.env["SUPERCOV_COMPACT_SERVER_EVIDENCE"] === "1";
+var scopedPathsWritten = /* @__PURE__ */ new Set();
+function serverLine(record, path) {
+  if (!compactServerEvidence || !path)
+    return JSON.stringify(record);
+  const { scope, meta, ...rest } = record;
+  const line = meta && record.type === "decision" ? { ...rest, decision: meta.id } : meta ? { ...rest, meta } : rest;
+  if (scope && !scopedPathsWritten.has(path)) {
+    scopedPathsWritten.add(path);
+    line.scope = scope;
+  }
+  return JSON.stringify(line);
+}
 function serverRecordKey(record) {
   var _a8;
   const suffix = record.type === "decision" ? `${record.meta.id}:${vectorKey(record.vector)}` : record.id;
@@ -530,7 +546,7 @@ function flushBufferedServerEvidence(scope) {
     return void 0;
   try {
     makeEvidenceDirectory(fs, buffered.directory);
-    fs.appendFileSync(buffered.path, [...buffered.records.values()].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    fs.appendFileSync(buffered.path, [...buffered.records.values()].map((record) => serverLine(record, buffered.path)).join("\n") + "\n");
     return buffered.path;
   } catch (e) {
     return void 0;
@@ -1034,7 +1050,7 @@ function appendServer(record) {
       appendDurableBackgroundRecord(fs, runId, serialized);
       return;
     }
-    enqueueServerAppend(directory, path, JSON.stringify(serialized) + "\n", runId);
+    enqueueServerAppend(directory, path, serverLine(serialized, path) + "\n", runId);
     if (deduplicationKey)
       state.persistedServerRecords.add(deduplicationKey);
   } catch (cause) {

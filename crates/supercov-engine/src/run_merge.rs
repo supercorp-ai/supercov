@@ -78,14 +78,25 @@ pub(crate) fn rewritten_contents(
     let mut rewritten = Vec::with_capacity(contents.len());
     let mut left_out = false;
     let mut kept = false;
+    // A compact attempt file names its scope on a writer's first line only:
+    // a line without one is of the test of the line before it.
+    let mut current_test: Option<String> = None;
     for line in contents.split('\n') {
         if line.is_empty() {
             continue;
         }
-        match serde_json::from_str::<Value>(line) {
+        let parsed = serde_json::from_str::<Value>(line);
+        if let Ok(value) = &parsed
+            && value.get("scope").is_some()
+        {
+            current_test = record_test(value).map(str::to_owned);
+        }
+        match parsed {
             Ok(value)
                 if superseded.is_some_and(|tests| {
-                    record_test(&value).is_some_and(|test| tests.contains(test))
+                    record_test(&value)
+                        .or(current_test.as_deref())
+                        .is_some_and(|test| tests.contains(test))
                 }) =>
             {
                 left_out = true;
