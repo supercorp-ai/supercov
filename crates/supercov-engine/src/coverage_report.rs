@@ -3768,6 +3768,34 @@ impl TransportStats {
 #[cfg(test)]
 mod tests {
 
+    /// A run's records and the same records with their browser events as
+    /// columns read as equal records, one by one (`SUPERCOV_COLUMNS_ORIGINAL`
+    /// and `SUPERCOV_COLUMNS_CONVERTED` name the two JSONL files).
+    #[test]
+    #[ignore = "reads a real run's records from the paths in its environment"]
+    fn a_real_runs_records_read_the_same_as_columns() {
+        use std::io::BufRead;
+        let open = |name: &str| {
+            std::io::BufReader::new(std::fs::File::open(std::env::var(name).unwrap()).unwrap())
+        };
+        let (mut records, mut events) = (0, 0);
+        for (original, converted) in open("SUPERCOV_COLUMNS_ORIGINAL")
+            .lines()
+            .zip(open("SUPERCOV_COLUMNS_CONVERTED").lines())
+        {
+            let original: RawTestResult = serde_json::from_str(&original.unwrap()).unwrap();
+            let converted: RawTestResult = serde_json::from_str(&converted.unwrap()).unwrap();
+            assert_eq!(converted, original, "record {records}");
+            records += 1;
+            events += original
+                .browser
+                .iter()
+                .map(|snapshot| snapshot.events.len())
+                .sum::<usize>();
+        }
+        eprintln!("{records} records, {events} browser events, all equal");
+    }
+
     /// What the Playwright collector writes as columns (its own encoder made
     /// this one) reads as exactly the events it was made of, in their order:
     /// a phase or none, two environments, decisions with their vectors, and a
