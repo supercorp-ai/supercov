@@ -954,6 +954,17 @@ const LEAVING_BINDING = "__supercovLeaving";
  * document that left gave its evidence, and the next one on its origin
  * restored the same evidence and added to it.
  */
+/**
+ * What tells two events apart. A hit has these five fields, and building the
+ * key from them is several times cheaper than serializing it: a test's pages
+ * hand over thousands of hits each time they leave. Anything else is told
+ * apart by all it says.
+ */
+function eventIdentity(event) {
+    if (process.env.SUPERCOV_FAST_SNAPSHOT_MERGE === "1" && event?.type === "hit" && Object.keys(event).length <= 5)
+        return `hit\0${event.id}\0${event.timestampMs}\0${event.phaseId ?? ""}\0${event.environment ?? ""}`;
+    return JSON.stringify(event);
+}
 function mergeSnapshots(snapshots) {
     const hits = new Set();
     const events = new Map();
@@ -971,7 +982,7 @@ function mergeSnapshots(snapshots) {
         for (const id of snapshot?.hits ?? [])
             hits.add(id);
         for (const event of snapshot?.events ?? [])
-            events.set(JSON.stringify(event), event);
+            events.set(eventIdentity(event), event);
         for (const decision of snapshot?.decisions ?? []) {
             const entry = vectorsOf(decisions, decision.meta?.id, { meta: decision.meta });
             for (const vector of decision.vectors ?? [])
