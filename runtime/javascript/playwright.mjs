@@ -1610,7 +1610,10 @@ const instrumentedFixtures = {
                 const endedAtMs = Date.now();
                 try {
                     const browser = await controller.collectRuntimeSnapshots();
-                    const server = readServerRecords(scope);
+                    // The engine joins the attempt's server file to this
+                    // record by its scope as it reads the run, so a copy here
+                    // only doubled the run's evidence (experiment flag).
+                    const server = process.env.SUPERCOV_NO_EMBEDDED_SERVER === "1" ? [] : readServerRecords(scope);
                     // Emit an artifact even when this test touched no application source.
                     // A complete test-to-coverage matrix must also identify tests that are
                     // removable without changing coverage.
