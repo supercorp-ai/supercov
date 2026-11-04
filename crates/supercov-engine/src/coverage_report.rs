@@ -2203,13 +2203,6 @@ fn create_coverage_view_with_model(
             );
         }
 
-        let correlate = |event: &RuntimeEvent| {
-            event
-                .phase_id
-                .clone()
-                .or_else(|| phase_at(&ordered_phases, event.timestamp_ms).map(str::to_owned))
-        };
-
         let snapshots = raw
             .runtime
             .iter()
@@ -2363,96 +2356,95 @@ fn create_coverage_view_with_model(
             }
         }
 
+        // A record's ids and vector are borrowed, not copied into an event
+        // of their own: a run's millions of server records each made four
+        // or five strings here.
         for record in &raw.server {
-            let (record_id, decision) = if record.record_type == "decision" {
-                let vector = record
-                    .vector
-                    .as_ref()
-                    .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
-                let meta = match (&record.meta, &record.decision) {
-                    (Some(meta), _) => {
-                        let Some(index) = decision_indexes.get(&meta.id).copied() else {
-                            if manifest_files.contains(&meta.file) {
+            let (record_id, decision): (&str, Option<&McdcVector>) =
+                if record.record_type == "decision" {
+                    let vector = record
+                        .vector
+                        .as_ref()
+                        .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
+                    let meta = match (&record.meta, &record.decision) {
+                        (Some(meta), _) => {
+                            let Some(index) = decision_indexes.get(&meta.id).copied() else {
+                                if manifest_files.contains(&meta.file) {
+                                    return Err(ReportError::InvalidServerRecord(format!(
+                                        "decision {} is absent from the frozen manifest",
+                                        meta.id
+                                    )));
+                                }
+                                continue;
+                            };
+                            if decision_metadata[index] != *meta {
                                 return Err(ReportError::InvalidServerRecord(format!(
-                                    "decision {} is absent from the frozen manifest",
+                                    "decision {} metadata differs from the frozen manifest",
                                     meta.id
                                 )));
                             }
-                            continue;
-                        };
-                        if decision_metadata[index] != *meta {
-                            return Err(ReportError::InvalidServerRecord(format!(
-                                "decision {} metadata differs from the frozen manifest",
-                                meta.id
-                            )));
+                            meta
                         }
-                        meta
-                    }
-                    // A compact record names only its decision: one the
-                    // manifest does not hold is of a file not measured.
-                    (None, Some(id)) => match decision_indexes.get(id).copied() {
-                        Some(index) => &decision_metadata[index],
-                        None => continue,
-                    },
-                    (None, None) => {
-                        return Err(ReportError::InvalidServerRecord("missing meta".into()));
-                    }
-                };
-                let key = vector_key(vector);
-                let indexes = vector_indexes.entry(meta.id.clone()).or_default();
-                let observations = vectors_by_decision.entry(meta.id.clone()).or_default();
-                let index = *indexes.entry(key).or_insert_with(|| {
-                    observations.push(MutableObservation {
-                        vector: vector.clone(),
-                        tests: Vec::new(),
-                        phases: Vec::new(),
-                        explicit_phases: Vec::new(),
+                        // A compact record names only its decision: one the
+                        // manifest does not hold is of a file not measured.
+                        (None, Some(id)) => match decision_indexes.get(id).copied() {
+                            Some(index) => &decision_metadata[index],
+                            None => continue,
+                        },
+                        (None, None) => {
+                            return Err(ReportError::InvalidServerRecord("missing meta".into()));
+                        }
+                    };
+                    let key = vector_key(vector);
+                    let indexes = hash_slot(&mut vector_indexes, &meta.id);
+                    let observations = hash_slot(&mut vectors_by_decision, &meta.id);
+                    let index = *indexes.entry(key).or_insert_with(|| {
+                        observations.push(MutableObservation {
+                            vector: vector.clone(),
+                            tests: Vec::new(),
+                            phases: Vec::new(),
+                            explicit_phases: Vec::new(),
+                        });
+                        observations.len() - 1
                     });
-                    observations.len() - 1
-                });
-                observations[index]
-                    .tests
-                    .push(tests_by_hit.number(&id, ids));
-                tests_by_id
-                    .get_mut(&id)
-                    .expect("registered test")
-                    .decisions
-                    .entry(meta.id.clone())
-                    .or_default()
+                    observations[index]
+                        .tests
+                        .push(tests_by_hit.number(&id, ids));
+                    tree_slot(
+                        &mut tests_by_id.get_mut(&id).expect("registered test").decisions,
+                        &meta.id,
+                    )
                     .insert(vector);
-                hash_slot(&mut tests_by_decision, &meta.id).push(tests_by_hit.number(&id, ids));
-                (meta.id.clone(), Some(vector.clone()))
-            } else if record.record_type == "hit" {
-                let hit = record
-                    .id
-                    .as_ref()
-                    .ok_or_else(|| ReportError::InvalidServerRecord("missing hit id".into()))?;
-                let number = hit_ids.number(hit, ids);
-                tests_by_hit.add(number, &id, ids);
-                tests_by_id
-                    .get_mut(&id)
-                    .expect("registered test")
-                    .hits
-                    .push(number);
-                (hit.clone(), None)
-            } else {
-                return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
-            };
+                    hash_slot(&mut tests_by_decision, &meta.id).push(tests_by_hit.number(&id, ids));
+                    (meta.id.as_str(), Some(vector))
+                } else if record.record_type == "hit" {
+                    let hit = record
+                        .id
+                        .as_ref()
+                        .ok_or_else(|| ReportError::InvalidServerRecord("missing hit id".into()))?;
+                    let number = hit_ids.number(hit, ids);
+                    tests_by_hit.add(number, &id, ids);
+                    tests_by_id
+                        .get_mut(&id)
+                        .expect("registered test")
+                        .hits
+                        .push(number);
+                    (hit.as_str(), None)
+                } else {
+                    return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
+                };
             let Some(timestamp_ms) = record.timestamp_ms else {
                 continue;
             };
-            let event = RuntimeEvent {
-                event_type: record.record_type.clone(),
-                id: record_id,
-                vector: decision,
-                timestamp_ms,
-                phase_id: record.phase_id.clone(),
-                environment: "server".into(),
+            let explicit = record.phase_id.is_some();
+            let Some(phase_id) = record
+                .phase_id
+                .as_deref()
+                .or_else(|| phase_at(&ordered_phases, timestamp_ms))
+            else {
+                continue;
             };
-            let explicit = event.phase_id.is_some();
-            let phase_id = correlate(&event);
-            let Some(phase_id) = phase_id else { continue };
-            let Some(phase) = phases_by_id.get_mut(phase_id.as_str()) else {
+            let Some(phase) = phases_by_id.get_mut(phase_id) else {
                 continue;
             };
             phase.server_events += 1;
@@ -2465,30 +2457,24 @@ fn create_coverage_view_with_model(
             }
             // A record is a hit or a decision, and only a decision carries a
             // vector.
-            let Some(vector) = &event.vector else {
-                let hit = hit_ids.number(&event.id, ids);
+            let Some(vector) = decision else {
+                let hit = hit_ids.number(record_id, ids);
                 phase.hits.push(hit);
-                phases_by_hit.add(hit, &phase_id, ids);
+                phases_by_hit.add(hit, phase_id, ids);
                 if explicit {
-                    explicit_phases_by_hit.add(hit, &phase_id, ids);
+                    explicit_phases_by_hit.add(hit, phase_id, ids);
                 }
                 continue;
             };
-            phase
-                .decisions
-                .entry(event.id.clone())
-                .or_default()
-                .insert(vector);
+            tree_slot(&mut phase.decisions, record_id).insert(vector);
             let observation =
-                observation_of(&vector_indexes, &mut vectors_by_decision, &event.id, vector)
+                observation_of(&vector_indexes, &mut vectors_by_decision, record_id, vector)
                     .expect("the record registered its vector above");
-            observation
-                .phases
-                .push(phases_by_hit.number(&phase_id, ids));
+            observation.phases.push(phases_by_hit.number(phase_id, ids));
             if explicit {
                 observation
                     .explicit_phases
-                    .push(explicit_phases_by_hit.number(&phase_id, ids));
+                    .push(explicit_phases_by_hit.number(phase_id, ids));
             }
         }
     }
