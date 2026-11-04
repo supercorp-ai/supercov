@@ -276,8 +276,9 @@ function activateProbeV2Key(key, force = false) {
 }
 // The async hook activates the current request's context before every
 // callback the server runs, and building its key and looking it up was most of
-// a Next server's time in the hook. A context object is never changed once
-// made, so each keeps the epoch it was given until the epochs are cleared.
+// a Next server's time in the hook. A request's context object is never
+// changed once made, and its key is made of it alone, so each keeps the epoch
+// it was given until the epochs are cleared.
 // Every copy of the runtime in a process shares one state, and the hook is the
 // first copy's, so the cache and its generation live on that state too: a
 // reset from another copy has to reach them.
@@ -285,6 +286,10 @@ var emptyProbeV2Context = Object.freeze({});
 // Experiment (SUPERCOV_SLOW_PATHS=1): the old per-callback and per-request work, for an A/B.
 var slowPaths = typeof process !== "undefined" && process.env != null && process.env["SUPERCOV_SLOW_PATHS"] === "1";
 function activateProbeV2Context(context) {
+  // Work no request owns is keyed by the test running when it runs, which
+  // changes under the same context: only a request's context keeps its epoch.
+  if (!context.scope)
+    return activateProbeV2Key(probeV2ContextKey(context));
   if (state.probeV2ContextEpochCache === void 0) {
     state.probeV2ContextEpochCache = /* @__PURE__ */ new WeakMap();
     state.probeV2EpochGeneration = 0;

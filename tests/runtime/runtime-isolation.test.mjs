@@ -236,3 +236,24 @@ test("a reset from another copy of the runtime reaches the async hook's epochs",
   `);
   assert.deepEqual(recorded, ["a-0:phase:1"], "a hit after the other copy's reset is recorded again");
 });
+
+test("work outside any request is recorded again for each test", () => {
+  // Work no request owns is keyed by the test running when it runs: a timer
+  // the server set records again, at a new epoch, for each new test.
+  const recorded = run(`
+    delete process.env.SUPERCOV_RUN_ID;
+    const file = runtime.registerProbeV2({ pointIds: ["background"], decisions: [] });
+    const tick = () => new Promise((done) => setTimeout(done, 1));
+    const epochs = [];
+    globalThis.__SUPERCOV_MCDC_TEST_ID__ = "first";
+    await tick();
+    runtime.coverageHitV2(file, 0);
+    epochs.push(file.hitEpochs[0]);
+    globalThis.__SUPERCOV_MCDC_TEST_ID__ = "second";
+    await tick();
+    runtime.coverageHitV2(file, 0);
+    epochs.push(file.hitEpochs[0]);
+    console.log(JSON.stringify(epochs));
+  `);
+  assert.notEqual(recorded[1], recorded[0], "the second test's hit is recorded at its own epoch");
+});
