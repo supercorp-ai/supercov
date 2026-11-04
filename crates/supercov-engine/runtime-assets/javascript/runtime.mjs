@@ -283,8 +283,6 @@ function activateProbeV2Key(key, force = false) {
 // first copy's, so the cache and its generation live on that state too: a
 // reset from another copy has to reach them.
 var emptyProbeV2Context = Object.freeze({});
-// Experiment (SUPERCOV_SLOW_PATHS=1): the old per-callback and per-request work, for an A/B.
-var slowPaths = typeof process !== "undefined" && process.env != null && process.env["SUPERCOV_SLOW_PATHS"] === "1";
 function activateProbeV2Context(context) {
   // Work no request owns is keyed by the test running when it runs, which
   // changes under the same context: only a request's context keeps its epoch.
@@ -295,7 +293,7 @@ function activateProbeV2Context(context) {
     state.probeV2EpochGeneration = 0;
   }
   const cached = state.probeV2ContextEpochCache.get(context);
-  if (!slowPaths && cached !== void 0 && cached.generation === state.probeV2EpochGeneration) {
+  if (cached !== void 0 && cached.generation === state.probeV2EpochGeneration) {
     state.probeV2Clock.epoch = cached.epoch;
     return cached.epoch;
   }
@@ -1693,13 +1691,11 @@ function noteSupport(scope) {
         // each is looked at once, whether it is noted or not.
         if (supportNoted.modules.has(name))
           continue;
+        supportNoted.modules.add(name);
         // The copy lives under `.supercov/`: the project root decides.
         const inside = name.indexOf(root) === 0 ? name.slice(root.length).replace(/^[\\/]/, "") : "";
-        if (!slowPaths)
-          supportNoted.modules.add(name);
         if (inside === "" || /^\.supercov[\\/]/.test(inside) || /(?:^|[\\/])node_modules[\\/]/.test(inside))
           continue;
-        supportNoted.modules.add(name);
         lines.push({ loaded: name });
       }
     }
