@@ -390,7 +390,7 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
         };
         let removal = crate::fault::io("trash-remove", io::ErrorKind::NotFound, || {
             if metadata.file_type().is_dir() {
-                fs::remove_dir_all(&path)
+                remove_tree(&path)
             } else {
                 fs::remove_file(&path)
             }
@@ -985,7 +985,6 @@ pub(crate) fn publish_run_with_fault(
     if fs::symlink_metadata(&staging).is_ok() {
         clear_staging(root, &staging)?;
     }
-    crate::coverage_report::stage("begin");
     let evidence_sha256 = file_sha256(evidence_source)?;
     fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
     let copied = copy_regular_file(evidence_source, &staging.join("evidence.raw.gz"))?;
@@ -1007,7 +1006,6 @@ pub(crate) fn publish_run_with_fault(
         clear_staging(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
-    crate::coverage_report::stage("hash, copy, hash");
     let mut json = serde_json::to_vec_pretty(metadata).expect("plain data serializes");
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
@@ -1033,7 +1031,6 @@ pub(crate) fn publish_run_with_fault(
     } else {
         crate::run_store::analyze_stored_run(&staged).ok()
     };
-    crate::coverage_report::stage("analysed");
     let archived_inputs = match archived
         .inputs
         .map(|manifest| {
@@ -1099,7 +1096,6 @@ pub(crate) fn publish_run_with_fault(
         }
         prepared
     });
-    crate::coverage_report::stage("index and manifest");
     // Everything publication derives from the analysis is written. It is
     // gigabytes of small allocations on a large run, and freeing them is
     // nobody's wait.
@@ -1544,6 +1540,72 @@ pub(crate) fn test_run_metadata(id: &str, bytes: u64) -> RunMetadata {
         recorded_by: None,
         companions: None,
     }
+}
+
+/// `fs::remove_dir_all`, the tree split into parts removed side by side. A
+/// run's workspace copy, a project's build output and all, is hundreds of
+/// thousands of files: one thread unlinking them was most of the ten
+/// seconds a run waits at its end for the trash to empty.
+fn remove_tree(root: &Path) -> io::Result<()> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(16);
+    let gone = |result: io::Result<()>| match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    // Breadth first, a few levels down, until there are parts enough.
+    let mut parts = Vec::<(PathBuf, bool)>::new();
+    let mut directories = vec![root.to_owned()];
+    for _ in 0..4 {
+        if threads <= 1 || directories.len() >= threads * 4 {
+            break;
+        }
+        let mut below = Vec::new();
+        for directory in directories {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let entry = entry?;
+                // Not followed: a link is removed, not what it names.
+                if fs::file_type(&entry)?.is_dir() {
+                    below.push(entry.path());
+                } else {
+                    parts.push((entry.path(), false));
+                }
+            }
+        }
+        directories = below;
+    }
+    parts.extend(directories.into_iter().map(|directory| (directory, true)));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers = (0..threads.min(parts.len()).max(1))
+            .map(|_| {
+                scope.spawn(|| -> io::Result<()> {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((path, directory)) = parts.get(index) else {
+                            return Ok(());
+                        };
+                        gone(if *directory {
+                            fs::remove_dir_all(path)
+                        } else {
+                            fs::remove_file(path)
+                        })?;
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .try_for_each(|worker| worker.join().unwrap_or_else(crate::threads::rethrow))
+    })?;
+    // What is left is the directories the parts were in.
+    gone(fs::remove_dir_all(root))
 }
 
 #[cfg(test)]
