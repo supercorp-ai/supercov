@@ -3843,11 +3843,19 @@ fn release_leaked_phases(raw_results: &mut [RawTestResult]) {
             .iter()
             .map(|phase| phase.id.clone())
             .collect::<BTreeSet<_>>();
-        let leaked = |phase: &mut Option<String>| {
-            if phase
-                .as_ref()
-                .is_some_and(|id| !own.contains(id) && declared.contains(id))
-            {
+        // Events come in runs of one phase: the last id's answer is kept.
+        let mut last = None::<(String, bool)>;
+        let mut leaked = |phase: &mut Option<String>| {
+            let Some(id) = phase.as_ref() else { return };
+            let leaks = match &last {
+                Some((known, leaks)) if known == id => *leaks,
+                _ => {
+                    let leaks = !own.contains(id) && declared.contains(id);
+                    last = Some((id.clone(), leaks));
+                    leaks
+                }
+            };
+            if leaks {
                 *phase = None;
             }
         };
