@@ -1132,9 +1132,16 @@ if (generatedPlaywrightConfig &&
     }
     process.argv.push("--config", generatedPlaywrightConfig);
 }
+// Experiment (SUPERCOV_WORKERS_ONLY_WRAPPER=1): only a test worker, which
+// Playwright starts with TEST_WORKER_INDEX, loads the wrapper. Every process
+// the runner starts inherits SUPERCOV_INSIDE_PLAYWRIGHT: the app server and
+// each mock server loaded Playwright and the collector, 190 ms before their
+// first line, and a server Playwright waits on missed its first look.
+const workersOnlyWrapper = process.env.SUPERCOV_WORKERS_ONLY_WRAPPER === "1";
 if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
     !isPlaywrightEntrypoint &&
+    (!workersOnlyWrapper || process.env.TEST_WORKER_INDEX !== undefined) &&
     process.env.SUPERCOV_INSIDE_VITEST !== "1" &&
     process.env.VITEST !== "true") {
     const target = playwrightTarget ?? "@playwright/test";
