@@ -2084,6 +2084,39 @@ fn whole_files_unmeasured(manifest: &CoverageManifest) -> Option<CoverageManifes
     Some(manifest)
 }
 
+/// `items.into_iter().map(work)`, a share of the items on each core, in
+/// order: each test's and phase's result is made from its own hits alone.
+fn map_in_parallel<T: Send, R: Send>(items: Vec<T>, work: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(items.len().div_ceil(64))
+        .max(1);
+    if threads == 1 {
+        return items.into_iter().map(work).collect();
+    }
+    let chunk = items.len().div_ceil(threads);
+    let mut parts = Vec::with_capacity(threads);
+    let mut items = items.into_iter();
+    loop {
+        let part = items.by_ref().take(chunk).collect::<Vec<_>>();
+        if part.is_empty() {
+            break;
+        }
+        parts.push(part);
+    }
+    let work = &work;
+    std::thread::scope(|scope| {
+        let handles = parts
+            .into_iter()
+            .map(|part| scope.spawn(move || part.into_iter().map(work).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
+            .collect()
+    })
+}
+
 /// Each number once: a test's or phase's hits name a point at each event
 /// that reached it, often thousands of times, and what is built from them
 /// names each point once.
@@ -2849,38 +2882,38 @@ fn create_coverage_view_with_model(
             .collect::<Vec<_>>()
     };
     test_order.sort_by(|left, right| tests_by_id[left].name.cmp(&tests_by_id[right].name));
-    let tests = test_order
+    let ordered_tests = test_order
         .into_iter()
-        .map(|id| {
-            let test = tests_by_id.remove(&id).expect("test order references test");
-            let outcome = test_outcome(&test);
-            let hits = distinct(test.hits);
-            let lines = lines_of(&hits);
-            let hits = hit_ids.sorted_by(hits, &hit_ranks);
-            TestCoverageResult {
-                id: test.id,
-                name: test.name,
-                file: test.file,
-                title: test.title,
-                retries: test.retries.into_iter().collect(),
-                attempts: test.attempts.into_values().collect(),
-                outcome,
-                provenance: test.provenance,
-                role: test.role,
-                attribution: test.attribution,
-                hits,
-                decisions: test
-                    .decisions
-                    .into_iter()
-                    .map(|(id, vectors)| TestDecisionResult {
-                        id,
-                        vectors: vectors.values,
-                    })
-                    .collect(),
-                lines,
-            }
-        })
+        .map(|id| tests_by_id.remove(&id).expect("test order references test"))
         .collect::<Vec<_>>();
+    let tests = map_in_parallel(ordered_tests, |test| {
+        let outcome = test_outcome(&test);
+        let hits = distinct(test.hits);
+        let lines = lines_of(&hits);
+        let hits = hit_ids.sorted_by(hits, &hit_ranks);
+        TestCoverageResult {
+            id: test.id,
+            name: test.name,
+            file: test.file,
+            title: test.title,
+            retries: test.retries.into_iter().collect(),
+            attempts: test.attempts.into_values().collect(),
+            outcome,
+            provenance: test.provenance,
+            role: test.role,
+            attribution: test.attribution,
+            hits,
+            decisions: test
+                .decisions
+                .into_iter()
+                .map(|(id, vectors)| TestDecisionResult {
+                    id,
+                    vectors: vectors.values,
+                })
+                .collect(),
+            lines,
+        }
+    });
 
     crate::coverage_report::vstage("tests");
     let mut test_files = BTreeMap::<
@@ -2924,36 +2957,33 @@ fn create_coverage_view_with_model(
             .cmp(&right.phase.started_at_ms)
             .then(left.phase.id.cmp(&right.phase.id))
     });
-    let phases = phases
-        .into_iter()
-        .map(|phase| {
-            let hits = distinct(phase.hits);
-            let lines = lines_of(&hits);
-            let hits = hit_ids.sorted_by(hits, &hit_ranks);
-            PhaseResult {
-                phase: phase.phase,
-                test: phase.test,
-                hits,
-                decisions: phase
-                    .decisions
-                    .into_iter()
-                    .map(|(id, vectors)| TestDecisionResult {
-                        id,
-                        vectors: vectors.values,
-                    })
-                    .collect(),
-                lines,
-                browser_events: phase.browser_events,
-                server_events: phase.server_events,
-                explicit_events: phase.explicit_events,
-                inferred_events: phase.inferred_events,
-                explicit_browser_events: phase.explicit_browser_events,
-                inferred_browser_events: phase.inferred_browser_events,
-                explicit_server_events: phase.explicit_server_events,
-                inferred_server_events: phase.inferred_server_events,
-            }
-        })
-        .collect::<Vec<_>>();
+    let phases = map_in_parallel(phases, |phase| {
+        let hits = distinct(phase.hits);
+        let lines = lines_of(&hits);
+        let hits = hit_ids.sorted_by(hits, &hit_ranks);
+        PhaseResult {
+            phase: phase.phase,
+            test: phase.test,
+            hits,
+            decisions: phase
+                .decisions
+                .into_iter()
+                .map(|(id, vectors)| TestDecisionResult {
+                    id,
+                    vectors: vectors.values,
+                })
+                .collect(),
+            lines,
+            browser_events: phase.browser_events,
+            server_events: phase.server_events,
+            explicit_events: phase.explicit_events,
+            inferred_events: phase.inferred_events,
+            explicit_browser_events: phase.explicit_browser_events,
+            inferred_browser_events: phase.inferred_browser_events,
+            explicit_server_events: phase.explicit_server_events,
+            inferred_server_events: phase.inferred_server_events,
+        }
+    });
 
     crate::coverage_report::vstage("phases");
     let total_obligations = decisions.len() + points.len() + branches.len();
