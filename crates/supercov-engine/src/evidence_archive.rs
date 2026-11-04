@@ -13,7 +13,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use flate2::{Compression, GzBuilder, bufread::GzDecoder};
+use flate2::{Compress, Compression, FlushCompress, Status, bufread::GzDecoder};
 use serde::{Deserialize, Serialize};
 use supercov_contracts::{EVIDENCE_ARCHIVE_MAGIC, EVIDENCE_ARCHIVE_SCHEMA_VERSION};
 
@@ -456,10 +456,10 @@ fn write_archive_version(
 
     let result = (|| {
         let buffered = BufWriter::new(FaultingWriter::new(file, fault));
-        let gzip = GzBuilder::new()
-            .mtime(0)
-            .operating_system(255)
-            .write(buffered, Compression::fast());
+        // Compressed on every core, as one gzip member any reader reads: on
+        // one core, compressing was most of a large run's evidence step.
+        // See `ParallelGzip`.
+        let gzip = ParallelGzip::new(buffered)?;
         let (gzip, uncompressed_bytes) = write_framed_with_magic(&entries, gzip, magic)?;
         let buffered = gzip.finish()?;
         let faulting = buffered
@@ -690,6 +690,130 @@ pub fn read_archive_schema_version(path: &Path) -> Result<u32, EvidenceArchiveEr
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
     schema_version_from_magic(&magic)
+}
+
+/// A gzip member made by compressing fixed-size pieces of the input side by
+/// side, as pigz does. Each piece is raw deflate from a fresh compressor,
+/// ended by a sync flush and the last by the final block, so the pieces join
+/// into one deflate stream; their CRCs combine into the member's. The header
+/// is the one `GzBuilder` wrote at the fastest level: no name, no time,
+/// unknown system.
+struct ParallelGzip<W: Write> {
+    inner: W,
+    pending: Vec<u8>,
+    crc: crc32fast::Hasher,
+    total: u64,
+    threads: usize,
+}
+
+const PARALLEL_GZIP_PIECE: usize = 4 << 20;
+
+impl<W: Write> ParallelGzip<W> {
+    fn new(mut inner: W) -> io::Result<Self> {
+        inner.write_all(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 4, 255])?;
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(32);
+        Ok(Self {
+            inner,
+            pending: Vec::new(),
+            crc: crc32fast::Hasher::new(),
+            total: 0,
+            threads,
+        })
+    }
+
+    /// Compress the pieces of `input`, the last ending the stream when
+    /// `last`, and write them in order.
+    fn compress(&mut self, input: &[u8], last: bool) -> io::Result<()> {
+        let pieces = input.chunks(PARALLEL_GZIP_PIECE).collect::<Vec<_>>();
+        let count = pieces.len();
+        let compressed = std::thread::scope(|scope| {
+            let handles = pieces
+                .iter()
+                .enumerate()
+                .map(|(index, piece)| {
+                    let ends = last && index + 1 == count;
+                    scope.spawn(move || {
+                        let mut crc = crc32fast::Hasher::new();
+                        crc.update(piece);
+                        (deflate_piece(piece, ends), crc)
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
+                .collect::<Vec<_>>()
+        });
+        for (bytes, crc) in compressed {
+            self.inner.write_all(&bytes?)?;
+            self.crc.combine(&crc);
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<W> {
+        let pending = std::mem::take(&mut self.pending);
+        if pending.is_empty() {
+            self.inner.write_all(&deflate_piece(&[], true)?)?;
+        } else {
+            self.compress(&pending, true)?;
+        }
+        let crc = self.crc.clone().finalize();
+        self.inner.write_all(&crc.to_le_bytes())?;
+        // ISIZE is the input's length modulo 2^32.
+        self.inner.write_all(&(self.total as u32).to_le_bytes())?;
+        self.inner.flush()?;
+        Ok(self.inner)
+    }
+}
+
+impl<W: Write> Write for ParallelGzip<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(buffer);
+        self.total += buffer.len() as u64;
+        let batch = PARALLEL_GZIP_PIECE * self.threads;
+        // A piece is held back so that the last one, which ends the stream,
+        // is never empty while there was input.
+        while self.pending.len() > batch {
+            let pending = std::mem::take(&mut self.pending);
+            self.compress(&pending[..batch], false)?;
+            self.pending = pending[batch..].to_vec();
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One piece as raw deflate: sync-flushed, or ending the stream.
+fn deflate_piece(piece: &[u8], last: bool) -> io::Result<Vec<u8>> {
+    let mut compressor = Compress::new(Compression::fast(), false);
+    let flush = if last {
+        FlushCompress::Finish
+    } else {
+        FlushCompress::Sync
+    };
+    let mut output = Vec::with_capacity(piece.len() / 2 + 1024);
+    loop {
+        if output.len() == output.capacity() {
+            output.reserve(output.capacity().max(4096));
+        }
+        let consumed = compressor.total_in() as usize;
+        let status = compressor
+            .compress_vec(&piece[consumed..], &mut output, flush)
+            .map_err(io::Error::other)?;
+        let all_in = compressor.total_in() as usize == piece.len();
+        match status {
+            Status::StreamEnd => break,
+            _ if !last && all_in && output.len() < output.capacity() => break,
+            _ => {}
+        }
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -1688,6 +1812,30 @@ mod tests {
             let mut bytes = (header.len() as u32).to_be_bytes().to_vec();
             bytes.extend_from_slice(header);
             assert!(read_framed_entries(&mut &bytes[..], |_| true, |_| Ok(())).is_err());
+        }
+    }
+
+    #[test]
+    fn a_parallel_gzip_is_one_member_any_gzip_reader_reads_whole() {
+        // Pieces of varied bytes, a few more than a batch, and the small and
+        // empty inputs at the edges.
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(32);
+        let large = (0..PARALLEL_GZIP_PIECE * (threads + 2) + 12_345)
+            .map(|index| ((index * 31) ^ (index >> 7)) as u8)
+            .collect::<Vec<_>>();
+        for input in [Vec::new(), b"x".to_vec(), large] {
+            let mut gzip = ParallelGzip::new(Vec::new()).unwrap();
+            // Written in uneven parts, as the framed writer does.
+            for part in input.chunks(1_000_003) {
+                gzip.write_all(part).unwrap();
+            }
+            let compressed = gzip.finish().unwrap();
+            let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
+            let mut read = Vec::new();
+            decoder.read_to_end(&mut read).unwrap();
+            assert_eq!(read, input);
+            // Nothing after the one member.
+            assert!(decoder.into_inner().is_empty());
         }
     }
 }
