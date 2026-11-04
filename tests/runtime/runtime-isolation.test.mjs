@@ -207,3 +207,32 @@ test("interleaved requests each keep their own phase, before and after a reset",
   assert.deepEqual(recorded.before.second, ["a-0:phase:2"]);
   assert.deepEqual(recorded.after, ["a-0:phase:3"], "a hit after a reset is recorded again");
 });
+
+test("a reset from another copy of the runtime reaches the async hook's epochs", () => {
+  // A bundle can carry its own copy of the runtime. The copies share one
+  // state, and the async hook is the first copy's: a reset from another copy
+  // has to clear the epochs that hook keeps for each request.
+  const recorded = run(`
+    // The first copy records first, and so installs the hook.
+    runtime.coverageHitV2(runtime.registerProbeV2({ pointIds: ["first"], decisions: [] }), 0);
+    const other = await import(${JSON.stringify(runtimeUrl + "?copy")});
+    const file = other.registerProbeV2({ pointIds: ["point"], decisions: [] });
+    other.activateCoverageScope(scope("a"));
+    other.resetCoverage("a");
+    const tick = () => new Promise((done) => setTimeout(done, 1));
+    let resume;
+    const paused = new Promise((done) => { resume = done; });
+    const crossing = other.withCoverageCarrier({ version: 1, scope: scope("a"), phaseId: "a-0:phase:1" }, async () => {
+      await tick();
+      other.coverageHitV2(file, 0);
+      await paused;
+      other.coverageHitV2(file, 0);
+    });
+    await tick(); await tick();
+    other.resetCoverage("a");
+    resume();
+    await crossing;
+    console.log(JSON.stringify(other.coverageSnapshot().events.filter((event) => event.id === "point").map((event) => event.phaseId)));
+  `);
+  assert.deepEqual(recorded, ["a-0:phase:1"], "a hit after the other copy's reset is recorded again");
+});

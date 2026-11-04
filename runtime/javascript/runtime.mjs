@@ -254,7 +254,7 @@ function activateProbeV2Key(key, force = false) {
     if (state.probeV2NextEpoch >= 4294967295) {
       state.probeV2NextEpoch = 1;
       state.probeV2ContextEpochs.clear();
-      probeV2EpochGeneration += 1;
+      state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
       for (const file of state.probeV2Files) {
         file.hitEpochs.fill(0);
         file.decisionObservationEpochs.fill(0);
@@ -278,19 +278,24 @@ function activateProbeV2Key(key, force = false) {
 // callback the server runs, and building its key and looking it up was most of
 // a Next server's time in the hook. A context object is never changed once
 // made, so each keeps the epoch it was given until the epochs are cleared.
-var probeV2ContextEpochCache = /* @__PURE__ */ new WeakMap();
-var probeV2EpochGeneration = 0;
+// Every copy of the runtime in a process shares one state, and the hook is the
+// first copy's, so the cache and its generation live on that state too: a
+// reset from another copy has to reach them.
 var emptyProbeV2Context = Object.freeze({});
 // Experiment (SUPERCOV_SLOW_PATHS=1): the old per-callback and per-request work, for an A/B.
 var slowPaths = typeof process !== "undefined" && process.env != null && process.env["SUPERCOV_SLOW_PATHS"] === "1";
 function activateProbeV2Context(context) {
-  const cached = probeV2ContextEpochCache.get(context);
-  if (!slowPaths && cached !== void 0 && cached.generation === probeV2EpochGeneration) {
+  if (state.probeV2ContextEpochCache === void 0) {
+    state.probeV2ContextEpochCache = /* @__PURE__ */ new WeakMap();
+    state.probeV2EpochGeneration = 0;
+  }
+  const cached = state.probeV2ContextEpochCache.get(context);
+  if (!slowPaths && cached !== void 0 && cached.generation === state.probeV2EpochGeneration) {
     state.probeV2Clock.epoch = cached.epoch;
     return cached.epoch;
   }
   const epoch = activateProbeV2Key(probeV2ContextKey(context));
-  probeV2ContextEpochCache.set(context, { generation: probeV2EpochGeneration, epoch });
+  state.probeV2ContextEpochCache.set(context, { generation: state.probeV2EpochGeneration, epoch });
   return epoch;
 }
 function withProbeV2Context(context, callback) {
@@ -364,7 +369,7 @@ function resetCoverage(testId2) {
   state.logicals.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
-  probeV2EpochGeneration += 1;
+  state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
   activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
   if (testId2)
     runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
