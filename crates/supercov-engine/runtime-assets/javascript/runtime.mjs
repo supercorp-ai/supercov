@@ -254,6 +254,7 @@ function activateProbeV2Key(key, force = false) {
     if (state.probeV2NextEpoch >= 4294967295) {
       state.probeV2NextEpoch = 1;
       state.probeV2ContextEpochs.clear();
+      probeV2EpochGeneration += 1;
       for (const file of state.probeV2Files) {
         file.hitEpochs.fill(0);
         file.decisionObservationEpochs.fill(0);
@@ -273,8 +274,22 @@ function activateProbeV2Key(key, force = false) {
   state.probeV2Clock.epoch = epoch;
   return epoch;
 }
+// The async hook activates the current request's context before every
+// callback the server runs, and building its key and looking it up was most of
+// a Next server's time in the hook. A context object is never changed once
+// made, so each keeps the epoch it was given until the epochs are cleared.
+var probeV2ContextEpochCache = /* @__PURE__ */ new WeakMap();
+var probeV2EpochGeneration = 0;
+var emptyProbeV2Context = Object.freeze({});
 function activateProbeV2Context(context) {
-  return activateProbeV2Key(probeV2ContextKey(context));
+  const cached = probeV2ContextEpochCache.get(context);
+  if (cached !== void 0 && cached.generation === probeV2EpochGeneration) {
+    state.probeV2Clock.epoch = cached.epoch;
+    return cached.epoch;
+  }
+  const epoch = activateProbeV2Key(probeV2ContextKey(context));
+  probeV2ContextEpochCache.set(context, { generation: probeV2EpochGeneration, epoch });
+  return epoch;
 }
 function withProbeV2Context(context, callback) {
   const previous = state.probeV2Clock.epoch;
@@ -304,7 +319,7 @@ function installProbeV2AsyncHook() {
       before() {
         var _a9, _b;
         epochs.push(state.probeV2Clock.epoch);
-        activateProbeV2Context((_b = (_a9 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a9 : environmentRequestContext()) != null ? _b : {});
+        activateProbeV2Context((_b = (_a9 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a9 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
       },
       after() {
         var _a9;
@@ -347,6 +362,7 @@ function resetCoverage(testId2) {
   state.logicals.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
+  probeV2EpochGeneration += 1;
   activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
   if (testId2)
     runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
@@ -1661,11 +1677,15 @@ function noteSupport(scope) {
     const root = process.env.SUPERCOV_PROJECT_ROOT;
     if (cache && root) {
       for (const name of Object.keys(cache)) {
-        // The copy lives under `.supercov/`: the project root decides.
-        const inside = name.indexOf(root) === 0 ? name.slice(root.length).replace(/^[\\/]/, "") : "";
-        if (supportNoted.modules.has(name) || inside === "" || /^\.supercov[\\/]/.test(inside) || /(?:^|[\\/])node_modules[\\/]/.test(inside))
+        // Every request comes here, and a server has thousands of modules:
+        // each is looked at once, whether it is noted or not.
+        if (supportNoted.modules.has(name))
           continue;
         supportNoted.modules.add(name);
+        // The copy lives under `.supercov/`: the project root decides.
+        const inside = name.indexOf(root) === 0 ? name.slice(root.length).replace(/^[\\/]/, "") : "";
+        if (inside === "" || /^\.supercov[\\/]/.test(inside) || /(?:^|[\\/])node_modules[\\/]/.test(inside))
+          continue;
         lines.push({ loaded: name });
       }
     }

@@ -170,3 +170,40 @@ test("a probe hit again in the same context is not recorded again", () => {
   `);
   assert.ok(recorded.reads <= 4, `recorded ${recorded.reads} times`);
 });
+
+test("interleaved requests each keep their own phase, before and after a reset", () => {
+  // The async hook reuses the epoch each request's context was given; a
+  // reset clears the epochs, and a context made before it must not keep one
+  // that now belongs to another context.
+  const recorded = run(`
+    const file = runtime.registerProbeV2({ pointIds: ["first", "second"], decisions: [] });
+    runtime.activateCoverageScope(scope("a"));
+    runtime.resetCoverage("a");
+    const tick = () => new Promise((done) => setTimeout(done, 1));
+    const request = (phaseId, point, rounds) => runtime.withCoverageCarrier({ version: 1, scope: scope("a"), phaseId }, async () => {
+      for (let round = 0; round < rounds; round++) {
+        await tick();
+        runtime.coverageHitV2(file, point);
+      }
+    });
+    const phasesOf = (id) => runtime.coverageSnapshot().events.filter((event) => event.id === id).map((event) => event.phaseId).sort();
+    await Promise.all([request("a-0:phase:1", 0, 3), request("a-0:phase:2", 0, 3), request("a-0:phase:2", 1, 2)]);
+    const before = { first: phasesOf("first"), second: phasesOf("second") };
+    let resume;
+    const paused = new Promise((done) => { resume = done; });
+    const crossing = runtime.withCoverageCarrier({ version: 1, scope: scope("a"), phaseId: "a-0:phase:3" }, async () => {
+      await tick();
+      runtime.coverageHitV2(file, 1);
+      await paused;
+      runtime.coverageHitV2(file, 1);
+    });
+    await tick(); await tick();
+    runtime.resetCoverage("a");
+    resume();
+    await crossing;
+    console.log(JSON.stringify({ before, after: phasesOf("second") }));
+  `);
+  assert.deepEqual(recorded.before.first, ["a-0:phase:1", "a-0:phase:2"]);
+  assert.deepEqual(recorded.before.second, ["a-0:phase:2"]);
+  assert.deepEqual(recorded.after, ["a-0:phase:3"], "a hit after a reset is recorded again");
+});
