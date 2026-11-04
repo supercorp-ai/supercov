@@ -3390,9 +3390,20 @@ fn parse_server_json_lines<'a, T: for<'de> Deserialize<'de>>(
 /// An attempt's server records. A compact file names its scope on a
 /// writer's first line only, and each line without one is of the attempt of
 /// the line before it in the same file.
+/// A record's hash, its scope left out: the records compared are those of
+/// one result, which share it.
 fn record_hash(record: &ServerRecord) -> u64 {
-    use std::hash::BuildHasher as _;
-    crate::interned::FastHash::default().hash_one(record)
+    use std::hash::{BuildHasher as _, Hash as _, Hasher as _};
+    let mut hasher = crate::interned::FastHash::default().build_hasher();
+    record.record_type.hash(&mut hasher);
+    record.meta.hash(&mut hasher);
+    record.decision.hash(&mut hasher);
+    record.vector.hash(&mut hasher);
+    record.id.hash(&mut hasher);
+    record.timestamp_ms.hash(&mut hasher);
+    record.phase_id.hash(&mut hasher);
+    record.request.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn parse_scoped_server_records<'a>(
@@ -3612,28 +3623,45 @@ pub fn archive_request(
     // the JSON it would write, and is moved into its result: serializing
     // each was most of the join on a large run.
     let scoped_server_records = scoped_records.len();
-    let mut seen = std::collections::HashMap::<usize, FastMap<u64, Vec<usize>>>::new();
+    // A file's records are together and share its scope: the result they
+    // join is looked up when the scope changes.
+    let mut last: Option<(ExecutionScope, usize)> = None;
+    let mut seen = FastMap::<usize, FastMap<u64, usize>>::default();
     for record in scoped_records {
         let Some(scope) = &record.scope else { continue };
-        let Some(&index) = by_scope.get(scope) else {
-            continue;
+        let index = match &last {
+            Some((last_scope, index)) if last_scope == scope => *index,
+            _ => {
+                let Some(&index) = by_scope.get(scope) else {
+                    continue;
+                };
+                last = Some((scope.clone(), index));
+                index
+            }
         };
         let server = &mut raw_results[index].server;
         let known = seen.entry(index).or_insert_with(|| {
-            let mut known = FastMap::<u64, Vec<usize>>::default();
+            let mut known = FastMap::<u64, usize>::default();
             for (position, existing) in server.iter().enumerate() {
-                known
-                    .entry(record_hash(existing))
-                    .or_default()
-                    .push(position);
+                known.entry(record_hash(existing)).or_insert(position);
             }
             known
         });
-        let positions = known.entry(record_hash(&record)).or_default();
-        if positions.iter().any(|&position| server[position] == record) {
-            continue;
+        let hash = record_hash(&record);
+        match known.get(&hash) {
+            // The same hash is almost always the same record; when it is
+            // not, every record the result holds is compared.
+            Some(&position)
+                if server[position] == record
+                    || server.iter().any(|existing| *existing == record) =>
+            {
+                continue;
+            }
+            Some(_) => {}
+            None => {
+                known.insert(hash, server.len());
+            }
         }
-        positions.push(server.len());
         server.push(record);
     }
 
