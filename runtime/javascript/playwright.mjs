@@ -87,6 +87,11 @@ const FAST_PHASE_SCRIPT = process.env.SUPERCOV_FAST_PHASE_SCRIPT === "1";
 // from the phase cookie, in one script per context, instead of from a script
 // replaced on every page at every phase.
 const COOKIE_PHASE_SCRIPT = process.env.SUPERCOV_COOKIE_PHASE_SCRIPT === "1";
+// The phase a new document starts in: the last action's, since a document
+// loads because of one (a navigation, a click that navigates). An assertion
+// that starts while it loads does not change it.
+const DOCUMENT_PHASE_COOKIE = "__supercov_document_phase";
+const DOCUMENT_PHASE_SITE_COOKIE = "__supercov_document_phase_site";
 // Temporary experiment (SUPERCOV_ABLATE): parts of the collection turned off, to time them.
 const ABLATE = process.env.SUPERCOV_ABLATE ?? "";
 // Wall-clock accounting for every browser round-trip this shim performs,
@@ -573,8 +578,8 @@ class CoveragePhaseController {
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
         }).catch(() => undefined);
-        // A document starts in the phase its cookie names, the one the last
-        // activation gave the app's hosts. Only this attempt's phase is taken:
+        // A document starts in the phase its cookie names: the last action's,
+        // given to the app's hosts. Only this attempt's phase is taken:
         // a copy of this script a context kept from an earlier test leaves a
         // later test's phase alone.
         if (COOKIE_PHASE_SCRIPT)
@@ -604,8 +609,8 @@ class CoveragePhaseController {
                 }
             }, {
                 attemptId: this.scope.attemptId,
-                phaseCookie: COVERAGE_PHASE_COOKIE,
-                phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
+                phaseCookie: DOCUMENT_PHASE_COOKIE,
+                phaseSiteCookie: DOCUMENT_PHASE_SITE_COOKIE,
             }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
@@ -620,7 +625,7 @@ class CoveragePhaseController {
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
         if (!adopted)
-            await this.updateContextHeaders(context, this.requestPhaseId());
+            await this.updateContextHeaders(context, this.requestPhaseId(), this.lastActionId);
         for (const page of context.pages())
             register(page);
     }
@@ -680,7 +685,7 @@ class CoveragePhaseController {
         this.lastActionId = phase.id;
         this.activePhaseId = phase.id;
         if (!ABLATE.includes("no-action-activate"))
-            await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id));
+            await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id, phase.id));
         return phase;
     }
     beginAssertion(operation, source = callerSource()) {
@@ -863,11 +868,11 @@ class CoveragePhaseController {
      * the 43 extra seconds, with the database worker's bounded wait the
      * largest part).
      */
-    async activateInBrowser(phaseId) {
+    async activateInBrowser(phaseId, documentPhaseId) {
         await Promise.all([
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context))
-                .map((context) => this.updateContextHeaders(context, phaseId)))),
+                .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
             this.activateFrames(phaseId),
             this.activateWorkers(phaseId),
             timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId)))),
@@ -936,12 +941,14 @@ class CoveragePhaseController {
      * site from the first navigation on, and, on a secure origin, to frames
      * of the app's other hosts as well.
      */
-    async updateContextHeaders(context, phaseId) {
+    async updateContextHeaders(context, phaseId, documentPhaseId) {
         const scope = encodeURIComponent(encodeCoverageScope(this.scope));
         const phase = phaseId ? encodeURIComponent(phaseId) : undefined;
-        const pairs = (scopeName, phaseName) => [
+        const documentPhase = COOKIE_PHASE_SCRIPT && documentPhaseId ? encodeURIComponent(documentPhaseId) : undefined;
+        const pairs = (scopeName, phaseName, documentName) => [
             [scopeName, scope],
             ...(phase ? [[phaseName, phase]] : []),
+            ...(documentPhase ? [[documentName, documentPhase]] : []),
         ];
         // The context's own headers are left alone: they are the suite's, and
         // a test that sets more with `setExtraHTTPHeaders` keeps them. Setting
@@ -950,13 +957,13 @@ class CoveragePhaseController {
             ...this.appHosts.map((url) => {
                 const host = new URL(url);
                 // For the app's own site: requests, navigations and sockets.
-                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
+                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
                 // For its frames on another of its hosts: a cookie that
                 // crosses sites must be Secure, which needs https or a local
                 // host. Chromium keeps such a cookie only when it is given by
                 // domain; given by an http URL it is dropped without a word.
                 if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
-                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
+                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
                 }
                 // One host refused leaves the others theirs.
                 return context.addCookies(cookies).catch(() => undefined);
