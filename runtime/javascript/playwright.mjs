@@ -83,6 +83,10 @@ const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
 const FAST_PHASE_SCRIPT = process.env.SUPERCOV_FAST_PHASE_SCRIPT === "1";
+// Experiment (SUPERCOV_COOKIE_PHASE_SCRIPT=1): a new document learns its phase
+// from the phase cookie, in one script per context, instead of from a script
+// replaced on every page at every phase.
+const COOKIE_PHASE_SCRIPT = process.env.SUPERCOV_COOKIE_PHASE_SCRIPT === "1";
 // Temporary experiment (SUPERCOV_ABLATE): parts of the collection turned off, to time them.
 const ABLATE = process.env.SUPERCOV_ABLATE ?? "";
 // Wall-clock accounting for every browser round-trip this shim performs,
@@ -491,7 +495,9 @@ class CoveragePhaseController {
             this.cdpSessions.set(page, cdp);
         }
         const phaseId = this.requestPhaseId();
-        if (phaseId)
+        if (phaseId && COOKIE_PHASE_SCRIPT)
+            await this.activateFrames(phaseId, [page]);
+        else if (phaseId)
             await this.activatePage(page, phaseId);
         page.on("worker", (worker) => {
             void this.registerWorker(worker);
@@ -567,6 +573,40 @@ class CoveragePhaseController {
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
         }).catch(() => undefined);
+        // A document starts in the phase its cookie names, the one the last
+        // activation gave the app's hosts. Only this attempt's phase is taken:
+        // a copy of this script a context kept from an earlier test leaves a
+        // later test's phase alone.
+        if (COOKIE_PHASE_SCRIPT)
+            await context.addInitScript(({ attemptId, phaseCookie, phaseSiteCookie }) => {
+                try {
+                    let phase;
+                    for (const part of document.cookie.split(";")) {
+                        const at = part.indexOf("=");
+                        const name = part.slice(0, at).trim();
+                        if (name !== phaseCookie && name !== phaseSiteCookie)
+                            continue;
+                        const value = decodeURIComponent(part.slice(at + 1));
+                        if (!value.startsWith(`${attemptId}:`))
+                            continue;
+                        phase = value;
+                        if (name === phaseCookie)
+                            break;
+                    }
+                    if (!phase)
+                        return;
+                    const coverageGlobal = globalThis;
+                    coverageGlobal.__SUPERCOV_PHASE_ID__ = phase;
+                    coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", phase);
+                }
+                catch {
+                    // A document that cannot read cookies keeps its stored phase.
+                }
+            }, {
+                attemptId: this.scope.attemptId,
+                phaseCookie: COVERAGE_PHASE_COOKIE,
+                phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
+            }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
             this.pendingRegistrations.add(pending);
@@ -833,8 +873,8 @@ class CoveragePhaseController {
             timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId)))),
         ]);
     }
-    async activateFrames(phaseId) {
-        await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
+    async activateFrames(phaseId, pages = this.pages) {
+        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames()).map((frame) => frame
             .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
@@ -925,7 +965,7 @@ class CoveragePhaseController {
     }
     async activatePage(page, phaseId) {
         const cdp = this.cdpSessions.get(page);
-        if (!cdp)
+        if (!cdp || COOKIE_PHASE_SCRIPT)
             return;
         // Experiment (SUPERCOV_FAST_PHASE_SCRIPT=1).
         if (FAST_PHASE_SCRIPT) {
