@@ -3217,16 +3217,19 @@ pub fn analyze_coverage_results(
     })
 }
 
-/// Parse each entry on its own, a share of them on each core, keeping their
-/// order. Every test's record is a JSON document of its own: one after another
-/// they were a fifth of re-indexing a 1,100-test run.
+/// Parse each entry on its own, on every core, keeping their order. Every
+/// test's record is a JSON document of its own: one after another they were a
+/// fifth of re-indexing a 1,100-test run. Each worker takes the next entry
+/// when it is done with one: entries run from bytes to tens of megabytes, and
+/// an equal share of them each left one worker parsing long after the rest.
+/// What fails is the first entry, in order, that fails.
 fn parse_in_parallel<T: Send>(
     entries: &[&EvidenceArchiveEntry],
     parse: impl Fn(&&EvidenceArchiveEntry) -> Result<Vec<T>, ReportError> + Sync,
 ) -> Result<Vec<T>, ReportError> {
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
-        .min(entries.len().div_ceil(64))
+        .min(entries.len().div_ceil(4))
         .max(1);
     if threads == 1 {
         return entries.iter().try_fold(Vec::new(), |mut parsed, entry| {
@@ -3234,30 +3237,42 @@ fn parse_in_parallel<T: Send>(
             Ok(parsed)
         });
     }
-    let chunk = entries.len().div_ceil(threads);
-    let parse = &parse;
-    let parts = std::thread::scope(|scope| {
-        let handles = entries
-            .chunks(chunk)
-            .map(|part| {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (parse, next) = (&parse, &next);
+    let mut parts = std::thread::scope(|scope| {
+        let handles = (0..threads)
+            .map(|_| {
                 scope.spawn(move || {
-                    part.iter().try_fold(Vec::new(), |mut parsed, entry| {
-                        parsed.extend(parse(entry)?);
-                        Ok::<_, ReportError>(parsed)
-                    })
+                    let mut parts = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(entry) = entries.get(index) else {
+                            break parts;
+                        };
+                        let part = parse(entry);
+                        let failed = part.is_err();
+                        parts.push((index, part));
+                        // Those after it are not needed; others may still
+                        // fail before it.
+                        if failed {
+                            break parts;
+                        }
+                    }
                 })
             })
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
+            .flat_map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
             .collect::<Vec<_>>()
     });
-    // One part a worker, and there is always a worker.
-    parts.into_iter().try_fold(Vec::new(), |mut parsed, part| {
-        parsed.extend(part?);
-        Ok(parsed)
-    })
+    parts.sort_unstable_by_key(|(index, _)| *index);
+    parts
+        .into_iter()
+        .try_fold(Vec::new(), |mut parsed, (_, part)| {
+            parsed.extend(part?);
+            Ok(parsed)
+        })
 }
 
 fn parse_entry<T: for<'de> Deserialize<'de>>(
