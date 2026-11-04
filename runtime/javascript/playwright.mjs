@@ -82,6 +82,7 @@ const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?
     .replace(/[^A-Za-z0-9_-]/g, "_");
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
+const FAST_PHASE_SCRIPT = process.env.SUPERCOV_FAST_PHASE_SCRIPT === "1";
 // Wall-clock accounting for every browser round-trip this shim performs,
 // enabled by SUPERCOV_PHASE_TIMING=1. One summary line per test on stderr;
 // a single boolean check when disabled.
@@ -922,22 +923,51 @@ class CoveragePhaseController {
         const cdp = this.cdpSessions.get(page);
         if (!cdp)
             return;
-        this.scriptUpdate = this.scriptUpdate.then(async () => {
-            const previous = this.newDocumentScriptIds.get(page);
-            if (previous) {
-                await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
-                    identifier: previous,
-                }).catch(() => undefined);
-            }
-            const installed = (await cdp
-                .send("Page.addScriptToEvaluateOnNewDocument", {
-                source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
-                runImmediately: true,
-            })
-                .catch(() => undefined));
-            if (installed?.identifier)
-                this.newDocumentScriptIds.set(page, installed.identifier);
-        });
+        // Experiment (SUPERCOV_FAST_PHASE_SCRIPT=1).
+        if (FAST_PHASE_SCRIPT) {
+            // The new phase's script is added before the last one is removed, and
+            // the removal is not waited for: one round trip of the browser's,
+            // not two in turn, before every action. A session's commands run in
+            // order, so the removal lands before any later update; until it does,
+            // a new document runs both, in the order they were added, and is left
+            // in the new phase.
+            this.scriptUpdate = this.scriptUpdate.then(async () => {
+                const previous = this.newDocumentScriptIds.get(page);
+                const installed = (await cdp
+                    .send("Page.addScriptToEvaluateOnNewDocument", {
+                    source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
+                    runImmediately: true,
+                })
+                    .catch(() => undefined));
+                if (installed?.identifier)
+                    this.newDocumentScriptIds.set(page, installed.identifier);
+                else
+                    this.newDocumentScriptIds.delete(page);
+                if (previous) {
+                    void cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+                        identifier: previous,
+                    }).catch(() => undefined);
+                }
+            });
+        }
+        else {
+            this.scriptUpdate = this.scriptUpdate.then(async () => {
+                const previous = this.newDocumentScriptIds.get(page);
+                if (previous) {
+                    await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+                        identifier: previous,
+                    }).catch(() => undefined);
+                }
+                const installed = (await cdp
+                    .send("Page.addScriptToEvaluateOnNewDocument", {
+                    source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
+                    runImmediately: true,
+                })
+                    .catch(() => undefined));
+                if (installed?.identifier)
+                    this.newDocumentScriptIds.set(page, installed.identifier);
+            });
+        }
         await this.scriptUpdate.catch(() => undefined);
     }
 }
