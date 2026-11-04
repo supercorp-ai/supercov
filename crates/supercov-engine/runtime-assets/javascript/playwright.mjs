@@ -83,7 +83,6 @@ const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
 const FAST_PHASE_SCRIPT = process.env.SUPERCOV_FAST_PHASE_SCRIPT === "1";
-const LAZY_ACTION_ACTIVATE = process.env.SUPERCOV_LAZY_ACTION_ACTIVATE === "1";
 // Temporary experiment (SUPERCOV_ABLATE): parts of the collection turned off, to time them.
 const ABLATE = process.env.SUPERCOV_ABLATE ?? "";
 // Wall-clock accounting for every browser round-trip this shim performs,
@@ -153,7 +152,6 @@ const ACTION_METHODS = new Set([
     "type",
     "uncheck",
 ]);
-const NAVIGATION_METHODS = new Set(["goBack", "goForward", "goto", "reload"]);
 const REQUEST_METHODS = new Set([
     "delete",
     "fetch",
@@ -636,26 +634,13 @@ class CoveragePhaseController {
         if (registration?.runtime === false)
             this.workersWithoutRuntime.add(worker);
     }
-    async beginAction(operation, method) {
+    async beginAction(operation) {
         timingCount("beginAction");
         const phase = this.createPhase("action", operation);
         this.lastActionId = phase.id;
         this.activePhaseId = phase.id;
-        if (ABLATE.includes("no-action-activate"))
-            return phase;
-        // Experiment (SUPERCOV_LAZY_ACTION_ACTIVATE=1): as for an assertion, the
-        // page's own commands queue behind the activation's, so an action in the
-        // page or a request carrying its phase need not wait for it. A navigation
-        // does: the browser reads the phase cookie for it from its own store, not
-        // from the page. So does any action while a worker runs, on its own session.
-        const activation = timed("action.activateInBrowser", () => this.activateInBrowser(phase.id));
-        if (LAZY_ACTION_ACTIVATE &&
-            !NAVIGATION_METHODS.has(method) &&
-            this.workers.size === 0) {
-            activation.catch(() => undefined);
-            return phase;
-        }
-        await activation;
+        if (!ABLATE.includes("no-action-activate"))
+            await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id));
         return phase;
     }
     beginAssertion(operation, source = callerSource()) {
@@ -720,7 +705,7 @@ class CoveragePhaseController {
                     if (ACTION_METHODS.has(method) || isRequest) {
                         return (async () => {
                             const operation = `${object.constructor?.name ?? "Playwright"}.${method}`;
-                            const phase = await this.beginAction(operation, method);
+                            const phase = await this.beginAction(operation);
                             try {
                                 const result = await Reflect.apply(value, object, isRequest ? this.scopeApiRequest(args) : args);
                                 this.finish(phase);
