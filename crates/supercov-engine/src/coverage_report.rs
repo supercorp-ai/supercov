@@ -20,7 +20,7 @@ use crate::coverage_analysis::{
 use crate::evidence_archive::EvidenceArchiveEntry;
 use crate::interned::{FastMap, Id, Interner};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DecisionMeta {
     pub id: String,
@@ -278,7 +278,7 @@ pub struct ExecutionScope {
     pub attempt_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServerRecord {
     #[serde(rename = "type")]
@@ -2084,6 +2084,15 @@ fn whole_files_unmeasured(manifest: &CoverageManifest) -> Option<CoverageManifes
     Some(manifest)
 }
 
+/// Each number once: a test's or phase's hits name a point at each event
+/// that reached it, often thousands of times, and what is built from them
+/// names each point once.
+fn distinct(mut numbers: Vec<usize>) -> Vec<usize> {
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+}
+
 fn create_coverage_view_with_model(
     manifest: &CoverageManifest,
     raw_results: &[&RawTestResult],
@@ -2091,6 +2100,7 @@ fn create_coverage_view_with_model(
     coverage_model: &CoverageModelDeclaration,
     ids: &mut Interner,
 ) -> Result<CoverageView, ReportError> {
+    crate::coverage_report::vstage("start");
     let settled;
     let manifest = match whole_files_unmeasured(manifest) {
         Some(applied) => {
@@ -2483,6 +2493,7 @@ fn create_coverage_view_with_model(
         }
     }
 
+    crate::coverage_report::vstage("accumulate");
     decision_metadata.sort_by(|left, right| {
         left.file
             .cmp(&right.file)
@@ -2495,6 +2506,7 @@ fn create_coverage_view_with_model(
     // A frontend may decline one outcome of a branch (a block that can never
     // be entered, a rescue that can never be reached) or the whole branch;
     // a branch whose every outcome is declined is declined itself.
+    crate::coverage_report::vstage("relations");
     let mut declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
     for branch in &manifest.branches {
         if !branch.alternatives.is_empty()
@@ -2669,6 +2681,7 @@ fn create_coverage_view_with_model(
         });
     }
 
+    crate::coverage_report::vstage("decisions");
     let points = manifest
         .points
         .iter()
@@ -2688,6 +2701,7 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
+    crate::coverage_report::vstage("points");
     let branches = manifest
         .branches
         .iter()
@@ -2732,6 +2746,7 @@ fn create_coverage_view_with_model(
     // limitation against. Only what was measured decides the line's state and
     // whether it counts. A line gathers its points' test and phase numbers,
     // which sort and deduplicate as numbers.
+    crate::coverage_report::vstage("branches+");
     let mut line_aggregates = BTreeMap::<SourceLine, LineAggregate>::new();
     for point in &points {
         let aggregate = line_aggregates
@@ -2800,6 +2815,7 @@ fn create_coverage_view_with_model(
     // Where each hit sits, by hit number, as (file rank, line): a test's or
     // phase's lines sort and deduplicate as numbers, in the order the
     // `SourceLine`s they stand for sort in.
+    crate::coverage_report::vstage("lines");
     let hit_ranks = hit_ids.ranks();
     let mut point_files = manifest
         .points
@@ -2838,8 +2854,9 @@ fn create_coverage_view_with_model(
         .map(|id| {
             let test = tests_by_id.remove(&id).expect("test order references test");
             let outcome = test_outcome(&test);
-            let lines = lines_of(&test.hits);
-            let hits = hit_ids.sorted_by(test.hits, &hit_ranks);
+            let hits = distinct(test.hits);
+            let lines = lines_of(&hits);
+            let hits = hit_ids.sorted_by(hits, &hit_ranks);
             TestCoverageResult {
                 id: test.id,
                 name: test.name,
@@ -2865,6 +2882,7 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
+    crate::coverage_report::vstage("tests");
     let mut test_files = BTreeMap::<
         String,
         (
@@ -2898,6 +2916,7 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
+    crate::coverage_report::vstage("test files");
     let mut phases = phases_by_id.into_values().collect::<Vec<_>>();
     phases.sort_by(|left, right| {
         left.phase
@@ -2908,8 +2927,9 @@ fn create_coverage_view_with_model(
     let phases = phases
         .into_iter()
         .map(|phase| {
-            let lines = lines_of(&phase.hits);
-            let hits = hit_ids.sorted_by(phase.hits, &hit_ranks);
+            let hits = distinct(phase.hits);
+            let lines = lines_of(&hits);
+            let hits = hit_ids.sorted_by(hits, &hit_ranks);
             PhaseResult {
                 phase: phase.phase,
                 test: phase.test,
@@ -2935,6 +2955,7 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
+    crate::coverage_report::vstage("phases");
     let total_obligations = decisions.len() + points.len() + branches.len();
     let (decisions, points, branches) = if declined.is_empty() {
         (decisions, points, branches)
@@ -2955,6 +2976,7 @@ fn create_coverage_view_with_model(
         )
     };
     let measured_obligations = decisions.len() + points.len() + branches.len();
+    crate::coverage_report::vstage("declined");
     let mut summary = summary_for_results(&decisions, &points, &branches, &lines, None)?;
     if total_obligations > measured_obligations {
         summary.unmeasured_obligations = Some(total_obligations - measured_obligations);
@@ -3043,6 +3065,7 @@ fn create_coverage_view_with_model(
             .collect()
     };
 
+    crate::coverage_report::vstage("summary+dimensions");
     Ok(CoverageView {
         generated_at: generated_at.into(),
         variant: coverage_model.variant.clone(),
@@ -3322,16 +3345,24 @@ fn parse_server_json_lines<'a, T: for<'de> Deserialize<'de>>(
 /// An attempt's server records. A compact file names its scope on a
 /// writer's first line only, and each line without one is of the attempt of
 /// the line before it in the same file.
+fn record_hash(record: &ServerRecord) -> u64 {
+    use std::hash::BuildHasher as _;
+    crate::interned::FastHash::default().hash_one(record)
+}
+
 fn parse_scoped_server_records<'a>(
     entries: impl Iterator<Item = &'a EvidenceArchiveEntry>,
 ) -> TolerantJsonLines<ServerRecord> {
-    let mut parsed = TolerantJsonLines {
-        records: Vec::new(),
-        corrupt_records: 0,
-        corrupt_files: 0,
-    };
-    for entry in entries {
-        let mut corrupt_here = 0;
+    // A file's records are parsed on their own: a record without a scope has
+    // its file's, so a file is never split. The files are many, a test's
+    // attempt each, and parsed side by side, in order.
+    let entries = entries.collect::<Vec<_>>();
+    let files = parse_in_parallel(&entries, |entry| {
+        let mut file = TolerantJsonLines {
+            records: Vec::new(),
+            corrupt_records: 0,
+            corrupt_files: 0,
+        };
         let mut current: Option<ExecutionScope> = None;
         for line in entry.contents.split(|byte| *byte == b'\n') {
             if line.is_empty() {
@@ -3343,15 +3374,26 @@ fn parse_scoped_server_records<'a>(
                         Some(scope) => current = Some(scope.clone()),
                         None => record.scope.clone_from(&current),
                     }
-                    parsed.records.push(record);
+                    file.records.push(record);
                 }
-                Err(_) => corrupt_here += 1,
+                Err(_) => file.corrupt_records += 1,
             }
         }
-        if corrupt_here > 0 {
-            parsed.corrupt_records += corrupt_here;
-            parsed.corrupt_files += 1;
+        if file.corrupt_records > 0 {
+            file.corrupt_files = 1;
         }
+        Ok(vec![file])
+    })
+    .expect("a file's parse never fails: a corrupt record is counted");
+    let mut parsed = TolerantJsonLines {
+        records: Vec::new(),
+        corrupt_records: 0,
+        corrupt_files: 0,
+    };
+    for file in files {
+        parsed.records.extend(file.records);
+        parsed.corrupt_records += file.corrupt_records;
+        parsed.corrupt_files += file.corrupt_files;
     }
     parsed
 }
@@ -3369,6 +3411,7 @@ pub fn analyze_coverage_archive(
 ) -> Result<CoverageReport, ReportError> {
     let (_, normalized, transport, _) = archive_request(request)?;
     let report = analyze_coverage_results(&normalized).map(|mut report| {
+        crate::coverage_report::stage("views");
         report.view.transport = Some(transport.clone());
         report.filters.passed.transport = Some(transport.clone());
         report.filters.failed.transport = Some(transport);
@@ -3384,6 +3427,41 @@ pub fn analyze_coverage_archive(
 /// A stored run's evidence as the request its views are built from, with the
 /// frontend that declared it, what its processes reported, and the digest of
 /// the archive bytes it was read from.
+pub(crate) fn vstage(label: &str) {
+    thread_local! { static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) }; }
+    if std::env::var_os("SUPERCOV_STAGES").is_none() {
+        return;
+    }
+    let now = std::time::Instant::now();
+    LAST.with(|last| {
+        if let Some(then) = last.get() {
+            eprintln!(
+                "[view {:?}] {label} {:.0}ms",
+                std::thread::current().id(),
+                (now - then).as_secs_f64() * 1000.0
+            );
+        }
+        last.set(Some(now));
+    });
+}
+
+pub(crate) fn stage(label: &str) {
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    if std::env::var_os("SUPERCOV_STAGES").is_none() {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let mut last = LAST.lock().unwrap();
+    if let Some(then) = *last {
+        eprintln!(
+            "[stage] {label} {:.0}ms",
+            (now - then).as_secs_f64() * 1000.0
+        );
+    }
+    *last = Some(now);
+}
+
 pub fn archive_request(
     request: &ArchiveReportRequest,
 ) -> Result<
@@ -3399,6 +3477,7 @@ pub fn archive_request(
     // bytes dropped: holding the decompressed archive whole beside what was
     // parsed from it was a gigabyte of a 1,100-test run's 3.6 GB.
     const BATCH: usize = 256;
+    crate::coverage_report::stage("start");
     let mut entries = Vec::new();
     let mut raw_results = Vec::new();
     let mut journal_results = Vec::new();
@@ -3447,6 +3526,7 @@ pub fn archive_request(
         },
     )
     .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
+    crate::coverage_report::stage("read and parse results");
     flush(&mut results, &mut journals, &mut failure);
     if let Some(error) = failure {
         return Err(error);
@@ -3468,6 +3548,7 @@ pub fn archive_request(
             && entry.path.ends_with(".jsonl")
     }));
     let scoped_records = scoped.records;
+    crate::coverage_report::stage("parse scoped server records");
     // Each server record joins the first result with its scope, once. A
     // linear search per record and a linear duplicate check per result made
     // this quadratic: supergateway's e2e servers spent most of a 20 s report
@@ -3482,26 +3563,36 @@ pub fn archive_request(
         .into_iter()
         .map(|(scope, index)| (scope.clone(), index))
         .collect();
-    let mut seen = std::collections::HashMap::<usize, std::collections::HashSet<Vec<u8>>>::new();
-    for record in &scoped_records {
+    // A record is compared as itself, by its hash and then in full, not as
+    // the JSON it would write, and is moved into its result: serializing
+    // each was most of the join on a large run.
+    let scoped_server_records = scoped_records.len();
+    let mut seen = std::collections::HashMap::<usize, FastMap<u64, Vec<usize>>>::new();
+    for record in scoped_records {
         let Some(scope) = &record.scope else { continue };
         let Some(&index) = by_scope.get(scope) else {
             continue;
         };
-        let raw = &mut raw_results[index];
+        let server = &mut raw_results[index].server;
         let known = seen.entry(index).or_insert_with(|| {
-            raw.server
-                .iter()
-                .filter_map(|existing| serde_json::to_vec(existing).ok())
-                .collect()
+            let mut known = FastMap::<u64, Vec<usize>>::default();
+            for (position, existing) in server.iter().enumerate() {
+                known
+                    .entry(record_hash(existing))
+                    .or_default()
+                    .push(position);
+            }
+            known
         });
-        // A record is strings and numbers: it always serializes.
-        let key = serde_json::to_vec(record).unwrap_or_default();
-        if known.insert(key) {
-            raw.server.push(record.clone());
+        let positions = known.entry(record_hash(&record)).or_default();
+        if positions.iter().any(|&position| server[position] == record) {
+            continue;
         }
+        positions.push(server.len());
+        server.push(record);
     }
 
+    crate::coverage_report::stage("join server records");
     // Background evidence by the process that wrote it: `<writer>-<n>.jsonl`.
     let mut writers = BTreeMap::<&str, Vec<&EvidenceArchiveEntry>>::new();
     for entry in entries.iter().filter(|entry| {
@@ -3530,6 +3621,7 @@ pub fn archive_request(
     // background evidence, so the runner stays though everything in it was
     // credited to a test or was only a note of what a server served.
     let had_background = !processes.is_empty();
+    crate::coverage_report::stage("parse background");
     let background_records = credit_by_time(&mut raw_results, processes);
     background.records.clone_from(&background_records);
     if had_background {
@@ -3579,7 +3671,7 @@ pub fn archive_request(
         remote_launches: count_event("remote-launch"),
         workspace_capabilities: count_event("workspace-capability"),
         guest_processes: count_event("guest-process"),
-        scoped_server_records: scoped_records.len(),
+        scoped_server_records,
         background_server_records: background_records.len(),
         corrupt_records: scoped.corrupt_records
             + background.corrupt_records
@@ -3602,7 +3694,9 @@ pub fn archive_request(
         )));
     }
     separate_repeated_executions(&mut raw_results);
+    crate::coverage_report::stage("credit, execution, model");
     release_leaked_phases(&mut raw_results);
+    crate::coverage_report::stage("separate+release phases");
     // After server work was credited to its tests by time, so a picked test
     // keeps what its requests did.
     if let Some(filter) = request
@@ -3634,6 +3728,7 @@ pub fn archive_request(
     drop(entries);
     crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
+    crate::coverage_report::stage("validate");
     Ok((frontend, normalized, transport, digest))
 }
 

@@ -985,6 +985,7 @@ pub(crate) fn publish_run_with_fault(
     if fs::symlink_metadata(&staging).is_ok() {
         clear_staging(root, &staging)?;
     }
+    crate::coverage_report::stage("begin");
     let evidence_sha256 = file_sha256(evidence_source)?;
     fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
     let copied = copy_regular_file(evidence_source, &staging.join("evidence.raw.gz"))?;
@@ -1006,6 +1007,7 @@ pub(crate) fn publish_run_with_fault(
         clear_staging(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
+    crate::coverage_report::stage("hash, copy, hash");
     let mut json = serde_json::to_vec_pretty(metadata).expect("plain data serializes");
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
@@ -1031,6 +1033,7 @@ pub(crate) fn publish_run_with_fault(
     } else {
         crate::run_store::analyze_stored_run(&staged).ok()
     };
+    crate::coverage_report::stage("analysed");
     let archived_inputs = match archived
         .inputs
         .map(|manifest| {
@@ -1096,6 +1099,7 @@ pub(crate) fn publish_run_with_fault(
         }
         prepared
     });
+    crate::coverage_report::stage("index and manifest");
     // Everything publication derives from the analysis is written. It is
     // gigabytes of small allocations on a large run, and freeing them is
     // nobody's wait.
