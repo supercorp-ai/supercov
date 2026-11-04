@@ -3483,6 +3483,15 @@ pub fn analyze_coverage_archive(
 /// A stored run's evidence as the request its views are built from, with the
 /// frontend that declared it, what its processes reported, and the digest of
 /// the archive bytes it was read from.
+/// Temporary: written to the descriptor itself, since a run holds stderr's
+/// lock for its whole length and a thread that asked for it would wait.
+fn stage_line(line: String) {
+    use std::io::Write as _;
+    use std::os::fd::FromRawFd as _;
+    let mut stderr = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(2) });
+    let _ = stderr.write_all(line.as_bytes());
+}
+
 pub(crate) fn vstage(label: &str) {
     thread_local! { static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) }; }
     if std::env::var_os("SUPERCOV_STAGES").is_none() {
@@ -3491,11 +3500,11 @@ pub(crate) fn vstage(label: &str) {
     let now = std::time::Instant::now();
     LAST.with(|last| {
         if let Some(then) = last.get() {
-            eprintln!(
-                "[view {:?}] {label} {:.0}ms",
+            stage_line(format!(
+                "[view {:?}] {label} {:.0}ms\n",
                 std::thread::current().id(),
                 (now - then).as_secs_f64() * 1000.0
-            );
+            ));
         }
         last.set(Some(now));
     });
@@ -3510,10 +3519,10 @@ pub(crate) fn stage(label: &str) {
     let now = std::time::Instant::now();
     let mut last = LAST.lock().unwrap();
     if let Some(then) = *last {
-        eprintln!(
-            "[stage] {label} {:.0}ms",
+        stage_line(format!(
+            "[stage] {label} {:.0}ms\n",
             (now - then).as_secs_f64() * 1000.0
-        );
+        ));
     }
     *last = Some(now);
 }
