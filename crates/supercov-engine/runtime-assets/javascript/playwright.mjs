@@ -991,6 +991,9 @@ function mergeSnapshots(snapshots) {
     };
 }
 function readSnapshot(target) {
+    // Temporary experiment (SUPERCOV_ABLATE=no-collect): time the collection.
+    if ((process.env.SUPERCOV_ABLATE ?? "").includes("no-collect"))
+        return Promise.resolve(undefined);
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;

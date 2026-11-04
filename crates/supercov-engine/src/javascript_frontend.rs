@@ -1705,7 +1705,7 @@ pub fn prepare_javascript_frontend(
     let runtime_path = runtime_directory.join("runtime.mjs");
     let standalone_runtime = compact_runtime(
         &fs::read_to_string(&runtime_path).map_err(|source| io_error(&runtime_path, source))?,
-    );
+    ); /* Temporary experiment: the browser's copy is told what SUPERCOV_ABLATE turns off. */ let standalone_runtime = match std::env::var("SUPERCOV_ABLATE") { Ok(ablate) if !ablate.is_empty() => format!("globalThis.__SUPERCOV_ABLATE__ = {};\n{standalone_runtime}", serde_json::to_string(&ablate).expect("a string serializes")), _ => standalone_runtime };
     // debug's karma bundles its sources with browserify and runs them in
     // Chrome, where nothing had installed the runtime: every file failed on
     // its first line ("reading 'mcdcBegin'"). An opaque child can start a
