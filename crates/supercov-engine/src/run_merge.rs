@@ -707,11 +707,13 @@ pub fn merge_coverage_runs(
             },
         ];
         // Two runs at least, each with evidence besides its three files of
-        // the whole run.
-        archives
+        // the whole run. Each entry is rewritten on its own, side by side,
+        // and they are kept in order: one after another, parsing and writing
+        // every record again was most of merging a large run.
+        let jobs = archives
             .iter()
             .enumerate()
-            .try_for_each(|(shard, archive)| {
+            .flat_map(|(shard, archive)| {
                 archive
                     .iter()
                     .filter(|entry| {
@@ -720,34 +722,55 @@ pub fn merge_coverage_runs(
                             "coverage-model.json" | "frontend.json" | "manifest.json"
                         )
                     })
-                    .try_for_each(|entry| -> Result<(), String> {
-                        // One record of the files for the whole merge: the latest
-                        // run's, which holds every file the others were recorded with.
-                        let superseded = grown
-                            .as_ref()
-                            .and_then(|grown| grown.superseded.get(&shard));
-                        let contents = match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
-                            Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
-                                files.clone()
-                            }
-                            _ => match rewritten_contents(
-                                &entry.contents,
-                                merged_run_id,
-                                superseded,
-                            )? {
-                                Some(contents) => contents,
-                                // Every record of the entry was of a test measured
-                                // again elsewhere.
-                                None => return Ok(()),
-                            },
-                        };
-                        entries.push(EvidenceArchiveEntry {
-                            path: merged_path(&entry.path, shard),
-                            contents,
-                        });
-                        Ok(())
+                    .map(move |entry| (shard, entry))
+            })
+            .collect::<Vec<_>>();
+        let rewrite = |(shard, entry): &(usize, &EvidenceArchiveEntry)| {
+            // One record of the files for the whole merge: the latest
+            // run's, which holds every file the others were recorded with.
+            let superseded = grown.as_ref().and_then(|grown| grown.superseded.get(shard));
+            match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
+                Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
+                    Ok(Some(files.clone()))
+                }
+                _ => rewritten_contents(&entry.contents, merged_run_id, superseded),
+            }
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(jobs.len().max(1));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut rewritten = std::thread::scope(|scope| {
+            let workers = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut done = Vec::new();
+                        loop {
+                            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(job) = jobs.get(index) else {
+                                break done;
+                            };
+                            done.push((index, rewrite(job)));
+                        }
                     })
-            })?;
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap_or_else(crate::threads::rethrow))
+                .collect::<Vec<_>>()
+        });
+        rewritten.sort_unstable_by_key(|(index, _)| *index);
+        // An entry with nothing left had only records of tests measured
+        // again elsewhere.
+        for ((shard, entry), (_, contents)) in jobs.iter().zip(rewritten) {
+            if let Some(contents) = contents? {
+                entries.push(EvidenceArchiveEntry {
+                    path: merged_path(&entry.path, *shard),
+                    contents,
+                });
+            }
+        }
         let archive_path = work.join("evidence.raw.gz");
         let raw = write_archive(entries, &archive_path)
             .map_err(|error| format!("Could not write merged evidence: {error}"))?;
