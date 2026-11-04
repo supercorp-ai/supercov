@@ -83,6 +83,8 @@ const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
 const FAST_PHASE_SCRIPT = process.env.SUPERCOV_FAST_PHASE_SCRIPT === "1";
+// Temporary experiment (SUPERCOV_ABLATE): parts of the collection turned off, to time them.
+const ABLATE = process.env.SUPERCOV_ABLATE ?? "";
 // Wall-clock accounting for every browser round-trip this shim performs,
 // enabled by SUPERCOV_PHASE_TIMING=1. One summary line per test on stderr;
 // a single boolean check when disabled.
@@ -637,7 +639,8 @@ class CoveragePhaseController {
         const phase = this.createPhase("action", operation);
         this.lastActionId = phase.id;
         this.activePhaseId = phase.id;
-        await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id));
+        if (!ABLATE.includes("no-action-activate"))
+            await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id));
         return phase;
     }
     beginAssertion(operation, source = callerSource()) {
@@ -647,7 +650,8 @@ class CoveragePhaseController {
         // Playwright queues browser protocol commands in order. Starting this
         // evaluation before an async locator assertion is sufficient to tag its
         // polling work without turning synchronous expect matchers into promises.
-        void timed("assertion.activateInBrowser", () => this.activateInBrowser(phase.id));
+        if (!ABLATE.includes("no-assert-activate"))
+            void timed("assertion.activateInBrowser", () => this.activateInBrowser(phase.id));
         return phase;
     }
     requestPhaseId() {
