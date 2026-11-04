@@ -1819,7 +1819,9 @@ mod tests {
     fn a_parallel_gzip_is_one_member_any_gzip_reader_reads_whole() {
         // Pieces of varied bytes, a few more than a batch, and the small and
         // empty inputs at the edges.
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(32);
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(32);
         let large = (0..PARALLEL_GZIP_PIECE * (threads + 2) + 12_345)
             .map(|index| ((index * 31) ^ (index >> 7)) as u8)
             .collect::<Vec<_>>();
