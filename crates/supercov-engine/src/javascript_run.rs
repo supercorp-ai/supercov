@@ -1085,15 +1085,15 @@ pub fn run_direct_javascript(
         Some(proxy) => {
             proxy.finish();
             let journal = crate::docker_proxy::journal(&docker_state.join("containers.jsonl"));
-            for note in journal.notes {
+            for note in &journal.notes {
                 let _ = writeln!(diagnostics, "[supercov] {note}");
             }
-            journal.measured
+            journal
         }
-        None => Vec::new(),
+        None => crate::docker_proxy::Journal::default(),
     };
     #[cfg(not(unix))]
-    let in_containers = Vec::<String>::new();
+    let in_containers = crate::docker_proxy::Journal::default();
     let test_command_ms = execution
         .phases
         .iter()
@@ -1426,7 +1426,7 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
     let mut entries =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
-    if let Some(warning) = nothing_came_back(&in_containers, &entries) {
+    for warning in nothing_came_back(&in_containers, !servers.is_empty(), &entries) {
         let _ = writeln!(diagnostics, "{warning}");
     }
     if let Some(support) = &support {
@@ -1598,22 +1598,36 @@ fn left_out_loads(root: &Path, workspace: &Path, notes: &Path) -> Vec<PathBuf> {
 }
 
 /// Containers that took the run's settings and sent nothing back: a boundary
-/// the run could not see past, not a suite that ran nothing. The run said
-/// "Complete" with no test in it, and no word why. No test is the stand-in
-/// result made for a run without one; nothing is also no server's record.
-fn nothing_came_back(in_containers: &[String], entries: &[EvidenceArchiveEntry]) -> Option<String> {
+/// the run could not see past, not a suite that ran nothing. Tests `docker
+/// exec` started that reported none, and a container that served -- one the
+/// tests talk to -- whose runtime never marked that it could write its
+/// evidence: on 2026-11-05 a server in a read-only mount crashed at its first
+/// probe, every test failed, and the run said nothing of it. A server in
+/// another language writes a run of its own and leaves no mark: such a run
+/// is read there.
+fn nothing_came_back(
+    containers: &crate::docker_proxy::Journal,
+    other_servers: bool,
+    entries: &[EvidenceArchiveEntry],
+) -> Vec<String> {
+    // The stand-in result made for a run that recorded no test.
     let no_test = entries
         .iter()
         .any(|entry| entry.path == "results/command/mcdc.json");
-    let no_server = !entries
-        .iter()
-        .any(|entry| entry.path.starts_with("server/"));
-    (!in_containers.is_empty() && no_test && no_server).then(|| {
-        format!(
-            "[supercov] warning: no test and no coverage came back from {}, which ran with the run's settings: what ran there is missing from this run, not zero. A container's evidence reaches the run through the copy Supercov ran the command in, mounted into it, or through the project's .supercov directory.",
-            crate::run_merge::listed(in_containers)
-        )
-    })
+    let mut warnings = Vec::new();
+    if !containers.execs.is_empty() && no_test {
+        warnings.push(format!(
+            "[supercov] warning: no test came back from {}, which ran with the run's settings: its tests are missing from this run, not passed or failed.",
+            crate::run_merge::listed(&containers.execs)
+        ));
+    }
+    if !containers.silent.is_empty() && !other_servers {
+        warnings.push(format!(
+            "[supercov] warning: no coverage came back from {}, which ran with the run's settings: what ran there is missing from this run, not zero. A container writes it into the copy's .supercov, mounted into it; one that stopped at its first probe, or could not write there, records nothing.",
+            crate::run_merge::listed(&containers.silent)
+        ));
+    }
+    warnings
 }
 
 /// Whether the command builds: a word of it, or of a `package.json` script
@@ -1640,11 +1654,13 @@ fn builds(
 ) -> bool {
     text.split(|c: char| c.is_whitespace() || "&|;()\"'".contains(c))
         .any(|word| {
-            let word = word.trim_start_matches('-');
-            if word == "build" || word.starts_with("build:") || word.ends_with(":build") {
+            if crate::project_discovery::names_a_build(word) {
                 return true;
             }
-            match scripts.get(word).and_then(serde_json::Value::as_str) {
+            match scripts
+                .get(word.trim_start_matches('-'))
+                .and_then(serde_json::Value::as_str)
+            {
                 Some(script) if seen.insert(word.to_owned()) => builds(script, scripts, seen),
                 _ => false,
             }
@@ -1983,27 +1999,39 @@ mod tests {
     use super::*;
     use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
 
-    /// Each part of "nothing came back" decides on its own: containers given
-    /// the settings, no test, and no server's record. The containers' runs
-    /// are reached end to end by docker-exec-playwright.mjs; a command with
-    /// no test but a server's record takes a server outside any container.
+    /// Each warning of "nothing came back" decides on its own: tests a
+    /// `docker exec` ran that reported none, whatever the servers did; and
+    /// containers that served and never marked that they could write,
+    /// whatever the tests did -- unless a server in another language, which
+    /// leaves no mark, was measured too. The containers' runs are reached end to end by
+    /// docker-exec-playwright.mjs.
     #[test]
     fn containers_are_said_to_have_sent_nothing_only_when_nothing_came() {
         let entry = |path: &str| EvidenceArchiveEntry {
             path: path.into(),
             contents: Vec::new(),
         };
-        let containers = ["`docker exec` in tests".to_owned()];
+        let journal = |execs: &[&str], served: &[&str]| crate::docker_proxy::Journal {
+            execs: execs.iter().map(|name| (*name).to_owned()).collect(),
+            silent: served.iter().map(|name| (*name).to_owned()).collect(),
+            ..Default::default()
+        };
         let none = [entry("results/command/mcdc.json")];
-        let warning = nothing_came_back(&containers, &none).unwrap();
-        assert!(warning.contains("from `docker exec` in tests"), "{warning}");
-        assert!(nothing_came_back(&[], &none).is_none());
-        assert!(nothing_came_back(&containers, &[entry("results/a/mcdc.json")]).is_none());
-        let served = [
-            entry("results/command/mcdc.json"),
-            entry("server/run/1.jsonl"),
-        ];
-        assert!(nothing_came_back(&containers, &served).is_none());
+        let tested = [entry("results/a/mcdc.json")];
+        let warned = |containers, other, entries: &[EvidenceArchiveEntry]| {
+            nothing_came_back(&containers, other, entries).join("\n")
+        };
+        let both = warned(journal(&["tests"], &["api"]), false, &none);
+        assert!(both.contains("no test came back from tests"), "{both}");
+        assert!(both.contains("no coverage came back from api"), "{both}");
+        assert_eq!(warned(journal(&[], &[]), false, &none), "");
+        assert_eq!(warned(journal(&["tests"], &[]), false, &tested), "");
+        let server = warned(journal(&["tests"], &["api"]), false, &tested);
+        assert!(
+            !server.contains("no test") && server.contains("from api"),
+            "{server}"
+        );
+        assert_eq!(warned(journal(&[], &["api"]), true, &tested), "");
     }
 
     /// A command that builds, itself or through the scripts it runs, is not

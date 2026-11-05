@@ -5851,6 +5851,13 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         "{said}"
     );
 
+    // A command that builds by another name, and whose build failed, is not
+    // told to add one: its own build is what to look at.
+    let elsewhere = project.supercov(&["--", "sh", "-c", "npm run build:ci; npm test"]);
+    assert_ne!(elsewhere.code(), 0, "{}", elsewhere.stdout());
+    let said = format!("{}{}", elsewhere.stdout(), elsewhere.stderr());
+    assert!(!said.contains("starts without build output"), "{said}");
+
     // With the build in the command, it compiles the instrumented copy, and
     // what the tests run is measured.
     let built = project
@@ -13377,13 +13384,13 @@ fn a_docker_relay_that_cannot_start_leaves_the_daemon_as_it_was() {
             ("RELAYED", "0"),
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.create_dir_all#docker_proxy.rs:203",
+                "fs.create_dir_all#docker_proxy.rs:211",
             ),
         ],
     );
     let said = unrelayed.stderr();
     assert_eq!(unrelayed.code(), 0, "{}{said}", unrelayed.stdout());
-    assert!(fired_at(&said, "docker_proxy.rs:203"), "{said}");
+    assert!(fired_at(&said, "docker_proxy.rs:211"), "{said}");
     assert!(
         said.contains(
             "containers the tests start are not measured: the Docker relay could not start"
@@ -15011,7 +15018,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2464 => main.rs:2464",
+            "fs.canonicalize#main.rs:2475 => main.rs:2475",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:1679 => javascript_frontend.rs:1679",
         ],

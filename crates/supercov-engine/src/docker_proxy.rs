@@ -40,7 +40,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,6 +50,14 @@ use serde_json::{Value, json};
 
 /// Set in each measured container: its runtime runs in an image of the copy.
 pub const CONTAINER_VARIABLE: &str = "SUPERCOV_CONTAINER";
+
+/// Where a measured container's runtime leaves a mark once it can write its
+/// evidence: one that never does -- a server stopped at its first probe, a
+/// directory it may not write -- is said to have sent nothing back.
+pub const MARK_VARIABLE: &str = "SUPERCOV_CONTAINER_MARK";
+
+/// Numbers each container's mark within a run.
+static MARKS: AtomicUsize = AtomicUsize::new(0);
 
 /// What the relay gives the containers it measures.
 #[derive(Debug, Clone)]
@@ -755,6 +763,8 @@ struct CreateContext {
     service: Option<String>,
     /// Why it was left alone, when it was.
     note: Option<String>,
+    /// Where its runtime marks that it could write, when it was measured.
+    mark: Option<PathBuf>,
 }
 
 impl Shared {
@@ -778,6 +788,7 @@ impl Shared {
             project: project.clone(),
             service: service.clone(),
             note: None,
+            mark: None,
         };
         // A compose service built from the copy is built from it now, so the
         // container holds the copy as it is.
@@ -852,7 +863,17 @@ impl Shared {
             &image_environment,
             mounted.as_deref(),
         );
+        // Under the run's own directory, mounted at its path: never moved.
+        let mark = self
+            .settings
+            .state
+            .with_file_name("marks")
+            .join(MARKS.fetch_add(1, Ordering::Relaxed).to_string());
+        let mut environment = string_array(config.get("Env"));
+        environment.push(format!("{MARK_VARIABLE}={}", mark.display()));
+        config["Env"] = json!(environment);
         context.measured = true;
+        context.mark = Some(mark);
         (config, context)
     }
 
@@ -898,6 +919,7 @@ impl Shared {
         config["Env"] = json!(environment);
         let line = json!({
             "exec": container,
+            "id": inspected["Id"],
             "image": inspected["Config"]["Image"],
             "measured": true,
         });
@@ -1030,6 +1052,7 @@ impl Shared {
             "project": context.project,
             "service": context.service,
             "note": context.note,
+            "mark": context.mark,
         });
         if let Ok(mut file) = fs::open_with(
             fs::OpenOptions::new().create(true).append(true),
@@ -1306,9 +1329,14 @@ fn write_registry(path: &Path, registry: &BTreeMap<String, String>) {
 pub struct Journal {
     /// Why each container left alone was.
     pub notes: Vec<String>,
-    /// What was given the run's settings: each container, by its compose
-    /// service or image, and each command `docker exec` started in one.
-    pub measured: Vec<String>,
+    /// Each command `docker exec` started with the run's settings: tests,
+    /// most often, whose results the run reads.
+    pub execs: Vec<String>,
+    /// Each container given the run's settings that nothing was `docker
+    /// exec`ed in -- a server, whose coverage the run reads -- and whose
+    /// runtime never marked that it could write, by its compose service or
+    /// image.
+    pub silent: Vec<String>,
 }
 
 pub fn journal(state: &Path) -> Journal {
@@ -1318,25 +1346,41 @@ pub fn journal(state: &Path) -> Journal {
     let lines = text
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line.get("measured").and_then(Value::as_bool).is_some())
         .collect::<Vec<_>>();
     let text = |line: &Value, name: &str| line.get(name).and_then(Value::as_str).map(str::to_owned);
-    let mut notes = lines
+    let sorted = |mut items: Vec<String>| {
+        items.sort();
+        items.dedup();
+        items
+    };
+    let measured = |line: &&Value| line["measured"] == true;
+    let exec_targets = lines
         .iter()
-        .filter_map(|line| text(line, "note"))
-        .collect::<Vec<_>>();
-    notes.sort();
-    notes.dedup();
-    let mut measured = lines
-        .iter()
-        .filter(|line| line.get("measured").and_then(Value::as_bool) == Some(true))
-        .filter_map(|line| match text(line, "exec") {
-            Some(container) => Some(format!("`docker exec` in {container}")),
-            None => text(line, "service").or_else(|| text(line, "image")),
-        })
-        .collect::<Vec<_>>();
-    measured.sort();
-    measured.dedup();
-    Journal { notes, measured }
+        .filter(|line| text(line, "exec").is_some())
+        .filter_map(|line| text(line, "id"))
+        .collect::<BTreeSet<_>>();
+    Journal {
+        notes: sorted(lines.iter().filter_map(|line| text(line, "note")).collect()),
+        execs: sorted(
+            lines
+                .iter()
+                .filter(measured)
+                .filter_map(|line| text(line, "exec"))
+                .map(|container| format!("`docker exec` in {container}"))
+                .collect(),
+        ),
+        silent: sorted(
+            lines
+                .iter()
+                .filter(measured)
+                .filter(|line| text(line, "exec").is_none())
+                .filter(|line| text(line, "id").is_none_or(|id| !exec_targets.contains(&id)))
+                .filter(|line| text(line, "mark").is_none_or(|mark| !Path::new(&mark).exists()))
+                .filter_map(|line| text(line, "service").or_else(|| text(line, "image")))
+                .collect(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1740,6 +1784,7 @@ mod tests {
                                     "{id}: image was built from an earlier copy {}",
                                     "x".repeat(2048)
                                 )),
+                                mark: None,
                             },
                         );
                     }
@@ -1928,15 +1973,44 @@ mod tests {
         );
         drop(stream);
         proxy.finish();
+        let journal = journal(&directory.join("state/containers.jsonl"));
         assert_eq!(
-            journal(&directory.join("state/containers.jsonl")).measured,
-            [
-                "`docker exec` in bare",
-                "`docker exec` in tests",
-                "pulled-outer",
-                "pulled-playwright"
-            ]
+            journal.execs,
+            ["`docker exec` in bare", "`docker exec` in tests"]
         );
+        // The daemon here names no container it was asked about, and no
+        // runtime ran in one: each created one served, and marked nothing.
+        assert_eq!(journal.silent, ["pulled-outer", "pulled-playwright"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A container the run's settings were given to serves, unless a
+    /// command was `docker exec`ed in it: that one ran the tests. One whose
+    /// runtime marked that it could write sent something back.
+    #[test]
+    fn a_container_tests_were_run_in_is_not_a_server() {
+        let directory = temporary("journal");
+        let state = directory.join("containers.jsonl");
+        let marked = directory.join("marks/1");
+        fs::create_dir_all(marked.parent().unwrap()).unwrap();
+        fs::write(&marked, "").unwrap();
+        fs::write(
+            &state,
+            [
+                json!({"id": "a1", "image": "app-api", "service": "api", "measured": true, "mark": directory.join("marks/0")}),
+                json!({"id": "d4", "image": "app-web", "service": "web", "measured": true, "mark": marked}),
+                json!({"id": "b2", "image": "playwright", "measured": true}),
+                json!({"id": "c3", "image": "postgres:16", "measured": false, "note": "left alone"}),
+                json!({"exec": "tests", "id": "b2", "image": "playwright", "measured": true}),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        let journal = journal(&state);
+        assert_eq!(journal.notes, ["left alone"]);
+        assert_eq!(journal.execs, ["`docker exec` in tests"]);
+        assert_eq!(journal.silent, ["api"]);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2624,7 +2698,7 @@ mod tests {
         let daemon = directory.join("d.sock");
         let _created = fake_daemon(&daemon);
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:139", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:147", || {
                 socket_path(&directory.join("state"))
             })
             .is_err()
@@ -2632,13 +2706,13 @@ mod tests {
         // A run directory too deep for a socket address gets a private
         // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir#docker_proxy.rs:150", || {
+            crate::fault::during("fs.create_dir#docker_proxy.rs:158", || {
                 socket_path(&directory.join("state").join("d".repeat(120)))
             })
             .is_err()
         );
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:211", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:219", || {
                 DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
             })
             .is_err()
