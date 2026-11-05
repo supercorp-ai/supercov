@@ -687,6 +687,7 @@ function flushBackgroundAppends(fs) {
 // all.
 function makeEvidenceDirectory(fs, directory) {
   const first = fs.mkdirSync(directory, { recursive: true });
+  markContainerWriting(fs);
   if (!first || typeof process === "undefined" || !process.env || process.env.SUPERCOV_CONTAINER !== "1")
     return;
   let current = first;
@@ -700,6 +701,20 @@ function makeEvidenceDirectory(fs, directory) {
       fs.chmodSync(made, 0o777);
     } catch (e) {
     }
+  }
+}
+// A container Supercov's relay measured says, once, that its evidence could
+// be written: one that never does -- a server stopped at its first probe, a
+// directory it may not write -- is named when the run ends.
+function markContainerWriting(fs) {
+  const mark = typeof process !== "undefined" && process.env ? process.env.SUPERCOV_CONTAINER_MARK : void 0;
+  if (!mark || state.containerMarked)
+    return;
+  state.containerMarked = true;
+  try {
+    fs.mkdirSync(mark.slice(0, mark.lastIndexOf("/")), { recursive: true });
+    fs.writeFileSync(mark, "");
+  } catch (e) {
   }
 }
 function writeBackgroundLines(fs, runId, payload) {

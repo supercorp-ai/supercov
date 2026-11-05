@@ -715,8 +715,11 @@ image, as `.:/workspace` in a compose file does: Supercov runs the command
 in the copy, so the mount is of the copy. It gets the run's settings with
 each path into the copy moved to where the container sees it, and the
 project's `node_modules`, which the copy's packages link to, mounted
-read-only at its own path. A mount of one directory of the project
-(`./src:/app/src`) is not the copy, and is left alone.
+read-only at its own path. The copy's `.supercov`, where the run's evidence
+is written, is mounted writable where the container sees it, so a copy
+mounted read-only (`.:/workspace:ro`) is measured as well. A mount of one
+directory of the project (`./src:/app/src`) is not the copy, and is left
+alone.
 
 The tests can run in such a container too. A command `docker exec` (or
 `docker compose exec`) starts in it, `npx playwright test` say, gets the
