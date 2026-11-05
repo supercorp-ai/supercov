@@ -2028,3 +2028,93 @@ fn an_ant_build_on_the_junit_platform_is_measured_through_the_platform_listener(
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+#[ignore = "runs a real Ant build; npm run test:jvm passes --include-ignored"]
+fn a_jvm_ant_stops_for_its_timeout_still_leaves_what_it_recorded() {
+    let _building = common::building();
+    let Some(ant) = apache_ant() else {
+        common::skip("jvm", "no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some((junit, hamcrest)) = junit4_jars() else {
+        common::skip("jvm", "no JUnit 4 and Hamcrest jars");
+        return;
+    };
+    let root = temporary("ant-timeout");
+    write(
+        &root,
+        "build.xml",
+        r#"<project name="app" default="test">
+    <target name="test">
+        <mkdir dir="out/classes"/>
+        <mkdir dir="out/test-classes"/>
+        <path id="test.classpath"><pathelement location="${junit.jar}"/><pathelement location="${hamcrest.jar}"/></path>
+        <javac srcdir="src" destdir="out/classes" includeantruntime="false"/>
+        <javac srcdir="test" destdir="out/test-classes" includeantruntime="false">
+            <classpath><path refid="test.classpath"/><pathelement location="out/classes"/></classpath>
+        </javac>
+        <junit fork="true" timeout="3000" printsummary="yes" haltonfailure="no">
+            <classpath><path refid="test.classpath"/><pathelement location="out/classes"/><pathelement location="out/test-classes"/></classpath>
+            <batchtest><fileset dir="test" includes="**/*Test.java"/></batchtest>
+        </junit>
+    </target>
+</project>
+"#,
+    );
+    write(
+        &root,
+        "src/app/Calc.java",
+        "package app;\n\npublic class Calc {\n  public static int clamp(int value, int high) {\n    if (value > high) {\n      return high;\n    }\n    return value;\n  }\n}\n",
+    );
+    // JUnit 4 runs methods in a fixed order by name hash; FixMethodOrder pins it.
+    write(
+        &root,
+        "test/app/SlowTest.java",
+        "package app;\n\nimport static org.junit.Assert.assertEquals;\n\nimport org.junit.FixMethodOrder;\nimport org.junit.Test;\nimport org.junit.runners.MethodSorters;\n\n@FixMethodOrder(MethodSorters.NAME_ASCENDING)\npublic class SlowTest {\n  @Test\n  public void a_clamps() {\n    assertEquals(3, Calc.clamp(5, 3));\n  }\n\n  @Test\n  public void b_hangs() throws Exception {\n    Thread.sleep(60_000);\n  }\n}\n",
+    );
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            ant.display().to_string(),
+            format!("-Djunit.jar={}", junit.display()),
+            format!("-Dhamcrest.jar={}", hamcrest.display()),
+            "test".into(),
+        ],
+        run_id: "run-jvm-ant-timeout".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    let executions: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(result.run_directory.join("test-executions.json")).unwrap(),
+    )
+    .unwrap();
+    let tests = executions["tests"].as_array().unwrap();
+    let clamps = tests
+        .iter()
+        .find(|test| test["test"]["name"] == "app.SlowTest#a_clamps")
+        .unwrap_or_else(|| panic!("the test before the timeout is recorded: {executions}\n{diagnostics}"));
+    assert_eq!(clamps["passed"], true, "{executions}");
+    assert!(
+        clamps["files"]["src/app/Calc.java"].as_array().is_some_and(|lines| !lines.is_empty()),
+        "{executions}"
+    );
+    // The test the timeout stopped is recorded once, by the JVM that ran it,
+    // as not passing; Ant's own report of it from its JVM records nothing.
+    let hangs = tests
+        .iter()
+        .filter(|test| test["test"]["name"] == "app.SlowTest#b_hangs")
+        .collect::<Vec<_>>();
+    assert_eq!(hangs.len(), 1, "{executions}");
+    assert_eq!(hangs[0]["passed"], false, "{executions}");
+    std::fs::remove_dir_all(root).ok();
+}

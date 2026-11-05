@@ -31,6 +31,17 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
   private static String evidenceDirectory;
   private static boolean armed;
   private static boolean hooked;
+  /** A test this JVM entered and has not ended: the one a timeout stopped. */
+  private static boolean testOpen;
+
+  /**
+   * The test Ant reports for a forked JVM that ended early -- past its
+   * timeout, or crashed -- from its own JVM, under the name of the test that
+   * was running. That test's record is the forked JVM's, which closes it on
+   * shutdown, so this one records nothing.
+   */
+  private static final String VM_EXIT_TEST =
+      "org.apache.tools.ant.taskdefs.optional.junit.JUnitTaskMirrorImpl$VmExitErrorTest";
 
   /** How the open test is ending, once something says it is not passing. */
   private String status;
@@ -62,8 +73,17 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
     // to then is still written.
     if (!hooked && evidenceDirectory != null) {
       hooked = true;
-      Runtime.getRuntime().addShutdownHook(new Thread(SupercovAntFormatter::writeEvidence));
+      Runtime.getRuntime().addShutdownHook(new Thread(SupercovAntFormatter::writeEvidenceOnExit));
     }
+  }
+
+  /** On shutdown: a test still open there was stopped, and did not pass. */
+  private static synchronized void writeEvidenceOnExit() {
+    if (testOpen) {
+      testOpen = false;
+      Supercov.exitTest("failed");
+    }
+    writeEvidence();
   }
 
   private static synchronized void writeEvidence() {
@@ -78,15 +98,20 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
     }
   }
 
+  /**
+   * Armed at the first test rather than here: Ant's own JVM starts a suite to
+   * report a forked one that ended early, and records nothing of its own.
+   */
   @Override
   public void startTestSuite(JUnitTest suite) {
     this.suite = suite.getName();
-    armOnce();
   }
 
   @Override
   public void endTestSuite(JUnitTest suite) {
-    writeEvidence();
+    if (armed) {
+      writeEvidence();
+    }
   }
 
   @Override
@@ -115,12 +140,22 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
     return Supercov.printable(qualified + "#" + method);
   }
 
+  private static boolean reportsAnEndedJvm(Test test) {
+    return test != null && VM_EXIT_TEST.equals(test.getClass().getName());
+  }
+
   @Override
   public void startTest(Test test) {
+    if (reportsAnEndedJvm(test)) {
+      return;
+    }
     armOnce();
     Supercov.enterTest(name(test), RUNNER, new String[0]);
     open = true;
     status = "passed";
+    synchronized (SupercovAntFormatter.class) {
+      testOpen = true;
+    }
   }
 
   @Override
@@ -157,6 +192,9 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
       return;
     }
     open = false;
-    Supercov.exitTest(status);
+    synchronized (SupercovAntFormatter.class) {
+      testOpen = false;
+      Supercov.exitTest(status);
+    }
   }
 }
