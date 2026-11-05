@@ -2267,7 +2267,7 @@ fn ant_anchor(root: &Path) -> Option<(PathBuf, PathBuf)> {
     let anchor = crate::ant_build::outside_anchor(root, &build)?;
     let relative = crate::ant_build::normalized(root)
         .strip_prefix(&anchor)
-        .ok()?
+        .expect("the anchor is a directory the project is in")
         .to_path_buf();
     if anchor.file_name().is_none()
         || relative
@@ -2420,17 +2420,6 @@ fn relink_unfolded(tree: &Path, workspace: &Path) {
     let _ = fs::remove_file(record);
 }
 
-/// The directory in a project's copy that corresponds to the tree it is laid
-/// out within: the repository or the directory its Ant build reaches out to.
-pub fn copied_tree(root: &Path, workspace: &Path) -> Option<PathBuf> {
-    let (_, relative) = enclosing_tree(root)?;
-    let mut tree = workspace.to_path_buf();
-    for _ in relative.components() {
-        tree.pop();
-    }
-    Some(tree)
-}
-
 /// Small entries a copy reaches through links above its repository, copied
 /// in. A script there that writes beside itself -- Ametys's
 /// `run-single-test.sh` writes the build file it runs into `.single-test/`
@@ -2450,23 +2439,20 @@ pub fn copy_small_links_around(copy: &Path, workspace: &Path, limit: u64) -> io:
         .collect::<Vec<_>>();
     let between = path_down.len().saturating_sub(2);
     for level in path_down.iter().skip(1).take(between) {
-        for entry in fs::read_dir(level)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path_down.contains(&path) {
-                continue;
-            }
-            if !fs::symlink_metadata(&path)?.file_type().is_symlink() {
-                continue;
+        // Never empty: each level holds the next one down.
+        fs::read_dir(level)?.try_for_each(|entry| {
+            let path = entry?.path();
+            if path_down.contains(&path) || !fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                return Ok(());
             }
             let target = fs::canonicalize(&path)?;
             if !fits_within(&target, limit) {
-                continue;
+                return Ok(());
             }
             fs::remove_file(&path).or_else(|_| fs::remove_dir(&path))?;
             record_unfolded(copy, path.strip_prefix(copy).unwrap_or(&path))?;
-            copy_plain_tree(&target, &path)?;
-        }
+            copy_plain_tree(&target, &path)
+        })?;
     }
     Ok(())
 }
@@ -2474,28 +2460,25 @@ pub fn copy_small_links_around(copy: &Path, workspace: &Path, limit: u64) -> io:
 /// Whether a file or directory holds no more than `limit` bytes, counting
 /// files reached through no link; stops counting once past it.
 fn fits_within(path: &Path, limit: u64) -> bool {
-    let mut total = 0u64;
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        let Ok(metadata) = fs::symlink_metadata(&next) else {
+    fn within(path: &Path, limit: u64, total: &mut u64) -> bool {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
             return false;
         };
         if metadata.file_type().is_symlink() {
-            continue;
+            return true;
         }
         if metadata.is_dir() {
-            let Ok(entries) = fs::read_dir(&next) else {
+            let Ok(entries) = fs::read_dir(path) else {
                 return false;
             };
-            pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
-            continue;
+            return entries
+                .filter_map(Result::ok)
+                .all(|entry| within(&entry.path(), limit, total));
         }
-        total += metadata.len();
-        if total > limit {
-            return false;
-        }
+        *total += metadata.len();
+        *total <= limit
     }
-    true
+    within(path, limit, &mut 0)
 }
 
 /// A directory or file copied as it is, links inside it kept as links.
@@ -2527,12 +2510,11 @@ fn relink_around(_root: &Path, workspace: &Path) {
     let Some(copy) = copy_directory_of(workspace) else {
         return;
     };
-    for level in workspace.ancestors().skip(1) {
+    // Up to the copy's own directory.
+    let _ = workspace.ancestors().skip(1).try_for_each(|level| {
         relink_unfolded(level, workspace);
-        if level == copy {
-            break;
-        }
-    }
+        (level != copy).then_some(())
+    });
 }
 
 #[cfg(test)]
@@ -2609,6 +2591,114 @@ mod tests {
         assert!(fs::symlink_metadata(tree.join("scratch")).is_err());
         assert!(workspace.is_dir());
         fs::remove_dir_all(top).unwrap();
+    }
+
+    /// Each step of copying the small entries around a copy that fails
+    /// stops it, and so does each step of making a linked file the copy's
+    /// own; an entry whose size cannot be read, or whose directory cannot
+    /// be listed, is left linked. A file directly in the tree, or under a
+    /// linked directory that holds nothing, has nothing above it to unfold.
+    #[cfg(unix)]
+    #[test]
+    fn each_step_of_laying_out_around_a_copy_that_fails_stops_it() {
+        let link = |target: &Path, at: &Path| std::os::unix::fs::symlink(target, at).unwrap();
+        let symlink = |path: &Path| fs::symlink_metadata(path).unwrap().file_type().is_symlink();
+        let fresh = |name: &str| {
+            let top = std::env::temp_dir().join(format!(
+                "supercov-around-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let real = top.join("real");
+            fs::create_dir_all(real.join("scratch/empty")).unwrap();
+            fs::create_dir_all(real.join("tools/build")).unwrap();
+            fs::create_dir_all(real.join("nothing")).unwrap();
+            fs::write(real.join("scratch/forms.xml"), "original").unwrap();
+            link(Path::new("forms.xml"), &real.join("scratch/alias.xml"));
+            fs::write(real.join("tools/build/common.xml"), "original").unwrap();
+            fs::write(real.join("tools/build/other.xml"), "kept").unwrap();
+            let copy = top.join("project/.supercov/workspaces/workspace");
+            let workspace = copy.join("tree/plugins/forms");
+            fs::create_dir_all(&workspace).unwrap();
+            link(&real.join("scratch"), &copy.join("tree/scratch"));
+            link(&real.join("tools"), &copy.join("tools"));
+            link(&real.join("nothing"), &copy.join("nothing"));
+            (top, copy, workspace)
+        };
+        // Copying the small entries in.
+        let (top, copy, workspace) = fresh("small");
+        copy_small_links_around(&copy, &workspace, 1024).unwrap();
+        assert!(!symlink(&copy.join("tree/scratch")));
+        assert!(symlink(&copy.join("tree/scratch/alias.xml")));
+        assert!(copy.join("tree/scratch/empty").is_dir());
+        // A workspace outside the copy has nothing around it to copy.
+        copy_small_links_around(&copy, &top.join("elsewhere"), 1024).unwrap();
+        // A record naming nothing below the tree removes nothing, and goes.
+        fs::write(copy.join(UNFOLDED_RECORD), "../outside\n\n").unwrap();
+        relink_unfolded(&copy, &workspace);
+        assert!(!copy.join(UNFOLDED_RECORD).exists());
+        assert!(!symlink(&copy.join("tree/scratch")));
+        fs::remove_dir_all(top).unwrap();
+        for fault in [
+            "fs.read_dir#workspace.rs:2443",
+            "fs.read_dir entry#workspace.rs:2443",
+            "fs.symlink_metadata#workspace.rs:2445",
+            "fs.canonicalize#workspace.rs:2448",
+            "fs.remove_file#workspace.rs:2452,fs.remove_dir#workspace.rs:2452",
+            "fs.write#workspace.rs:2364",
+            "fs.symlink_metadata#workspace.rs:2486",
+            "fs.read_link#workspace.rs:2488",
+            "fs.copy#workspace.rs:2493",
+            "fs.create_dir#workspace.rs:2496",
+            "fs.read_dir#workspace.rs:2497",
+            "fs.read_dir entry#workspace.rs:2497",
+        ] {
+            let (top, copy, workspace) = fresh("small-fault");
+            let failed =
+                crate::fault::during(fault, || copy_small_links_around(&copy, &workspace, 1024));
+            assert!(failed.is_err(), "{fault}");
+            fs::remove_dir_all(top).unwrap();
+        }
+        for fault in [
+            "fs.symlink_metadata#workspace.rs:2464",
+            "fs.read_dir#workspace.rs:2471",
+        ] {
+            let (top, copy, workspace) = fresh("unsized");
+            crate::fault::during(fault, || copy_small_links_around(&copy, &workspace, 1024))
+                .unwrap();
+            assert!(symlink(&copy.join("tree/scratch")), "{fault}");
+            fs::remove_dir_all(top).unwrap();
+        }
+        // Making a linked file the copy's own.
+        let (top, copy, _) = fresh("unfold");
+        let file = copy.join("tools/build/common.xml");
+        unfold_links_to(&copy, &copy.join("top.xml")).unwrap();
+        unfold_links_to(&copy, &copy.join("nothing/added.xml")).unwrap();
+        assert!(!symlink(&copy.join("nothing")));
+        unfold_links_to(&copy, &file).unwrap();
+        assert!(!symlink(&copy.join("tools/build")) && !file.exists());
+        fs::remove_dir_all(top).unwrap();
+        for fault in [
+            "fs.symlink_metadata#workspace.rs:2328",
+            "fs.canonicalize#workspace.rs:2332",
+            "fs.remove_file#workspace.rs:2333,fs.remove_dir#workspace.rs:2333",
+            "fs.create_dir#workspace.rs:2334",
+            "fs.write#workspace.rs:2364",
+            "fs.read_dir#workspace.rs:2338",
+            "fs.read_dir entry#workspace.rs:2338",
+            "fs.symlink=9,fs.copy#workspace.rs:2349",
+            "fs.remove_file#workspace.rs:2354",
+        ] {
+            let (top, copy, _) = fresh("unfold-fault");
+            let failed = crate::fault::during(fault, || {
+                unfold_links_to(&copy, &copy.join("tools/build/common.xml"))
+            });
+            assert!(failed.is_err(), "{fault}");
+            fs::remove_dir_all(top).unwrap();
+        }
     }
 
     /// A copy is laid out within the higher of the project's repository and

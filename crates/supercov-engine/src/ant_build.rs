@@ -247,9 +247,11 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
             build.sources_unread = true;
             continue;
         };
-        for source in defined {
-            push_unique(compiled.entry(destination.clone()).or_default(), source);
-        }
+        // A defined path holds what was pushed into it: never nothing.
+        let sources = compiled.entry(destination).or_default();
+        defined
+            .into_iter()
+            .for_each(|source| push_unique(sources, source));
     }
     for sources in compiled.values() {
         for source in sources {
@@ -587,39 +589,30 @@ fn matching(directory: &Path, patterns: &str) -> Vec<PathBuf> {
         .filter(|pattern| !pattern.is_empty())
         .collect::<Vec<_>>();
     let mut found = Vec::new();
-    let mut pending = vec![(directory.to_path_buf(), 0usize)];
-    while let Some((next, depth)) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            let Ok(relative) = path.strip_prefix(directory) else {
-                continue;
-            };
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            if path.is_dir() {
-                if depth < 8 {
-                    pending.push((path.clone(), depth + 1));
-                }
-                if patterns
-                    .iter()
-                    .any(|pattern| ant_pattern(pattern, &relative))
-                {
-                    found.push(path);
-                }
-                continue;
-            }
-            if patterns
-                .iter()
-                .any(|pattern| ant_pattern(pattern, &relative))
-            {
-                found.push(path);
-            }
-        }
-    }
+    walk(directory, "", 0, &patterns, &mut found);
     found.sort();
     found
+}
+
+/// Each entry under `directory` that a pattern matches, `prefix` its path
+/// from where the walk began, eight levels down at most.
+fn walk(directory: &Path, prefix: &str, depth: usize, patterns: &[&str], found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let relative = format!("{prefix}{}", entry.file_name().to_string_lossy());
+        if path.is_dir() && depth < 8 {
+            walk(&path, &format!("{relative}/"), depth + 1, patterns, found);
+        }
+        if patterns
+            .iter()
+            .any(|pattern| ant_pattern(pattern, &relative))
+        {
+            found.push(path);
+        }
+    }
 }
 
 /// Whether a `/`-separated path matches an Ant pattern: `**` any number of
@@ -726,21 +719,12 @@ fn properties_file(text: &str) -> Vec<(String, String)> {
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'))
         .filter_map(|line| {
             // The separator is the first `=` or `:` that is not escaped.
-            let bytes = line.as_bytes();
-            let mut split = None;
-            let mut index = 0;
-            while index < bytes.len() {
-                match bytes[index] {
-                    b'\\' => index += 1,
-                    b'=' | b':' => {
-                        split = Some(index);
-                        break;
-                    }
-                    _ => {}
-                }
-                index += 1;
-            }
-            let split = split?;
+            let mut escaped = false;
+            let split = line.bytes().position(|byte| {
+                let separates = !escaped && (byte == b'=' || byte == b':');
+                escaped = !escaped && byte == b'\\';
+                separates
+            })?;
             Some((
                 unescape_property(line[..split].trim()),
                 unescape_property(line[split + 1..].trim()),
@@ -863,6 +847,96 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// Builds read as far as they go: a file that imports itself is read
+    /// once, and what names nothing -- a `<subant>` fileset under a property
+    /// no one sets, an empty file list or `<src path>`, a bare
+    /// `<pathelement>`, a dirset matching nothing or under no directory, a
+    /// properties file of comments -- adds nothing.
+    #[test]
+    fn a_build_that_names_nothing_reads_as_nothing() {
+        let project = temporary("nothing");
+        fs::create_dir_all(project.join("empty")).unwrap();
+        fs::write(project.join("comments.properties"), "# only this\n").unwrap();
+        fs::write(
+            project.join("build.xml"),
+            r#"<project name="odd">
+    <import file="build.xml"/>
+    <property file="comments.properties"/>
+    <path id="bare"><pathelement/></path>
+    <dirset id="unmatched" dir="." includes="nowhere"/>
+    <dirset id="absent" dir="absent"/>
+    <subant target="test"><fileset dir="${unset}"/><filelist dir="." files=""/></subant>
+    <javac destdir="classes"><src path=""/></javac>
+</project>"#,
+        )
+        .unwrap();
+        let build = read_ant_build(&project, &BTreeMap::new());
+        assert_eq!(build.files, [project.join("build.xml")]);
+        assert!(build.sources.is_empty(), "{:?}", build.sources);
+        assert!(build.test_roots.is_empty(), "{:?}", build.test_roots);
+        assert_eq!(build.outputs, [project.join("classes")]);
+        assert!(build.defined_paths.is_empty(), "{:?}", build.defined_paths);
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    /// Text that is not quite XML reads as far as it is: a `<` at the end
+    /// opens nothing, and an attribute name holding a quoted `=` ends the
+    /// tag's attributes.
+    #[test]
+    fn a_tag_cut_short_or_misquoted_reads_as_far_as_it_goes() {
+        assert!(tags("<project/> <").len() == 1);
+        let found = tags(r#"<a "x=" b='y'>"#);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "a");
+        assert!(found[0].attributes.is_empty());
+    }
+
+    /// java.util.Properties escapes: a tab, a newline and a return stand for
+    /// theirs, an escaped separator for itself, and a backslash that ends the
+    /// value for nothing; an empty value is empty.
+    #[test]
+    fn a_properties_file_reads_its_escapes() {
+        assert_eq!(
+            properties_file(
+                "lines=one\\ntwo\\rthree\\tfour\nkept\\:key=a\\:b\ntrailing=end\\\nempty=\n"
+            ),
+            [
+                ("lines".to_owned(), "one\ntwo\rthree\tfour".to_owned()),
+                ("kept:key".to_owned(), "a:b".to_owned()),
+                ("trailing".to_owned(), "end".to_owned()),
+                ("empty".to_owned(), String::new()),
+            ]
+        );
+    }
+
+    /// A `${` that never closes is kept as written.
+    #[test]
+    fn an_unclosed_property_reference_is_kept_as_written() {
+        let properties = BTreeMap::from([("b".to_owned(), "known".to_owned())]);
+        assert_eq!(expand("${b}/${c", &properties), "known/${c");
+    }
+
+    /// `.` folds away, `..` takes the name before it, and nothing stays
+    /// nothing.
+    #[test]
+    fn a_path_is_folded_without_the_filesystem() {
+        assert_eq!(normalized(Path::new("./a/../b")), PathBuf::from("b"));
+        assert_eq!(normalized(Path::new("")), PathBuf::new());
+    }
+
+    /// No file read, or a file under no directory the project shares (a
+    /// relative name; on Windows, another drive), has no anchor outside.
+    #[test]
+    fn a_build_with_no_file_outside_has_no_outside_anchor() {
+        let root = Path::new("/work/project");
+        assert_eq!(outside_anchor(root, &AntBuild::default()), None);
+        let elsewhere = AntBuild {
+            files: vec![PathBuf::from("elsewhere.xml")],
+            ..AntBuild::default()
+        };
+        assert_eq!(outside_anchor(root, &elsewhere), None);
     }
 
     #[test]
