@@ -1071,7 +1071,7 @@ function patchBrowserPrototype(browser) {
  * way the page is gone by the time the test's snapshots are collected.
  */
 /** The cookies Supercov gives a context to carry the test's scope. */
-const OWN_COOKIES = new Set([COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE]);
+const OWN_COOKIES = new Set([COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE]);
 const suiteCookies = (cookies) => (Array.isArray(cookies) ? cookies.filter((cookie) => !OWN_COOKIES.has(cookie?.name)) : cookies);
 function patchContextPrototype(context) {
     // A test reads and saves the cookies it and its app set, never
