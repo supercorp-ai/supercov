@@ -1836,6 +1836,17 @@ mod tests {
                 .contains(&json!(format!("{project}:{project}:ro"))),
             "{sent}"
         );
+        // A directory above the copy holds it too, further down.
+        let sent = post(
+            "/containers/create",
+            json!({"Image": "pulled-outer", "HostConfig": {"Binds": [
+                format!("{}:/outer", directory.display()),
+            ]}}),
+        );
+        assert!(
+            environment(&sent).contains(&"SUPERCOV_PROJECT_ROOT=/outer/copy".to_owned()),
+            "{sent}"
+        );
         // A directory of the copy is some of its code and none of its
         // runtime: not the copy.
         let sent = post(
@@ -1901,6 +1912,7 @@ mod tests {
             [
                 "`docker exec` in bare",
                 "`docker exec` in tests",
+                "pulled-outer",
                 "pulled-playwright"
             ]
         );
@@ -1925,6 +1937,7 @@ mod tests {
             "Mounts": [
                 {"Type": "bind", "Source": "/host/src", "Target": "/src"},
                 {"Type": "bind", "Source": "/host/untargeted"},
+                {"Type": "bind", "Target": "/unsourced"},
                 {"Type": "volume", "Source": "named", "Target": "/named"},
             ],
         }}));
@@ -2558,6 +2571,7 @@ mod tests {
         // The root directory: no parent to make, and no file to append to.
         let unwritable = ProxySettings {
             state: PathBuf::from("/"),
+            exec_environment: Vec::new(),
             ..settings(&directory)
         };
         let proxy = DockerProxy::start(&directory.join("p.sock"), &daemon, unwritable).unwrap();
@@ -2854,6 +2868,7 @@ mod tests {
             docker: PathBuf::from("docker"),
         };
         let create = br#"{"Image":"shop"}"#;
+        let exec = br#"{"Cmd":["true"]}"#;
         let client = [
             &b"POST /build HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\nbody"[..],
             b"POST /refuse HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n",
@@ -2869,6 +2884,12 @@ mod tests {
             )
             .as_bytes(),
             create,
+            format!(
+                "POST /containers/tests/exec HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                exec.len()
+            )
+            .as_bytes(),
+            exec,
             b"POST /containers/create HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
             b"GET /logs HTTP/1.1\r\n\r\n",
         ]
@@ -2878,6 +2899,7 @@ mod tests {
             b"HTTP/1.1 417 Expectation Failed\r\nContent-Length: 4\r\n\r\nnope",
             b"HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\nC\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n",
             b"HTTP/1.1 201 Created\r\nContent-Length: 12\r\n\r\n{\"Id\":\"two\"}",
+            b"HTTP/1.1 201 Created\r\nContent-Length: 11\r\n\r\n{\"Id\":\"e1\"}",
             b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\nno",
             b"HTTP/1.1 200 OK\r\n\r\nall of it",
         ]

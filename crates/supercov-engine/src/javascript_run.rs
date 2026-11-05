@@ -1625,22 +1625,30 @@ fn command_builds(command: &[String], workspace: &Path) -> bool {
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|package| package.get("scripts").cloned())
         .unwrap_or_default();
-    let mut texts = vec![command.join(" ")];
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(text) = texts.pop() {
-        for word in text.split(|c: char| c.is_whitespace() || "&|;()\"'".contains(c)) {
+    builds(
+        &command.join(" "),
+        &scripts,
+        &mut std::collections::BTreeSet::new(),
+    )
+}
+
+/// Whether `text` builds, through the scripts it names that `seen` has not.
+fn builds(
+    text: &str,
+    scripts: &serde_json::Value,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    text.split(|c: char| c.is_whitespace() || "&|;()\"'".contains(c))
+        .any(|word| {
             let word = word.trim_start_matches('-');
             if word == "build" || word.starts_with("build:") || word.ends_with(":build") {
                 return true;
             }
-            if let Some(script) = scripts.get(word).and_then(serde_json::Value::as_str)
-                && seen.insert(word.to_owned())
-            {
-                texts.push(script.to_owned());
+            match scripts.get(word).and_then(serde_json::Value::as_str) {
+                Some(script) if seen.insert(word.to_owned()) => builds(script, scripts, seen),
+                _ => false,
             }
-        }
-    }
-    false
+        })
 }
 
 fn companion_run_id(run_id: &str, nth: usize) -> String {

@@ -135,6 +135,7 @@ gates! {
     jvm_servers => "jvm-server-playwright.mjs",
     docker_servers => "docker-server-playwright.mjs",
     docker_clients => "docker-clients-playwright.mjs",
+    docker_exec => "docker-exec-playwright.mjs",
     rust_region_container => "rust-region-container.mjs",
     rust_worker_playwright => "rust-worker-playwright.mjs",
     rust_worker_cargo_test => "rust-worker-cargo-test.mjs",
