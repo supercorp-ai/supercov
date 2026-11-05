@@ -35,6 +35,14 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
   private static boolean testOpen;
 
   /**
+   * Whether the task ends a JVM past its timeout without running its shutdown
+   * hooks. On Windows {@code Process.destroy} is {@code TerminateProcess}: the
+   * hook never runs, and the JVM's whole evidence would be lost with it.
+   */
+  private static final boolean KILLED_WITHOUT_HOOKS =
+      System.getProperty("os.name", "").startsWith("Windows");
+
+  /**
    * The test Ant reports for a forked JVM that ended early -- past its
    * timeout, or crashed -- from its own JVM, under the name of the test that
    * was running. That test's record is the forked JVM's, which closes it on
@@ -69,8 +77,8 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
       Supercov.arm(0, new int[0]);
     }
     // A JVM the task kills for running past its timeout never reaches the
-    // end of its suite, but it is stopped, not destroyed: what it recorded up
-    // to then is still written.
+    // end of its suite, but on Linux and macOS it is stopped, not destroyed:
+    // what it recorded up to then is still written. Windows is startTest's.
     if (!hooked && evidenceDirectory != null && forkedByAnt()) {
       hooked = true;
       Runtime.getRuntime().addShutdownHook(new Thread(SupercovAntFormatter::writeEvidenceOnExit));
@@ -166,6 +174,13 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
     status = "passed";
     synchronized (SupercovAntFormatter.class) {
       testOpen = true;
+      // Where no hook will run, what the JVM recorded so far is written
+      // before each test, the test standing as not passing until it ends:
+      // a timeout then loses only what the stopped test itself reached.
+      if (KILLED_WITHOUT_HOOKS && hooked) {
+        Supercov.setTestStatus("failed");
+        writeEvidence();
+      }
     }
   }
 

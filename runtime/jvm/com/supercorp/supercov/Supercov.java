@@ -175,6 +175,17 @@ public final class Supercov {
     current = records.size() - 1;
   }
 
+  /**
+   * Records how the running test stands so far, without ending it: a JVM that
+   * may be killed outright writes its evidence with the test as not passing,
+   * and the test's own end then records how it really ended.
+   */
+  public static synchronized void setTestStatus(String status) {
+    if (current >= 0 && current < records.size()) {
+      records.get(current).status = status;
+    }
+  }
+
   /** Ends the running test, harvesting what it reached. */
   public static synchronized void exitTest() {
     exitTest("passed");
