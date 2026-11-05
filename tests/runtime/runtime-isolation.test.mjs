@@ -176,7 +176,7 @@ test("interleaved requests each keep their own phase, before and after a reset",
   // reset clears the epochs, and a context made before it must not keep one
   // that now belongs to another context.
   const recorded = run(`
-    const file = runtime.registerProbeV2({ pointIds: ["first", "second"], decisions: [] });
+    const file = runtime.registerProbeV2({ pointIds: ["first", "second"], decisions: [], decisionWidths: [] });
     runtime.activateCoverageScope(scope("a"));
     runtime.resetCoverage("a");
     const tick = () => new Promise((done) => setTimeout(done, 1));
@@ -214,9 +214,9 @@ test("a reset from another copy of the runtime reaches the async hook's epochs",
   // has to clear the epochs that hook keeps for each request.
   const recorded = run(`
     // The first copy records first, and so installs the hook.
-    runtime.coverageHitV2(runtime.registerProbeV2({ pointIds: ["first"], decisions: [] }), 0);
+    runtime.coverageHitV2(runtime.registerProbeV2({ pointIds: ["first"], decisions: [], decisionWidths: [] }), 0);
     const other = await import(${JSON.stringify(runtimeUrl + "?copy")});
-    const file = other.registerProbeV2({ pointIds: ["point"], decisions: [] });
+    const file = other.registerProbeV2({ pointIds: ["point"], decisions: [], decisionWidths: [] });
     other.activateCoverageScope(scope("a"));
     other.resetCoverage("a");
     const tick = () => new Promise((done) => setTimeout(done, 1));
@@ -242,7 +242,7 @@ test("work outside any request is recorded again for each test", () => {
   // the server set records again, at a new epoch, for each new test.
   const recorded = run(`
     delete process.env.SUPERCOV_RUN_ID;
-    const file = runtime.registerProbeV2({ pointIds: ["background"], decisions: [] });
+    const file = runtime.registerProbeV2({ pointIds: ["background"], decisions: [], decisionWidths: [] });
     const tick = () => new Promise((done) => setTimeout(done, 1));
     const epochs = [];
     globalThis.__SUPERCOV_MCDC_TEST_ID__ = "first";

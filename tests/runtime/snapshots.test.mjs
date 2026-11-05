@@ -47,10 +47,10 @@ test("a prefix that stops matching part way is compared no further", () => {
 
 test("hits, decisions and logicals are merged as before", () => {
   const merged = mergeSnapshots([
-    { hits: ["a", "b"], decisions: [{ meta: { id: "d" }, vectors: [{ values: [true], outcome: true }] }], logicals: [{ id: "l", vectors: [[1]] }] },
-    { hits: ["b", "c"], decisions: [{ meta: { id: "d" }, vectors: [{ values: [true], outcome: true }, { values: [false], outcome: false }] }], logicals: [{ id: "l", vectors: [[1], [2]] }] },
+    { hits: ["a", "b"], decisions: [{ id: "d", vectors: [{ values: [true], outcome: true }] }], logicals: [{ id: "l", vectors: [[1]] }] },
+    { hits: ["b", "c"], decisions: [{ id: "d", vectors: [{ values: [true], outcome: true }, { values: [false], outcome: false }] }], logicals: [{ id: "l", vectors: [[1], [2]] }] },
   ]);
   assert.deepEqual(merged.hits, ["a", "b", "c"]);
-  assert.deepEqual(merged.decisions, [{ meta: { id: "d" }, vectors: [{ values: [true], outcome: true }, { values: [false], outcome: false }] }]);
+  assert.deepEqual(merged.decisions, [{ id: "d", vectors: [{ values: [true], outcome: true }, { values: [false], outcome: false }] }]);
   assert.deepEqual(merged.logicals, [{ id: "l", vectors: [[1], [2]] }]);
 });
