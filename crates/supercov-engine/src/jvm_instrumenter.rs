@@ -386,8 +386,18 @@ impl Collector<'_> {
         if node.kind() == "block" {
             return;
         }
+        // An `else if` braced here is an `if` that may add an `else` of its
+        // own at its end (`record_arms`, rank 70). That `else` is the inner
+        // `if`'s, so the brace closing around the whole `if` goes after it:
+        // `else { if (b) {...} else {...} }`, not `else { if (b) {...} } else
+        // {...}`, which does not compile.
+        let closing = if matches!(node.kind(), "if_statement" | "if_expression") {
+            80
+        } else {
+            60
+        };
         self.edit(node.start_byte(), 60, "{ ".to_owned());
-        self.edit(node.end_byte(), 60, " }".to_owned());
+        self.edit(node.end_byte(), closing, " }".to_owned());
         if is_statement(node, self.source, self.language) {
             // Ranked above the brace so that applying right to left leaves the
             // brace outermost and the probe within it.
@@ -1820,6 +1830,17 @@ class Outer {
 
     /// The arms were left unwalked when the condition narrowed a type: the
     /// statements and decisions inside them were not measured at all.
+    #[test]
+    fn an_else_if_that_narrows_a_type_and_has_no_else_still_compiles() {
+        // Ametys: `if (n instanceof Form f) {...} else if (n instanceof Page p) {...}`
+        // and nothing after. The inner `if` adds an `else` to record being
+        // false, and it has to land inside the braces around the `else if`.
+        let (_, probed) = java_runs_alike(
+            "class X {\n  static String f(Object o) {\n    String out = \"none\";\n    if (o instanceof Integer i) {\n      out = \"int \" + i;\n    }\n    else if (o instanceof String s) \n    {\n      out = \"string \" + s;\n    }\n    return out;\n  }\n  public static void main(String[] args) {\n    System.out.println(f(1) + \" \" + f(\"a\") + \" \" + f(2.0));\n  }\n}\n",
+        );
+        assert!(!probed.contains("} } else"), "{probed}");
+    }
+
     #[test]
     fn the_arms_of_a_condition_that_narrows_a_type_are_measured() {
         let (obligations, probed) = java_runs_alike(
