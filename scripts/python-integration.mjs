@@ -197,7 +197,7 @@ try {
       { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1160' }, encoding: 'utf8' },
     );
     assert.notEqual(unpublished.status, 0, unpublished.stderr);
-    assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1154/u, unpublished.stderr);
+    assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1160/u, unpublished.stderr);
     assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
   }
   // A command that fails before any test runs keeps its own status:

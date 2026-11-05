@@ -280,7 +280,7 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
   assert.match(unread.stderr, /the Python server's run could not be published/u, unread.stderr);
   const unfinished = run(mixed, binary, ['--', 'npx', 'playwright', 'test', 'tests/grades.spec.js'], { SUPERCOV_TEST_FAULT: 'fs.symlink_metadata#javascript_run.rs:1545' });
   assert.notEqual(unfinished.status, 0, unfinished.stdout + unfinished.stderr);
-  assert.match(unfinished.stderr, /test fault at fs \(javascript_run\.rs:1526/u, unfinished.stderr);
+  assert.match(unfinished.stderr, /test fault at fs \(javascript_run\.rs:1545/u, unfinished.stderr);
 
   // Frameworks and servers, from a virtual environment in the project.
   if (process.platform !== 'win32' && !process.env.SUPERCOV_SKIP_PYTHON_FRAMEWORKS) {
