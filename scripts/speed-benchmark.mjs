@@ -81,7 +81,9 @@ run(
 );
 copyFileSync(join(project, '.env.example'), join(project, '.env'));
 // One worker: the flow's user shares one team, whose discussion list each
-// repetition empties again. A production build, as CI serves it.
+// repetition empties again. A production build, as CI serves it, without
+// the lint \`next build\` runs first: the same for every variant, and a
+// release before 4.25 failed it on the test files it rewrote.
 writeFileSync(
   join(project, 'playwright.speed.config.ts'),
   `import { defineConfig, devices } from '@playwright/test';
@@ -103,7 +105,7 @@ export default defineConfig({
   ],
   webServer: [
     { command: 'yarn run-mock-server', port: 8080, timeout: 120_000 },
-    { command: 'yarn build && yarn start --port 3000', port: 3000, timeout: 600_000 },
+    { command: 'npx next build --no-lint && yarn start --port 3000', port: 3000, timeout: 600_000 },
   ],
 });
 `,
