@@ -4922,7 +4922,8 @@ fn bun_sources_bootstrap_when_an_unused_package_script_names_a_browser_runner() 
             "{runner}: the unused package script suppressed the source loader"
         );
         assert!(
-            !source.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
+            !source.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {")
+                && !source.contains("browser-runtime.mjs"),
             "{runner}: an unused browser runner added its fallback to a Bun-only source"
         );
         let summary = project.supercov(&["runs", "latest"]).succeeds();
@@ -5062,13 +5063,23 @@ fn bun_source_imports_bootstrap_before_probes_even_with_shadowed_host_names() {
         let loader = source
             .find("new Function(\"stack\", \"specifier\"")
             .unwrap();
-        let fallback = source
-            .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
-            .unwrap();
-        assert!(
-            loader < fallback,
-            "{file}: the host must load run settings before the browser fallback initializes"
-        );
+        // An ES module imports the one shared browser fallback, which does
+        // nothing where the host is Node-like (Bun is), so the loader still
+        // gives the runtime its settings. Other sources inline the fallback.
+        if file.ends_with(".cjs") {
+            let fallback = source
+                .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
+                .unwrap();
+            assert!(
+                loader < fallback,
+                "{file}: the host must load run settings before the browser fallback initializes"
+            );
+        } else {
+            assert!(
+                source.contains("browser-runtime.mjs\";"),
+                "{file}: an ES module imports the shared browser fallback"
+            );
+        }
         let line = project
             .supercov(&[
                 "runs",
