@@ -8,6 +8,7 @@
 // the test command's settings, each path into the copy moved to /workspace,
 // and Playwright runs under the preload and the generated configuration as
 // it would beside Supercov. Without them each test's coverage was no test's.
+// A command there that sends nothing back is said to have.
 // Without Docker there is nothing to run, and the gate says so.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -53,6 +54,13 @@ docker exec ${name} node_modules/.bin/playwright test || status=$?
 docker rm -f ${name} >/dev/null
 exit $status
 `,
+  // The same container, given the settings, and a command in it that sends
+  // nothing back: the run says so rather than reading as a run of nothing.
+  'run-nothing.sh': `set -e
+docker run -d --name ${name} --user ${user} -v "$PWD":/workspace -w /workspace ${IMAGE} sleep infinity >/dev/null
+docker exec ${name} true
+docker rm -f ${name} >/dev/null
+`,
 };
 
 try {
@@ -74,6 +82,9 @@ try {
   const low = lines('a low score fails');
   assert.ok(high.includes('src/grade.js:3') && !high.includes('src/grade.js:5'), `${high}\n${measured.stderr}`);
   assert.ok(low.includes('src/grade.js:5') && !low.includes('src/grade.js:3'), `${low}\n${measured.stderr}`);
+  const nothing = run(root, binary, ['--', 'sh', 'run-nothing.sh']);
+  assert.equal(nothing.status, 0, `${nothing.stdout}${nothing.stderr}`);
+  assert.match(nothing.stderr, /warning: no test and no coverage came back from `docker exec` in supercov-docker-exec-\d+; node:\d+-bookworm-slim/u, nothing.stderr);
   console.log('[docker-exec-playwright] Playwright run by `docker exec` in a container the copy is mounted into credits each test its own lines');
 } finally {
   spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });

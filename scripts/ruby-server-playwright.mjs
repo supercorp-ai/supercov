@@ -291,9 +291,9 @@ test('a test that reaches no server', async () => {
   assert.match(moved.stderr, /Ruby server coverage: 1 test/u, moved.stderr);
   // Prepared again for the copy that moved, the Python server's plan that
   // cannot be written ends the run.
-  const reprepared = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'copy-moved,fs.write#python_run.rs:677@2' });
+  const reprepared = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'copy-moved,fs.write#python_run.rs:678@2' });
   assert.notEqual(reprepared.status, 0, reprepared.stdout + reprepared.stderr);
-  assert.ok(reprepared.stderr.includes('test fault at fs (python_run.rs:677'), reprepared.stderr);
+  assert.ok(reprepared.stderr.includes('test fault at fs (python_run.rs:678'), reprepared.stderr);
   const unpublishable = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'server-publish' });
   assert.notEqual(unpublishable.status, 0, unpublishable.stdout + unpublishable.stderr);
   assert.match(unpublishable.stderr, /test fault at server-publish/u, unpublishable.stderr);
@@ -314,11 +314,11 @@ test('a test that reaches no server', async () => {
   // finished, the evidence cleared, the run's state written, the first run
   // finished -- that fails ends the run, saying where.
   for (const [fault, place] of [
-    ['fs.symlink_metadata#javascript_run.rs:1307', 'javascript_run.rs:1307'],
-    ['fs.symlink_metadata#javascript_run.rs:1323', 'javascript_run.rs:1323'],
-    ['fs.symlink_metadata#javascript_run.rs:1325', 'javascript_run.rs:1325'],
-    ['fs.read#javascript_run.rs:1351', 'javascript_run.rs:1351'],
-    ['fs.symlink_metadata#javascript_run.rs:1363', 'javascript_run.rs:1363'],
+    ['fs.symlink_metadata#javascript_run.rs:1334', 'javascript_run.rs:1334'],
+    ['fs.symlink_metadata#javascript_run.rs:1350', 'javascript_run.rs:1350'],
+    ['fs.symlink_metadata#javascript_run.rs:1352', 'javascript_run.rs:1352'],
+    ['fs.read#javascript_run.rs:1378', 'javascript_run.rs:1378'],
+    ['fs.symlink_metadata#javascript_run.rs:1390', 'javascript_run.rs:1390'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
@@ -328,12 +328,12 @@ test('a test that reaches no server', async () => {
   // directory, its archive, its run moved into place -- is said, and never
   // panics; the first server's failing ends the run.
   for (const [fault, place] of [
-    ['fs.create_dir_all#python_run.rs:809', 'python_run.rs:809'],
-    ['fs.create_dir_all#ruby_run.rs:642', 'ruby_run.rs:642'],
+    ['fs.create_dir_all#python_run.rs:810', 'python_run.rs:810'],
+    ['fs.create_dir_all#ruby_run.rs:643', 'ruby_run.rs:643'],
     ['fs.rename#evidence_archive.rs:472', 'evidence_archive.rs:472'],
     ['fs.rename#evidence_archive.rs:472@2', 'evidence_archive.rs:472'],
-    ['fs.rename#lifecycle.rs:1125', 'lifecycle.rs:1125'],
-    ['fs.rename#lifecycle.rs:1125@2', 'lifecycle.rs:1125'],
+    ['fs.rename#lifecycle.rs:1154', 'lifecycle.rs:1154'],
+    ['fs.rename#lifecycle.rs:1154@2', 'lifecycle.rs:1154'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);

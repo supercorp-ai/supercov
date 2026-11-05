@@ -1113,26 +1113,14 @@ fn exec_container(path: &str) -> Option<&str> {
 /// volume is no host path, and is left out.
 fn create_binds(config: &Value) -> Vec<(PathBuf, PathBuf)> {
     let host = &config["HostConfig"];
-    let binds = string_array(host.get("Binds"))
-        .into_iter()
+    string_array(host.get("Binds"))
+        .iter()
         .filter_map(|bind| {
-            let mut parts = bind.splitn(3, ':');
-            Some((parts.next()?.to_owned(), parts.next()?.to_owned()))
-        });
-    let mounts = host
-        .get("Mounts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|mount| mount.get("Type").and_then(Value::as_str) == Some("bind"))
-        .filter_map(|mount| {
-            Some((
-                mount.get("Source")?.as_str()?.to_owned(),
-                mount.get("Target")?.as_str()?.to_owned(),
-            ))
-        });
-    binds
-        .chain(mounts)
+            let (source, rest) = bind.split_once(':')?;
+            let target = rest.split_once(':').map_or(rest, |(target, _)| target);
+            Some((source.to_owned(), target.to_owned()))
+        })
+        .chain(bind_mounts(host.get("Mounts"), "Target"))
         .filter(|(source, _)| source.starts_with('/'))
         .map(|(source, target)| (PathBuf::from(source), PathBuf::from(target)))
         .collect()
@@ -1140,19 +1128,26 @@ fn create_binds(config: &Value) -> Vec<(PathBuf, PathBuf)> {
 
 /// A container's bind mounts as the daemon reports them.
 fn inspected_binds(inspected: &Value) -> Vec<(PathBuf, PathBuf)> {
-    inspected
-        .get("Mounts")
+    bind_mounts(inspected.get("Mounts"), "Destination")
+        .map(|(source, target)| (PathBuf::from(source), PathBuf::from(target)))
+        .collect()
+}
+
+/// The bind mounts of a `Mounts` list, whose container path is `target`
+/// (`Target` in a create request, `Destination` in an inspection).
+fn bind_mounts<'v>(
+    mounts: Option<&'v Value>,
+    target: &'v str,
+) -> impl Iterator<Item = (String, String)> + 'v {
+    mounts
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|mount| mount.get("Type").and_then(Value::as_str) == Some("bind"))
-        .filter_map(|mount| {
-            Some((
-                PathBuf::from(mount.get("Source")?.as_str()?),
-                PathBuf::from(mount.get("Destination")?.as_str()?),
-            ))
+        .filter_map(move |mount| {
+            let text = |name: &str| mount.get(name).and_then(Value::as_str).map(str::to_owned);
+            Some((text("Source")?, text(target)?))
         })
-        .collect()
 }
 
 /// Where a container with these binds sees the copy: under the deepest
@@ -1162,7 +1157,7 @@ fn inspected_binds(inspected: &Value) -> Vec<(PathBuf, PathBuf)> {
 fn mounted_copy(binds: &[(PathBuf, PathBuf)], copy: &Path) -> Option<PathBuf> {
     // The daemon may name the copy by its resolved path (`/private/var` for
     // macOS's `/var`).
-    let resolved = fs::canonicalize(copy).ok();
+    let resolved = copy.canonicalize().ok();
     binds
         .iter()
         .filter_map(|(source, target)| {
@@ -1288,42 +1283,42 @@ fn write_registry(path: &Path, registry: &BTreeMap<String, String>) {
     }
 }
 
-/// What the relay gave the run's settings: each container, by its compose
-/// service or image, and each command `docker exec` started in one.
-pub fn measured(state: &Path) -> Vec<String> {
+/// What the relay recorded, read once at the run's end.
+#[derive(Debug, Default)]
+pub struct Journal {
+    /// Why each container left alone was.
+    pub notes: Vec<String>,
+    /// What was given the run's settings: each container, by its compose
+    /// service or image, and each command `docker exec` started in one.
+    pub measured: Vec<String>,
+}
+
+pub fn journal(state: &Path) -> Journal {
     let Ok(text) = fs::read_to_string(state) else {
-        return Vec::new();
+        return Journal::default();
     };
-    let mut measured = text
+    let lines = text
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    let text = |line: &Value, name: &str| line.get(name).and_then(Value::as_str).map(str::to_owned);
+    let mut notes = lines
+        .iter()
+        .filter_map(|line| text(line, "note"))
+        .collect::<Vec<_>>();
+    notes.sort();
+    notes.dedup();
+    let mut measured = lines
+        .iter()
         .filter(|line| line.get("measured").and_then(Value::as_bool) == Some(true))
-        .filter_map(|line| {
-            let text = |name: &str| line.get(name).and_then(Value::as_str).map(str::to_owned);
-            match text("exec") {
-                Some(container) => Some(format!("`docker exec` in {container}")),
-                None => text("service").or_else(|| text("image")),
-            }
+        .filter_map(|line| match text(line, "exec") {
+            Some(container) => Some(format!("`docker exec` in {container}")),
+            None => text(line, "service").or_else(|| text(line, "image")),
         })
         .collect::<Vec<_>>();
     measured.sort();
     measured.dedup();
-    measured
-}
-
-/// The notes the relay recorded about containers it left alone.
-pub fn notes(state: &Path) -> Vec<String> {
-    let Ok(text) = fs::read_to_string(state) else {
-        return Vec::new();
-    };
-    let mut notes = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|line| line.get("note").and_then(Value::as_str).map(str::to_owned))
-        .collect::<Vec<_>>();
-    notes.sort();
-    notes.dedup();
-    notes
+    Journal { notes, measured }
 }
 
 #[cfg(test)]
@@ -1425,24 +1420,48 @@ mod tests {
                                 .and_then(|rest| rest.strip_suffix("/json"))
                         {
                             // The suite's test container has the copy
-                            // mounted; any other has nothing mounted.
+                            // mounted, a bare one has it beside mounts of
+                            // no use, and any other has nothing mounted;
+                            // a container that is gone is not found.
                             let copy = socket_directory.join("copy");
-                            let mounts = if container == "tests" {
-                                json!([{"Type": "bind", "Source": copy, "Destination": "/workspace"}])
-                            } else {
-                                json!([])
+                            let (mounts, environment) = match container {
+                                "tests" => (
+                                    json!([{"Type": "bind", "Source": copy, "Destination": "/workspace"}]),
+                                    json!(["NODE_OPTIONS=--max-old-space-size=4096"]),
+                                ),
+                                "bare" => (
+                                    json!([
+                                        {"Type": "volume", "Source": "data", "Destination": "/data"},
+                                        {"Type": "bind", "Source": "/etc/hosts"},
+                                        {"Type": "bind", "Source": copy, "Destination": "/workspace"},
+                                    ]),
+                                    Value::Null,
+                                ),
+                                _ => (json!([]), Value::Null),
                             };
-                            respond(
-                                &mut writer,
-                                "200 OK",
-                                &json!({
-                                    "Mounts": mounts,
-                                    "Config": {"Image": "playwright", "Env": ["NODE_OPTIONS=--max-old-space-size=4096"]},
-                                })
-                                .to_string(),
-                            );
+                            if container == "gone" {
+                                respond(
+                                    &mut writer,
+                                    "404 Not Found",
+                                    r#"{"message":"no such container"}"#,
+                                );
+                            } else {
+                                respond(
+                                    &mut writer,
+                                    "200 OK",
+                                    &json!({
+                                        "Mounts": mounts,
+                                        "Config": {"Image": "playwright", "Env": environment},
+                                    })
+                                    .to_string(),
+                                );
+                            }
                         } else if method == "POST" && path.ends_with("/exec") {
-                            sender.send(serde_json::from_slice(&body).unwrap()).unwrap();
+                            sender
+                                .send(serde_json::from_slice(&body).unwrap_or_else(|_| {
+                                    Value::String(String::from_utf8_lossy(&body).into_owned())
+                                }))
+                                .unwrap();
                             respond(&mut writer, "201 Created", r#"{"Id":"e1"}"#);
                         } else if method == "POST" && path == "/containers/create" {
                             let config: Value = serde_json::from_slice(&body).unwrap();
@@ -1721,7 +1740,7 @@ mod tests {
             .map(|record| record["id"].as_str().unwrap())
             .collect::<BTreeSet<_>>();
         assert_eq!(ids.len(), 256);
-        assert_eq!(notes(&shared.settings.state).len(), 256);
+        assert_eq!(journal(&shared.settings.state).notes.len(), 256);
         assert_eq!(shared.created.lock().unwrap().len(), 256);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1752,7 +1771,7 @@ mod tests {
         assert!(sent.get("Env").is_none(), "{sent}");
         drop(stream);
         proxy.finish();
-        let notes = notes(&directory.join("state/containers.jsonl"));
+        let notes = journal(&directory.join("state/containers.jsonl")).notes;
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("earlier copy"), "{notes:?}");
         fs::remove_dir_all(directory).unwrap();
@@ -1839,16 +1858,78 @@ mod tests {
             ),
             "{sent}"
         );
-        // An exec where the copy is not mounted is passed on as it came.
-        let sent = post("/containers/db/exec", json!({"Cmd": ["psql"]}));
-        assert_eq!(sent, json!({"Cmd": ["psql"]}));
+        // A container with no options of its own, or empty ones: ours alone.
+        let ours = "NODE_OPTIONS=--import=file:///workspace/.supercov/node_modules/register.mjs";
+        let sent = post("/containers/bare/exec", json!({"Env": ["NODE_OPTIONS="]}));
+        assert!(environment(&sent).contains(&ours.to_owned()), "{sent}");
+        let sent = post("/containers/bare/exec", json!({"Cmd": ["true"]}));
+        assert!(environment(&sent).contains(&ours.to_owned()), "{sent}");
+        // An exec where the copy is not mounted, in a container that is
+        // gone, or that is not JSON is passed on as it came.
+        for container in ["db", "gone"] {
+            let sent = post(
+                &format!("/containers/{container}/exec"),
+                json!({"Cmd": ["psql"]}),
+            );
+            assert_eq!(sent, json!({"Cmd": ["psql"]}));
+        }
+        let body = "not json";
+        exchange(
+            &mut stream,
+            &mut reader,
+            &format!(
+                "POST /containers/tests/exec HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert_eq!(
+            created.recv_timeout(Duration::from_secs(5)).unwrap(),
+            json!(body)
+        );
         drop(stream);
         proxy.finish();
         assert_eq!(
-            measured(&directory.join("state/containers.jsonl")),
-            ["`docker exec` in tests", "pulled-playwright"]
+            journal(&directory.join("state/containers.jsonl")).measured,
+            [
+                "`docker exec` in bare",
+                "`docker exec` in tests",
+                "pulled-playwright"
+            ]
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// What the relay reads of a request it rewrites: an exec's container,
+    /// and a create's binds, of any shape a client sends.
+    #[test]
+    fn an_exec_names_its_container_and_a_create_its_host_binds() {
+        assert_eq!(exec_container("/containers/tests/exec"), Some("tests"));
+        for path in [
+            "/containers//exec",
+            "/containers/a/b/exec",
+            "/containers/create",
+            "/images/x/exec",
+        ] {
+            assert_eq!(exec_container(path), None, "{path}");
+        }
+        let binds = create_binds(&json!({"HostConfig": {
+            "Binds": ["/host/app:/app:ro", "/host/data:/data", "cache:/cache", "/anonymous"],
+            "Mounts": [
+                {"Type": "bind", "Source": "/host/src", "Target": "/src"},
+                {"Type": "bind", "Source": "/host/untargeted"},
+                {"Type": "volume", "Source": "named", "Target": "/named"},
+            ],
+        }}));
+        assert_eq!(
+            binds,
+            [
+                ("/host/app", "/app"),
+                ("/host/data", "/data"),
+                ("/host/src", "/src")
+            ]
+            .map(|(source, target)| (PathBuf::from(source), PathBuf::from(target)))
+        );
+        assert!(create_binds(&json!({})).is_empty());
     }
 
     #[test]
@@ -2312,7 +2393,11 @@ mod tests {
         );
         drop(stream);
         proxy.finish();
-        assert!(notes(&directory.join("state/containers.jsonl")).is_empty());
+        assert!(
+            journal(&directory.join("state/containers.jsonl"))
+                .notes
+                .is_empty()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2472,9 +2557,19 @@ mod tests {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let (head, _) = create(&mut stream, &mut reader, &json!({"Image": "app"}));
         assert!(head.start.contains(" 201"), "{head:?}");
+        let body = json!({"Cmd": ["true"]}).to_string();
+        let (head, _) = exchange(
+            &mut stream,
+            &mut reader,
+            &format!(
+                "POST /containers/tests/exec HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(head.start.contains(" 201"), "{head:?}");
         drop(stream);
         proxy.finish();
-        assert!(notes(Path::new("/")).is_empty());
+        assert!(journal(Path::new("/")).notes.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2486,7 +2581,7 @@ mod tests {
         let daemon = directory.join("d.sock");
         let _created = fake_daemon(&daemon);
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:125", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:139", || {
                 socket_path(&directory.join("state"))
             })
             .is_err()
@@ -2494,13 +2589,13 @@ mod tests {
         // A run directory too deep for a socket address gets a private
         // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir#docker_proxy.rs:136", || {
+            crate::fault::during("fs.create_dir#docker_proxy.rs:150", || {
                 socket_path(&directory.join("state").join("d".repeat(120)))
             })
             .is_err()
         );
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:197", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:211", || {
                 DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
             })
             .is_err()

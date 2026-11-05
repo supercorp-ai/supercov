@@ -1666,7 +1666,7 @@ mod tests {
         }
         write("filtered-notes.txt", 0);
         // A directory that cannot be listed is pruned of nothing.
-        crate::fault::during("fs.read_dir#run_store.rs:1249", || {
+        crate::fault::during("fs.read_dir#run_store.rs:1258", || {
             prune_filtered_indexes(&kept)
         });
         assert!(root.join("filtered-01.index").exists());

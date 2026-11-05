@@ -975,19 +975,28 @@ pub(crate) fn publish_run_with_fault(
     // of each command instead dropped all but one of four machines' shards,
     // each run with the same command and copied into one store.
     if metadata.merged != Some(true) {
-        let earlier = crate::run_store::discover_runs(root)
-            .map(|inventory| inventory.runs)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|run| {
-                run.metadata.merged != Some(true)
-                    && run.metadata.command == metadata.command
-                    && run.metadata.source_roots == metadata.source_roots
-                    && run.metadata.integrity.instrumenter_version
-                        == metadata.integrity.instrumenter_version
-            })
-            .map(|run| run.id)
-            .collect::<Vec<_>>();
+        // A store that cannot be listed cannot take the run either.
+        let earlier = crate::fault::or(
+            "run-store-unlisted",
+            || {
+                Err(crate::run_store::RunStoreError::Io(io::Error::other(
+                    "injected fault at run-store-unlisted",
+                )))
+            },
+            || crate::run_store::discover_runs(root),
+        )
+        .map_err(|error| LifecycleError::InvalidState(format!("run store: {error}")))?
+        .runs
+        .into_iter()
+        // A merge's command is `supercov merge`, which is no other run's.
+        .filter(|run| {
+            run.metadata.command == metadata.command
+                && run.metadata.source_roots == metadata.source_roots
+                && run.metadata.integrity.instrumenter_version
+                    == metadata.integrity.instrumenter_version
+        })
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
         metadata.supersedes = (!earlier.is_empty()).then_some(earlier);
     }
     let metadata = &metadata;
@@ -1585,7 +1594,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1443", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1472", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1610,7 +1619,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1178", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1207", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1618,7 +1627,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1253", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1282", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()

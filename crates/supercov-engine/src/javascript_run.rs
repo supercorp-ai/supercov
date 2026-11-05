@@ -1078,18 +1078,20 @@ pub fn run_direct_javascript(
             return Err(message.into());
         }
     };
-    // A server left running writes its last window when stopped.
+    // A server left running writes its last window when stopped. What the
+    // run's settings were given to is kept, to say so when nothing came back.
     #[cfg(unix)]
-    if let Some(proxy) = docker_proxy.take() {
-        proxy.finish();
-        for note in crate::docker_proxy::notes(&docker_state.join("containers.jsonl")) {
-            let _ = writeln!(diagnostics, "[supercov] {note}");
+    let in_containers = match docker_proxy.take() {
+        Some(proxy) => {
+            proxy.finish();
+            let journal = crate::docker_proxy::journal(&docker_state.join("containers.jsonl"));
+            for note in journal.notes {
+                let _ = writeln!(diagnostics, "[supercov] {note}");
+            }
+            journal.measured
         }
-    }
-    // What the run's settings were given to in containers, to say so when
-    // nothing came back from there.
-    #[cfg(unix)]
-    let in_containers = crate::docker_proxy::measured(&docker_state.join("containers.jsonl"));
+        None => Vec::new(),
+    };
     #[cfg(not(unix))]
     let in_containers = Vec::<String>::new();
     let test_command_ms = execution
@@ -1424,22 +1426,8 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
     let mut entries =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
-    // Containers that took the run's settings and sent nothing back: a
-    // boundary the run could not see past, not a suite that ran nothing.
-    // The run said "Complete" with no test in it, and no word why.
-    if !in_containers.is_empty()
-        && entries
-            .iter()
-            .any(|entry| entry.path == "results/command/mcdc.json")
-        && !entries
-            .iter()
-            .any(|entry| entry.path.starts_with("server/"))
-    {
-        let _ = writeln!(
-            diagnostics,
-            "[supercov] warning: no test and no coverage came back from {}, which ran with the run's settings: what ran there is missing from this run, not zero. A container's evidence reaches the run through the copy Supercov ran the command in, mounted into it, or through the project's .supercov directory.",
-            crate::run_merge::listed(&in_containers)
-        );
+    if let Some(warning) = nothing_came_back(&in_containers, &entries) {
+        let _ = writeln!(diagnostics, "{warning}");
     }
     if let Some(support) = &support {
         entries.push(EvidenceArchiveEntry {
@@ -1609,6 +1597,25 @@ fn left_out_loads(root: &Path, workspace: &Path, notes: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Containers that took the run's settings and sent nothing back: a boundary
+/// the run could not see past, not a suite that ran nothing. The run said
+/// "Complete" with no test in it, and no word why. No test is the stand-in
+/// result made for a run without one; nothing is also no server's record.
+fn nothing_came_back(in_containers: &[String], entries: &[EvidenceArchiveEntry]) -> Option<String> {
+    let no_test = entries
+        .iter()
+        .any(|entry| entry.path == "results/command/mcdc.json");
+    let no_server = !entries
+        .iter()
+        .any(|entry| entry.path.starts_with("server/"));
+    (!in_containers.is_empty() && no_test && no_server).then(|| {
+        format!(
+            "[supercov] warning: no test and no coverage came back from {}, which ran with the run's settings: what ran there is missing from this run, not zero. A container's evidence reaches the run through the copy Supercov ran the command in, mounted into it, or through the project's .supercov directory.",
+            crate::run_merge::listed(in_containers)
+        )
+    })
+}
+
 /// Whether the command builds: a word of it, or of a `package.json` script
 /// it runs, directly or through other scripts, is a build (`build`,
 /// `build:web`, `turbo run build`, `tsc --build`).
@@ -1679,7 +1686,9 @@ fn start_docker_relay(
         copy: workspace.to_owned(),
         mount: root.join(".supercov"),
         // Each package in the copy's node_modules links to the project's.
-        links: crate::workspace::canonicalize_simplified(root.join("node_modules"))
+        links: root
+            .join("node_modules")
+            .canonicalize()
             .into_iter()
             .filter(|modules| modules.is_dir())
             .collect(),
@@ -1966,6 +1975,29 @@ mod tests {
     use super::*;
     use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
 
+    /// Each part of "nothing came back" decides on its own: containers given
+    /// the settings, no test, and no server's record. The containers' runs
+    /// are reached end to end by docker-exec-playwright.mjs; a command with
+    /// no test but a server's record takes a server outside any container.
+    #[test]
+    fn containers_are_said_to_have_sent_nothing_only_when_nothing_came() {
+        let entry = |path: &str| EvidenceArchiveEntry {
+            path: path.into(),
+            contents: Vec::new(),
+        };
+        let containers = ["`docker exec` in tests".to_owned()];
+        let none = [entry("results/command/mcdc.json")];
+        let warning = nothing_came_back(&containers, &none).unwrap();
+        assert!(warning.contains("from `docker exec` in tests"), "{warning}");
+        assert!(nothing_came_back(&[], &none).is_none());
+        assert!(nothing_came_back(&containers, &[entry("results/a/mcdc.json")]).is_none());
+        let served = [
+            entry("results/command/mcdc.json"),
+            entry("server/run/1.jsonl"),
+        ];
+        assert!(nothing_came_back(&containers, &served).is_none());
+    }
+
     /// A command that builds, itself or through the scripts it runs, is not
     /// told to build: its build is what to look at.
     #[test]
@@ -1998,6 +2030,7 @@ mod tests {
         ]));
         assert!(builds(&["npx", "tsc", "--build"]));
         assert!(builds(&["npm", "run", "ci"]));
+        assert!(builds(&["pnpm", "web:build"]));
         assert!(!builds(&["npm", "test"]));
         assert!(!builds(&["npm", "run", "loop"]));
         assert!(!builds(&["node", "--test", "test/build.test.js"]));
