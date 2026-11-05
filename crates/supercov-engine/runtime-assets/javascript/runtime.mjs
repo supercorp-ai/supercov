@@ -130,19 +130,6 @@ var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
 var _a;
 var isBrowser = !(typeof process !== "undefined" && typeof ((_a = process.versions) == null ? void 0 : _a.node) === "string");
-// Temporary experiment (SUPERCOV_ABLATE): turn one part of recording off to
-// time it. Coverage is wrong under it.
-var ablation = (function() {
-  try {
-    var fromEnv = typeof process !== "undefined" && process.env != null ? process.env["SUPERCOV_ABLATE"] : void 0;
-    return String(fromEnv || runtimeGlobal.__SUPERCOV_ABLATE__ || "");
-  } catch (e) {
-    return "";
-  }
-})();
-var ablateAsyncHook = ablation.indexOf("no-async-hook") !== -1;
-var ablateServerWrite = ablation.indexOf("no-server-write") !== -1;
-var ablateBrowserEvents = ablation.indexOf("no-browser-events") !== -1;
 var _a2;
 var testId = (_a2 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a2 : "unscoped";
 var storageKey = "__supercov_coverage_" + testId;
@@ -314,11 +301,6 @@ function installProbeV2AsyncHook() {
   var _a8;
   if (isBrowser || state.probeV2HookInstalled || typeof process === "undefined")
     return;
-  if (ablateAsyncHook) {
-    state.probeV2HookInstalled = true;
-    state.probeV2Clock.fast = true;
-    return;
-  }
   try {
     const getBuiltinModule = process.getBuiltinModule;
     const createHook = (_a8 = getBuiltinModule == null ? void 0 : getBuiltinModule("node:async_hooks")) == null ? void 0 : _a8.createHook;
@@ -535,12 +517,11 @@ function persistBrowser() {
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
 }
-// Experiment (SUPERCOV_COMPACT_SERVER_EVIDENCE=1): an attempt's file says
-// its scope once per writing process; the engine takes it from the file.
-var compactServerEvidence = typeof process !== "undefined" && process.env != null && process.env["SUPERCOV_COMPACT_SERVER_EVIDENCE"] === "1";
+// An attempt's file says its scope once per writing process: each line
+// without one is of the scope of the line before it in the same file.
 var scopedPathsWritten = /* @__PURE__ */ new Set();
 function serverLine(record, path) {
-  if (!compactServerEvidence || !path)
+  if (!path)
     return JSON.stringify(record);
   const { scope, ...line } = record;
   if (scope && !scopedPathsWritten.has(path)) {
@@ -1058,8 +1039,6 @@ function scheduleServerFlush() {
 }
 function appendServer(record) {
   var _a8, _b, _c, _d;
-  if (ablateServerWrite && !state.runtimeSnapshots)
-    return;
   if (state.runtimeSnapshots) {
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
     if (record.type === "decision") {
@@ -1831,8 +1810,6 @@ function eventKey(event) {
   return `${(_a8 = event.phaseId) != null ? _a8 : "unscoped"}:${event.type}:${suffix}`;
 }
 function recordBrowserEvent(event) {
-  if (ablateBrowserEvents)
-    return false;
   const key = eventKey(event);
   if (state.eventKeys.has(key))
     return false;

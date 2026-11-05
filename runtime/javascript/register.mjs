@@ -981,22 +981,13 @@ if (missingFile) {
         }
     };
 }
-const loaderData = {
-    typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
-    supportFile,
-    missingFile,
-};
-// Experiment (SUPERCOV_SYNC_HOOKS=1): the hooks run in this thread. Off it,
-// every Node process started a thread of its own and compiled a module
-// loader there: 40 ms before the command's first line.
-if (process.env.SUPERCOV_SYNC_HOOKS === "1" && typeof Module.registerHooks === "function") {
-    const hooks = await import("./resolve-loader.mjs");
-    hooks.initialize(loaderData);
-    Module.registerHooks({ resolve: hooks.resolveSync, load: hooks.loadSync });
-}
-else {
-    register(new URL("./resolve-loader.mjs", import.meta.url), { data: loaderData });
-}
+register(new URL("./resolve-loader.mjs", import.meta.url), {
+    data: {
+        typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
+        supportFile,
+        missingFile,
+    },
+});
 if (process.env.SUPERCOV_DEBUG === "1") {
     console.error("[supercov] preload", { entrypoint });
 }

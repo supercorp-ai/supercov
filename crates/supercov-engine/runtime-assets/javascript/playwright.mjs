@@ -83,8 +83,6 @@ const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?
     .replace(/[^A-Za-z0-9_-]/g, "_");
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
-// Temporary experiment (SUPERCOV_ABLATE): parts of the collection turned off, to time them.
-const ABLATE = process.env.SUPERCOV_ABLATE ?? "";
 // Wall-clock accounting for every browser round-trip this shim performs,
 // enabled by SUPERCOV_PHASE_TIMING=1. One summary line per test on stderr;
 // a single boolean check when disabled.
@@ -649,8 +647,7 @@ class CoveragePhaseController {
         const phase = this.createPhase("action", operation);
         this.lastActionId = phase.id;
         this.activePhaseId = phase.id;
-        if (!ABLATE.includes("no-action-activate"))
-            await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id, phase.id));
+        await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id, phase.id));
         return phase;
     }
     beginAssertion(operation, source = callerSource()) {
@@ -660,8 +657,7 @@ class CoveragePhaseController {
         // Playwright queues browser protocol commands in order. Starting this
         // evaluation before an async locator assertion is sufficient to tag its
         // polling work without turning synchronous expect matchers into promises.
-        if (!ABLATE.includes("no-assert-activate"))
-            void timed("assertion.activateInBrowser", () => this.activateInBrowser(phase.id));
+        void timed("assertion.activateInBrowser", () => this.activateInBrowser(phase.id));
         return phase;
     }
     requestPhaseId() {
@@ -976,9 +972,6 @@ class CoveragePhaseController {
  */
 const LEAVING_BINDING = "__supercovLeaving";
 function readSnapshot(target) {
-    // Temporary experiment (SUPERCOV_ABLATE=no-collect): time the collection.
-    if ((process.env.SUPERCOV_ABLATE ?? "").includes("no-collect"))
-        return Promise.resolve(undefined);
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
@@ -1455,32 +1448,6 @@ function executionScope(testInfo) {
         attemptId,
     };
 }
-function readServerRecords(scope) {
-    let inherited;
-    try {
-        return readFileSync(serverEvidencePath(scope), "utf8")
-            .split("\n")
-            .filter(Boolean)
-            .flatMap((line) => {
-            try {
-                const record = JSON.parse(line);
-                // A compact file names its scope on a writer's first line.
-                if (record.scope)
-                    inherited = record.scope;
-                else if (inherited)
-                    record.scope = inherited;
-                return record.scope?.attemptId === scope.attemptId ? [record] : [];
-            }
-            catch {
-                // Ignore a final partial line if the server was writing during collection.
-                return [];
-            }
-        });
-    }
-    catch {
-        return [];
-    }
-}
 function phaseSourceLine(source) {
     return source?.replace(/:\d+$/, "");
 }
@@ -1518,14 +1485,14 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
  * directory as well. No test streams into this path.
  */
 /**
- * A snapshot's events as columns (experiment: SUPERCOV_COMPACT_BROWSER_EVENTS=1).
+ * A snapshot's events as columns.
  * A page records each hit once per test as an event of five fields, and its
  * thousands of them were most of a test's record. The engine decodes the
  * columns into exactly these events, in this order.
  */
 function columnarEvents(snapshot) {
     const events = snapshot?.events;
-    if (process.env.SUPERCOV_COMPACT_BROWSER_EVENTS !== "1" || !Array.isArray(events) || events.length === 0)
+    if (!Array.isArray(events) || events.length === 0)
         return snapshot;
     const tables = { types: new Map(), phases: new Map(), environments: new Map() };
     const index = (table, value) => {
@@ -1646,10 +1613,6 @@ const instrumentedFixtures = {
                 const endedAtMs = Date.now();
                 try {
                     const browser = await controller.collectRuntimeSnapshots();
-                    // The engine joins the attempt's server file to this
-                    // record by its scope as it reads the run, so a copy here
-                    // only doubled the run's evidence (experiment flag).
-                    const server = process.env.SUPERCOV_NO_EMBEDDED_SERVER === "1" ? [] : readServerRecords(scope);
                     // Emit an artifact even when this test touched no application source.
                     // A complete test-to-coverage matrix must also identify tests that are
                     // removable without changing coverage.
@@ -1675,7 +1638,6 @@ const instrumentedFixtures = {
                         phases: mergeCollectedPhases(controller.phases, directRuntime()?.takeNodeAssertionPhases(scope) ?? []),
                         ...(controller.workerEvidenceMissing ? { attribution: "partial" } : {}),
                         browser: browser.map(columnarEvents),
-                        server,
                         span: [startedAtMs, endedAtMs],
                     };
                     appendEvidenceLine(`${JSON.stringify(payload)}\n`);

@@ -2097,7 +2097,6 @@ fn create_coverage_view_with_model(
     coverage_model: &CoverageModelDeclaration,
     ids: &mut Interner,
 ) -> Result<CoverageView, ReportError> {
-    crate::coverage_report::vstage("start");
     let settled;
     let manifest = match whole_files_unmeasured(manifest) {
         Some(applied) => {
@@ -2424,7 +2423,6 @@ fn create_coverage_view_with_model(
         }
     }
 
-    crate::coverage_report::vstage("accumulate");
     decision_metadata.sort_by(|left, right| {
         left.file
             .cmp(&right.file)
@@ -2437,7 +2435,6 @@ fn create_coverage_view_with_model(
     // A frontend may decline one outcome of a branch (a block that can never
     // be entered, a rescue that can never be reached) or the whole branch;
     // a branch whose every outcome is declined is declined itself.
-    crate::coverage_report::vstage("relations");
     let mut declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
     for branch in &manifest.branches {
         if !branch.alternatives.is_empty()
@@ -2612,7 +2609,6 @@ fn create_coverage_view_with_model(
         });
     }
 
-    crate::coverage_report::vstage("decisions");
     let points = manifest
         .points
         .iter()
@@ -2632,7 +2628,6 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
-    crate::coverage_report::vstage("points");
     let branches = manifest
         .branches
         .iter()
@@ -2677,7 +2672,6 @@ fn create_coverage_view_with_model(
     // limitation against. Only what was measured decides the line's state and
     // whether it counts. A line gathers its points' test and phase numbers,
     // which sort and deduplicate as numbers.
-    crate::coverage_report::vstage("branches+");
     let mut line_aggregates = BTreeMap::<SourceLine, LineAggregate>::new();
     for point in &points {
         let aggregate = line_aggregates
@@ -2746,7 +2740,6 @@ fn create_coverage_view_with_model(
     // Where each hit sits, by hit number, as (file rank, line): a test's or
     // phase's lines sort and deduplicate as numbers, in the order the
     // `SourceLine`s they stand for sort in.
-    crate::coverage_report::vstage("lines");
     let hit_ranks = hit_ids.ranks();
     let mut point_files = manifest
         .points
@@ -2813,7 +2806,6 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
-    crate::coverage_report::vstage("tests");
     let mut test_files = BTreeMap::<
         String,
         (
@@ -2847,7 +2839,6 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
-    crate::coverage_report::vstage("test files");
     let mut phases = phases_by_id.into_values().collect::<Vec<_>>();
     phases.sort_by(|left, right| {
         left.phase
@@ -2886,7 +2877,6 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
-    crate::coverage_report::vstage("phases");
     let total_obligations = decisions.len() + points.len() + branches.len();
     let (decisions, points, branches) = if declined.is_empty() {
         (decisions, points, branches)
@@ -2907,7 +2897,6 @@ fn create_coverage_view_with_model(
         )
     };
     let measured_obligations = decisions.len() + points.len() + branches.len();
-    crate::coverage_report::vstage("declined");
     let mut summary = summary_for_results(&decisions, &points, &branches, &lines, None)?;
     if total_obligations > measured_obligations {
         summary.unmeasured_obligations = Some(total_obligations - measured_obligations);
@@ -2996,7 +2985,6 @@ fn create_coverage_view_with_model(
             .collect()
     };
 
-    crate::coverage_report::vstage("summary+dimensions");
     Ok(CoverageView {
         generated_at: generated_at.into(),
         variant: coverage_model.variant.clone(),
@@ -3373,7 +3361,6 @@ fn finish_archive_analysis(
     transport: TransportStats,
 ) -> Result<CoverageReport, ReportError> {
     let report = analyze_coverage_results(&normalized).map(|mut report| {
-        crate::coverage_report::stage("views");
         report.view.transport = Some(transport.clone());
         report.filters.passed.transport = Some(transport.clone());
         report.filters.failed.transport = Some(transport);
@@ -3389,50 +3376,6 @@ fn finish_archive_analysis(
 /// A stored run's evidence as the request its views are built from, with the
 /// frontend that declared it, what its processes reported, and the digest of
 /// the archive bytes it was read from.
-/// Temporary: written to the descriptor itself, since a run holds stderr's
-/// lock for its whole length and a thread that asked for it would wait.
-fn stage_line(line: String) {
-    use std::io::Write as _;
-    use std::os::fd::FromRawFd as _;
-    let mut stderr = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(2) });
-    let _ = stderr.write_all(line.as_bytes());
-}
-
-pub(crate) fn vstage(label: &str) {
-    thread_local! { static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) }; }
-    if std::env::var_os("SUPERCOV_STAGES").is_none() {
-        return;
-    }
-    let now = std::time::Instant::now();
-    LAST.with(|last| {
-        if let Some(then) = last.get() {
-            stage_line(format!(
-                "[view {:?}] {label} {:.0}ms\n",
-                std::thread::current().id(),
-                (now - then).as_secs_f64() * 1000.0
-            ));
-        }
-        last.set(Some(now));
-    });
-}
-
-pub(crate) fn stage(label: &str) {
-    use std::sync::Mutex;
-    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-    if std::env::var_os("SUPERCOV_STAGES").is_none() {
-        return;
-    }
-    let now = std::time::Instant::now();
-    let mut last = LAST.lock().unwrap();
-    if let Some(then) = *last {
-        stage_line(format!(
-            "[stage] {label} {:.0}ms\n",
-            (now - then).as_secs_f64() * 1000.0
-        ));
-    }
-    *last = Some(now);
-}
-
 pub fn archive_request(
     request: &ArchiveReportRequest,
 ) -> Result<
@@ -3489,7 +3432,6 @@ fn archive_request_from<D>(
     // bytes dropped: holding the decompressed archive whole beside what was
     // parsed from it was a gigabyte of a 1,100-test run's 3.6 GB.
     const BATCH: usize = 256;
-    crate::coverage_report::stage("start");
     let mut entries = Vec::new();
     let mut raw_results = Vec::new();
     let mut journal_results = Vec::new();
@@ -3534,7 +3476,6 @@ fn archive_request_from<D>(
         Ok(())
     })
     .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
-    crate::coverage_report::stage("read and parse results");
     flush(&mut results, &mut journals, &mut failure);
     if let Some(error) = failure {
         return Err(error);
@@ -3556,7 +3497,6 @@ fn archive_request_from<D>(
             && entry.path.ends_with(".jsonl")
     }));
     let scoped_records = scoped.records;
-    crate::coverage_report::stage("parse scoped server records");
     // Each server record joins the first result with its scope, once. A
     // linear search per record and a linear duplicate check per result made
     // this quadratic: supergateway's e2e servers spent most of a 20 s report
@@ -3614,7 +3554,6 @@ fn archive_request_from<D>(
         server.push(record);
     }
 
-    crate::coverage_report::stage("join server records");
     // Background evidence by the process that wrote it: `<writer>-<n>.jsonl`.
     let mut writers = BTreeMap::<&str, Vec<&EvidenceArchiveEntry>>::new();
     for entry in entries.iter().filter(|entry| {
@@ -3643,7 +3582,6 @@ fn archive_request_from<D>(
     // background evidence, so the runner stays though everything in it was
     // credited to a test or was only a note of what a server served.
     let had_background = !processes.is_empty();
-    crate::coverage_report::stage("parse background");
     let background_records = credit_by_time(&mut raw_results, processes);
     background.records.clone_from(&background_records);
     if had_background {
@@ -3716,9 +3654,7 @@ fn archive_request_from<D>(
         )));
     }
     separate_repeated_executions(&mut raw_results);
-    crate::coverage_report::stage("credit, execution, model");
     release_leaked_phases(&mut raw_results);
-    crate::coverage_report::stage("separate+release phases");
     // After server work was credited to its tests by time, so a picked test
     // keeps what its requests did.
     if let Some(filter) = request
@@ -3750,7 +3686,6 @@ fn archive_request_from<D>(
     drop(entries);
     crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
-    crate::coverage_report::stage("validate");
     Ok((frontend, normalized, transport, digest))
 }
 

@@ -1731,7 +1731,6 @@ struct SourceInstrumentation<'a> {
     standalone_runtime: &'a str,
     browser_suite: bool,
     images: bool,
-    shared_browser_runtime: bool,
 }
 
 /// Instruments `file` in the workspace and keeps its authored copy. Each
@@ -1747,7 +1746,6 @@ fn instrument_source(
         standalone_runtime,
         browser_suite,
         images,
-        shared_browser_runtime,
     } = *options;
     let relative = project_relative(file)?;
     let path = workspace.join(relative);
@@ -1817,7 +1815,7 @@ fn instrument_source(
     // Host processes need the settings-aware loader first; browser pages
     // and workers fall back to the embedded runtime when no preload exists.
     bootstrap_loader(&mut output, relative, browser_suite);
-    let shared = (shared_browser_runtime && is_es_module(&path, &output.code))
+    let shared = (browser_suite && is_es_module(&path, &output.code))
         .then(|| runtime_specifier(relative, SHARED_BROWSER_RUNTIME));
     bootstrap_runtime(
         &mut output,
@@ -1893,25 +1891,17 @@ pub fn prepare_javascript_frontend(
     let runtime_path = runtime_directory.join("runtime.mjs");
     let standalone_runtime = compact_runtime(
         &fs::read_to_string(&runtime_path).map_err(|source| io_error(&runtime_path, source))?,
-    ); /* Temporary experiment: the browser's copy is told what SUPERCOV_ABLATE turns off. */
-    let standalone_runtime = match std::env::var("SUPERCOV_ABLATE") {
-        Ok(ablate) if !ablate.is_empty() => format!(
-            "globalThis.__SUPERCOV_ABLATE__ = {};\n{standalone_runtime}",
-            serde_json::to_string(&ablate).expect("a string serializes")
-        ),
-        _ => standalone_runtime,
-    };
+    );
     // debug's karma bundles its sources with browserify and runs them in
     // Chrome, where nothing had installed the runtime: every file failed on
     // its first line ("reading 'mcdcBegin'"). An opaque child can start a
     // browser even when the measured command is a unit-test runner.
     let browser_suite = project.playwright_config.is_some() || project.browser_runner;
     let images = builds_images(workspace);
-    // Experiment: one copy of the browser fallback runtime that ES modules
-    // import, instead of a copy inlined in every source.
-    let shared_browser_runtime = browser_suite
-        && std::env::var("SUPERCOV_SHARED_BROWSER_RUNTIME").is_ok_and(|value| value == "1");
-    if shared_browser_runtime {
+    // One copy of the browser fallback runtime that ES modules import: a
+    // copy inlined in every source made a large app's client JavaScript
+    // 12.8 MB instead of 4.8 MB.
+    if browser_suite {
         let path = runtime_directory.join(SHARED_BROWSER_RUNTIME);
         atomic_write(
             &path,
@@ -1930,7 +1920,6 @@ pub fn prepare_javascript_frontend(
         standalone_runtime: &standalone_runtime,
         browser_suite,
         images,
-        shared_browser_runtime,
     };
     let instrumented = crate::threads::parallel_map(&project.source_files, |file| {
         instrument_source(&options, file)
