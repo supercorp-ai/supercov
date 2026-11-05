@@ -19348,12 +19348,12 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");
     let ran = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "fs.open#run_store.rs:848")],
+        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:301")],
     );
     assert_eq!(ran.code(), 0, "{}", ran.stderr());
     assert!(
         ran.stderr()
-            .contains("test fault at fs (run_store.rs:848 open)"),
+            .contains("test fault at fs (query_index.rs:301 rename)"),
         "{}",
         ran.stderr()
     );
