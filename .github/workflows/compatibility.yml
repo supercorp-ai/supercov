@@ -327,9 +327,10 @@ jobs:
     # one, so every test binary the toolchain builds aborts before `main`.
     # That is true of `go test` anywhere, with or without Supercov -- Go fixed
     # it in 1.23 -- so the pairing is tested where Go 1.22 itself works rather
-    # than dropped. macOS 14 is the oldest image still published.
-    name: Go ${{ matrix.go }} (${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-14' || matrix.os }})
-    runs-on: ${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-14' || matrix.os }}
+    # than dropped. macOS 15 is the oldest image still published: GitHub
+    # retired macOS 14 in November 2026.
+    name: Go ${{ matrix.go }} (${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-15' || matrix.os }})
+    runs-on: ${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-15' || matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
