@@ -15,26 +15,36 @@ runs:
       uses: actions/cache/restore@v4
       with:
         path: ~/.cache/supercov-ant
-        key: apache-ant-${{ inputs.version }}-jars-1-${{ runner.os }}
+        key: apache-ant-${{ inputs.version }}-jars-2-${{ runner.os }}
     - shell: bash
       env:
         VERSION: ${{ inputs.version }}
       run: |
         kept="$HOME/.cache/supercov-ant"
         mkdir -p "$kept"
-        zip="$kept/apache-ant-$VERSION-bin.zip"
-        # Apache's CDN first; the archive keeps every release, but slowly,
-        # and the CDN drops one once the next is out.
-        for url in \
-          "https://dlcdn.apache.org/ant/binaries/apache-ant-$VERSION-bin.zip" \
-          "https://archive.apache.org/dist/ant/binaries/apache-ant-$VERSION-bin.zip"; do
-          [ -s "$zip" ] && break
-          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 600 -o "$zip.part" "$url" \
-            && mv "$zip.part" "$zip"
-        done
-        [ -s "$zip" ] || { echo "::error::Apache Ant $VERSION could not be fetched"; exit 1; }
+        fetch() {
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 600 -o "$kept/$1.part" "$2" \
+            && mv "$kept/$1.part" "$kept/$1"
+        }
+        # The release asked for, from Apache's CDN, then from its archive,
+        # which keeps every release but answers slowly or not at all (it timed
+        # out on 2026-11-05); and failing both, the CDN's current 1.10 release,
+        # which has every task the tests use. The CDN keeps only the newest:
+        # 1.10.15 was gone from it by the time 1.10.18 was out.
+        zip=$(ls "$kept"/apache-ant-*-bin.zip 2>/dev/null | head -1)
+        if [ -z "$zip" ]; then
+          name="apache-ant-$VERSION-bin.zip"
+          fetch "$name" "https://dlcdn.apache.org/ant/binaries/$name" \
+            || fetch "$name" "https://archive.apache.org/dist/ant/binaries/$name" \
+            || { name=$(curl -fsSL --retry 5 --connect-timeout 30 https://dlcdn.apache.org/ant/binaries/ \
+                   | grep -oE 'apache-ant-1\.10\.[0-9]+-bin\.zip' | sort -uV | tail -1) \
+                 && fetch "$name" "https://dlcdn.apache.org/ant/binaries/$name"; } \
+            || { echo "::error::Apache Ant could not be fetched"; exit 1; }
+          zip="$kept/$name"
+        fi
         unzip -q -o "$zip" -d "$RUNNER_TEMP"
-        echo "ANT_HOME=$RUNNER_TEMP/apache-ant-$VERSION" >> "$GITHUB_ENV"
+        home=$(basename "$zip" -bin.zip)
+        echo "ANT_HOME=$RUNNER_TEMP/$home" >> "$GITHUB_ENV"
         # JUnit 4 for <junit>, the platform for <junitlauncher>, and TestNG
         # 6.14.3, the last line whose jar carries its own Ant task: where the
         # tests look, without Maven, which not every runner has.
@@ -61,4 +71,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: ~/.cache/supercov-ant
-        key: apache-ant-${{ inputs.version }}-jars-1-${{ runner.os }}
+        key: apache-ant-${{ inputs.version }}-jars-2-${{ runner.os }}
