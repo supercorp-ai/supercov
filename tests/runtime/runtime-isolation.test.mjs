@@ -157,7 +157,7 @@ test("a probe hit again in the same context is not recorded again", () => {
   // 177 s under Supercov and 0.1 s without it. Date.now is read only for a
   // record about to be written.
   const recorded = run(`
-    const file = runtime.registerProbeV2({ pointIds: ["statement"], decisions: [] });
+    const file = runtime.registerProbeV2({ pointIds: ["statement"], decisions: [], decisionWidths: [] });
     const realNow = Date.now;
     let reads = 0;
     Date.now = () => { reads += 1; return realNow(); };

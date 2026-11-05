@@ -932,6 +932,7 @@ test("a default records whether it was taken or a value was provided, per slot",
     file: "src/cache.js",
     pointIds: ["statement", "ttl:default", "ttl:provided", "cb:default", "cb:provided"],
     decisions: [],
+    decisionWidths: [],
     defaultCount: 2,
   });
   resetCoverage("default-taken");
@@ -968,6 +969,7 @@ test("V2 selections and optional chains record what their frame-based forms reco
     file: "src/pick.js",
     pointIds: ["pick:short", "pick:short", "pick:right", "pick:right", "member:short", "member:continued", "call:short", "call:continued"],
     decisions: [],
+    decisionWidths: [],
     selectionPoints: [0, 1],
   });
   resetCoverage("v2-selection");
@@ -1004,6 +1006,7 @@ test("a nested selection's leaves record every selection their value decides", a
     file: "src/ok.js",
     pointIds: ["or:short", "or:short", "or:right", "or:right", "and:short", "and:short", "and:right", "and:right"],
     decisions: [],
+    decisionWidths: [],
     selectionPoints: [0, 2],
   });
   const ok = (a, b, c) =>
@@ -1038,6 +1041,7 @@ test("a tree recorded around itself records what a call around each leaf did", a
     file: "src/ok.js",
     pointIds: ["or:short", "or:short", "or:right", "or:right", "and:short", "and:short", "and:right", "and:right", "nn:short", "nn:short", "nn:right", "nn:right"],
     decisions: [],
+    decisionWidths: [],
     selectionPoints: [0, 3],
     // The steps of each leaf, and what `a` (leaf 0) or `b` (leaf 1) decided
     // by the time `c` (leaf 2) starts: the `&&` short and falsy, or right
@@ -1084,6 +1088,7 @@ test("V2 logical assignments record the outcomes their frame-based form recorded
     file: "src/fill.js",
     pointIds: ["fill:short", "fill:short", "fill:right", "fill:right"],
     decisions: [],
+    decisionWidths: [],
     selectionPoints: [0, 1],
   });
   resetCoverage("v2-assignment");
@@ -1115,6 +1120,7 @@ test("a rendered JSX expression records its own evaluation and passes the value 
     file: "src/button.tsx",
     pointIds: ["attribute", "child"],
     decisions: [],
+    decisionWidths: [],
     points: [],
   });
   resetCoverage("rendered-value");
