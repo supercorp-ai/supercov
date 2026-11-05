@@ -461,18 +461,29 @@ function pushWorkerEvidence() {
   runtimeGlobal.__SUPERCOV_WORKER_EVIDENCE__ = () => Array.from(received, ([token, pushed]) => ({ token, url: pushed.url, current: pushed.current, snapshot: pushed.snapshot }));
 })();
 var persistBrowserListenersInstalled = false;
-// Set once this document gave the Playwright collector its evidence on the
-// way out. Its next document need not inherit it then: carried through
+// How much evidence the document holds. Every part of it only grows until a
+// reset, so the same size twice is the same evidence.
+function evidenceSize() {
+  let size = state.hits.size + state.events.length;
+  for (const decision of state.decisions.values())
+    size += decision.vectors.size;
+  for (const vectors of state.logicals.values())
+    size += vectors.size;
+  return size;
+}
+// The evidence's size when this document gave it to the Playwright collector
+// on the way out. Its next document need not inherit it then: carried through
 // localStorage as well, every page of a test parsed all the evidence of the
 // pages before it on load and wrote it all again on leaving, a test of thirty
 // pages paying for the first one thirty times, and the collector merged the
-// same evidence once per page.
-var handedOver = false;
+// same evidence once per page. What runs after the hand-over -- the rest of a
+// handler that set `location.href`, a render it started -- is still carried.
+var handedOverSize = -1;
 function persistBrowserNow() {
   if (!isBrowser)
     return;
   try {
-    if (handedOver)
+    if (handedOverSize === evidenceSize())
       localStorage.removeItem(storageKey);
     else
       localStorage.setItem(storageKey, JSON.stringify(coverageSnapshot()));
@@ -489,7 +500,7 @@ function handOverBrowser() {
   try {
     if (typeof runtimeGlobal.__supercovLeaving === "function") {
       runtimeGlobal.__supercovLeaving(JSON.stringify(coverageSnapshot()));
-      handedOver = true;
+      handedOverSize = evidenceSize();
     }
   } catch (e) {
   }
