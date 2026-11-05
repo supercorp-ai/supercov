@@ -3536,7 +3536,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1280, 1300, 1389, 1425, 1436] {
+        for line in [1289, 1309, 1398, 1434, 1445] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {

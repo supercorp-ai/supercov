@@ -5922,13 +5922,13 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
     let mut env = through(&base).to_vec();
-    env.push(("SUPERCOV_TEST_FAULT", "fs.write#assertion_coverage.rs:2303"));
+    env.push(("SUPERCOV_TEST_FAULT", "fs.write#assertion_coverage.rs:2306"));
     let assessed = project.supercov_with(&["runs", &run, "assertions", "assess"], &env);
     assert_eq!(assessed.code(), 0, "{}", assessed.stderr());
     assert!(
         assessed
             .stderr()
-            .contains("test fault at fs (assertion_coverage.rs:2303 write)"),
+            .contains("test fault at fs (assertion_coverage.rs:2306 write)"),
         "{}",
         assessed.stderr()
     );
