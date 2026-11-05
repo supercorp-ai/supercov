@@ -1764,3 +1764,154 @@ fn a_kotlin_logical_value_is_a_decision_unless_it_smart_casts() {
     assert_eq!(limited("condition-narrows-a-type"), 1, "{manifest}");
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Apache Ant's launcher, from `ANT_HOME`. Not looked up by name: `ant` on a
+/// PATH is as likely another tool (Anthropic's CLI installs one).
+fn apache_ant() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("ANT_HOME")?);
+    let launcher = home.join("bin").join(if cfg!(windows) { "ant.bat" } else { "ant" });
+    launcher.is_file().then_some(launcher)
+}
+
+/// JUnit 4 and Hamcrest from the local Maven repository, or from
+/// `JUNIT4_JAR` and `HAMCREST_JAR`.
+fn junit4_jars() -> Option<(PathBuf, PathBuf)> {
+    let m2 = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".m2/repository"));
+    let pick = |variable: &str, relative: &str| {
+        std::env::var_os(variable)
+            .map(PathBuf::from)
+            .or_else(|| m2.as_ref().map(|m2| m2.join(relative)))
+            .filter(|path| path.is_file())
+    };
+    Some((
+        pick("JUNIT4_JAR", "junit/junit/4.13.2/junit-4.13.2.jar")?,
+        pick("HAMCREST_JAR", "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar")?,
+    ))
+}
+
+/// The shape of Ametys's builds: a thin `build.xml` importing a harness from
+/// beside the project, whose `<junit>` sits inside another task and forks a
+/// JVM per test class.
+fn ant_fixture(top: &Path) -> PathBuf {
+    write(
+        top,
+        "tools/common.xml",
+        r#"<project name="harness">
+    <property name="classes" location="out/classes"/>
+    <property name="tests-dir" location="test"/>
+    <target name="compile">
+        <mkdir dir="${classes}"/>
+        <javac srcdir="main/app/src" destdir="${classes}" includeantruntime="false"/>
+    </target>
+    <target name="test" depends="compile">
+        <mkdir dir="out/test-classes"/>
+        <path id="test.classpath">
+            <pathelement location="${junit.jar}"/>
+            <pathelement location="${hamcrest.jar}"/>
+        </path>
+        <javac srcdir="${tests-dir}/src" destdir="out/test-classes" includeantruntime="false">
+            <classpath><path refid="test.classpath"/><pathelement location="${classes}"/></classpath>
+        </javac>
+        <sequential>
+            <junit fork="true" printsummary="yes" haltonfailure="no" failureproperty="failed">
+                <classpath>
+                    <path refid="test.classpath"/>
+                    <pathelement location="${classes}"/>
+                    <pathelement location="out/test-classes"/>
+                </classpath>
+                <formatter type="plain" usefile="false"/>
+                <batchtest><fileset dir="${tests-dir}/src" includes="**/*Test.java"/></batchtest>
+            </junit>
+        </sequential>
+        <fail if="failed" message="tests failed"/>
+    </target>
+</project>
+"#,
+    );
+    let project = top.join("plugins/app");
+    write(
+        &project,
+        "build.xml",
+        r#"<project name="app" default="test">
+    <property name="common" location="../../tools/common.xml"/>
+    <import file="${common}"/>
+</project>
+"#,
+    );
+    write(
+        &project,
+        "main/app/src/app/Calc.java",
+        "package app;\n\npublic class Calc {\n  public static int clamp(int value, int high) {\n    if (value > high) {\n      return high;\n    }\n    return value;\n  }\n\n  public static String sign(Object value) {\n    if (value instanceof Integer number && number < 0) {\n      return \"negative\";\n    }\n    else if (value instanceof Integer number) {\n      return \"positive\";\n    }\n    return \"none\";\n  }\n}\n",
+    );
+    write(
+        &project,
+        "test/src/app/CalcTest.java",
+        "package app;\n\nimport static org.junit.Assert.assertEquals;\n\nimport org.junit.Ignore;\nimport org.junit.Test;\n\npublic class CalcTest {\n  @Test\n  public void clampsHighValues() {\n    assertEquals(3, Calc.clamp(5, 3));\n  }\n\n  @Test\n  public void namesASign() {\n    assertEquals(\"negative\", Calc.sign(-1));\n  }\n\n  @Ignore\n  @Test\n  public void notYet() {}\n}\n",
+    );
+    project
+}
+
+#[test]
+#[ignore = "runs a real Ant build; npm run test:jvm passes --include-ignored"]
+fn an_ant_build_with_its_harness_beside_the_project_is_measured_per_test() {
+    let _building = common::building();
+    let Some(ant) = apache_ant() else {
+        common::skip("jvm", "no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some((junit, hamcrest)) = junit4_jars() else {
+        common::skip("jvm", "no JUnit 4 and Hamcrest jars");
+        return;
+    };
+    let top = temporary("ant-harness");
+    let root = ant_fixture(&top);
+    let harness = std::fs::read_to_string(top.join("tools/common.xml")).unwrap();
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            ant.display().to_string(),
+            format!("-Djunit.jar={}", junit.display()),
+            format!("-Dhamcrest.jar={}", hamcrest.display()),
+            "test".into(),
+        ],
+        run_id: "run-jvm-ant-harness".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    assert_eq!(result.exit_code, 0, "{diagnostics}");
+    assert_eq!(result.build, JvmBuild::Ant, "{diagnostics}");
+    assert_eq!(result.tests, 3, "two run and one ignored: {diagnostics}");
+    assert_eq!(
+        std::fs::read_to_string(top.join("tools/common.xml")).unwrap(),
+        harness,
+        "the harness outside the project is changed only in the copy"
+    );
+    let executions: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(result.run_directory.join("test-executions.json"))
+            .expect("the run records what each test executed"),
+    )
+    .unwrap();
+    let tests = executions["tests"].as_array().unwrap();
+    let named = |name: &str| {
+        tests
+            .iter()
+            .find(|test| test["test"]["name"].as_str().is_some_and(|test| test.ends_with(name)))
+            .unwrap_or_else(|| panic!("{name}: {executions}"))
+    };
+    assert_eq!(named("CalcTest#clampsHighValues")["test"]["file"], "test/src/app/CalcTest.java", "{executions}");
+    // Each test has its own lines, and the ignored one none.
+    assert_eq!(named("CalcTest#clampsHighValues")["files"]["main/app/src/app/Calc.java"], serde_json::json!([2]), "{executions}");
+    assert_eq!(named("CalcTest#namesASign")["files"]["main/app/src/app/Calc.java"], serde_json::json!([3]), "{executions}");
+    assert_eq!(named("CalcTest#notYet")["passed"], false, "{executions}");
+    assert_eq!(named("CalcTest#notYet")["files"], serde_json::json!({}), "{executions}");
+    std::fs::remove_dir_all(top).ok();
+}
