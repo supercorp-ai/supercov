@@ -1092,8 +1092,6 @@ pub fn run_direct_javascript(
         }
         None => crate::docker_proxy::Journal::default(),
     };
-    #[cfg(not(unix))]
-    let in_containers = crate::docker_proxy::Journal::default();
     let test_command_ms = execution
         .phases
         .iter()
@@ -1426,6 +1424,8 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
     let mut entries =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
+    // The relay, and so what it gave settings to, is Unix's alone.
+    #[cfg(unix)]
     for warning in nothing_came_back(&in_containers, !servers.is_empty(), &entries) {
         let _ = writeln!(diagnostics, "{warning}");
     }
@@ -1605,6 +1605,7 @@ fn left_out_loads(root: &Path, workspace: &Path, notes: &Path) -> Vec<PathBuf> {
 /// probe, every test failed, and the run said nothing of it. A server in
 /// another language writes a run of its own and leaves no mark: such a run
 /// is read there.
+#[cfg(unix)]
 fn nothing_came_back(
     containers: &crate::docker_proxy::Journal,
     other_servers: bool,
@@ -2005,6 +2006,7 @@ mod tests {
     /// whatever the tests did -- unless a server in another language, which
     /// leaves no mark, was measured too. The containers' runs are reached end to end by
     /// docker-exec-playwright.mjs.
+    #[cfg(unix)]
     #[test]
     fn containers_are_said_to_have_sent_nothing_only_when_nothing_came() {
         let entry = |path: &str| EvidenceArchiveEntry {
