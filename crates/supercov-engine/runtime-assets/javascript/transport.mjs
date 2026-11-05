@@ -7,6 +7,42 @@ export const COVERAGE_PHASE_COOKIE = "__supercov_phase";
 // so the two cannot be one.
 export const COVERAGE_SCOPE_SITE_COOKIE = "__supercov_scope_site";
 export const COVERAGE_PHASE_SITE_COOKIE = "__supercov_phase_site";
+// The phase a new document starts in: the last action's, since a document
+// loads because of one (a navigation, a click that navigates). An assertion
+// that starts while it loads does not change it.
+export const COVERAGE_DOCUMENT_PHASE_COOKIE = "__supercov_document_phase";
+export const COVERAGE_DOCUMENT_PHASE_SITE_COOKIE = "__supercov_document_phase_site";
+/**
+ * Runs at the start of every document of a context, as an init script, so it
+ * reads nothing from this module. A document starts in the phase its cookie
+ * names. Only this attempt's phase is taken: a copy of the script that a
+ * context kept from an earlier test leaves a later test's phase alone.
+ */
+export function startDocumentInPhase({ attemptId, phaseCookie, phaseSiteCookie }) {
+    try {
+        let phase;
+        for (const part of document.cookie.split(";")) {
+            const at = part.indexOf("=");
+            const name = part.slice(0, at).trim();
+            if (name !== phaseCookie && name !== phaseSiteCookie)
+                continue;
+            const value = decodeURIComponent(part.slice(at + 1));
+            if (!value.startsWith(`${attemptId}:`))
+                continue;
+            phase = value;
+            if (name === phaseCookie)
+                break;
+        }
+        if (!phase)
+            return;
+        const coverageGlobal = globalThis;
+        coverageGlobal.__SUPERCOV_PHASE_ID__ = phase;
+        coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", phase);
+    }
+    catch {
+        // A document that cannot read cookies keeps its stored phase.
+    }
+}
 export const COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 export const DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
 // Buffer as it was when Supercov loaded. Tests replace globals -- axios's set

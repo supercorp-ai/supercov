@@ -442,7 +442,7 @@ fn read_evidence_directory_with(
             .collect::<Result<Vec<_>, _>>()?;
         parse_transport(name, &contents, &slot_contents, layout.as_ref())
     };
-    let parsed = parallel_map(&work, parse);
+    let parsed = crate::threads::parallel_map(&work, parse);
     for ((name, _, _), parsed) in work.iter().zip(parsed) {
         apply_transport(name, parsed?, run_id, &mut evidence)?;
     }
@@ -893,39 +893,6 @@ impl Decoded {
         }
         records
     }
-}
-
-/// `items.iter().map(work)`, spread over the machine's cores, in order.
-fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(items.len().div_ceil(64).max(1));
-    if threads <= 1 {
-        return items.iter().map(work).collect();
-    }
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut done = std::thread::scope(|scope| {
-        let workers = (0..threads)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(item) = items.get(index) else {
-                            break done;
-                        };
-                        done.push((index, work(item)));
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        workers
-            .into_iter()
-            .flat_map(|worker| worker.join().unwrap_or_else(crate::threads::rethrow))
-            .collect::<Vec<_>>()
-    });
-    done.sort_unstable_by_key(|(index, _)| *index);
-    done.into_iter().map(|(_, result)| result).collect()
 }
 
 fn transport_u32(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -1891,7 +1858,7 @@ fn build_from_evidence(
     let mut snapshots = phases_observed
         .iter()
         .map(|(identity, _)| *identity)
-        .zip(parallel_map(
+        .zip(crate::threads::parallel_map(
             &phases_observed,
             |(identity, observations)| {
                 snapshot(&index, observations, &slot_ids, &phase_id(run_id, identity))
@@ -4581,7 +4548,7 @@ pub(crate) mod tests {
     fn work_spread_over_threads_comes_back_in_order() {
         let items = (0..1000).collect::<Vec<u32>>();
         assert_eq!(
-            parallel_map(&items, |item| item * 2),
+            crate::threads::parallel_map(&items, |item| item * 2),
             items.iter().map(|item| item * 2).collect::<Vec<_>>()
         );
     }

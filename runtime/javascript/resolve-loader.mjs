@@ -111,7 +111,9 @@ function throughRequireHook(resolved) {
         return resolved;
     return { ...resolved, format: "commonjs" };
 }
-export async function resolve(specifier, context, nextResolve) {
+// A specifier Supercov answers itself (`url`), or sends on as another
+// (`next`, answered as it is); undefined for every other.
+function redirected(specifier, context) {
     // Some transpilers preserve the source-relative runtime import while moving
     // only the transformed application file to an output directory. The
     // source-local copy keeps strict rootDir compilers happy; this fallback
@@ -157,10 +159,35 @@ export async function resolve(specifier, context, nextResolve) {
                 shortCircuit: true,
             };
         }
-        return nextResolve(REPLACEMENT, context);
+        return { next: REPLACEMENT };
     }
+    return undefined;
+}
+export async function resolve(specifier, context, nextResolve) {
+    const redirect = redirected(specifier, context);
+    if (redirect?.url)
+        return redirect;
+    if (redirect?.next)
+        return nextResolve(redirect.next, context);
     try {
         return throughRequireHook(await nextResolve(specifier, context));
+    }
+    catch (error) {
+        if (error?.code === "ERR_MODULE_NOT_FOUND")
+            noteMissing(specifier, context.parentURL);
+        throw error;
+    }
+}
+// The same hooks run in the loading thread (`module.registerHooks`), where
+// the next hook answers at once (experiment, SUPERCOV_SYNC_HOOKS=1).
+export function resolveSync(specifier, context, nextResolve) {
+    const redirect = redirected(specifier, context);
+    if (redirect?.url)
+        return redirect;
+    if (redirect?.next)
+        return nextResolve(redirect.next, context);
+    try {
+        return throughRequireHook(nextResolve(specifier, context));
     }
     catch (error) {
         if (error?.code === "ERR_MODULE_NOT_FOUND")
@@ -200,7 +227,12 @@ function mapToCopy(source, filename) {
     }
 }
 export async function load(url, context, nextLoad) {
-    const result = await nextLoad(url, context);
+    return loaded(url, await nextLoad(url, context));
+}
+export function loadSync(url, context, nextLoad) {
+    return loaded(url, nextLoad(url, context));
+}
+function loaded(url, result) {
     noteLoaded(url);
     if (!NODE_COVERAGE_FILTERS || result.source == null || !url.startsWith("file:"))
         return result;

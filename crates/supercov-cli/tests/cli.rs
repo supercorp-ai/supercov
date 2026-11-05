@@ -232,7 +232,7 @@ fn a_measured_suite_reads_back_through_every_query() {
             ],
             &[(
                 "SUPERCOV_TEST_FAULT",
-                "fs.read_from#evidence_archive.rs:637",
+                "fs.read_from#evidence_archive.rs:675",
             )],
         )
         .exits(2);
@@ -602,14 +602,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1103")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1100")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1103"),
+        seen.contains("test fault at fs (javascript_run.rs:1100"),
         "{seen}"
     );
 }
@@ -851,12 +851,12 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_from#evidence_archive.rs:637",
+            "fs.read_from#evidence_archive.rs:675",
         )],
     );
     let said = refused.stderr();
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "evidence_archive.rs:637"), "{said}");
+    assert!(fired_at(&said, "evidence_archive.rs:675"), "{said}");
 }
 
 /// Quality snapshots are read as far as they hold: a catalog entry or finding
@@ -1228,7 +1228,7 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
             "Cannot read local coverage runs",
         ),
         (
-            "fs.read_from#evidence_archive.rs:637",
+            "fs.read_from#evidence_archive.rs:675",
             "Cannot merge coverage run",
         ),
         ("copy-release", "Could not release merge lock"),
@@ -6280,7 +6280,7 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     let unread = project
         .supercov_with(
             &["runs", "latest", "tests", "without-evidence", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:657=50")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:695=50")],
         )
         .json();
     assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
@@ -7595,7 +7595,7 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
     let unread = project
         .supercov_with(
             &["merge", &javascript, &python],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:657")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:695")],
         )
         .exits(2);
     assert!(unread.contains("recorded by another build"), "{unread}");
@@ -12974,7 +12974,7 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // With no record of the runners the run used, or of its files, the
     // change cannot be put on other runners: it reaches every test.
     for fault in [
-        "fs.open#evidence_archive.rs:657=50",
+        "fs.open#evidence_archive.rs:695=50",
         "fs.open#source_manifest.rs:359@2",
     ] {
         let unjudged = project
@@ -15013,7 +15013,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2464 => main.rs:2464",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1679 => javascript_frontend.rs:1679",
+            "fs.read_to_string#javascript_frontend.rs:1895 => javascript_frontend.rs:1895",
         ],
     );
 }
@@ -16352,7 +16352,7 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
         ("fs.read_dir@55", "workspaces"),
         ("fs.read_dir@57", "/out"),
-        ("fs.read@65", "workspaces"),
+        ("fs.read#workspace.rs:1647", "workspaces"),
         ("fs.create_dir_all@17", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
         ("fs.copy@6", "out/data.bin"),
@@ -16576,19 +16576,19 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1307",
-        "fs.create_dir_all#javascript_run.rs:677",
-        "fs.write#javascript_run.rs:978",
+        "fs.create_dir_all#lifecycle.rs:1313",
+        "fs.create_dir_all#javascript_run.rs:674",
+        "fs.write#javascript_run.rs:975",
         "fs.canonicalize#process_supervision.rs:1719",
-        "fs.create_dir_all#javascript_run.rs:1049",
-        "fs.create_dir_all#javascript_run.rs:1222",
+        "fs.create_dir_all#javascript_run.rs:1046",
+        "fs.create_dir_all#javascript_run.rs:1219",
         "fs.read_dir#evidence_archive.rs:262",
-        "fs.create_dir_all#evidence_archive.rs:445",
-        "fs.create_dir_all#javascript_run.rs:1461",
-        "fs.create_dir_all#javascript_run.rs:1463",
+        "fs.create_dir_all#evidence_archive.rs:483",
+        "fs.create_dir_all#javascript_run.rs:1480",
+        "fs.create_dir_all#javascript_run.rs:1482",
         "fs.create_dir_all#lifecycle.rs:1018",
-        "fs.create_dir_all#javascript_run.rs:1555",
-        "fs.create_dir_all#javascript_run.rs:1557",
+        "fs.create_dir_all#javascript_run.rs:1582",
+        "fs.create_dir_all#javascript_run.rs:1584",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -16754,18 +16754,18 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@32", "runtime.d.mts"),
-        ("fs.rename@33", "playwright.mjs"),
-        ("fs.rename@35", "playwright.config.mjs"),
-        ("fs.rename@36", "vitest.config.mjs"),
-        ("fs.rename@39", "vitestCommands.mjs"),
+        ("fs.rename@33", "runtime.d.mts"),
+        ("fs.rename@34", "playwright.mjs"),
+        ("fs.rename@36", "playwright.config.mjs"),
+        ("fs.rename@37", "vitest.config.mjs"),
+        ("fs.rename@40", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@41", "test/cart.test.js"),
-        ("fs.rename@42", "authored-sources.json"),
-        ("fs.rename@43", "statement-exclusions.json"),
-        ("fs.rename@44", "manifest.json"),
-        ("fs.rename@45", "instrumentation-complete"),
-        ("fs.rename@46", "injected fault at fs"),
+        ("fs.rename@42", "test/cart.test.js"),
+        ("fs.rename@43", "authored-sources.json"),
+        ("fs.rename@44", "statement-exclusions.json"),
+        ("fs.rename@45", "manifest.json"),
+        ("fs.rename@46", "instrumentation-complete"),
+        ("fs.rename@47", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -16830,7 +16830,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:637",
+        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:675",
         // The runs listed again for the details.
         "fs.read_dir#run_store.rs:671@2",
     ] {
@@ -16893,11 +16893,11 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1312,fs.read_from#evidence_archive.rs:637",
+            "fs.read#run_store.rs:1312,fs.read_from#evidence_archive.rs:675",
         )],
     );
     assert!(
-        fired_at(&spanless.stderr(), "evidence_archive.rs:637"),
+        fired_at(&spanless.stderr(), "evidence_archive.rs:675"),
         "{}",
         spanless.stderr()
     );
@@ -17085,12 +17085,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:353",
-            "javascript_frontend.rs:353",
+            "fs.read#javascript_frontend.rs:354",
+            "javascript_frontend.rs:354",
         ),
         (
-            "fs.read#javascript_frontend.rs:365",
-            "javascript_frontend.rs:365",
+            "fs.read#javascript_frontend.rs:366",
+            "javascript_frontend.rs:366",
         ),
         ("fs.symlink_metadata#workspace.rs:1282", "workspace.rs:1282"),
     ] {
@@ -17120,12 +17120,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1808@2",
+            "fs.read_to_string#javascript_frontend.rs:1682@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1808"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1682"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -19242,21 +19242,21 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.canonicalize#source_manifest.rs:773",
+            "fs.canonicalize#source_manifest.rs:780",
         )],
     );
     assert_ne!(unresolved.code(), 0, "{}", unresolved.stderr());
-    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:773"));
+    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:780"));
     let unread = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#source_manifest.rs:784",
+            "fs.read_to_string#source_manifest.rs:791",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert!(!said.contains("panicked"), "{said}");
-    assert!(fired_at(&said, "source_manifest.rs:784"), "{said}");
+    assert!(fired_at(&said, "source_manifest.rs:791"), "{said}");
 }
 
 /// A JavaScript run beside a wasm library prepares the library in the copy:

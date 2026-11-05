@@ -194,7 +194,7 @@ try {
     const unpublished = spawnSync(
       binary,
       ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests', '--ignore=tests/test_patterns.py'],
-      { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1154' }, encoding: 'utf8' },
+      { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1160' }, encoding: 'utf8' },
     );
     assert.notEqual(unpublished.status, 0, unpublished.stderr);
     assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1154/u, unpublished.stderr);

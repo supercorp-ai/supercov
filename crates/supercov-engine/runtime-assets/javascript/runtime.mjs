@@ -130,6 +130,19 @@ var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
 var _a;
 var isBrowser = !(typeof process !== "undefined" && typeof ((_a = process.versions) == null ? void 0 : _a.node) === "string");
+// Temporary experiment (SUPERCOV_ABLATE): turn one part of recording off to
+// time it. Coverage is wrong under it.
+var ablation = (function() {
+  try {
+    var fromEnv = typeof process !== "undefined" && process.env != null ? process.env["SUPERCOV_ABLATE"] : void 0;
+    return String(fromEnv || runtimeGlobal.__SUPERCOV_ABLATE__ || "");
+  } catch (e) {
+    return "";
+  }
+})();
+var ablateAsyncHook = ablation.indexOf("no-async-hook") !== -1;
+var ablateServerWrite = ablation.indexOf("no-server-write") !== -1;
+var ablateBrowserEvents = ablation.indexOf("no-browser-events") !== -1;
 var _a2;
 var testId = (_a2 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a2 : "unscoped";
 var storageKey = "__supercov_coverage_" + testId;
@@ -241,6 +254,7 @@ function activateProbeV2Key(key, force = false) {
     if (state.probeV2NextEpoch >= 4294967295) {
       state.probeV2NextEpoch = 1;
       state.probeV2ContextEpochs.clear();
+      state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
       for (const file of state.probeV2Files) {
         file.hitEpochs.fill(0);
         file.decisionObservationEpochs.fill(0);
@@ -260,8 +274,32 @@ function activateProbeV2Key(key, force = false) {
   state.probeV2Clock.epoch = epoch;
   return epoch;
 }
+// The async hook activates the current request's context before every
+// callback the server runs, and building its key and looking it up was most of
+// a Next server's time in the hook. A request's context object is never
+// changed once made, and its key is made of it alone, so each keeps the epoch
+// it was given until the epochs are cleared.
+// Every copy of the runtime in a process shares one state, and the hook is the
+// first copy's, so the cache and its generation live on that state too: a
+// reset from another copy has to reach them.
+var emptyProbeV2Context = Object.freeze({});
 function activateProbeV2Context(context) {
-  return activateProbeV2Key(probeV2ContextKey(context));
+  // Work no request owns is keyed by the test running when it runs, which
+  // changes under the same context: only a request's context keeps its epoch.
+  if (!context.scope)
+    return activateProbeV2Key(probeV2ContextKey(context));
+  if (state.probeV2ContextEpochCache === void 0) {
+    state.probeV2ContextEpochCache = /* @__PURE__ */ new WeakMap();
+    state.probeV2EpochGeneration = 0;
+  }
+  const cached = state.probeV2ContextEpochCache.get(context);
+  if (cached !== void 0 && cached.generation === state.probeV2EpochGeneration) {
+    state.probeV2Clock.epoch = cached.epoch;
+    return cached.epoch;
+  }
+  const epoch = activateProbeV2Key(probeV2ContextKey(context));
+  state.probeV2ContextEpochCache.set(context, { generation: state.probeV2EpochGeneration, epoch });
+  return epoch;
 }
 function withProbeV2Context(context, callback) {
   const previous = state.probeV2Clock.epoch;
@@ -276,6 +314,11 @@ function installProbeV2AsyncHook() {
   var _a8;
   if (isBrowser || state.probeV2HookInstalled || typeof process === "undefined")
     return;
+  if (ablateAsyncHook) {
+    state.probeV2HookInstalled = true;
+    state.probeV2Clock.fast = true;
+    return;
+  }
   try {
     const getBuiltinModule = process.getBuiltinModule;
     const createHook = (_a8 = getBuiltinModule == null ? void 0 : getBuiltinModule("node:async_hooks")) == null ? void 0 : _a8.createHook;
@@ -286,7 +329,7 @@ function installProbeV2AsyncHook() {
       before() {
         var _a9, _b;
         epochs.push(state.probeV2Clock.epoch);
-        activateProbeV2Context((_b = (_a9 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a9 : environmentRequestContext()) != null ? _b : {});
+        activateProbeV2Context((_b = (_a9 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a9 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
       },
       after() {
         var _a9;
@@ -329,6 +372,7 @@ function resetCoverage(testId2) {
   state.logicals.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
+  state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
   activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
   if (testId2)
     runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
@@ -417,11 +461,32 @@ function pushWorkerEvidence() {
   runtimeGlobal.__SUPERCOV_WORKER_EVIDENCE__ = () => Array.from(received, ([token, pushed]) => ({ token, url: pushed.url, current: pushed.current, snapshot: pushed.snapshot }));
 })();
 var persistBrowserListenersInstalled = false;
+// How much evidence the document holds. Every part of it only grows until a
+// reset, so the same size twice is the same evidence.
+function evidenceSize() {
+  let size = state.hits.size + state.events.length;
+  for (const decision of state.decisions.values())
+    size += decision.vectors.size;
+  for (const vectors of state.logicals.values())
+    size += vectors.size;
+  return size;
+}
+// The evidence's size when this document gave it to the Playwright collector
+// on the way out. Its next document need not inherit it then: carried through
+// localStorage as well, every page of a test parsed all the evidence of the
+// pages before it on load and wrote it all again on leaving, a test of thirty
+// pages paying for the first one thirty times, and the collector merged the
+// same evidence once per page. What runs after the hand-over -- the rest of a
+// handler that set `location.href`, a render it started -- is still carried.
+var handedOverSize = -1;
 function persistBrowserNow() {
   if (!isBrowser)
     return;
   try {
-    localStorage.setItem(storageKey, JSON.stringify(coverageSnapshot()));
+    if (handedOverSize === evidenceSize())
+      localStorage.removeItem(storageKey);
+    else
+      localStorage.setItem(storageKey, JSON.stringify(coverageSnapshot()));
   } catch (e) {
   }
 }
@@ -433,8 +498,10 @@ function persistBrowserNow() {
 // it does.
 function handOverBrowser() {
   try {
-    if (typeof runtimeGlobal.__supercovLeaving === "function")
+    if (typeof runtimeGlobal.__supercovLeaving === "function") {
       runtimeGlobal.__supercovLeaving(JSON.stringify(coverageSnapshot()));
+      handedOverSize = evidenceSize();
+    }
   } catch (e) {
   }
 }
@@ -467,6 +534,20 @@ function persistBrowser() {
 }
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
+}
+// Experiment (SUPERCOV_COMPACT_SERVER_EVIDENCE=1): an attempt's file says
+// its scope once per writing process; the engine takes it from the file.
+var compactServerEvidence = typeof process !== "undefined" && process.env != null && process.env["SUPERCOV_COMPACT_SERVER_EVIDENCE"] === "1";
+var scopedPathsWritten = /* @__PURE__ */ new Set();
+function serverLine(record, path) {
+  if (!compactServerEvidence || !path)
+    return JSON.stringify(record);
+  const { scope, ...line } = record;
+  if (scope && !scopedPathsWritten.has(path)) {
+    scopedPathsWritten.add(path);
+    line.scope = scope;
+  }
+  return JSON.stringify(line);
 }
 function serverRecordKey(record) {
   var _a8;
@@ -530,7 +611,7 @@ function flushBufferedServerEvidence(scope) {
     return void 0;
   try {
     makeEvidenceDirectory(fs, buffered.directory);
-    fs.appendFileSync(buffered.path, [...buffered.records.values()].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    fs.appendFileSync(buffered.path, [...buffered.records.values()].map((record) => serverLine(record, buffered.path)).join("\n") + "\n");
     return buffered.path;
   } catch (e) {
     return void 0;
@@ -977,6 +1058,8 @@ function scheduleServerFlush() {
 }
 function appendServer(record) {
   var _a8, _b, _c, _d;
+  if (ablateServerWrite && !state.runtimeSnapshots)
+    return;
   if (state.runtimeSnapshots) {
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
     if (record.type === "decision") {
@@ -1034,7 +1117,7 @@ function appendServer(record) {
       appendDurableBackgroundRecord(fs, runId, serialized);
       return;
     }
-    enqueueServerAppend(directory, path, JSON.stringify(serialized) + "\n", runId);
+    enqueueServerAppend(directory, path, serverLine(serialized, path) + "\n", runId);
     if (deduplicationKey)
       state.persistedServerRecords.add(deduplicationKey);
   } catch (cause) {
@@ -1625,11 +1708,15 @@ function noteSupport(scope) {
     const root = process.env.SUPERCOV_PROJECT_ROOT;
     if (cache && root) {
       for (const name of Object.keys(cache)) {
-        // The copy lives under `.supercov/`: the project root decides.
-        const inside = name.indexOf(root) === 0 ? name.slice(root.length).replace(/^[\\/]/, "") : "";
-        if (supportNoted.modules.has(name) || inside === "" || /^\.supercov[\\/]/.test(inside) || /(?:^|[\\/])node_modules[\\/]/.test(inside))
+        // Every request comes here, and a server has thousands of modules:
+        // each is looked at once, whether it is noted or not.
+        if (supportNoted.modules.has(name))
           continue;
         supportNoted.modules.add(name);
+        // The copy lives under `.supercov/`: the project root decides.
+        const inside = name.indexOf(root) === 0 ? name.slice(root.length).replace(/^[\\/]/, "") : "";
+        if (inside === "" || /^\.supercov[\\/]/.test(inside) || /(?:^|[\\/])node_modules[\\/]/.test(inside))
+          continue;
         lines.push({ loaded: name });
       }
     }
@@ -1744,6 +1831,8 @@ function eventKey(event) {
   return `${(_a8 = event.phaseId) != null ? _a8 : "unscoped"}:${event.type}:${suffix}`;
 }
 function recordBrowserEvent(event) {
+  if (ablateBrowserEvents)
+    return false;
   const key = eventKey(event);
   if (state.eventKeys.has(key))
     return false;

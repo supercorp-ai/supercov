@@ -70,6 +70,7 @@ const mappings = [
     "resolve-loader.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
+    "snapshots.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",

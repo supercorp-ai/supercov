@@ -719,6 +719,12 @@ function injectChildEnvironment(method, args) {
     // every task aborted with ERR_MODULE_NOT_FOUND. launchSupervisor.js is
     // generated into the same .supercov directory as register.mjs.
     environment.NODE_OPTIONS = appendNodeImport(existingEnvironment?.NODE_OPTIONS ?? process.env.NODE_OPTIONS, new URL("./register.mjs", import.meta.url).href);
+    // The Playwright runner marked its children as not test workers; a process
+    // it forks from its worker entry is one (see register.mjs).
+    if (method === "fork" &&
+        environment.SUPERCOV_PLAYWRIGHT_WORKER !== undefined &&
+        /\/worker\/(?:workerProcessEntry|workerMain)\.js$/.test(String(args[0]).replaceAll("\\", "/")))
+        environment.SUPERCOV_PLAYWRIGHT_WORKER = "1";
     next[index] = { ...options, env: environment };
     if (typeof original === "function")
         next.splice(index + 1, 0, original);
