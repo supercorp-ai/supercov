@@ -196,6 +196,11 @@ public final class Supercov {
     current = -1;
   }
 
+  /// Which record belongs to the test this thread is running, once records
+  /// stopped being attributable. Tests that overlap do not end in the order
+  /// they began, so the outcome cannot be written to whichever was last.
+  private static final ThreadLocal<Integer> concurrentRecord = new ThreadLocal<>();
+
   /**
    * Gives up on per-test attribution, once, for the whole run.
    *
@@ -214,11 +219,6 @@ public final class Supercov {
    * <p>Supercov disables parallel execution in the workspace it generates, so
    * reaching this means something else turned it back on.
    */
-  /// Which record belongs to the test this thread is running, once records
-  /// stopped being attributable. Tests that overlap do not end in the order
-  /// they began, so the outcome cannot be written to whichever was last.
-  private static final ThreadLocal<Integer> concurrentRecord = new ThreadLocal<>();
-
   private static void overlap() {
     if (overlapped) {
       return;

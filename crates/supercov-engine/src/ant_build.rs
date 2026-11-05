@@ -144,6 +144,10 @@ pub struct AntBuild {
     /// the build: `srcdir`, nested `<src path>`, and `<src refid>` naming a
     /// `<path>` or `<dirset>` the build defines. Tests among them included.
     pub sources: Vec<PathBuf>,
+    /// Whether some `<javac>` compiles from a directory that cannot be read
+    /// without running the build: one under a property only the build sets,
+    /// or a path id it never defines.
+    pub sources_unread: bool,
     /// `<path id>` and `<dirset id>` definitions, for `<src refid>`.
     defined_paths: BTreeMap<String, Vec<PathBuf>>,
     /// `<src refid>` uses, by the output directory they compile into, resolved
@@ -213,12 +217,11 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
         Pass::All,
     );
     for (destination, reference) in std::mem::take(&mut build.referenced_sources) {
-        for source in build
-            .defined_paths
-            .get(&reference)
-            .cloned()
-            .unwrap_or_default()
-        {
+        let Some(defined) = build.defined_paths.get(&reference).cloned() else {
+            build.sources_unread = true;
+            continue;
+        };
+        for source in defined {
             push_unique(compiled.entry(destination.clone()).or_default(), source);
         }
     }
@@ -419,14 +422,14 @@ fn read_file(
                 let destination = tag
                     .attribute("destdir")
                     .and_then(|dir| known(dir, properties));
+                build.sources_unread |= destination.is_none();
                 if let Some(destination) = &destination {
-                    let sources = tag
-                        .attribute("srcdir")
-                        .map(path_list)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|dir| known(&dir, properties))
+                    let listed = tag.attribute("srcdir").map(path_list).unwrap_or_default();
+                    let sources = listed
+                        .iter()
+                        .filter_map(|dir| known(dir, properties))
                         .collect::<Vec<_>>();
+                    build.sources_unread |= sources.len() < listed.len();
                     // A build that compiles in place writes its classes beside
                     // its sources: that directory is not only output.
                     if !sources.contains(destination) {
@@ -445,8 +448,12 @@ fn read_file(
                 let Some(destination) = &javac else { continue };
                 if let Some(path) = tag.attribute("path") {
                     for source in path_list(&expand(path, properties)) {
-                        if let Some(source) = known(&source, properties) {
-                            push_unique(compiled.entry(destination.clone()).or_default(), source);
+                        match known(&source, properties) {
+                            Some(source) => push_unique(
+                                compiled.entry(destination.clone()).or_default(),
+                                source,
+                            ),
+                            None => build.sources_unread = true,
                         }
                     }
                 }
@@ -1056,6 +1063,24 @@ mod tests {
             ],
             "{build:?}"
         );
+        assert!(!build.sources_unread, "{build:?}");
+        // Each way a compilation's sources can be known only to the build
+        // that runs: an output, a source directory or a nested path under a
+        // property it sets, and a path id it never defines.
+        for javac in [
+            r#"<javac srcdir="java" destdir="${classes}"/>"#,
+            r#"<javac srcdir="java:${generated}" destdir="out"/>"#,
+            r#"<javac destdir="out"><src path="${generated}"/></javac>"#,
+            r#"<javac destdir="out"><src refid="made.at.run.time"/></javac>"#,
+        ] {
+            fs::write(
+                project.join("build.xml"),
+                format!(r#"<project><target name="compile">{javac}</target></project>"#),
+            )
+            .unwrap();
+            let build = read_ant_build(&project, &BTreeMap::new());
+            assert!(build.sources_unread, "{javac}: {build:?}");
+        }
         fs::remove_dir_all(project).unwrap();
     }
 

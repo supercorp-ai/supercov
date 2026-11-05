@@ -713,9 +713,7 @@ fn walk(collector: &mut Collector, node: Node) {
                 let index = collector
                     .add_decision(node, "value")
                     .expect("a logical value has two conditions");
-                let wrapper = format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]);
-                collector.edit(node.start_byte(), 5, wrapper);
-                collector.edit(node.end_byte(), 5, ")".to_owned());
+                wrap_decision(collector, node, &probes, index);
             }
         }
         "if_statement" | "if_expression" => {
@@ -782,16 +780,10 @@ fn walk(collector: &mut Collector, node: Node) {
                         }));
                     } else {
                         let probes = collector.add_branch(node, "loop", &["true", "false"]);
-                        let decision = collector.add_decision(inner, "loop");
-                        let wrapper = match decision {
-                            Some(index) => format!(
-                                "{RUNTIME_CLASS}.bd({}, {}, {index}, ",
-                                probes[0], probes[1]
-                            ),
-                            None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-                        };
-                        collector.edit(inner.start_byte(), 5, wrapper);
-                        collector.edit(inner.end_byte(), 5, ")".to_owned());
+                        match collector.add_decision(inner, "loop") {
+                            Some(index) => wrap_decision(collector, inner, &probes, index),
+                            None => wrap_condition(collector, inner, &probes),
+                        }
                     }
                 }
                 // Kotlin's `while` and `do`/`while` always hold a condition,
@@ -877,15 +869,58 @@ fn if_node(collector: &mut Collector, node: Node) -> Option<()> {
                 "reason": "the compiler reads this condition to narrow a type in the branch below it, so observing its operands would stop the code compiling; the branch is recorded from its arms and carries no condition vectors",
             }));
     } else {
-        let decision = collector.add_decision(condition, "if");
-        let wrapper = match decision {
-            Some(index) => format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]),
-            None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-        };
-        collector.edit(condition.start_byte(), 5, wrapper);
-        collector.edit(condition.end_byte(), 5, ")".to_owned());
+        match collector.add_decision(condition, "if") {
+            Some(index) => wrap_decision(collector, condition, &probes, index),
+            None => wrap_condition(collector, condition, &probes),
+        }
     }
     Some(())
+}
+
+/// Wraps a branch's single condition in the call that records which way it
+/// went.
+fn wrap_condition(collector: &mut Collector, node: Node, probes: &[u64]) {
+    let wrapper = format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]);
+    collector.edit(node.start_byte(), 5, wrapper);
+    collector.edit(node.end_byte(), 5, ")".to_owned());
+}
+
+/// Wraps a decision of several conditions in the call that records its
+/// branch and closes its vector.
+///
+/// Java's compiler reads `&&`, `||`, `!` and `?:` to learn what a condition
+/// has assigned by the time it holds, or fails: `while (!stopped() && (n =
+/// in.read(buffer)) >= 0) out.write(buffer, 0, n);` compiles because `n` is
+/// assigned whenever the loop runs its body. A call's result tells it
+/// nothing of the kind, so a decision that assigns is recorded in the arms
+/// of a conditional on it instead: `(d ? bd(.., true) || true : bd(..,
+/// false) && false)` has assigned, when true and when false, exactly what
+/// `d` has.
+fn wrap_decision(collector: &mut Collector, node: Node, probes: &[u64], index: usize) {
+    let record = |outcome: bool| {
+        format!(
+            "{RUNTIME_CLASS}.bd({}, {}, {index}, {outcome})",
+            probes[0], probes[1]
+        )
+    };
+    if collector.language == JvmLanguage::Java && assigns(node) {
+        let arms = format!(" ? {} || true : {} && false)", record(true), record(false));
+        collector.edit(node.start_byte(), 5, "(".to_owned());
+        // After the last condition's own `)`, which ranks 20.
+        collector.edit(node.end_byte(), 21, arms);
+    } else {
+        let wrapper = format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]);
+        collector.edit(node.start_byte(), 5, wrapper);
+        collector.edit(node.end_byte(), 5, ")".to_owned());
+    }
+}
+
+/// Whether an expression assigns a variable anywhere within it.
+fn assigns(node: Node) -> bool {
+    node.kind() == "assignment_expression" || {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).any(assigns)
+    }
 }
 
 fn is_statement(node: Node, source: &str, language: JvmLanguage) -> bool {

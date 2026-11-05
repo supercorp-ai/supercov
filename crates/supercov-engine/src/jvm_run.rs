@@ -1584,10 +1584,11 @@ fn with_ant_formatter(
                     }
                     if inner.closing {
                         depth = depth.saturating_sub(1);
-                        if depth == 0 && inner.name == "classpath" {
-                            if let Some(start) = open_at.take() {
-                                classpath.push_str(&text[start..=inner.end]);
-                            }
+                        if depth == 0
+                            && inner.name == "classpath"
+                            && let Some(start) = open_at.take()
+                        {
+                            classpath.push_str(&text[start..=inner.end]);
                         }
                         continue;
                     }
@@ -1664,7 +1665,7 @@ fn with_ant_formatter(
     if edits.is_empty() {
         return None;
     }
-    edits.sort_by(|left, right| right.0.cmp(&left.0));
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
     let mut out = text.to_owned();
     for (at, insert, replaced) in edits {
         out.replace_range(at..at + replaced, &insert);

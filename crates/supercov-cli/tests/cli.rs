@@ -16990,18 +16990,18 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
         // The project's tree walked, then the copy's: the seventh listing.
-        ("fs.read_dir#jvm_project.rs:268", "jvm_project.rs:268"),
-        ("fs.read_dir#jvm_project.rs:268@7", "jvm_project.rs:268"),
+        ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
+        ("fs.read_dir#jvm_project.rs:281@7", "jvm_project.rs:281"),
         (
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2451", "jvm_run.rs:2451"),
-        ("fs.create_dir_all#jvm_run.rs:2467", "jvm_run.rs:2467"),
-        ("fs.create_dir_all#jvm_run.rs:2477", "jvm_run.rs:2477"),
-        ("fs.write#jvm_run.rs:2451", "jvm_run.rs:2451"),
-        ("fs.write#jvm_run.rs:2467", "jvm_run.rs:2467"),
+        ("fs.create_dir_all#jvm_run.rs:2488", "jvm_run.rs:2488"),
+        ("fs.create_dir_all#jvm_run.rs:2504", "jvm_run.rs:2504"),
+        ("fs.create_dir_all#jvm_run.rs:2514", "jvm_run.rs:2514"),
+        ("fs.write#jvm_run.rs:2488", "jvm_run.rs:2488"),
+        ("fs.write#jvm_run.rs:2504", "jvm_run.rs:2504"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18367,8 +18367,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:1936", "jvm_run.rs:1936"),
-                ("fs.read_dir#jvm_project.rs:268", "jvm_project.rs:268"),
+                ("fs.canonicalize#jvm_run.rs:1973", "jvm_run.rs:1973"),
+                ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );

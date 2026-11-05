@@ -807,9 +807,12 @@ A project with a `build.xml` (and no Maven or Gradle build) is an Ant build.
 Ant has no layout convention, so Supercov reads the build: it follows the
 `<import>` chain with the properties it defines, takes the directories each
 `<batchtest>` or `<testclasses>` scans as the tests — or, where it scans
-compiled classes, the sources the `<javac>` writing them compiles — and every
-other `src` directory holding Java as the code they test, leaving out the
-directories the build writes into.
+compiled classes, the sources the `<javac>` writing them compiles — and what
+its other `<javac>` tasks compile as the code they test, leaving out the
+directories the build writes into. Java elsewhere, such as the sources a test
+compiles as its input, is left alone. Where a `<javac>` compiles from a path
+the build makes only at run time, every other `src` directory holding Java is
+taken as product code too.
 When the build names its tests where that cannot be read — a path a custom
 task builds at run time — say where they are:
 

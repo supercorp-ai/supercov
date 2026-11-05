@@ -258,6 +258,7 @@ fn enclosing_repository(root: &Path) -> Option<(&Path, &Path)> {
 /// so that what its suite reaches as `../` is where it is in the checkout.
 fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
     match enclosing_tree(root) {
+        // The tree under its own name, then the way down to the package.
         Some((tree, relative)) => Ok(Path::new(tree.file_name().expect(NAMED)).join(relative)),
         None => Ok(PathBuf::from(project_name(root)?)),
     }

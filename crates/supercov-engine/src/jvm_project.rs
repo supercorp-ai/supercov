@@ -154,6 +154,8 @@ struct AntLayout {
     outputs: Vec<String>,
     /// What the build's `<javac>` tasks compile, where it can be read.
     sources: Vec<String>,
+    /// Whether some of what they compile cannot be.
+    sources_unread: bool,
 }
 
 impl AntLayout {
@@ -190,6 +192,7 @@ impl AntLayout {
             tests,
             outputs: relative(&build.outputs),
             sources: relative(&build.sources),
+            sources_unread: build.sources_unread,
         }
     }
 
@@ -210,10 +213,20 @@ impl AntLayout {
         if Self::under(&self.tests, relative) {
             return Some("test");
         }
-        // What the build compiles is product code wherever it is; a `src`
-        // directory is, too, where the build names its sources at run time.
+        // What the build compiles is product code wherever it is, and where
+        // the build says all it compiles, nothing else is: Apache Ant keeps
+        // Java its own tests compile as data in `src/etc/testcases`. A `src`
+        // directory is product code where the build names its product's
+        // sources only at run time, as Ametys's does.
         if Self::under(&self.sources, relative) {
             return Some("main");
+        }
+        let names_its_product = self
+            .sources
+            .iter()
+            .any(|source| !Self::under(&self.tests, source));
+        if names_its_product && !self.sources_unread {
+            return Some("unbuilt");
         }
         relative
             .split('/')
@@ -554,6 +567,8 @@ mod tests {
             ("java/app/Calc.java", "package app; class Calc {}"),
             ("checks/app/CalcTest.java", "package app; class CalcTest {}"),
             ("out/classes/Stale.java", "class Stale {}"),
+            // Java a test compiles as its input, which no build task does.
+            ("src/etc/testcases/src1/Data.java", "class Data {}"),
         ] {
             fs::create_dir_all(root.join(relative).parent().unwrap()).unwrap();
             fs::write(root.join(relative), text).unwrap();
@@ -566,6 +581,35 @@ mod tests {
         };
         assert_eq!(names(&files.sources), ["java/app/Calc.java"]);
         assert_eq!(names(&files.tests), ["checks/app/CalcTest.java"]);
+        assert!(
+            files.excluded.contains(&(
+                "src/etc/testcases/src1/Data.java".to_owned(),
+                "a source set that is neither main nor test"
+            )),
+            "{:?}",
+            files.excluded
+        );
+        // A build whose only readable <javac> compiles its tests builds its
+        // product somewhere it does not say, and a `src` directory is it.
+        fs::write(
+            root.join("build.xml"),
+            r#"<project><target name="t"><javac srcdir="checks" destdir="out/tests"/><junit><batchtest><fileset dir="out/tests"/></batchtest></junit></target></project>"#,
+        )
+        .unwrap();
+        let files = discover_jvm_files(&root).unwrap();
+        assert_eq!(names(&files.sources), ["src/etc/testcases/src1/Data.java"]);
+        assert_eq!(names(&files.tests), ["checks/app/CalcTest.java"]);
+        // Nor does one that also compiles from a path made at run time.
+        fs::write(
+            root.join("build.xml"),
+            r#"<project><target name="t"><javac srcdir="java" destdir="out/classes"><src refid="made.at.run.time"/></javac><javac srcdir="checks" destdir="out/tests"/><junit><batchtest><fileset dir="out/tests"/></batchtest></junit></target></project>"#,
+        )
+        .unwrap();
+        let files = discover_jvm_files(&root).unwrap();
+        assert_eq!(
+            names(&files.sources),
+            ["java/app/Calc.java", "src/etc/testcases/src1/Data.java"]
+        );
         fs::write(root.join("build.xml"), "<project/>").unwrap();
         fs::create_dir_all(root.join("src/test/java")).unwrap();
         fs::write(root.join("src/test/java/T.java"), "class T {}").unwrap();
