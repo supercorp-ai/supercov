@@ -16,9 +16,7 @@ use supercov_contracts::{
 
 use crate::{
     coverage_report::{PersistedCoverageModel, RawTestResult, javascript_coverage_model},
-    evidence_archive::{
-        EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
-    },
+    evidence_archive::{EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources},
     integrity::{FrontendIntegrityInputs, create_run_integrity},
     javascript_frontend::{
         javascript_frontend_reuse_paths, load_cached_javascript_frontend,
@@ -26,8 +24,7 @@ use crate::{
     },
     lifecycle::{
         ProjectLock, RunState, RunStateStatus, finalize_published_run, interrupt_run_state,
-        publish_run, recover_abandoned_runs, remove_stored_tree_deferred, update_run_state,
-        write_run_state,
+        recover_abandoned_runs, remove_stored_tree_deferred, update_run_state, write_run_state,
     },
     orchestration::{
         ExecutionPhase, ExecutionPlan, OrchestrationError, PhaseKind, execute_plan_with_supervisor,
@@ -1427,7 +1424,29 @@ pub fn run_direct_javascript(
         });
     }
     let entries = crate::source_capture::append(entries, &recorded_inputs);
-    let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
+    let entries = crate::evidence_archive::canonicalize_entries(entries)
+        .map_err(|error| error.to_string())?;
+    // The evidence is analysed as publication would analyse the archive --
+    // the same entries in its order, with the run's integrity record -- while
+    // the archive is compressed: publication read a gigabyte of it back and
+    // parsed it again only once it had been written.
+    let analysis_request = crate::coverage_report::ArchiveReportRequest {
+        archive_path: archive_path.clone(),
+        run_id: run_id.clone(),
+        generated_at: started_at.clone(),
+        integrity: Some(serde_json::to_value(&integrity).expect("plain data serializes")),
+        test_exit_code: crate::coverage_report::ExitCodeInput::Present(Some(execution.exit_code)),
+        test_filter: None,
+    };
+    let (raw, analysed) = std::thread::scope(|scope| {
+        let analysis = scope.spawn(|| {
+            crate::coverage_report::analyze_coverage_entries(&analysis_request, &entries).ok()
+        });
+        let raw = crate::evidence_archive::write_canonical_archive(&entries, &archive_path);
+        (raw, analysis.join().unwrap_or_else(crate::threads::rethrow))
+    });
+    std::thread::spawn(move || drop(entries));
+    let raw = raw.map_err(|error| error.to_string())?;
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;
     remove_stored_tree_deferred(&root, &server_evidence_root).map_err(|error| error.to_string())?;
@@ -1514,8 +1533,16 @@ pub fn run_direct_javascript(
         companions: (!companions.is_empty()).then_some(companions),
         ..metadata
     };
-    let run_directory =
-        publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+    let run_directory = crate::lifecycle::publish_archived_run(
+        &root,
+        &metadata,
+        &archive_path,
+        crate::lifecycle::Archived {
+            report: analysed,
+            inputs: None,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     let terminal_status = if execution.exit_code == 0 {
         RunStateStatus::Complete
     } else {

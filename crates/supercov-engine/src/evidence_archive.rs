@@ -325,7 +325,9 @@ pub fn collect_sources(
     canonicalize_entries(entries)
 }
 
-fn canonicalize_entries(
+/// Entries in the order an archive holds them, each path checked and held
+/// once, with the manifest among them: what reading the archive gives back.
+pub(crate) fn canonicalize_entries(
     mut entries: Vec<EvidenceArchiveEntry>,
 ) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
     for entry in &entries {
@@ -431,6 +433,32 @@ pub(crate) fn write_archive_with_fault(
     )
 }
 
+/// `write_archive` for entries `canonicalize_entries` already put in order,
+/// borrowed: what the archive is written from can be read meanwhile.
+pub(crate) fn write_canonical_archive(
+    entries: &[EvidenceArchiveEntry],
+    destination: &Path,
+) -> Result<EvidenceArchiveMetadata, EvidenceArchiveError> {
+    let held = |path: &str| entries.iter().any(|entry| entry.path == path);
+    if !held("frontend.json") {
+        return Err(EvidenceArchiveError::MissingFrontend);
+    }
+    if !held("coverage-model.json") {
+        return Err(EvidenceArchiveError::MissingCoverageModel);
+    }
+    assert!(
+        entries.windows(2).all(|pair| pair[0].path < pair[1].path),
+        "the entries are canonical"
+    );
+    write_entries(
+        entries,
+        destination,
+        EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+        EVIDENCE_ARCHIVE_MAGIC,
+        None,
+    )
+}
+
 fn write_archive_version(
     entries: Vec<EvidenceArchiveEntry>,
     destination: &Path,
@@ -439,6 +467,16 @@ fn write_archive_version(
     fault: Option<EvidenceArchiveWriteFault>,
 ) -> Result<EvidenceArchiveMetadata, EvidenceArchiveError> {
     let entries = canonicalize_entries(entries)?;
+    write_entries(&entries, destination, schema_version, magic, fault)
+}
+
+fn write_entries(
+    entries: &[EvidenceArchiveEntry],
+    destination: &Path,
+    schema_version: u32,
+    magic: &str,
+    fault: Option<EvidenceArchiveWriteFault>,
+) -> Result<EvidenceArchiveMetadata, EvidenceArchiveError> {
     let parent = destination
         .parent()
         .ok_or_else(|| EvidenceArchiveError::InvalidPath(destination.display().to_string()))?;
@@ -460,7 +498,7 @@ fn write_archive_version(
         // one core, compressing was most of a large run's evidence step.
         // See `ParallelGzip`.
         let gzip = ParallelGzip::new(buffered)?;
-        let (gzip, uncompressed_bytes) = write_framed_with_magic(&entries, gzip, magic)?;
+        let (gzip, uncompressed_bytes) = write_framed_with_magic(entries, gzip, magic)?;
         let buffered = gzip.finish()?;
         let faulting = buffered
             .into_inner()

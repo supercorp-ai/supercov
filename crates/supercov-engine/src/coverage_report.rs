@@ -3422,6 +3422,13 @@ pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
     let (_, normalized, transport, _) = archive_request(request)?;
+    finish_archive_analysis(normalized, transport)
+}
+
+fn finish_archive_analysis(
+    normalized: CoverageReportRequest,
+    transport: TransportStats,
+) -> Result<CoverageReport, ReportError> {
     let report = analyze_coverage_results(&normalized).map(|mut report| {
         crate::coverage_report::stage("views");
         report.view.transport = Some(transport.clone());
@@ -3494,6 +3501,47 @@ pub fn archive_request(
     ),
     ReportError,
 > {
+    archive_request_from(request, |visit| {
+        crate::evidence_archive::read_archive_each(
+            Path::new(&request.archive_path),
+            |_| true,
+            visit,
+        )
+    })
+}
+
+/// A run's evidence, still in memory as the archive is written from it, as
+/// the request its views are built from: what `analyze_coverage_archive`
+/// makes of the archive, without waiting for it to be compressed and read
+/// back. `entries` are in the archive's order (`canonicalize_entries`).
+pub fn analyze_coverage_entries(
+    request: &ArchiveReportRequest,
+    entries: &[EvidenceArchiveEntry],
+) -> Result<CoverageReport, ReportError> {
+    let (_, normalized, transport, ()) = archive_request_from(request, |mut visit| {
+        entries.iter().cloned().try_for_each(&mut visit)
+    })?;
+    finish_archive_analysis(normalized, transport)
+}
+
+/// `archive_request`, from entries `read` hands to the visitor in the
+/// archive's order.
+fn archive_request_from<D>(
+    request: &ArchiveReportRequest,
+    read: impl FnOnce(
+        &mut dyn FnMut(
+            EvidenceArchiveEntry,
+        ) -> Result<(), crate::evidence_archive::EvidenceArchiveError>,
+    ) -> Result<D, crate::evidence_archive::EvidenceArchiveError>,
+) -> Result<
+    (
+        FrontendRunDeclaration,
+        CoverageReportRequest,
+        TransportStats,
+        D,
+    ),
+    ReportError,
+> {
     // Every test's record is parsed as it is read, a batch at a time, and its
     // bytes dropped: holding the decompressed archive whole beside what was
     // parsed from it was a gigabyte of a 1,100-test run's 3.6 GB.
@@ -3529,23 +3577,19 @@ pub fn archive_request(
         results.clear();
         journals.clear();
     };
-    let digest = crate::evidence_archive::read_archive_each(
-        Path::new(&request.archive_path),
-        |_| true,
-        |entry| {
-            if is_mcdc_result(&entry.path) {
-                results.push(entry);
-            } else if is_mcdc_journal(&entry.path) {
-                journals.push(entry);
-            } else {
-                entries.push(entry);
-            }
-            if results.len() + journals.len() >= BATCH {
-                flush(&mut results, &mut journals, &mut failure);
-            }
-            Ok(())
-        },
-    )
+    let digest = read(&mut |entry| {
+        if is_mcdc_result(&entry.path) {
+            results.push(entry);
+        } else if is_mcdc_journal(&entry.path) {
+            journals.push(entry);
+        } else {
+            entries.push(entry);
+        }
+        if results.len() + journals.len() >= BATCH {
+            flush(&mut results, &mut journals, &mut failure);
+        }
+        Ok(())
+    })
     .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     crate::coverage_report::stage("read and parse results");
     flush(&mut results, &mut journals, &mut failure);
