@@ -1,0 +1,77 @@
+name: Speed
+
+# How much longer a real Next.js application's tests take under Supercov than
+# without it, for the pull request's base and its head on one machine, taking
+# turns (scripts/speed-benchmark.mjs). Add the `speed` label to a pull request;
+# each push to a labelled pull request measures again.
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speed-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: contains(github.event.pull_request.labels.*.name, 'speed')
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      matrix:
+        include:
+          - variant: base
+            ref: ${{ github.event.pull_request.base.sha }}
+          - variant: new
+            ref: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: speed-${{ matrix.variant }}
+      - run: cargo build --profile measure -p supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/measure/supercov
+          retention-days: 3
+
+  measure:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov
+      - run: npx -y playwright@1.49.1 install-deps chromium
+      - name: Measure
+        env:
+          SUPERCOV_BINARIES: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
+          SPEED_ROUNDS: 3
+          SPEED_REPEAT: 10
+          SPEED_OUTPUT: ${{ runner.temp }}/speed
+        run: node scripts/speed-benchmark.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speed
+          path: |
+            ${{ runner.temp }}/speed/samples.jsonl
+            ${{ runner.temp }}/speed/summary.md
+            ${{ runner.temp }}/speed/logs/
+          retention-days: 7
