@@ -738,6 +738,7 @@ npx supercov -- npx playwright test
 | JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle |
 | JUnit 4 under Ant's `<junit>` | Exact per test, under the names Ant's XML report uses | Ant 1.10 — see below |
 | Any platform engine under Ant's `<junitlauncher>` | Exact per test, through the platform listener | Ant 1.10 — see below |
+| TestNG under Ant's `<testng>` | Exact per test, through the TestNG listener | TestNG 6.x with its Ant task — see below |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
@@ -836,7 +837,9 @@ that names no tests where they can be read keeps the `src/main` and
 
 Ant's `<junitlauncher>` runs tests on the JUnit Platform, so it gets the same
 platform listener Maven and Gradle builds get, as a `<listener>` of the task,
-compiled the same way against the task's classpath.
+compiled the same way against the task's classpath. TestNG's `<testng>` task
+gets the TestNG listener in its own `listeners` attribute, beside any the
+build names.
 
 Many Ant builds import a shared harness from beside the project —
 `<import file="../../../tools/master/build/common/common-build.xml"/>` — and

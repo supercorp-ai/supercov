@@ -2118,3 +2118,95 @@ fn a_jvm_ant_stops_for_its_timeout_still_leaves_what_it_recorded() {
     assert_eq!(hangs[0]["passed"], false, "{executions}");
     std::fs::remove_dir_all(root).ok();
 }
+
+/// TestNG and what it needs to run, from the local Maven repository: 6.14.3,
+/// the last line that ships its Ant task in the jar itself.
+fn testng_jars() -> Option<Vec<PathBuf>> {
+    let m2 = PathBuf::from(std::env::var_os("HOME")?).join(".m2/repository");
+    [
+        "org/testng/testng/6.14.3/testng-6.14.3.jar",
+        "com/beust/jcommander/1.72/jcommander-1.72.jar",
+    ]
+    .iter()
+    .map(|relative| Some(m2.join(relative)).filter(|path| path.is_file()))
+    .collect()
+}
+
+#[test]
+#[ignore = "runs a real Ant build; npm run test:jvm passes --include-ignored"]
+fn an_ant_build_running_testng_is_measured_through_the_testng_listener() {
+    let _building = common::building();
+    let Some(ant) = apache_ant() else {
+        common::skip("jvm", "no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some(jars) = testng_jars() else {
+        common::skip("jvm", "no TestNG 6.14.3 and JCommander 1.72 jars in ~/.m2");
+        return;
+    };
+    let root = temporary("ant-testng");
+    let classpath = jars
+        .iter()
+        .map(|jar| format!("<pathelement location=\"{}\"/>", jar.display()))
+        .collect::<String>();
+    write(
+        &root,
+        "build.xml",
+        &format!(
+            r#"<project name="app" default="test">
+    <path id="testng.path">{classpath}</path>
+    <taskdef resource="testngtasks" classpathref="testng.path"/>
+    <path id="test.path"><path refid="testng.path"/><pathelement location="out/classes"/><pathelement location="out/test-classes"/></path>
+    <target name="test">
+        <mkdir dir="out/classes"/>
+        <mkdir dir="out/test-classes"/>
+        <javac srcdir="src" destdir="out/classes" includeantruntime="false"/>
+        <javac srcdir="test" destdir="out/test-classes" includeantruntime="false" classpathref="test.path"/>
+        <testng classpathref="test.path" outputdir="out/testng" haltonfailure="true">
+            <classfileset dir="out/test-classes" includes="**/*Test.class"/>
+        </testng>
+    </target>
+</project>
+"#
+        ),
+    );
+    write(
+        &root,
+        "src/app/Calc.java",
+        "package app;\n\npublic class Calc {\n  public static int clamp(int value, int high) {\n    if (value > high) {\n      return high;\n    }\n    return value;\n  }\n}\n",
+    );
+    write(
+        &root,
+        "test/app/CalcTest.java",
+        "package app;\n\nimport static org.testng.Assert.assertEquals;\n\nimport org.testng.annotations.Test;\n\npublic class CalcTest {\n  @Test\n  public void clampsHighValues() {\n    assertEquals(Calc.clamp(5, 3), 3);\n  }\n\n  @Test\n  public void keepsLowValues() {\n    assertEquals(Calc.clamp(1, 3), 1);\n  }\n}\n",
+    );
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![ant.display().to_string(), "test".into()],
+        run_id: "run-jvm-ant-testng".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    assert_eq!(result.exit_code, 0, "{diagnostics}");
+    assert_eq!(result.tests, 2, "{diagnostics}");
+    let executions: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(result.run_directory.join("test-executions.json")).unwrap(),
+    )
+    .unwrap();
+    let tests = executions["tests"].as_array().unwrap();
+    assert!(
+        tests.iter().all(|test| test["test"]["file"] == "test/app/CalcTest.java"
+            && test["files"]["src/app/Calc.java"].as_array().is_some_and(|lines| !lines.is_empty())),
+        "{executions}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

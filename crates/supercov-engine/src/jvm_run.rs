@@ -1521,16 +1521,21 @@ fn xml_attribute(value: &str) -> String {
 /// A `<junitlauncher>` runs on the JUnit Platform, and gets the platform
 /// listener instead, compiled from `listener_sources`: it needs the platform's
 /// launcher API, which only that task's classpath is sure to have.
+///
+/// A `<testng>` task gets the TestNG listener through its own `listeners`
+/// attribute, compiled from `testng_sources`.
 fn with_ant_formatter(
     text: &str,
     sources: &Path,
     listener_sources: &Path,
+    testng_sources: &Path,
     classes: &Path,
 ) -> Option<String> {
     let all = crate::ant_build::tags(text);
     let classes = xml_attribute(&classes.to_string_lossy());
     let formatter_sources = xml_attribute(&sources.to_string_lossy());
     let listener_sources = xml_attribute(&listener_sources.to_string_lossy());
+    let testng_sources = xml_attribute(&testng_sources.to_string_lossy());
     // (offset, text to insert, length to replace), applied from the end.
     let mut edits: Vec<(usize, String, usize)> = Vec::new();
     let mut stack: Vec<&crate::ant_build::Tag> = Vec::new();
@@ -1541,11 +1546,25 @@ fn with_ant_formatter(
             }
             continue;
         }
-        if tag.name == "junit" || tag.name == "junitlauncher" {
+        if matches!(tag.name.as_str(), "junit" | "junitlauncher" | "testng") {
             let launcher = tag.name == "junitlauncher";
-            let sources = if launcher { &listener_sources } else { &formatter_sources };
-            // The task's own classpath, copied as written.
+            let testng = tag.name == "testng";
+            let sources = if launcher {
+                &listener_sources
+            } else if testng {
+                &testng_sources
+            } else {
+                &formatter_sources
+            };
+            // The task's own classpath, copied as written: attributes
+            // (`<testng classpathref>`) and nested elements alike.
             let mut classpath = String::new();
+            if let Some(reference) = tag.attribute("classpathref") {
+                classpath.push_str(&format!("<classpath refid=\"{}\"/>", xml_attribute(reference)));
+            }
+            if let Some(path) = tag.attribute("classpath") {
+                classpath.push_str(&format!("<classpath path=\"{}\"/>", xml_attribute(path)));
+            }
             if !tag.empty {
                 let mut depth = 0usize;
                 let mut open_at: Option<usize> = None;
@@ -1590,7 +1609,27 @@ fn with_ant_formatter(
                 holder = open;
             }
             edits.push((holder.start, compile, 0));
-            let inside = if launcher {
+            if testng {
+                // TestNG takes its listeners by class name, comma-separated.
+                let listener = TESTNG_LISTENER_CLASS;
+                let start_tag = &text[tag.start..=tag.end];
+                match start_tag.find("listeners=") {
+                    Some(at) => {
+                        let quote_at = tag.start + at + "listeners=".len();
+                        let quote = &text[quote_at..=quote_at];
+                        if let Some(close) = text[quote_at + 1..tag.end].find(quote) {
+                            edits.push((quote_at + 1 + close, format!(",{listener}"), 0));
+                        }
+                    }
+                    None => {
+                        let name_end = tag.start + 1 + tag.name.len();
+                        edits.push((name_end, format!(" listeners=\"{listener}\""), 0));
+                    }
+                }
+            }
+            let inside = if testng {
+                format!("<classpath><pathelement location=\"{classes}\"/></classpath>")
+            } else if launcher {
                 format!(
                     "<classpath><pathelement location=\"{classes}\"/></classpath><listener classname=\"{LISTENER_CLASS}\"/>"
                 )
@@ -1724,6 +1763,7 @@ fn instrument_ant(
     let formatter = evidence_directory.join("ant-formatter");
     let sources = formatter.join("src");
     let listener_sources = formatter.join("platform-src");
+    let testng_sources = formatter.join("testng-src");
     let classes = formatter.join("classes");
     let config = configuration(probe_count, &project.decision_widths, &module.evidence);
     write(
@@ -1736,6 +1776,11 @@ fn instrument_ant(
         LISTENER_SOURCE,
     )?;
     write(&listener_sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"), &config)?;
+    write(
+        &testng_sources.join(PACKAGE_DIRECTORY).join("SupercovTestNGListener.java"),
+        TESTNG_LISTENER_SOURCE,
+    )?;
+    write(&testng_sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"), &config)?;
 
     let build = crate::ant_build::read_ant_build(workspace, &BTreeMap::new());
     // Everything changed outside the project is changed within the copy's
@@ -1778,13 +1823,18 @@ fn instrument_ant(
         };
         // A file that holds the formatter already is one an earlier run left
         // in the copy: patching it again would run that run's compilation.
-        if text.contains(ANT_FORMATTER_CLASS) || text.contains(&format!("classname=\"{LISTENER_CLASS}\"")) {
+        if text.contains(ANT_FORMATTER_CLASS)
+            || text.contains(&format!("classname=\"{LISTENER_CLASS}\""))
+            || text.contains(TESTNG_LISTENER_CLASS)
+        {
             return Err(format!(
                 "{} in the copy still holds an earlier run's changes; delete .supercov/workspaces and run again",
                 file.display()
             ));
         }
-        let Some(updated) = with_ant_formatter(&text, &sources, &listener_sources, &classes) else {
+        let Some(updated) =
+            with_ant_formatter(&text, &sources, &listener_sources, &testng_sources, &classes)
+        else {
             continue;
         };
         if !file.starts_with(workspace) {
@@ -2192,7 +2242,7 @@ pub fn run_direct_jvm(
             // An Ant build reports through its own tasks, and one that exits
             // before them has usually failed to build: say which.
             let lifecycle = if instrumented.build == JvmBuild::Ant {
-                "An Ant build reports through its <junit> and <junitlauncher> tasks, so the build has to reach one: a build that fails before them (a dependency it cannot resolve, a compile error) records nothing"
+                "An Ant build reports through its <junit>, <junitlauncher> and <testng> tasks, so the build has to reach one: a build that fails before them (a dependency it cannot resolve, a compile error) records nothing"
             } else {
                 "Supercov attributes through each framework's own lifecycle, so the suite has to run on the JUnit Platform or TestNG"
             };
@@ -2501,7 +2551,7 @@ mod tests {
     </target>
     <target name="quick"><junit classpath="lib/junit.jar"/></target>
 </project>"#;
-        let patched = with_ant_formatter(build, Path::new("/w/src"), Path::new("/w/platform"), Path::new("/w/classes")).expect("changed");
+        let patched = with_ant_formatter(build, Path::new("/w/src"), Path::new("/w/platform"), Path::new("/w/testng"), Path::new("/w/classes")).expect("changed");
         let compile = "<mkdir dir=\"/w/classes\"/><javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\"";
         // Compiled after the classpath exists and before the coverage wrapper.
         let resolved = patched.find("<ivy:cachepath").unwrap();
@@ -2513,13 +2563,14 @@ mod tests {
         // An empty task gets a body.
         assert!(patched.contains("<junit classpath=\"lib/junit.jar\"><classpath><pathelement location=\"/w/classes\"/></classpath><formatter classname=\"com.supercorp.supercov.SupercovAntFormatter\" usefile=\"false\"/></junit>"), "{patched}");
         assert_eq!(patched.matches("<javac ").count(), 2);
-        assert_eq!(with_ant_formatter("<project><target name=\"t\"><echo/></target></project>", Path::new("/s"), Path::new("/p"), Path::new("/c")), None);
+        assert_eq!(with_ant_formatter("<project><target name=\"t\"><echo/></target></project>", Path::new("/s"), Path::new("/p"), Path::new("/n"), Path::new("/c")), None);
         // A task on the JUnit Platform gets the platform listener, compiled
         // from its own sources.
         let launcher = with_ant_formatter(
             "<project><target name=\"t\"><junitlauncher><classpath refid=\"cp\"/><testclasses><fileset dir=\"t\"/></testclasses></junitlauncher></target></project>",
             Path::new("/w/src"),
             Path::new("/w/platform"),
+            Path::new("/w/testng"),
             Path::new("/w/classes"),
         )
         .expect("changed");
@@ -2533,12 +2584,26 @@ mod tests {
             "<project><target name=\"t\"><sequential><path id=\"cp\"/><junit><classpath id=\"x\" refid=\"cp\"/></junit></sequential></target></project>",
             Path::new("/w/src"),
             Path::new("/w/platform"),
+            Path::new("/w/testng"),
             Path::new("/w/classes"),
         )
         .expect("changed");
         assert!(ordered.find("<path id=\"cp\"/>").unwrap() < ordered.find("<mkdir").unwrap(), "{ordered}");
         assert!(ordered.contains("<javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{ordered}");
         assert_eq!(without_ids("<path id='a' refid=\"b\"/>"), "<path refid=\"b\"/>");
+        // TestNG takes the listener in its own attribute, kept beside the
+        // project's own listeners, and its classpath attribute is copied.
+        let testng = with_ant_formatter(
+            "<project><target name=\"t\"><testng classpathref=\"cp\" listeners=\"a.Mine\"><classfileset dir=\"out\"/></testng><testng classpathref=\"cp\"/></target></project>",
+            Path::new("/w/src"),
+            Path::new("/w/platform"),
+            Path::new("/w/testng"),
+            Path::new("/w/classes"),
+        )
+        .expect("changed");
+        assert!(testng.contains("listeners=\"a.Mine,com.supercorp.supercov.SupercovTestNGListener\""), "{testng}");
+        assert!(testng.contains("<testng listeners=\"com.supercorp.supercov.SupercovTestNGListener\" classpathref=\"cp\">"), "{testng}");
+        assert!(testng.contains("<javac srcdir=\"/w/testng\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{testng}");
     }
 
     use super::*;
@@ -3679,7 +3744,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1289, 1309, 1398, 1434, 1445] {
+        for line in [1293, 1313, 1402, 1438, 1449] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {

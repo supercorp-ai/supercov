@@ -136,7 +136,7 @@ pub struct AntBuild {
     /// Directories the build writes into: `<javac destdir>` and the usual
     /// output properties. Never sources.
     pub outputs: Vec<PathBuf>,
-    /// The files that hold a `<junit>` or `<junitlauncher>` task.
+    /// The files that hold a `<junit>`, `<junitlauncher>` or `<testng>` task.
     pub junit_files: Vec<PathBuf>,
     /// Every directory a `<javac>` compiles that can be read without running
     /// the build: `srcdir`, nested `<src path>`, and `<src refid>` naming a
@@ -275,7 +275,7 @@ fn read_file(
     };
     for tag in &all {
         if tag.closing {
-            if tag.name == "batchtest" || tag.name == "testclasses" {
+            if matches!(tag.name.as_str(), "batchtest" | "testclasses" | "testng") {
                 in_batchtest = in_batchtest.saturating_sub(1);
             }
             if tag.name == "javac" {
@@ -346,8 +346,14 @@ fn read_file(
                     read_sub_build(&directory, &file, properties, build, compiled);
                 }
             }
-            "batchtest" | "testclasses" if !tag.empty => in_batchtest += 1,
-            "fileset" | "dirset" if in_batchtest > 0 => {
+            "batchtest" | "testclasses" | "testng" if !tag.empty => {
+                in_batchtest += 1;
+                if tag.name == "testng" {
+                    push_unique(&mut build.junit_files, file.clone());
+                }
+            }
+            "testng" => push_unique(&mut build.junit_files, file.clone()),
+            "fileset" | "dirset" | "classfileset" if in_batchtest > 0 => {
                 if let Some(dir) = tag.attribute("dir") {
                     let dir = expand(dir, properties);
                     if !dir.contains("${") {
