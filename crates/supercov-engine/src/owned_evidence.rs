@@ -527,7 +527,7 @@ fn snapshot(
         );
         clock += observed.len() as i64;
         decisions.push(DecisionSnapshot {
-            meta: meta.clone(),
+            id: meta.id.clone(),
             vectors: observed,
         });
     }

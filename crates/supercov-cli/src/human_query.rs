@@ -2916,7 +2916,7 @@ mod tests {
                 phases: Vec::new(),
                 runtime: vec![RuntimeSnapshot {
                     decisions: vec![DecisionSnapshot {
-                        meta: decision,
+                        id: decision.id.clone(),
                         vectors: vec![McdcVector {
                             values: vec![Some(false), None],
                             outcome: false,

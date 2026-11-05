@@ -297,7 +297,7 @@ fn create_analyzable_run(
         phases: vec![],
         runtime: vec![RuntimeSnapshot {
             decisions: vec![DecisionSnapshot {
-                meta: decision,
+                id: decision.id.clone(),
                 vectors: vec![
                     McdcVector {
                         values: vec![Some(false), Some(false)],

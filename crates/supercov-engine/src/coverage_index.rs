@@ -4188,7 +4188,7 @@ mod tests {
                 phases,
                 runtime: vec![RuntimeSnapshot {
                     decisions: vec![crate::coverage_report::DecisionSnapshot {
-                        meta: decision,
+                        id: decision.id,
                         vectors: vec![McdcVector {
                             values: vec![Some(false), None],
                             outcome: false,

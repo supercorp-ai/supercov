@@ -973,7 +973,7 @@ function mergeSnapshots(snapshots) {
         for (const event of snapshot?.events ?? [])
             events.set(JSON.stringify(event), event);
         for (const decision of snapshot?.decisions ?? []) {
-            const entry = vectorsOf(decisions, decision.meta?.id, { meta: decision.meta });
+            const entry = vectorsOf(decisions, decision.id, { id: decision.id });
             for (const vector of decision.vectors ?? [])
                 entry.seen.set(JSON.stringify(vector), vector);
         }
@@ -984,7 +984,7 @@ function mergeSnapshots(snapshots) {
         }
     }
     return {
-        decisions: [...decisions.values()].map(({ seen, meta }) => ({ meta, vectors: [...seen.values()] })),
+        decisions: [...decisions.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
         hits: [...hits],
         events: [...events.values()],
         logicals: [...logicals.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),

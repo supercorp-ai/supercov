@@ -4075,7 +4075,7 @@ mod tests {
                 phases: Vec::new(),
                 runtime: vec![RuntimeSnapshot {
                     decisions: vec![DecisionSnapshot {
-                        meta: decision("ran", 2),
+                        id: decision("ran", 2).id,
                         vectors: vec![McdcVector {
                             values: vec![Some(true)],
                             outcome: true,

@@ -949,7 +949,7 @@ fn snapshot(
             Ok(())
         })?;
         decisions.push(DecisionSnapshot {
-            meta: (*meta).clone(),
+            id: meta.id.clone(),
             vectors: observed,
         });
     }

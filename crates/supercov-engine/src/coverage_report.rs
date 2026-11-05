@@ -89,7 +89,10 @@ pub struct CoverageManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DecisionSnapshot {
-    pub meta: DecisionMeta,
+    /// The decision as the manifest has it. Evidence names a decision by id
+    /// alone: its text came from the instrumented module, and in a browser
+    /// chunk that was server code the bundler had otherwise removed.
+    pub id: String,
     pub vectors: Vec<McdcVector>,
 }
 
@@ -163,8 +166,6 @@ pub struct ExecutionScope {
 pub struct ServerRecord {
     #[serde(rename = "type")]
     pub record_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<DecisionMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector: Option<McdcVector>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1981,24 +1982,6 @@ fn create_coverage_view_with_model(
         .enumerate()
         .map(|(index, meta)| (meta.id.clone(), index))
         .collect::<HashMap<_, _>>();
-    let manifest_files = manifest
-        .decisions
-        .iter()
-        .map(|meta| meta.file.clone())
-        .chain(manifest.points.iter().map(|meta| meta.file.clone()))
-        .chain(manifest.branches.iter().map(|meta| meta.file.clone()))
-        .chain(
-            manifest
-                .scope
-                .as_ref()
-                .and_then(|scope| scope.get("entries"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("included"))
-                .filter_map(|entry| entry.get("file").and_then(Value::as_str).map(str::to_owned)),
-        )
-        .collect::<BTreeSet<_>>();
     let mut vectors_by_decision = FastMap::<String, Vec<MutableObservation>>::default();
     let mut vector_indexes = FastMap::<String, FastMap<String, usize>>::default();
     // Numbers of `tests_by_hit`'s tests, as they arrive.
@@ -2083,25 +2066,14 @@ fn create_coverage_view_with_model(
             .chain(raw.browser.iter().map(|snapshot| (snapshot, true)));
         for (snapshot, browser) in snapshots {
             for decision in &snapshot.decisions {
-                let Some(index) = decision_indexes.get(&decision.meta.id).copied() else {
-                    if manifest_files.contains(&decision.meta.file) {
-                        return Err(ReportError::InvalidServerRecord(format!(
-                            "decision {} is absent from the frozen manifest",
-                            decision.meta.id
-                        )));
-                    }
+                // Code the manifest does not measure, as a hit of it is.
+                if !decision_indexes.contains_key(&decision.id) {
                     continue;
-                };
-                if decision_metadata[index] != decision.meta {
-                    return Err(ReportError::InvalidServerRecord(format!(
-                        "decision {} metadata differs from the frozen manifest",
-                        decision.meta.id
-                    )));
                 }
                 for vector in &decision.vectors {
                     let key = vector_key(vector);
-                    let indexes = hash_slot(&mut vector_indexes, &decision.meta.id);
-                    let observations = hash_slot(&mut vectors_by_decision, &decision.meta.id);
+                    let indexes = hash_slot(&mut vector_indexes, &decision.id);
+                    let observations = hash_slot(&mut vectors_by_decision, &decision.id);
                     let observation_index = *indexes.entry(key).or_insert_with(|| {
                         observations.push(MutableObservation {
                             vector: vector.clone(),
@@ -2116,12 +2088,12 @@ fn create_coverage_view_with_model(
                         .push(tests_by_hit.number(&id, ids));
                     tree_slot(
                         &mut tests_by_id.get_mut(&id).expect("registered test").decisions,
-                        &decision.meta.id,
+                        &decision.id,
                     )
                     .insert(vector);
                 }
                 if !decision.vectors.is_empty() {
-                    hash_slot(&mut tests_by_decision, &decision.meta.id)
+                    hash_slot(&mut tests_by_decision, &decision.id)
                         .push(tests_by_hit.number(&id, ids));
                 }
             }
@@ -2213,7 +2185,7 @@ fn create_coverage_view_with_model(
                     explicit_phases_by_hit.add(hit, phase_id, ids);
                 }
                 for decision in &snapshot.decisions {
-                    let id = &decision.meta.id;
+                    let id = &decision.id;
                     for vector in &decision.vectors {
                         tree_slot(&mut phase.decisions, id).insert(vector);
                         if let Some(observation) =
@@ -2231,32 +2203,19 @@ fn create_coverage_view_with_model(
 
         for record in &raw.server {
             let (record_id, decision) = if record.record_type == "decision" {
-                let meta = record
-                    .meta
-                    .as_ref()
-                    .ok_or_else(|| ReportError::InvalidServerRecord("missing meta".into()))?;
+                let decision = record.id.as_ref().ok_or_else(|| {
+                    ReportError::InvalidServerRecord("missing decision id".into())
+                })?;
                 let vector = record
                     .vector
                     .as_ref()
                     .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
-                let Some(index) = decision_indexes.get(&meta.id).copied() else {
-                    if manifest_files.contains(&meta.file) {
-                        return Err(ReportError::InvalidServerRecord(format!(
-                            "decision {} is absent from the frozen manifest",
-                            meta.id
-                        )));
-                    }
+                if !decision_indexes.contains_key(decision) {
                     continue;
-                };
-                if decision_metadata[index] != *meta {
-                    return Err(ReportError::InvalidServerRecord(format!(
-                        "decision {} metadata differs from the frozen manifest",
-                        meta.id
-                    )));
                 }
                 let key = vector_key(vector);
-                let indexes = vector_indexes.entry(meta.id.clone()).or_default();
-                let observations = vectors_by_decision.entry(meta.id.clone()).or_default();
+                let indexes = vector_indexes.entry(decision.clone()).or_default();
+                let observations = vectors_by_decision.entry(decision.clone()).or_default();
                 let index = *indexes.entry(key).or_insert_with(|| {
                     observations.push(MutableObservation {
                         vector: vector.clone(),
@@ -2273,11 +2232,11 @@ fn create_coverage_view_with_model(
                     .get_mut(&id)
                     .expect("registered test")
                     .decisions
-                    .entry(meta.id.clone())
+                    .entry(decision.clone())
                     .or_default()
                     .insert(vector);
-                hash_slot(&mut tests_by_decision, &meta.id).push(tests_by_hit.number(&id, ids));
-                (meta.id.clone(), Some(vector.clone()))
+                hash_slot(&mut tests_by_decision, decision).push(tests_by_hit.number(&id, ids));
+                (decision.clone(), Some(vector.clone()))
             } else if record.record_type == "hit" {
                 let hit = record
                     .id
@@ -3885,7 +3844,6 @@ mod tests {
         };
         let at = |timestamp: i64| ServerRecord {
             record_type: "hit".into(),
-            meta: None,
             vector: None,
             id: Some(format!("hit-{timestamp}")),
             timestamp_ms: Some(timestamp),
@@ -3970,7 +3928,6 @@ mod tests {
         };
         let record = |kind: &str, id: &str, at: i64, request: Option<u64>| ServerRecord {
             record_type: kind.into(),
-            meta: None,
             vector: None,
             id: Some(id.into()),
             timestamp_ms: Some(at),
@@ -4251,9 +4208,8 @@ mod tests {
         assert_eq!(view.decisions[0].conditions.len(), 2);
     }
 
-    /// A server's decision record names a decision of the frozen manifest
-    /// as the manifest has it, with a vector; one of a file outside it is
-    /// passed over.
+    /// A server's decision record names a decision by id, with a vector;
+    /// one the manifest does not hold is passed over, as a hit of it is.
     #[test]
     fn a_server_decision_record_is_refused_for_each_way_it_breaks_the_manifest() {
         let meta = |id: &str, file: &str, source: &str| DecisionMeta {
@@ -4278,11 +4234,10 @@ mod tests {
             values: vec![Some(true), Some(true)],
             outcome: true,
         };
-        let record = |meta: Option<DecisionMeta>, vector: Option<McdcVector>| ServerRecord {
+        let record = |id: Option<&str>, vector: Option<McdcVector>| ServerRecord {
             record_type: "decision".into(),
-            meta,
             vector,
-            id: None,
+            id: id.map(str::to_owned),
             timestamp_ms: None,
             phase_id: None,
             scope: None,
@@ -4297,7 +4252,10 @@ mod tests {
                 Err(error) => format!("{error:?}"),
             }
         };
-        assert_eq!(read(record(None, Some(vector.clone()))), "missing meta");
+        assert_eq!(
+            read(record(None, Some(vector.clone()))),
+            "missing decision id"
+        );
         assert_eq!(
             read(ServerRecord {
                 record_type: "hit".into(),
@@ -4305,41 +4263,9 @@ mod tests {
             }),
             "missing hit id"
         );
-        assert_eq!(
-            read(record(
-                Some(meta("decision", "src/app.js", "left && right")),
-                None
-            )),
-            "missing vector"
-        );
-        assert!(
-            read(record(
-                Some(meta("other", "src/app.js", "a && b")),
-                Some(vector.clone())
-            ))
-            .contains("absent from the frozen manifest")
-        );
-        assert!(
-            read(record(
-                Some(meta("decision", "src/app.js", "left || right")),
-                Some(vector.clone())
-            ))
-            .contains("metadata differs from the frozen manifest")
-        );
-        assert!(
-            read(record(
-                Some(meta("other", "lib/vendor.js", "a && b")),
-                Some(vector.clone())
-            ))
-            .starts_with("ok")
-        );
-        assert!(
-            read(record(
-                Some(meta("decision", "src/app.js", "left && right")),
-                Some(vector)
-            ))
-            .starts_with("ok")
-        );
+        assert_eq!(read(record(Some("decision"), None)), "missing vector");
+        assert_eq!(read(record(Some("other"), Some(vector.clone()))), "ok 0");
+        assert_eq!(read(record(Some("decision"), Some(vector))), "ok 1");
     }
 
     /// A branch whose every outcome a frontend declined is declined itself;
@@ -4400,15 +4326,7 @@ mod tests {
         };
         let mut attempt = raw("test", 0, "passed", &[]);
         attempt.runtime[0].decisions.push(DecisionSnapshot {
-            meta: DecisionMeta {
-                id: "synthetic-fixture".into(),
-                file: "fixtures/generated.js".into(),
-                line: 1,
-                column: 0,
-                source: "a && b && c".into(),
-                conditions: vec!["a".into(), "b".into(), "c".into()],
-                kind: "if".into(),
-            },
+            id: "synthetic-fixture".into(),
             vectors: vec![McdcVector {
                 values: vec![Some(true), Some(true), Some(true)],
                 outcome: true,
@@ -4422,7 +4340,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_manifest_rejects_in_scope_unknown_or_changed_decisions() {
+    fn frozen_manifest_refuses_a_vector_narrower_than_its_decision() {
         let expected = DecisionMeta {
             id: "application-decision".into(),
             file: "src/app.js".into(),
@@ -4434,54 +4352,19 @@ mod tests {
         };
         let manifest = CoverageManifest {
             unmeasured: Vec::new(),
-            decisions: vec![expected.clone()],
+            decisions: vec![expected],
             points: vec![],
             branches: vec![],
             limitations: vec![],
-            scope: Some(serde_json::json!({
-                "entries": [{ "file": "src/empty.js", "status": "included" }]
-            })),
+            scope: None,
             assertion_sites: Vec::new(),
         };
-        let vector = McdcVector {
-            values: vec![Some(true), Some(true)],
-            outcome: true,
-        };
-
-        let mut unknown = raw("test", 0, "passed", &[]);
-        unknown.runtime[0].decisions.push(DecisionSnapshot {
-            meta: DecisionMeta {
-                id: "unknown-decision".into(),
-                file: "src/empty.js".into(),
-                ..expected.clone()
-            },
-            vectors: vec![vector.clone()],
-        });
-        assert!(matches!(
-            create_coverage_view(&manifest, &[unknown], "time"),
-            Err(ReportError::InvalidServerRecord(reason))
-                if reason.contains("absent from the frozen manifest")
-        ));
-
-        let mut changed = raw("test", 0, "passed", &[]);
-        changed.runtime[0].decisions.push(DecisionSnapshot {
-            meta: DecisionMeta {
-                source: "left || right".into(),
-                ..expected
-            },
-            vectors: vec![vector],
-        });
-        assert!(matches!(
-            create_coverage_view(&manifest, &[changed], "time"),
-            Err(ReportError::InvalidServerRecord(reason))
-                if reason.contains("differs from the frozen manifest")
-        ));
 
         // A vector of fewer conditions than its decision has is no reading
         // of it.
         let mut narrow = raw("test", 0, "passed", &[]);
         narrow.runtime[0].decisions.push(DecisionSnapshot {
-            meta: manifest.decisions[0].clone(),
+            id: manifest.decisions[0].id.clone(),
             vectors: vec![McdcVector {
                 values: vec![Some(true)],
                 outcome: true,
@@ -4593,7 +4476,7 @@ mod tests {
         let mut attempt = raw("test", 0, "passed", &["hit"]);
         attempt.phases = vec![phase("a", 100), phase("b", 200)];
         attempt.runtime[0].decisions.push(DecisionSnapshot {
-            meta: decision.clone(),
+            id: decision.id.clone(),
             vectors: vec![both.clone()],
         });
         attempt.runtime[0].events = vec![
@@ -4606,7 +4489,7 @@ mod tests {
         ];
         attempt.browser.push(RuntimeSnapshot {
             decisions: vec![DecisionSnapshot {
-                meta: decision.clone(),
+                id: decision.id.clone(),
                 vectors: vec![both.clone()],
             }],
             hits: vec!["hit".into()],
@@ -5696,11 +5579,11 @@ mod tests {
         test.runtime[0].phase_id = Some("test:call".into());
         test.runtime[0].decisions = vec![
             DecisionSnapshot {
-                meta: decision_meta("ready", "src/app.js"),
+                id: "ready".into(),
                 vectors: Vec::new(),
             },
             DecisionSnapshot {
-                meta: decision_meta("vendored", "vendor/lib.js"),
+                id: "vendored".into(),
                 vectors: vec![McdcVector {
                     values: vec![Some(true)],
                     outcome: true,
@@ -5720,7 +5603,6 @@ mod tests {
         let mut test = raw("test", 0, "passed", &[]);
         test.server = vec![ServerRecord {
             record_type: "trace".into(),
-            meta: None,
             vector: None,
             id: Some("work".into()),
             timestamp_ms: None,

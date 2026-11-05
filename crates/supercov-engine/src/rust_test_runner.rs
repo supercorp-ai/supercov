@@ -34,8 +34,8 @@ use crate::{
     coverage_analysis::McdcVector,
     coverage_report::{
         CoverageManifest, CoverageModelDeclaration, CoveragePhase, CoverageReportRequest,
-        DecisionMeta, DecisionSnapshot, ExecutionScope, ExitCodeInput, PersistedCoverageModel,
-        RawTestResult, RuntimeEvent, RuntimeSnapshot, TestProvenance,
+        DecisionSnapshot, ExecutionScope, ExitCodeInput, PersistedCoverageModel, RawTestResult,
+        RuntimeEvent, RuntimeSnapshot, TestProvenance,
     },
     evidence_archive::EvidenceArchiveEntry,
     rust_project::PreparedRustProject,
@@ -1464,9 +1464,8 @@ pub(crate) fn snapshot_regions(
     }
     let mut decision_snapshots = Vec::new();
     for (id, observed) in vectors {
-        let meta: DecisionMeta = (*decisions[id.as_str()]).clone();
         decision_snapshots.push(DecisionSnapshot {
-            meta,
+            id,
             vectors: observed
                 .into_iter()
                 .map(|(values, outcome)| McdcVector { values, outcome })
@@ -5017,6 +5016,14 @@ mod tests {
 
         // The let chain's condition vectors, with the pattern's outcome
         // derived: [let Some(inner) = value, inner > 0, flag].
+        let chain = &run
+            .request
+            .manifest
+            .decisions
+            .iter()
+            .find(|decision| decision.source.starts_with("let Some(inner) = value"))
+            .expect("the let chain is a decision")
+            .id;
         let chain_vectors = |test: &str| {
             let result = run
                 .request
@@ -5028,7 +5035,7 @@ mod tests {
                 .runtime
                 .iter()
                 .flat_map(|snapshot| &snapshot.decisions)
-                .find(|decision| decision.meta.source.starts_with("let Some(inner) = value"))
+                .find(|decision| decision.id == *chain)
                 .unwrap_or_else(|| panic!("{test} recorded no chain decision"));
             snapshot
                 .vectors

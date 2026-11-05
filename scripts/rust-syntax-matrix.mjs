@@ -52,8 +52,8 @@ function installRuntime(target) {
   };
   target.__supercovRuntime = {
     coverageHit() {},
-    mcdcBegin(_id, meta) {
-      return { meta, values: Array.from({ length: meta.conditions.length }, () => null) };
+    mcdcBegin(id, width) {
+      return { id, values: Array.from({ length: width }, () => null) };
     },
     mcdcCondition(frame, index, value) {
       frame.values[index] = Boolean(value);
@@ -67,9 +67,9 @@ function installRuntime(target) {
         ...definition,
         clock: { epoch: 1, fast: true },
         hitEpochs: new Uint32Array(definition.pointIds.length),
-        decisionEpochs: definition.decisions.map((meta) =>
-          meta.conditions.length <= 6
-            ? new Uint32Array(2 * 3 ** meta.conditions.length)
+        decisionEpochs: definition.decisionWidths.map((width) =>
+          width <= 6
+            ? new Uint32Array(2 * 3 ** width)
             : new Map(),
         ),
         decisionVectorCounts: definition.decisions.map(
@@ -346,10 +346,10 @@ async function runBrowser(name) {
             const emptySpread = { [Symbol.iterator]: () => ({ next: () => ({ done: true }) }) };
             globalThis.__supercovRuntime = {
               coverageHit() {},
-              mcdcBegin(_id, meta) { return { meta, values: Array(meta.conditions.length).fill(null) }; },
+              mcdcBegin(id, width) { return { id, values: Array(width).fill(null) }; },
               mcdcCondition(frame, conditionIndex, value) { frame.values[conditionIndex] = Boolean(value); return value; },
               mcdcEnd(_frame, value) { return value; },
-              registerProbeV2(definition) { return { ...definition, clock: { epoch: 1, fast: true }, hitEpochs: new Uint32Array(definition.pointIds.length), decisionEpochs: definition.decisions.map((meta) => meta.conditions.length <= 6 ? new Uint32Array(2 * 3 ** meta.conditions.length) : new Map()), decisionVectorCounts: definition.decisions.map((_meta, definitionIndex) => definition.decisionVectorCounts?.[definitionIndex] ?? 0), decisionObservationEpochs: new Uint32Array(definition.decisions.length), decisionObservationCounts: new Uint16Array(definition.decisions.length), decisionCompleteEpochs: new Uint32Array(definition.decisions.length), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
+              registerProbeV2(definition) { return { ...definition, clock: { epoch: 1, fast: true }, hitEpochs: new Uint32Array(definition.pointIds.length), decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : new Map()), decisionVectorCounts: definition.decisions.map((_meta, definitionIndex) => definition.decisionVectorCounts?.[definitionIndex] ?? 0), decisionObservationEpochs: new Uint32Array(definition.decisions.length), decisionObservationCounts: new Uint16Array(definition.decisions.length), decisionCompleteEpochs: new Uint32Array(definition.decisions.length), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
               coverageHitV2() {},
               renderedValueV2(_file, _index, value) { return value; },
               mcdcEndV2(_file, _decisionIndex, _encoded, value) { return value; },

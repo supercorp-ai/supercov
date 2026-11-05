@@ -185,8 +185,8 @@ function createState() {
   try {
     const stored = JSON.parse((_a8 = localStorage.getItem(storageKey)) != null ? _a8 : "{}");
     for (const snapshot of (_b = stored.decisions) != null ? _b : []) {
-      state2.decisions.set(snapshot.meta.id, {
-        meta: snapshot.meta,
+      state2.decisions.set(snapshot.id, {
+        id: snapshot.id,
         vectors: new Map(snapshot.vectors.map((vector) => [vectorKey(vector), vector]))
       });
     }
@@ -304,7 +304,7 @@ runtimeGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__ = (browserTestId, browserPhase
 };
 function decisionSnapshot() {
   return [...state.decisions.values()].map((decision) => ({
-    meta: decision.meta,
+    id: decision.id,
     vectors: [...decision.vectors.values()]
   }));
 }
@@ -470,7 +470,7 @@ function attemptKey(scope) {
 }
 function serverRecordKey(record) {
   var _a8;
-  const suffix = record.type === "decision" ? `${record.meta.id}:${vectorKey(record.vector)}` : record.id;
+  const suffix = record.type === "decision" ? `${record.id}:${vectorKey(record.vector)}` : record.id;
   // Each request that names no test keeps its own first hits: the report
   // credits them to the test running when it came, and a later request's
   // work belongs to whichever test was running then.
@@ -982,7 +982,7 @@ function appendServer(record) {
     if (record.type === "decision") {
       recordBrowserEvent(__spreadProps(__spreadValues({
         type: "decision",
-        id: record.meta.id,
+        id: record.id,
         vector: record.vector,
         timestampMs
       }, record.phaseId ? { phaseId: record.phaseId } : {}), {
@@ -1801,11 +1801,14 @@ function recordCoverageHit(id) {
 function registerProbeV2(definition) {
   var _a8, _b;
   const file = {
+    // Each decision's id and its number of conditions: the module carries
+    // no source text, which the manifest holds.
     decisions: definition.decisions,
+    decisionWidths: definition.decisionWidths,
     pointIds: definition.pointIds,
     clock: state.probeV2Clock,
     hitEpochs: new Uint32Array(definition.pointIds.length),
-    decisionEpochs: definition.decisions.map((meta) => meta.conditions.length <= 6 ? new Uint32Array(2 * 3 ** meta.conditions.length) : /* @__PURE__ */ new Map()),
+    decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : /* @__PURE__ */ new Map()),
     decisionVectorCounts: definition.decisions.map((_, index) => {
       var _a9, _b2;
       return (_b2 = (_a9 = definition.decisionVectorCounts) == null ? void 0 : _a9[index]) != null ? _b2 : 0;
@@ -1898,8 +1901,8 @@ function mcdcEndV2(file, decisionIndex, encoded, value) {
 }
 function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   var _a8, _b;
-  const meta = file.decisions[decisionIndex];
-  if (!meta || !Number.isSafeInteger(encoded) || encoded < 0)
+  const id = file.decisions[decisionIndex];
+  if (!id || !Number.isSafeInteger(encoded) || encoded < 0)
     return value;
   const outcome = Boolean(value);
   const vectorIndex = encoded * 2 + (outcome ? 1 : 0);
@@ -1934,10 +1937,10 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
       if (observedCount >= expectedCount)
         file.decisionCompleteEpochs[decisionIndex] = epoch;
     }
-    if (!state.decisions.has(meta.id))
-      state.decisions.set(meta.id, { meta, vectors: /* @__PURE__ */ new Map() });
-    const vector = decodeProbeV2Vector(meta.conditions.length, encoded, outcome);
-    return vector ? mcdcEnd({ meta, values: vector.values }, value) : value;
+    if (!state.decisions.has(id))
+      state.decisions.set(id, { id, vectors: /* @__PURE__ */ new Map() });
+    const vector = decodeProbeV2Vector(file.decisionWidths[decisionIndex], encoded, outcome);
+    return vector ? mcdcEnd({ id, values: vector.values }, value) : value;
   } finally {
     if (fallbackEpoch)
       file.clock.epoch = previousEpoch;
@@ -2224,13 +2227,13 @@ function loopEntered(frame) {
 function loopEnd(frame) {
   if (!frame.entered) coverageHit(frame.zeroId);
 }
-function mcdcBegin(id, meta) {
+function mcdcBegin(id, width) {
   if (!state.decisions.has(id)) {
-    state.decisions.set(id, { meta, vectors: /* @__PURE__ */ new Map() });
+    state.decisions.set(id, { id, vectors: /* @__PURE__ */ new Map() });
   }
   return {
-    meta,
-    values: Array.from({ length: meta.conditions.length }, () => null)
+    id,
+    values: Array.from({ length: width }, () => null)
   };
 }
 function mcdcCondition(frame, index, value) {
@@ -2238,7 +2241,7 @@ function mcdcCondition(frame, index, value) {
   return value;
 }
 function mcdcEnd(frame, value) {
-  const decision = state.decisions.get(frame.meta.id);
+  const decision = state.decisions.get(frame.id);
   if (!decision)
     return value;
   const vector = { values: frame.values, outcome: Boolean(value) };
@@ -2249,7 +2252,7 @@ function mcdcEnd(frame, value) {
   if (isBrowser) {
     if (recordBrowserEvent(__spreadProps(__spreadValues({
       type: "decision",
-      id: decision.meta.id,
+      id: decision.id,
       vector,
       timestampMs
     }, phaseId ? { phaseId } : {}), {
@@ -2259,7 +2262,7 @@ function mcdcEnd(frame, value) {
   } else {
     appendServer(__spreadValues({
       type: "decision",
-      meta: decision.meta,
+      id: decision.id,
       vector,
       timestampMs
     }, phaseId ? { phaseId } : {}));

@@ -4918,7 +4918,7 @@ mod tests {
             phases: Vec::new(),
             runtime: vec![RuntimeSnapshot {
                 decisions: vec![crate::coverage_report::DecisionSnapshot {
-                    meta: decision(),
+                    id: decision().id,
                     vectors: vec![vector],
                 }],
                 hits: Vec::new(),
@@ -5394,7 +5394,6 @@ mod tests {
                 });
                 admin.server.push(crate::coverage_report::ServerRecord {
                     record_type: "hit".into(),
-                    meta: None,
                     vector: None,
                     id: Some("handler".into()),
                     timestamp_ms: Some(5),

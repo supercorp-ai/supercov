@@ -1565,7 +1565,7 @@ fn snapshot(
             })
             .collect::<Result<Vec<_>, _>>()?;
         decisions.push(DecisionSnapshot {
-            meta: (*meta).clone(),
+            id: meta.id.clone(),
             vectors: observed,
         });
     }
@@ -3459,7 +3459,7 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>();
             for decision in &snapshot.decisions {
                 for vector in &decision.vectors {
-                    written.push(event("decision", &decision.meta.id, Some(vector.clone())));
+                    written.push(event("decision", &decision.id, Some(vector.clone())));
                 }
             }
             snapshot.events = written;

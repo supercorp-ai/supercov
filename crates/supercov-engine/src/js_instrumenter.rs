@@ -23,11 +23,10 @@ use oxc_ast::{
         Expression, ExpressionStatement, ForInStatement, ForOfStatement, ForStatement,
         ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters, Function,
         FunctionBody, IfStatement, ImportDeclarationSpecifier, ImportOrExportKind, JSXExpression,
-        JSXExpressionContainer, LogicalExpression, NewExpression, ObjectPropertyKind,
-        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
-        StaticMemberExpression, SwitchStatement, TSGlobalDeclaration, TSModuleDeclaration,
-        TryStatement, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
-        WhileStatement, WithStatement,
+        JSXExpressionContainer, LogicalExpression, NewExpression, PrivateFieldExpression, Program,
+        PropertyKey, PropertyKind, Statement, StaticMemberExpression, SwitchStatement,
+        TSGlobalDeclaration, TSModuleDeclaration, TryStatement, VariableDeclaration,
+        VariableDeclarationKind, VariableDeclarator, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -4432,8 +4431,14 @@ fn instrument_candidate_with_binding(
     request_transformer.visit_program(&mut parsed.program);
     let uses_request_phase = request_transformer.used;
 
+    // Ids and widths only: the text of each decision is in the manifest, and
+    // this literal sits at the top of the module, where a bundler that drops
+    // a route's server-only `loader` and `action` keeps it. With the text it
+    // carried their conditions (`process.env.QSTASH_RETRIES`) into browser
+    // chunks.
     let registration = serde_json::json!({
-        "decisions": &collector.decisions,
+        "decisions": collector.decisions.iter().map(|decision| &decision.id).collect::<Vec<_>>(),
+        "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
         "pointIds": point_analysis.points.iter().map(|point| &point.id).chain(&default_point_ids).chain(&extra.ids).collect::<Vec<_>>(),
         "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
@@ -7555,44 +7560,6 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             .expression_string_literal(Span::default(), self.ast.str(value), None)
     }
 
-    fn object_property(&self, name: &str, value: Expression<'a>) -> ObjectPropertyKind<'a> {
-        self.ast.object_property_kind_object_property(
-            Span::default(),
-            PropertyKind::Init,
-            self.ast
-                .property_key_static_identifier(Span::default(), self.ast.ident(name)),
-            value,
-            false,
-            false,
-            false,
-        )
-    }
-
-    fn decision_meta(&self, decision: &CandidateDecision) -> Expression<'a> {
-        let conditions = self.ast.expression_array(
-            Span::default(),
-            self.ast.vec_from_iter(
-                decision
-                    .conditions
-                    .iter()
-                    .map(|condition| ArrayExpressionElement::from(self.string(condition))),
-            ),
-        );
-        let properties = self.ast.vec_from_array([
-            self.object_property("id", self.string(&decision.id)),
-            self.object_property("file", self.string(&decision.file)),
-            self.object_property("line", self.number(decision.line as u64)),
-            self.object_property("column", self.number(decision.column as u64)),
-            self.object_property("source", self.string(&decision.source)),
-            self.object_property("conditions", conditions),
-            self.object_property("kind", self.string(&decision.kind)),
-        ]);
-        Expression::ObjectExpression(
-            self.ast
-                .alloc_object_expression(Span::default(), properties),
-        )
-    }
-
     fn assign(&self, name: &str, value: Expression<'a>) -> Expression<'a> {
         self.ast.expression_assignment(
             Span::default(),
@@ -8000,7 +7967,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
                 NONE,
                 self.ast.vec_from_array([
                     Argument::from(self.string(&decision.id)),
-                    Argument::from(self.decision_meta(decision)),
+                    Argument::from(self.number(decision.conditions.len() as u64)),
                 ]),
                 false,
             );
@@ -10653,6 +10620,27 @@ export const r = v && w && q;
         // Nothing to instrument is nothing changed.
         let empty = instrument_candidate("", "src/empty.ts").unwrap();
         assert!(empty.points.is_empty());
+    }
+
+    /// A route module's `loader` runs on the server only, and a bundler
+    /// drops it from the browser's chunk. What it decides must go with it:
+    /// the module names its decisions by id and width, never by their text,
+    /// so the text is in the code only where the code is. A decision too
+    /// wide for the encoding is begun with its width, too.
+    #[test]
+    fn a_module_carries_no_decision_text_beyond_its_own_code() {
+        let wide = (0..33)
+            .map(|index| format!("process.env.WIDE_{index}"))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        let source = format!(
+            "export async function loader() {{\n  if (process.env.QSTASH_RETRIES && process.env.QSTASH_TOKEN) return 1;\n  if ({wide}) return 2;\n  return 0;\n}}\nexport default function Page({{ ready }}) {{\n  return ready ? 'ready' : 'waiting';\n}}\n"
+        );
+        let output = instrument_candidate(&source, "app/routes/jobs.tsx").unwrap();
+        for text in ["process.env.QSTASH_RETRIES", "process.env.WIDE_32"] {
+            assert_eq!(output.code.matches(text).count(), 1, "{text}\n{}", output.code);
+        }
+        assert!(output.code.contains("decisionWidths"), "{}", output.code);
     }
 
     #[test]
