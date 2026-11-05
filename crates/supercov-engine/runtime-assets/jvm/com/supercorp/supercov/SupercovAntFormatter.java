@@ -34,6 +34,8 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
 
   /** How the open test is ending, once something says it is not passing. */
   private String status;
+  /** The class the task ran, which a suite runs other classes' tests from. */
+  private String suite;
   private boolean open;
 
   /**
@@ -78,6 +80,7 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
 
   @Override
   public void startTestSuite(JUnitTest suite) {
+    this.suite = suite.getName();
     armOnce();
   }
 
@@ -98,11 +101,18 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
   /**
    * The name the XML report gives the test, {@code Class#method}: a reader
    * matching coverage against Ant's own report should not have to translate.
+   *
+   * <p>A suite runs tests of other classes, which the task may also run on
+   * their own: Ametys's {@code AllTrashTestCase} runs both trash classes, and
+   * matches the pattern that runs each of them too. The same test ran twice,
+   * once in each JVM, and two runs cannot share a name. One from a suite is
+   * named within it, as the JUnit Platform names it, {@code Suite#Class#method}.
    */
-  private static String name(Test test) {
+  private String name(Test test) {
     String method = JUnitVersionHelper.getTestCaseName(test);
     String type = JUnitVersionHelper.getTestCaseClassName(test);
-    return Supercov.printable(type + "#" + method);
+    String qualified = suite == null || suite.equals(type) ? type : suite + "#" + type;
+    return Supercov.printable(qualified + "#" + method);
   }
 
   @Override

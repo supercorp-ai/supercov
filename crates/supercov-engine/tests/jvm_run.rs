@@ -1845,6 +1845,11 @@ fn ant_fixture(top: &Path) -> PathBuf {
     );
     write(
         &project,
+        "test/src/app/AllCalcTest.java",
+        "package app;\n\nimport org.junit.runner.RunWith;\nimport org.junit.runners.Suite;\n\n@RunWith(Suite.class)\n@Suite.SuiteClasses(CalcTest.class)\npublic class AllCalcTest {}\n",
+    );
+    write(
+        &project,
         "test/src/app/CalcTest.java",
         "package app;\n\nimport static org.junit.Assert.assertEquals;\n\nimport org.junit.Ignore;\nimport org.junit.Test;\n\npublic class CalcTest {\n  @Test\n  public void clampsHighValues() {\n    assertEquals(3, Calc.clamp(5, 3));\n  }\n\n  @Test\n  public void namesASign() {\n    assertEquals(\"negative\", Calc.sign(-1));\n  }\n\n  @Ignore\n  @Test\n  public void notYet() {}\n}\n",
     );
@@ -1889,7 +1894,9 @@ fn an_ant_build_with_its_harness_beside_the_project_is_measured_per_test() {
     let diagnostics = String::from_utf8_lossy(&diagnostics);
     assert_eq!(result.exit_code, 0, "{diagnostics}");
     assert_eq!(result.build, JvmBuild::Ant, "{diagnostics}");
-    assert_eq!(result.tests, 3, "two run and one ignored: {diagnostics}");
+    // Two run and one ignored, each again from a suite that the batch runs
+    // too (as Ametys's AllTrashTestCase does), under a name within the suite.
+    assert_eq!(result.tests, 6, "{diagnostics}");
     assert_eq!(
         std::fs::read_to_string(top.join("tools/common.xml")).unwrap(),
         harness,
@@ -1904,15 +1911,18 @@ fn an_ant_build_with_its_harness_beside_the_project_is_measured_per_test() {
     let named = |name: &str| {
         tests
             .iter()
-            .find(|test| test["test"]["name"].as_str().is_some_and(|test| test.ends_with(name)))
+            .find(|test| test["test"]["name"] == name)
             .unwrap_or_else(|| panic!("{name}: {executions}"))
     };
-    assert_eq!(named("CalcTest#clampsHighValues")["test"]["file"], "test/src/app/CalcTest.java", "{executions}");
+    assert_eq!(named("app.CalcTest#clampsHighValues")["test"]["file"], "test/src/app/CalcTest.java", "{executions}");
     // Each test has its own lines, and the ignored one none.
-    assert_eq!(named("CalcTest#clampsHighValues")["files"]["main/app/src/app/Calc.java"], serde_json::json!([2]), "{executions}");
-    assert_eq!(named("CalcTest#namesASign")["files"]["main/app/src/app/Calc.java"], serde_json::json!([3]), "{executions}");
-    assert_eq!(named("CalcTest#notYet")["passed"], false, "{executions}");
-    assert_eq!(named("CalcTest#notYet")["files"], serde_json::json!({}), "{executions}");
+    assert_eq!(named("app.CalcTest#clampsHighValues")["files"]["main/app/src/app/Calc.java"], serde_json::json!([2]), "{executions}");
+    assert_eq!(named("app.CalcTest#namesASign")["files"]["main/app/src/app/Calc.java"], serde_json::json!([3]), "{executions}");
+    assert_eq!(named("app.CalcTest#notYet")["passed"], false, "{executions}");
+    assert_eq!(named("app.CalcTest#notYet")["files"], serde_json::json!({}), "{executions}");
+    let from_suite = named("app.AllCalcTest#app.CalcTest#clampsHighValues");
+    assert_eq!(from_suite["test"]["file"], "test/src/app/AllCalcTest.java", "{executions}");
+    assert_eq!(from_suite["files"]["main/app/src/app/Calc.java"], serde_json::json!([2]), "{executions}");
     std::fs::remove_dir_all(top).ok();
 }
 

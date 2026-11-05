@@ -736,6 +736,8 @@ npx supercov -- npx playwright test
 | Spock | Exact per feature, under the names Spock itself reports | — |
 | TestNG | Exact per test, each data-provider invocation its own | — |
 | JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle |
+| JUnit 4 under Ant's `<junit>` | Exact per test, under the names Ant's XML report uses | Ant 1.10 — see below |
+| Any platform engine under Ant's `<junitlauncher>` | Exact per test, through the platform listener | Ant 1.10 — see below |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
@@ -796,6 +798,61 @@ the denominator stays visible after the build log is gone.
 npx supercov -- mvn test
 npx supercov -- ./gradlew test
 npx supercov -- ./mvnw verify
+```
+
+### Ant and Ivy
+
+A project with a `build.xml` (and no Maven or Gradle build) is an Ant build.
+Ant has no layout convention, so Supercov reads the build: it follows the
+`<import>` chain with the properties it defines, takes the directories each
+`<batchtest>` or `<testclasses>` scans as the tests — or, where it scans
+compiled classes, the sources the `<javac>` writing them compiles — and every
+other `src` directory holding Java as the code they test, leaving out the
+directories the build writes into.
+When the build names its tests where that cannot be read — a path a custom
+task builds at run time — say where they are:
+
+```sh
+SUPERCOV_TEST_ROOTS=test/src npx supercov -- ant test
+```
+
+`SUPERCOV_SOURCE_ROOTS` narrows the product code the same way as for any
+project.
+
+Ant's `<junit>` task runs JUnit 4 itself, not on the JUnit Platform, so in the
+copy each `<junit>` task gets a result formatter of Supercov's next to its own
+formatters. The task loads it in every JVM it forks — one per test class by
+default — and it tells the runtime when each test starts and ends. Each JVM
+writes its evidence at the end of its suite and on shutdown, so a JVM the
+task stops for running past its timeout still leaves what it recorded, and
+the run merges every one. The formatter is compiled by the copy's build just
+before the task, against the task's own classpath and Ant's runtime. Tests
+keep the names Ant's XML reports give them, `Class#method`. A `<junit>` that
+runs classes in threads (`threads` above 1) is reported as concurrent, as a
+parallel JUnit Platform suite is.
+
+Ant's `<junitlauncher>` runs tests on the JUnit Platform, so it gets the same
+platform listener Maven and Gradle builds get, as a `<listener>` of the task,
+compiled the same way against the task's classpath.
+
+Many Ant builds import a shared harness from beside the project —
+`<import file="../../../tools/master/build/common/common-build.xml"/>` — and
+the `<junit>` task lives there. The copy is laid out at the project's place
+within the closest directory holding it and everything its build imports,
+with links standing for the rest, so `../` reaches what it reaches in the
+checkout. A file outside the project that holds a `<junit>` task — the
+harness, or a wrapper script's own build file beside it — is changed in the
+copy's own version of that file; the original and the rest of the harness
+are only read. A script outside the project that writes beside itself still
+writes into the checkout, as it does without Supercov.
+
+Only the project's own sources are measured: modules resolved as jars, Ivy's
+included, are not instrumented. Code that is not Java or Kotlin — XSLT,
+sitemaps, scripts run by the JVM — is outside what the figure covers.
+
+```sh
+npx supercov -- ant test
+npx supercov -- ../../../run-single-test.sh . ALL
 ```
 
 ## Containers, VMs, and remote execution
