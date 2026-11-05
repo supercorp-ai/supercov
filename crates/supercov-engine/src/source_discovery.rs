@@ -643,7 +643,7 @@ fn test_or_fixture(file: &str) -> bool {
         .any(|part| matches!(part, "test" | "spec"))
 }
 
-fn depends_on_next(manifest: &Value) -> bool {
+pub(crate) fn depends_on_next(manifest: &Value) -> bool {
     ["dependencies", "devDependencies", "peerDependencies"]
         .iter()
         .any(|field| {

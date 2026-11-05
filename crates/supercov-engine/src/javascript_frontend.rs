@@ -1194,6 +1194,43 @@ fn shared_browser_runtime_source(runtime_source: &str) -> String {
     )
 }
 
+/// The sources Next.js bundles: those whose nearest `package.json` depends
+/// on `next`, outside the `public/` it serves as they are. Only a bundled
+/// module may import the shared browser runtime: a server that sends files
+/// as they are cannot reach `.supercov/node_modules`, and a page whose
+/// module failed to import ran none of its code.
+fn next_bundled_sources(workspace: &Path, files: &[String]) -> BTreeSet<String> {
+    let mut manifests: BTreeMap<PathBuf, Option<bool>> = BTreeMap::new();
+    let mut bundled = BTreeSet::new();
+    for file in files {
+        let path = Path::new(file);
+        let mut directory = path.parent();
+        while let Some(current) = directory {
+            let next = *manifests.entry(current.to_path_buf()).or_insert_with(|| {
+                std::fs::read_to_string(workspace.join(current).join("package.json"))
+                    .ok()
+                    .map(|text| {
+                        serde_json::from_str(&text).is_ok_and(|manifest| {
+                            crate::source_discovery::depends_on_next(&manifest)
+                        })
+                    })
+            });
+            if let Some(next) = next {
+                if next
+                    && !path
+                        .strip_prefix(current)
+                        .is_ok_and(|below| below.starts_with("public"))
+                {
+                    bundled.insert(file.clone());
+                }
+                break;
+            }
+            directory = current.parent();
+        }
+    }
+    bundled
+}
+
 /// Whether a source is an ES module, which can import the shared runtime.
 fn is_es_module(path: &Path, code: &str) -> bool {
     match path.extension().and_then(|value| value.to_str()) {
@@ -1731,6 +1768,7 @@ struct SourceInstrumentation<'a> {
     standalone_runtime: &'a str,
     browser_suite: bool,
     images: bool,
+    next_bundled: &'a BTreeSet<String>,
 }
 
 /// Instruments `file` in the workspace and keeps its authored copy. Each
@@ -1746,6 +1784,7 @@ fn instrument_source(
         standalone_runtime,
         browser_suite,
         images,
+        next_bundled,
     } = *options;
     let relative = project_relative(file)?;
     let path = workspace.join(relative);
@@ -1815,7 +1854,7 @@ fn instrument_source(
     // Host processes need the settings-aware loader first; browser pages
     // and workers fall back to the embedded runtime when no preload exists.
     bootstrap_loader(&mut output, relative, browser_suite);
-    let shared = (browser_suite && is_es_module(&path, &output.code))
+    let shared = (next_bundled.contains(file) && is_es_module(&path, &output.code))
         .then(|| runtime_specifier(relative, SHARED_BROWSER_RUNTIME));
     bootstrap_runtime(
         &mut output,
@@ -1898,10 +1937,15 @@ pub fn prepare_javascript_frontend(
     // browser even when the measured command is a unit-test runner.
     let browser_suite = project.playwright_config.is_some() || project.browser_runner;
     let images = builds_images(workspace);
-    // One copy of the browser fallback runtime that ES modules import: a
-    // copy inlined in every source made a large app's client JavaScript
-    // 12.8 MB instead of 4.8 MB.
-    if browser_suite {
+    // One copy of the browser fallback runtime that the ES modules Next.js
+    // bundles import: a copy inlined in every source made a large app's
+    // client JavaScript 12.8 MB instead of 4.8 MB.
+    let next_bundled = if browser_suite {
+        next_bundled_sources(workspace, &project.source_files)
+    } else {
+        BTreeSet::new()
+    };
+    if !next_bundled.is_empty() {
         let path = runtime_directory.join(SHARED_BROWSER_RUNTIME);
         atomic_write(
             &path,
@@ -1920,6 +1964,7 @@ pub fn prepare_javascript_frontend(
         standalone_runtime: &standalone_runtime,
         browser_suite,
         images,
+        next_bundled: &next_bundled,
     };
     let instrumented = crate::threads::parallel_map(&project.source_files, |file| {
         instrument_source(&options, file)
@@ -2112,8 +2157,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1752",
-            "javascript-source-path#javascript_frontend.rs:1680",
+            "javascript-source-path#javascript_frontend.rs:1789",
+            "javascript-source-path#javascript_frontend.rs:1717",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));

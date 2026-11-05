@@ -5063,23 +5063,13 @@ fn bun_source_imports_bootstrap_before_probes_even_with_shadowed_host_names() {
         let loader = source
             .find("new Function(\"stack\", \"specifier\"")
             .unwrap();
-        // An ES module imports the one shared browser fallback, which does
-        // nothing where the host is Node-like (Bun is), so the loader still
-        // gives the runtime its settings. Other sources inline the fallback.
-        if file.ends_with(".cjs") {
-            let fallback = source
-                .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
-                .unwrap();
-            assert!(
-                loader < fallback,
-                "{file}: the host must load run settings before the browser fallback initializes"
-            );
-        } else {
-            assert!(
-                source.contains("browser-runtime.mjs\";"),
-                "{file}: an ES module imports the shared browser fallback"
-            );
-        }
+        let fallback = source
+            .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
+            .unwrap();
+        assert!(
+            loader < fallback,
+            "{file}: the host must load run settings before the browser fallback initializes"
+        );
         let line = project
             .supercov(&[
                 "runs",
@@ -15024,7 +15014,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2464 => main.rs:2464",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1895 => javascript_frontend.rs:1895",
+            "fs.read_to_string#javascript_frontend.rs:1932 => javascript_frontend.rs:1932",
         ],
     );
 }
@@ -17131,12 +17121,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1682@2",
+            "fs.read_to_string#javascript_frontend.rs:1719@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1682"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1719"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
