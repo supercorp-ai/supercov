@@ -233,9 +233,19 @@ fn read_file(
     };
     build.files.push(file.clone());
     let directory = file.parent().unwrap_or(root).to_path_buf();
+    // An external entity (`<!ENTITY common SYSTEM "common.xml">`, then
+    // `&common;`) puts another file's elements where it is referred to: the
+    // older way of sharing build fragments, before `<import>`.
+    for (name, system) in external_entities(&text) {
+        if text.contains(&format!("&{name};")) {
+            read_file(root, &directory.join(system), properties, build, compiled, pass);
+        }
+    }
     let all = tags(&text);
     let mut in_batchtest = 0usize;
     let mut in_target = 0usize;
+    // The `<subant>` being read: its build file name and where it runs them.
+    let mut subant: Option<String> = None;
     // The output directory of the `<javac>` being read, for its nested `<src>`.
     let mut javac: Option<PathBuf> = None;
     let known = |value: &str, properties: &BTreeMap<String, String>| {
@@ -252,6 +262,9 @@ fn read_file(
             }
             if tag.name == "target" {
                 in_target = in_target.saturating_sub(1);
+            }
+            if tag.name == "subant" {
+                subant = None;
             }
             continue;
         }
@@ -270,6 +283,43 @@ fn read_file(
                     if !imported.contains("${") {
                         read_file(root, &directory.join(imported), properties, build, compiled, pass);
                     }
+                }
+            }
+            // `<ant>` runs another build file, by default with the caller's
+            // properties, its paths against its own directory.
+            "ant" => {
+                let directory = tag
+                    .attribute("dir")
+                    .and_then(|dir| known(dir, properties))
+                    .unwrap_or_else(|| root.to_path_buf());
+                let antfile = expand(tag.attribute("antfile").unwrap_or("build.xml"), properties);
+                if !antfile.contains("${") {
+                    read_sub_build(&directory, &resolve(&directory, &antfile), properties, build, compiled);
+                }
+            }
+            "subant" if !tag.empty => {
+                subant = Some(expand(tag.attribute("antfile").unwrap_or("build.xml"), properties));
+            }
+            "fileset" | "dirset" | "filelist" if subant.is_some() => {
+                let antfile = subant.clone().unwrap_or_else(|| "build.xml".into());
+                let Some(dir) = tag.attribute("dir").and_then(|dir| known(dir, properties)) else {
+                    continue;
+                };
+                let listed = if tag.name == "filelist" {
+                    tag.attribute("files")
+                        .map(|files| files.split([',', ' ']).filter(|f| !f.is_empty()).map(|f| dir.join(expand(f, properties))).collect())
+                        .unwrap_or_default()
+                } else {
+                    matching(&dir, tag.attribute("includes").unwrap_or("**"))
+                };
+                for path in listed {
+                    // A dirset names the directories each build file is in.
+                    let (directory, file) = if tag.name == "dirset" {
+                        (path.clone(), path.join(&antfile))
+                    } else {
+                        (path.parent().unwrap_or(&dir).to_path_buf(), path)
+                    };
+                    read_sub_build(&directory, &file, properties, build, compiled);
                 }
             }
             "batchtest" | "testclasses" if !tag.empty => in_batchtest += 1,
@@ -316,6 +366,114 @@ fn read_file(
             _ => {}
         }
     }
+}
+
+/// A build `<ant>` or `<subant>` runs: read as its own project, with the
+/// caller's properties and its directory as the base for its paths.
+fn read_sub_build(
+    directory: &Path,
+    file: &Path,
+    properties: &BTreeMap<String, String>,
+    build: &mut AntBuild,
+    compiled: &mut BTreeMap<PathBuf, Vec<PathBuf>>,
+) {
+    let mut inherited = properties.clone();
+    inherited.insert("basedir".into(), directory.to_string_lossy().into_owned());
+    let mut ignored = AntBuild::default();
+    read_file(directory, file, &mut inherited, &mut ignored, &mut BTreeMap::new(), Pass::TopLevel);
+    read_file(directory, file, &mut inherited, build, compiled, Pass::All);
+}
+
+/// The `<!ENTITY name SYSTEM "file">` declarations of a build file's DOCTYPE.
+fn external_entities(text: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("<!ENTITY") {
+        rest = &rest[at + "<!ENTITY".len()..];
+        let declaration = &rest[..rest.find('>').unwrap_or(rest.len())];
+        let mut words = declaration.split_whitespace();
+        let (Some(name), Some(kind)) = (words.next(), words.next()) else {
+            continue;
+        };
+        if name == "%" || kind != "SYSTEM" {
+            continue;
+        }
+        let quoted = declaration[declaration.find("SYSTEM").unwrap_or(0) + 6..].trim();
+        let Some(quote) = quoted.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        if let Some(close) = quoted[1..].find(quote) {
+            found.push((name.to_owned(), quoted[1..1 + close].to_owned()));
+        }
+    }
+    found
+}
+
+/// The files under `directory` an Ant pattern list names (`*/build.xml`,
+/// `modules/**/build.xml`), comma- or space-separated, in sorted order.
+fn matching(directory: &Path, patterns: &str) -> Vec<PathBuf> {
+    let patterns = patterns
+        .split([',', ' '])
+        .filter(|pattern| !pattern.is_empty())
+        .collect::<Vec<_>>();
+    let mut found = Vec::new();
+    let mut pending = vec![(directory.to_path_buf(), 0usize)];
+    while let Some((next, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(directory) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if path.is_dir() {
+                if depth < 8 {
+                    pending.push((path.clone(), depth + 1));
+                }
+                if patterns.iter().any(|pattern| ant_pattern(pattern, &relative)) {
+                    found.push(path);
+                }
+                continue;
+            }
+            if patterns.iter().any(|pattern| ant_pattern(pattern, &relative)) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Whether a `/`-separated path matches an Ant pattern: `**` any number of
+/// directories, `*` any run within one name, `?` one character.
+fn ant_pattern(pattern: &str, path: &str) -> bool {
+    fn names(pattern: &[&str], path: &[&str]) -> bool {
+        match (pattern.first(), path.first()) {
+            (None, None) => true,
+            (Some(&"**"), _) => {
+                names(&pattern[1..], path) || (!path.is_empty() && names(pattern, &path[1..]))
+            }
+            (Some(part), Some(name)) => one(part.as_bytes(), name.as_bytes()) && names(&pattern[1..], &path[1..]),
+            _ => false,
+        }
+    }
+    fn one(pattern: &[u8], name: &[u8]) -> bool {
+        match (pattern.first(), name.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => one(&pattern[1..], name) || (!name.is_empty() && one(pattern, &name[1..])),
+            (Some(b'?'), Some(_)) => one(&pattern[1..], &name[1..]),
+            (Some(expected), Some(actual)) => expected == actual && one(&pattern[1..], &name[1..]),
+            _ => false,
+        }
+    }
+    let pattern = pattern.trim_matches('/');
+    let pattern = if pattern.ends_with('/') || pattern.is_empty() { "**" } else { pattern };
+    names(
+        &pattern.split('/').collect::<Vec<_>>(),
+        &path.split('/').collect::<Vec<_>>(),
+    )
 }
 
 /// `<property>` sets a property once: a later definition, in this file or
@@ -571,6 +729,49 @@ mod tests {
         assert!(!build.outputs.contains(&top.join("src")), "an in-place compile is not output: {:?}", build.outputs);
         assert_eq!(path_list("src:lib;C:\\other"), ["src", "lib", "C:\\other"]);
         fs::remove_dir_all(top).unwrap();
+    }
+
+    /// Fragments shared through an entity, a module run by `<ant>`, and
+    /// modules a `<subant>` finds by pattern: each one's tests are read, each
+    /// against its own directory.
+    #[test]
+    fn entities_ant_and_subant_builds_are_followed() {
+        let project = temporary("sub-builds");
+        let write = |relative: &str, text: &str| {
+            let path = project.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "build.xml",
+            r#"<?xml version="1.0"?>
+<!DOCTYPE project [ <!ENTITY shared SYSTEM "shared.xml"> ]>
+<project name="top">
+    &shared;
+    <target name="all">
+        <ant dir="core" antfile="core.xml"/>
+        <subant><fileset dir="modules" includes="*/build.xml"/></subant>
+    </target>
+</project>"#,
+        );
+        write("shared.xml", r#"<target name="shared"><junit><batchtest><fileset dir="shared-tests"/></batchtest></junit></target>"#);
+        write("core/core.xml", r#"<project><target name="t"><junit><batchtest><fileset dir="test"/></batchtest></junit></target></project>"#);
+        write("modules/a/build.xml", r#"<project><target name="t"><junit><batchtest><fileset dir="tests"/></batchtest></junit></target></project>"#);
+        write("modules/b/notes.xml", "<project/>");
+        let build = read_ant_build(&project, &BTreeMap::new());
+        assert_eq!(
+            build.test_roots,
+            [project.join("shared-tests"), project.join("core/test"), project.join("modules/a/tests")],
+            "{build:?}"
+        );
+        assert_eq!(
+            build.junit_files,
+            [project.join("shared.xml"), project.join("core/core.xml"), project.join("modules/a/build.xml")]
+        );
+        assert!(ant_pattern("**/build.xml", "a/b/build.xml"));
+        assert!(ant_pattern("mod?/*.xml", "mod1/x.xml"));
+        assert!(!ant_pattern("*/build.xml", "a/b/build.xml"));
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
