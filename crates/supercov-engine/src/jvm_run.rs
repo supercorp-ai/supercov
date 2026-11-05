@@ -2110,8 +2110,15 @@ pub fn run_direct_jvm(
             );
         }
         if outcomes.is_empty() {
+            // An Ant build reports through its own tasks, and one that exits
+            // before them has usually failed to build: say which.
+            let lifecycle = if instrumented.build == JvmBuild::Ant {
+                "an Ant build reports through its <junit> and <junitlauncher> tasks, so the build has to reach one: a build that fails before them (a dependency it cannot resolve, a compile error) records nothing"
+            } else {
+                "Supercov attributes through each framework's own lifecycle, so the suite has to run on the JUnit Platform or TestNG"
+            };
             return Err(format!(
-                "the test run wrote no coverage evidence (the command exited {exit_code}). Supercov attributes through each framework's own lifecycle, so the suite has to run on the JUnit Platform or TestNG."
+                "the test run wrote no coverage evidence (the command exited {exit_code}). {lifecycle}."
             ));
         }
         let evidence = merge_evidence(parts);
