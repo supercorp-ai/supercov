@@ -461,11 +461,21 @@ function pushWorkerEvidence() {
   runtimeGlobal.__SUPERCOV_WORKER_EVIDENCE__ = () => Array.from(received, ([token, pushed]) => ({ token, url: pushed.url, current: pushed.current, snapshot: pushed.snapshot }));
 })();
 var persistBrowserListenersInstalled = false;
+// Set once this document gave the Playwright collector its evidence on the
+// way out. Its next document need not inherit it then: carried through
+// localStorage as well, every page of a test parsed all the evidence of the
+// pages before it on load and wrote it all again on leaving, a test of thirty
+// pages paying for the first one thirty times, and the collector merged the
+// same evidence once per page.
+var handedOver = false;
 function persistBrowserNow() {
   if (!isBrowser)
     return;
   try {
-    localStorage.setItem(storageKey, JSON.stringify(coverageSnapshot()));
+    if (handedOver)
+      localStorage.removeItem(storageKey);
+    else
+      localStorage.setItem(storageKey, JSON.stringify(coverageSnapshot()));
   } catch (e) {
   }
 }
@@ -477,8 +487,10 @@ function persistBrowserNow() {
 // it does.
 function handOverBrowser() {
   try {
-    if (typeof runtimeGlobal.__supercovLeaving === "function")
+    if (typeof runtimeGlobal.__supercovLeaving === "function") {
       runtimeGlobal.__supercovLeaving(JSON.stringify(coverageSnapshot()));
+      handedOver = true;
+    }
   } catch (e) {
   }
 }
