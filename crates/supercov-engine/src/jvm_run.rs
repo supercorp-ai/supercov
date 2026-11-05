@@ -1579,7 +1579,9 @@ fn with_ant_formatter(
                 let mut depth = 0usize;
                 let mut open_at: Option<usize> = None;
                 for inner in &all[index + 1..] {
-                    if inner.name == tag.name && inner.closing && depth == 0 {
+                    // A task holds no task of its own name: its end is the
+                    // first closing tag that names it.
+                    if inner.closing && inner.name == tag.name {
                         break;
                     }
                     if inner.closing {
@@ -1623,14 +1625,9 @@ fn with_ant_formatter(
             if testng {
                 // TestNG takes its listeners by class name, comma-separated.
                 let listener = TESTNG_LISTENER_CLASS;
-                let start_tag = &text[tag.start..=tag.end];
-                match start_tag.find("listeners=") {
-                    Some(at) => {
-                        let quote_at = tag.start + at + "listeners=".len();
-                        let quote = &text[quote_at..=quote_at];
-                        if let Some(close) = text[quote_at + 1..tag.end].find(quote) {
-                            edits.push((quote_at + 1 + close, format!(",{listener}"), 0));
-                        }
+                match tag.attribute_at("listeners") {
+                    Some(listeners) => {
+                        edits.push((listeners.value_end, format!(",{listener}"), 0));
                     }
                     None => {
                         let name_end = tag.start + 1 + tag.name.len();
@@ -1684,25 +1681,16 @@ fn runs_its_tasks_in_order(element: &str) -> bool {
 
 /// A classpath copied as written, with no `id` of its own.
 fn without_ids(classpath: &str) -> String {
-    let mut out = String::new();
-    let mut rest = classpath;
-    while let Some(at) = rest.find(" id=") {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + 4..];
-        let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            out.push_str(" id=");
-            rest = after;
-            continue;
-        };
-        match after[1..].find(quote) {
-            Some(close) => rest = &after[close + 2..],
-            None => {
-                out.push_str(&rest[at..]);
-                return out;
-            }
-        }
+    let ids = crate::ant_build::tags(classpath)
+        .into_iter()
+        .flat_map(|tag| tag.attributes)
+        .filter(|attribute| attribute.name == "id")
+        .map(|id| (classpath[..id.name_at].trim_end().len(), id.value_end + 1))
+        .collect::<Vec<_>>();
+    let mut out = classpath.to_owned();
+    for (from, to) in ids.into_iter().rev() {
+        out.replace_range(from..to, "");
     }
-    out.push_str(rest);
     out
 }
 
@@ -2121,9 +2109,20 @@ pub fn run_direct_jvm(
             );
         }
         if !instrumented.unmeasurable.is_empty() {
+            let (why, remedy) = if instrumented.build == JvmBuild::Ant {
+                (
+                    "hold tests their build runs through no <junit>, <junitlauncher> or <testng> task Supercov can find, so they are not attributed",
+                    "Supercov listens through those tasks; tests the build runs another way, such as a <java> task starting a runner itself, run exactly as they did.",
+                )
+            } else {
+                (
+                    "run JUnit 4, which is not a JUnit Platform engine, so they are not attributed",
+                    "Supercov listens through the platform's own lifecycle, and putting the platform on a JUnit 4 classpath makes the build choose a provider that finds no engine -- so it leaves those modules alone rather than break them. Adding junit-vintage-engine runs the same tests on the platform, and Supercov measures them.",
+                )
+            };
             let _ = writeln!(
                 diagnostics,
-                "[supercov] {} module(s) run JUnit 4, which is not a JUnit Platform engine, so they are not attributed: {}. Supercov listens through the platform's own lifecycle, and putting the platform on a JUnit 4 classpath makes the build choose a provider that finds no engine -- so it leaves those modules alone rather than break them. Adding junit-vintage-engine runs the same tests on the platform, and Supercov measures them.",
+                "[supercov] {} module(s) {why}: {}. {remedy}",
                 instrumented.unmeasurable.len(),
                 instrumented.unmeasurable.join(", ")
             );
@@ -2750,6 +2749,62 @@ mod tests {
         );
         assert!(testng.contains("<testng listeners=\"com.supercorp.supercov.SupercovTestNGListener\" classpathref=\"cp\">"), "{testng}");
         assert!(testng.contains("<javac srcdir=\"/w/testng\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{testng}");
+    }
+
+    /// What a task holds is read as markup, not as text: a value that
+    /// mentions `listeners=` or ` id=` is a value, a stray closing tag closes
+    /// nothing, and only the task's own classpath is copied.
+    #[test]
+    fn a_task_is_patched_by_its_markup_not_its_text() {
+        let patch = |build: &str| {
+            with_ant_formatter(
+                build,
+                Path::new("/w/src"),
+                Path::new("/w/platform"),
+                Path::new("/w/testng"),
+                Path::new("/w/classes"),
+            )
+            .expect("changed")
+        };
+        let testng = patch(
+            "<project><target name=\"t\"><testng description=\"see listeners=x\" classpathref=\"cp\"/></target></project>",
+        );
+        assert!(
+            testng.contains("<testng listeners=\"com.supercorp.supercov.SupercovTestNGListener\" description=\"see listeners=x\""),
+            "{testng}"
+        );
+        let junit = patch(
+            "<project><target name=\"t\"></echo><junit></classpath><batchtest><fileset dir=\"t\"><include name=\"**\"/></fileset></batchtest><classpath id=\"own\"><pathelement path=\"a id='b'\"/></classpath></junit></target></project>",
+        );
+        assert!(
+            junit.contains("<javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath><pathelement path=\"a id='b'\"/></classpath></javac><junit>"),
+            "{junit}"
+        );
+    }
+
+    /// A test two batches both run is reported twice, the second numbered.
+    #[test]
+    fn a_test_run_again_is_numbered() {
+        let test = |name: &str| crate::owned_evidence::OwnedTestEvidence {
+            name: name.to_owned(),
+            ..Default::default()
+        };
+        let mut forked = [
+            crate::owned_evidence::OwnedEvidence {
+                tests: vec![test("A#one"), test("A#two")],
+                ..Default::default()
+            },
+            crate::owned_evidence::OwnedEvidence {
+                tests: vec![test("A#one")],
+                ..Default::default()
+            },
+        ];
+        number_repeated_runs(&mut forked);
+        let names = forked
+            .iter()
+            .flat_map(|evidence| evidence.tests.iter().map(|test| test.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["A#one", "A#two", "A#one [2]"]);
     }
 
     use super::*;

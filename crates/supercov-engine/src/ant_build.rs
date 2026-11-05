@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tag {
     pub name: String,
-    pub attributes: Vec<(String, String)>,
+    pub attributes: Vec<Attribute>,
     /// Where the tag starts and where it ends, `<` to `>` inclusive.
     pub start: usize,
     pub end: usize,
@@ -23,12 +23,27 @@ pub struct Tag {
     pub empty: bool,
 }
 
+/// An attribute of a tag, and where it is in the text the tag was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute {
+    pub name: String,
+    pub value: String,
+    /// The offset of its name.
+    pub name_at: usize,
+    /// The offset of the quote that closes its value.
+    pub value_end: usize,
+}
+
 impl Tag {
     pub fn attribute(&self, name: &str) -> Option<&str> {
+        self.attribute_at(name)
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    pub fn attribute_at(&self, name: &str) -> Option<&Attribute> {
         self.attributes
             .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.as_str())
+            .find(|attribute| attribute.name == name)
     }
 }
 
@@ -77,14 +92,16 @@ pub fn tags(text: &str) -> Vec<Tag> {
         let inner = &text[start + 1..end];
         let closing = inner.starts_with('/');
         let empty = inner.ends_with('/');
-        let inner = inner.trim_start_matches('/').trim_end_matches('/');
+        let unslashed = inner.trim_start_matches('/');
+        let base = start + 1 + inner.len() - unslashed.len();
+        let inner = unslashed.trim_end_matches('/');
         let name_end = inner
             .find(|character: char| character.is_whitespace())
             .unwrap_or(inner.len());
         let name = inner[..name_end].to_owned();
         if !name.is_empty() {
             found.push(Tag {
-                attributes: attributes(&inner[name_end..]),
+                attributes: attributes(&inner[name_end..], base + name_end),
                 name,
                 start,
                 end,
@@ -97,22 +114,31 @@ pub fn tags(text: &str) -> Vec<Tag> {
     found
 }
 
-fn attributes(text: &str) -> Vec<(String, String)> {
+/// The attributes of a tag's text after its name, which starts at `base`.
+fn attributes(text: &str, base: usize) -> Vec<Attribute> {
     let mut found = Vec::new();
-    let mut rest = text;
+    let mut at = 0;
     loop {
-        rest = rest.trim_start();
+        at = text.len() - text[at..].trim_start().len();
+        let rest = &text[at..];
         let Some(equals) = rest.find('=') else { break };
-        let key = rest[..equals].trim().to_owned();
+        let name = rest[..equals].trim().to_owned();
         let after = rest[equals + 1..].trim_start();
+        let open = text.len() - after.len();
         let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
             break;
         };
         let Some(close) = after[1..].find(quote) else {
             break;
         };
-        found.push((key, unescape(&after[1..1 + close])));
-        rest = &after[close + 2..];
+        let value_end = open + 1 + close;
+        found.push(Attribute {
+            name,
+            value: unescape(&after[1..1 + close]),
+            name_at: base + at,
+            value_end: base + value_end,
+        });
+        at = value_end + 1;
     }
     found
 }
@@ -185,7 +211,7 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
         .and_then(|text| {
             tags(&text)
                 .into_iter()
-                .find(|tag| tag.name == "project" && !tag.closing)
+                .find(|tag| tag.name == "project")
                 .and_then(|tag| tag.attribute("basedir").map(str::to_owned))
         })
         .filter(|basedir| !basedir.contains("${"))
@@ -622,12 +648,11 @@ fn ant_pattern(pattern: &str, path: &str) -> bool {
             _ => false,
         }
     }
-    let pattern = pattern.trim_matches('/');
-    let pattern = if pattern.ends_with('/') || pattern.is_empty() {
-        "**"
-    } else {
-        pattern
-    };
+    // A pattern that ends in `/` names everything below it, as `/**` would.
+    let mut pattern = pattern.trim_start_matches('/').to_owned();
+    if pattern.is_empty() || pattern.ends_with('/') {
+        pattern.push_str("**");
+    }
     names(
         &pattern.split('/').collect::<Vec<_>>(),
         &path.split('/').collect::<Vec<_>>(),
@@ -843,7 +868,7 @@ mod tests {
     #[test]
     fn tags_skip_comments_and_keep_quoted_angle_brackets() {
         let found = tags(
-            r#"<?xml version="1.0"?><!-- <junit> --><project a='x>y'><junit fork="true"/></project>"#,
+            r#"<?xml version="1.0"?><!-- <junit> --><project a='x>y'><![CDATA[<javac>]]>< ><junit fork="true"/><echo level=info message="unread"/></project>"#,
         );
         let names: Vec<_> = found
             .iter()
@@ -854,10 +879,14 @@ mod tests {
             [
                 ("project", false, false),
                 ("junit", false, true),
+                ("echo", false, true),
                 ("project", true, false)
             ]
         );
         assert_eq!(found[0].attribute("a"), Some("x>y"));
+        // An unquoted value is not XML, and ends what can be read of the tag.
+        assert_eq!(found[2].attribute("level"), None);
+        assert_eq!(found[2].attribute("message"), None);
     }
 
     /// The Ametys layout: a thin build.xml importing a shared harness three
@@ -1029,6 +1058,119 @@ mod tests {
         assert!(ant_pattern("mod?/*.xml", "mod1/x.xml"));
         assert!(!ant_pattern("*/build.xml", "a/b/build.xml"));
         fs::remove_dir_all(project).unwrap();
+    }
+
+    /// What a build holds that cannot or need not be followed is stepped
+    /// past, and what can be is still read around it.
+    #[test]
+    fn the_build_reads_past_what_it_cannot_follow() {
+        let project = temporary("reads-past");
+        let write = |relative: &str, text: &str| {
+            let path = project.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "build.xml",
+            r#"<?xml version="1.0"?>
+<!DOCTYPE project [
+    <!ENTITY % parameters SYSTEM "parameters.dtd">
+    <!ENTITY inline "text">
+    <!ENTITY lonely>
+    <!ENTITY single SYSTEM 'single.xml'>
+    <!ENTITY bare SYSTEM bare.xml>
+    <!ENTITY open SYSTEM "open.xml>
+    <!ENTITY unused SYSTEM "unused.xml">
+]>
+<project name="past">
+    &single; &bare; &open;
+    <property name="unset" location="${nowhere}/x"/>
+    <property name="referenced" refid="somewhere"/>
+    <property environment="env"/>
+    <property file="missing.properties"/>
+    <import file="${nowhere}/common.xml"/>
+    <import file="cycle.xml"/>
+    <target name="empty"/>
+    <target name="all">
+        <ant antfile="${nowhere}.xml"/>
+        <subant antfile="part.xml"/>
+        <subant antfile="part.xml">
+            <filelist dir="parts" files="one/part.xml,two/part.xml"/>
+            <dirset dir="dirs" includes="*"/>
+        </subant>
+        <testng outputdir="out"/>
+        <junit><batchtest><fileset refid="tests"/><fileset dir="${nowhere}"/></batchtest></junit>
+        <apt destdir="out/apt"><src path="annotated"/></apt>
+        <javac destdir="out/classes"><classpath><path><pathelement location="lib"/></path></classpath></javac>
+        <copy todir="out"><dirset dir="java"/></copy>
+    </target>
+    <path id="empty"/>
+    <dirset id="dirs" dir="${nowhere}"/>
+</project>"#,
+        );
+        write(
+            "cycle.xml",
+            r#"<project><import file="build.xml"/></project>"#,
+        );
+        let batch = |dir: &str| {
+            format!(
+                r#"<project><target name="t"><junit><batchtest><fileset dir="{dir}"/></batchtest></junit></target></project>"#
+            )
+        };
+        write("single.xml", &batch("single-tests"));
+        write("unused.xml", &batch("unused-tests"));
+        write("parts/one/part.xml", &batch("t1"));
+        write("parts/two/part.xml", &batch("t2"));
+        write("dirs/x/part.xml", &batch("tx"));
+        let build = read_ant_build(&project, &BTreeMap::new());
+        assert_eq!(
+            build.test_roots,
+            [
+                project.join("single-tests"),
+                project.join("parts/one/t1"),
+                project.join("parts/two/t2"),
+                project.join("dirs/x/tx"),
+            ],
+            "{build:?}"
+        );
+        assert!(build.junit_files.contains(&project.join("build.xml")));
+        assert!(build.sources.is_empty(), "{build:?}");
+        assert!(build.files.contains(&project.join("cycle.xml")));
+
+        // An import chain stops somewhere: past 64 files, nothing more is read.
+        for index in 0..70 {
+            write(
+                &format!("chain/{index}.xml"),
+                &format!(r#"<project><import file="{}.xml"/></project>"#, index + 1),
+            );
+        }
+        let build = read_ant_build(&project.join("chain"), &BTreeMap::new());
+        assert!(build.files.is_empty(), "no build.xml there: {build:?}");
+        fs::copy(project.join("chain/0.xml"), project.join("chain/build.xml")).unwrap();
+        let build = read_ant_build(&project.join("chain"), &BTreeMap::new());
+        assert_eq!(build.files.len(), 65, "{build:?}");
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn patterns_path_lists_and_properties_read_their_edges() {
+        assert!(!ant_pattern("**/b", ""));
+        assert!(!ant_pattern("*b", "a"));
+        assert!(ant_pattern("modules/", "modules/a/build.xml"));
+        assert!(ant_pattern("/", "anything/at/all"));
+        assert_eq!(path_list("1:/a;C:rel::;"), ["1", "/a", "C", "rel"]);
+        assert_eq!(
+            properties_file("\n   \n!bang=1\nno separator\nkey=value"),
+            [("key".to_owned(), "value".to_owned())]
+        );
+        // A directory deeper than eight levels is not searched.
+        let top = temporary("deep");
+        let deep = (0..10).fold(top.clone(), |path, level| path.join(level.to_string()));
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("build.xml"), "<project/>").unwrap();
+        fs::write(top.join("0/build.xml"), "<project/>").unwrap();
+        assert_eq!(matching(&top, "**/build.xml"), [top.join("0/build.xml")]);
+        fs::remove_dir_all(top).unwrap();
     }
 
     /// Every `<javac>` source that can be read: an attribute, nested

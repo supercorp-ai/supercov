@@ -2442,18 +2442,18 @@ pub fn copy_small_links_around(copy: &Path, workspace: &Path, limit: u64) -> io:
     let Ok(below) = workspace.strip_prefix(copy) else {
         return Ok(());
     };
+    // From the workspace up to the copy: the levels between them hold what
+    // the copy links to, the workspace and the copy themselves do not.
     let path_down = below
         .ancestors()
         .map(|ancestor| copy.join(ancestor))
         .collect::<Vec<_>>();
-    for level in workspace.ancestors().skip(1) {
-        if level == copy || !level.starts_with(copy) {
-            break;
-        }
+    let between = path_down.len().saturating_sub(2);
+    for level in path_down.iter().skip(1).take(between) {
         for entry in fs::read_dir(level)? {
             let entry = entry?;
             let path = entry.path();
-            if path_down.contains(&path) || entry.file_name() == UNFOLDED_RECORD {
+            if path_down.contains(&path) {
                 continue;
             }
             if !fs::symlink_metadata(&path)?.file_type().is_symlink() {
@@ -2552,6 +2552,8 @@ mod tests {
         fs::create_dir_all(real.join("scratch")).unwrap();
         fs::write(real.join("run.sh"), "echo").unwrap();
         fs::write(real.join("scratch/forms.xml"), "original").unwrap();
+        // A link inside is neither counted nor followed: it is copied as one.
+        std::os::unix::fs::symlink("../harness", real.join("scratch/harness")).unwrap();
         fs::create_dir_all(real.join("harness")).unwrap();
         fs::write(real.join("harness/big.jar"), vec![0u8; 2048]).unwrap();
         let copy = top.join("project/.supercov/workspaces/workspace");
@@ -2561,7 +2563,21 @@ mod tests {
             let directory = real.join(name).is_dir();
             create_link(&real.join(name), &copy.join("tree").join(name), directory).unwrap();
         }
+        // What is the copy's own already stays as it is.
+        fs::write(copy.join("tree/plugins/notes.txt"), "own").unwrap();
         copy_small_links_around(&copy, &workspace, 1024).unwrap();
+        assert_eq!(
+            fs::read_to_string(copy.join("tree/plugins/notes.txt")).unwrap(),
+            "own"
+        );
+        assert!(
+            fs::symlink_metadata(copy.join("tree/scratch/harness"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // A workspace that is the copy has nothing between them.
+        copy_small_links_around(&copy, &copy, 1024).unwrap();
         let tree = copy.join("tree");
         assert!(
             !fs::symlink_metadata(tree.join("scratch"))
@@ -2595,6 +2611,64 @@ mod tests {
         fs::remove_dir_all(top).unwrap();
     }
 
+    /// A copy is laid out within the higher of the project's repository and
+    /// the directory its Ant build reaches out to; never the filesystem's
+    /// root, and never a tree a Supercov copy lies inside.
+    #[cfg(unix)]
+    #[test]
+    fn an_ant_build_lays_its_copy_out_within_what_it_reaches() {
+        let top = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "supercov-anchor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let write = |relative: &str, text: &str| {
+            let path = top.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        let harness = r#"<project><target name="t"><junit><batchtest><fileset dir="test"/></batchtest></junit></target></project>"#;
+        write("a/tools/common.xml", harness);
+        write(
+            "a/module/main/build.xml",
+            r#"<project><import file="../../tools/common.xml"/></project>"#,
+        );
+        // A repository below what the build reaches: the reach wins.
+        fs::create_dir_all(top.join("a/module/.git")).unwrap();
+        assert_eq!(
+            enclosing_tree(&top.join("a/module/main")),
+            Some((top.join("a"), PathBuf::from("module/main")))
+        );
+        // A repository above it: the repository.
+        write("b/x/tools/common.xml", harness);
+        write(
+            "b/x/main/build.xml",
+            r#"<project><import file="../tools/common.xml"/></project>"#,
+        );
+        fs::create_dir_all(top.join("b/.git")).unwrap();
+        assert_eq!(
+            enclosing_tree(&top.join("b/x/main")),
+            Some((top.join("b"), PathBuf::from("x/main")))
+        );
+        // A build reaching the filesystem's root is laid out within nothing.
+        write(
+            "c/build.xml",
+            r#"<project><import file="/etc/hosts"/></project>"#,
+        );
+        assert_eq!(ant_anchor(&top.join("c")), None);
+        // Nor is a copy's own build, reaching past the `.supercov` it is in.
+        write("d/tools/common.xml", harness);
+        write(
+            "d/.supercov/w/main/build.xml",
+            r#"<project><import file="../../../tools/common.xml"/></project>"#,
+        );
+        assert_eq!(ant_anchor(&top.join("d/.supercov/w/main")), None);
+        fs::remove_dir_all(top).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_file_reached_through_links_is_made_the_copy_own() {
@@ -2610,6 +2684,8 @@ mod tests {
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("common.xml"), "original").unwrap();
         fs::write(real.join("other.xml"), "kept").unwrap();
+        fs::create_dir_all(top.join("real/tools/.git")).unwrap();
+        fs::write(top.join("real/tools/top.xml"), "top").unwrap();
         let tree = top.join("project/.supercov/workspaces/workspace");
         fs::create_dir_all(&tree).unwrap();
         // Never outside one of Supercov's copies.
@@ -2636,6 +2712,10 @@ mod tests {
         );
         assert!(fs::symlink_metadata(tree.join("tools")).unwrap().is_dir());
         assert!(
+            !tree.join("tools/.git").exists(),
+            "never a repository's own"
+        );
+        assert!(
             fs::symlink_metadata(tree.join("tools/build/other.xml"))
                 .unwrap()
                 .file_type()
@@ -2644,9 +2724,28 @@ mod tests {
         // Again, on the copy as it now is.
         unfold_links_to(&tree, &file).unwrap();
         assert!(unfold_links_to(&tree, &top.join("elsewhere.xml")).is_err());
+        // Where a link cannot be made, a file is copied in and a directory
+        // left out: what the build reads there is still the checkout's.
+        std::os::unix::fs::symlink(top.join("real/tools"), tree.join("unlinked")).unwrap();
+        crate::fault::during("fs.symlink", || {
+            unfold_links_to(&tree, &tree.join("unlinked/top.xml"))
+        })
+        .unwrap();
+        let copied = fs::symlink_metadata(tree.join("unlinked/top.xml")).unwrap();
+        assert!(copied.is_file(), "copied rather than linked");
+        assert!(!tree.join("unlinked/build").exists());
+        // Only plain names below the tree are removed, and never the
+        // directories the copy itself is in.
+        fs::create_dir_all(tree.join("../outside")).unwrap();
+        fs::create_dir_all(tree.join("project")).unwrap();
+        let mut record = fs::read_to_string(tree.join(UNFOLDED_RECORD)).unwrap();
+        record.push_str("../outside\nproject\n");
+        fs::write(tree.join(UNFOLDED_RECORD), record).unwrap();
         // Before the next run, what was unfolded is removed, for the links to
         // be made again from the checkout.
         relink_unfolded(&tree, &tree.join("project"));
+        assert!(tree.join("../outside").exists());
+        assert!(tree.join("project").exists());
         assert!(
             fs::symlink_metadata(tree.join("tools")).is_err(),
             "removed to be linked again"

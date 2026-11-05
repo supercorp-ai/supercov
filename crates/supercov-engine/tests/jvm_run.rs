@@ -1809,6 +1809,7 @@ fn ant_fixture(top: &Path) -> PathBuf {
         top,
         "tools/common.xml",
         r#"<project name="harness">
+    <import file="../shared.xml"/>
     <property name="classes" location="out/classes"/>
     <property name="tests-dir" location="test"/>
     <target name="compile">
@@ -1840,6 +1841,17 @@ fn ant_fixture(top: &Path) -> PathBuf {
 </project>
 "#,
     );
+    // Beside the harness, as Ametys has them: a file the harness imports,
+    // and a wrapper's own build file no import reaches. Each holds a task in
+    // a target this build does not run.
+    let unrun = |name: &str| {
+        format!(
+            r#"<project name="{name}"><target name="{name}-only"><junit><batchtest><fileset dir="test/src"/></batchtest></junit></target></project>
+"#
+        )
+    };
+    write(top, "shared.xml", &unrun("shared"));
+    write(top, "single-test.xml", &unrun("single"));
     let project = top.join("plugins/app");
     write(
         &project,
