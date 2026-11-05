@@ -218,6 +218,14 @@ impl DockerProxy {
         if let Some(parent) = settings.state.parent() {
             fs::create_dir_all(parent)?;
         }
+        // The marks containers leave (`MARK_VARIABLE`) go in a directory made
+        // here, open to every user: one a container's root made could not be
+        // emptied by the run. Without it a container leaves no mark, and is
+        // said to have sent nothing.
+        let marks = settings.state.with_file_name("marks");
+        let _ = std::fs::create_dir_all(&marks);
+        let _ =
+            std::fs::set_permissions(&marks, std::os::unix::fs::PermissionsExt::from_mode(0o777));
         let shared = Arc::new(Shared {
             settings,
             upstream: upstream.to_owned(),

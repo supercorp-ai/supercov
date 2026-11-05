@@ -602,14 +602,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1103")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1101")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1103"),
+        seen.contains("test fault at fs (javascript_run.rs:1101"),
         "{seen}"
     );
 }
@@ -16588,7 +16588,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.write#javascript_run.rs:978",
         "fs.canonicalize#process_supervision.rs:1719",
         "fs.create_dir_all#javascript_run.rs:1049",
-        "fs.create_dir_all#javascript_run.rs:1222",
+        "fs.create_dir_all#javascript_run.rs:1220",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:445",
         "fs.create_dir_all#javascript_run.rs:1461",
