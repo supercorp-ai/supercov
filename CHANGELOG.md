@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.24.0
+
+**Added**
+
+- Playwright tests that run in a container are measured, started with `docker exec` or `docker compose exec` in a container the project is mounted into (`.:/workspace`). The command is given Supercov's settings, with each path moved to where the container sees the project, and each test is credited with what it ran. A container the project is mounted into is measured whatever its image, and the project's `node_modules` is mounted into it read-only. See [supported suites](https://github.com/supercorp-ai/supercov/blob/v4.24.0/docs/supported-suites.md#a-server-in-a-container).
+- When containers were given the run's settings and no test or coverage came back from them, the run says so, rather than reading as complete with nothing in it.
+
+**Fixed**
+
+- A browser chunk of an instrumented module held the text of every condition in the file, including a route's server-only `loader` and `action` (`process.env.QSTASH_RETRIES`), so server source reached the browser and a check for secrets in the client bundle failed. A module now carries only each decision's id and number of conditions.
+- `supercov merge` with no run named took the newest run of each command, so the runs several machines made of one command, copied into one `.supercov/runs`, merged as one. Each is now merged; a command measured again in the same project still replaces its earlier run.
+- When tests could not load build output the copy lacks, a command that already builds was told to add a build. It is now told its build did not make the files.
+
 ## 4.23.0
 
 **Added**
