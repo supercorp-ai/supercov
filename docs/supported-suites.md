@@ -737,6 +737,7 @@ npx supercov -- npx playwright test
 | TestNG | Exact per test, each data-provider invocation its own | — |
 | JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle |
 | JUnit 4 under Ant's `<junit>` | Exact per test, under the names Ant's XML report uses | Ant 1.10 — see below |
+| Any platform engine under Ant's `<junitlauncher>` | Exact per test, through the platform listener | Ant 1.10 — see below |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
@@ -804,8 +805,10 @@ npx supercov -- ./mvnw verify
 A project with a `build.xml` (and no Maven or Gradle build) is an Ant build.
 Ant has no layout convention, so Supercov reads the build: it follows the
 `<import>` chain with the properties it defines, takes the directories each
-`<batchtest>` scans as the tests, and every other `src` directory holding Java
-as the code they test, leaving out the directories the build writes into.
+`<batchtest>` or `<testclasses>` scans as the tests — or, where it scans
+compiled classes, the sources the `<javac>` writing them compiles — and every
+other `src` directory holding Java as the code they test, leaving out the
+directories the build writes into.
 When the build names its tests where that cannot be read — a path a custom
 task builds at run time — say where they are:
 
@@ -827,6 +830,10 @@ before the task, against the task's own classpath and Ant's runtime. Tests
 keep the names Ant's XML reports give them, `Class#method`. A `<junit>` that
 runs classes in threads (`threads` above 1) is reported as concurrent, as a
 parallel JUnit Platform suite is.
+
+Ant's `<junitlauncher>` runs tests on the JUnit Platform, so it gets the same
+platform listener Maven and Gradle builds get, as a `<listener>` of the task,
+compiled the same way against the task's classpath.
 
 Many Ant builds import a shared harness from beside the project —
 `<import file="../../../tools/master/build/common/common-build.xml"/>` — and

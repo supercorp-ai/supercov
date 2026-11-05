@@ -1915,3 +1915,106 @@ fn an_ant_build_with_its_harness_beside_the_project_is_measured_per_test() {
     assert_eq!(named("CalcTest#notYet")["files"], serde_json::json!({}), "{executions}");
     std::fs::remove_dir_all(top).ok();
 }
+
+/// JUnit 5 on the platform, from the local Maven repository: what
+/// `<junitlauncher>` needs on its classpath.
+fn jupiter_jars() -> Option<Vec<PathBuf>> {
+    let m2 = PathBuf::from(std::env::var_os("HOME")?).join(".m2/repository");
+    [
+        "org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar",
+        "org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar",
+        "org/junit/platform/junit-platform-commons/1.10.2/junit-platform-commons-1.10.2.jar",
+        "org/junit/platform/junit-platform-engine/1.10.2/junit-platform-engine-1.10.2.jar",
+        "org/junit/platform/junit-platform-launcher/1.10.2/junit-platform-launcher-1.10.2.jar",
+        "org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar",
+        "org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar",
+    ]
+    .iter()
+    .map(|relative| Some(m2.join(relative)).filter(|path| path.is_file()))
+    .collect()
+}
+
+#[test]
+#[ignore = "runs a real Ant build; npm run test:jvm passes --include-ignored"]
+fn an_ant_build_on_the_junit_platform_is_measured_through_the_platform_listener() {
+    let _building = common::building();
+    let Some(ant) = apache_ant() else {
+        common::skip("jvm", "no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some(jars) = jupiter_jars() else {
+        common::skip("jvm", "no JUnit 5.10.2 jars in ~/.m2");
+        return;
+    };
+    let root = temporary("ant-launcher");
+    let classpath = jars
+        .iter()
+        .map(|jar| format!("<pathelement location=\"{}\"/>", jar.display()))
+        .collect::<String>();
+    write(
+        &root,
+        "build.xml",
+        &format!(
+            r#"<project name="app" default="test">
+    <path id="platform">{classpath}</path>
+    <target name="test">
+        <mkdir dir="out/classes"/>
+        <mkdir dir="out/test-classes"/>
+        <javac srcdir="src/main" destdir="out/classes" includeantruntime="false"/>
+        <javac srcdir="src/test" destdir="out/test-classes" includeantruntime="false">
+            <classpath><path refid="platform"/><pathelement location="out/classes"/></classpath>
+        </javac>
+        <junitlauncher haltOnFailure="true" printSummary="true">
+            <classpath>
+                <path refid="platform"/>
+                <pathelement location="out/classes"/>
+                <pathelement location="out/test-classes"/>
+            </classpath>
+            <testclasses><fileset dir="out/test-classes" includes="**/*Test.class"/><fork/></testclasses>
+        </junitlauncher>
+    </target>
+</project>
+"#
+        ),
+    );
+    write(
+        &root,
+        "src/main/app/Calc.java",
+        "package app;\n\npublic class Calc {\n  public static int clamp(int value, int high) {\n    if (value > high) {\n      return high;\n    }\n    return value;\n  }\n}\n",
+    );
+    write(
+        &root,
+        "src/test/app/CalcTest.java",
+        "package app;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n  @Test\n  void clampsHighValues() {\n    assertEquals(3, Calc.clamp(5, 3));\n  }\n\n  @Test\n  void keepsLowValues() {\n    assertEquals(1, Calc.clamp(1, 3));\n  }\n}\n",
+    );
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![ant.display().to_string(), "test".into()],
+        run_id: "run-jvm-ant-launcher".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    assert_eq!(result.exit_code, 0, "{diagnostics}");
+    assert_eq!(result.build, JvmBuild::Ant, "{diagnostics}");
+    assert_eq!(result.tests, 2, "{diagnostics}");
+    let executions: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(result.run_directory.join("test-executions.json")).unwrap(),
+    )
+    .unwrap();
+    let tests = executions["tests"].as_array().unwrap();
+    assert!(
+        tests.iter().all(|test| test["attribution"] == "exact"
+            && test["files"]["src/main/app/Calc.java"].as_array().is_some_and(|lines| !lines.is_empty())),
+        "{executions}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

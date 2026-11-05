@@ -130,12 +130,13 @@ pub struct AntBuild {
     /// The project's `build.xml` and every file it imports, in the order Ant
     /// reads them.
     pub files: Vec<PathBuf>,
-    /// The directories `<batchtest>` scans for test classes.
+    /// The directories `<batchtest>` (and `<junitlauncher>`'s
+    /// `<testclasses>`) scans for test classes.
     pub test_roots: Vec<PathBuf>,
     /// Directories the build writes into: `<javac destdir>` and the usual
     /// output properties. Never sources.
     pub outputs: Vec<PathBuf>,
-    /// The files that hold a `<junit>` task.
+    /// The files that hold a `<junit>` or `<junitlauncher>` task.
     pub junit_files: Vec<PathBuf>,
 }
 
@@ -166,7 +167,20 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
     properties
         .entry("basedir".into())
         .or_insert_with(|| root.to_string_lossy().into_owned());
-    read_file(root, &start, &mut properties, &mut build);
+    let mut compiled = BTreeMap::new();
+    read_file(root, &start, &mut properties, &mut build, &mut compiled);
+    // A batch that scans compiled classes -- `<junitlauncher>`'s
+    // `<testclasses>` always does -- names the directory a `<javac>` wrote
+    // them into: its tests are that compilation's sources.
+    let scanned = std::mem::take(&mut build.test_roots);
+    for root in scanned {
+        match compiled.get(&root) {
+            Some(sources) => sources
+                .iter()
+                .for_each(|source: &PathBuf| push_unique(&mut build.test_roots, source.clone())),
+            None => push_unique(&mut build.test_roots, root),
+        }
+    }
     for name in OUTPUT_PROPERTIES {
         if let Some(value) = properties.get(*name).filter(|value| !value.contains("${")) {
             push_unique(&mut build.outputs, resolve(root, value));
@@ -175,11 +189,13 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
     build
 }
 
+/// `compiled` maps each `<javac>` output directory to its sources.
 fn read_file(
     root: &Path,
     file: &Path,
     properties: &mut BTreeMap<String, String>,
     build: &mut AntBuild,
+    compiled: &mut BTreeMap<PathBuf, Vec<PathBuf>>,
 ) {
     let file = normalized(file);
     if build.files.contains(&file) || build.files.len() > 64 {
@@ -192,10 +208,19 @@ fn read_file(
     let directory = file.parent().unwrap_or(root).to_path_buf();
     let all = tags(&text);
     let mut in_batchtest = 0usize;
+    // The output directory of the `<javac>` being read, for its nested `<src>`.
+    let mut javac: Option<PathBuf> = None;
+    let known = |value: &str, properties: &BTreeMap<String, String>| {
+        let value = expand(value, properties);
+        (!value.contains("${")).then(|| resolve(root, &value))
+    };
     for tag in &all {
         if tag.closing {
-            if tag.name == "batchtest" {
+            if tag.name == "batchtest" || tag.name == "testclasses" {
                 in_batchtest = in_batchtest.saturating_sub(1);
+            }
+            if tag.name == "javac" {
+                javac = None;
             }
             continue;
         }
@@ -205,11 +230,11 @@ fn read_file(
                 if let Some(imported) = tag.attribute("file") {
                     let imported = expand(imported, properties);
                     if !imported.contains("${") {
-                        read_file(root, &directory.join(imported), properties, build);
+                        read_file(root, &directory.join(imported), properties, build, compiled);
                     }
                 }
             }
-            "batchtest" if !tag.empty => in_batchtest += 1,
+            "batchtest" | "testclasses" if !tag.empty => in_batchtest += 1,
             "fileset" | "dirset" if in_batchtest > 0 => {
                 if let Some(dir) = tag.attribute("dir") {
                     let dir = expand(dir, properties);
@@ -219,14 +244,31 @@ fn read_file(
                 }
             }
             "javac" => {
-                if let Some(dir) = tag.attribute("destdir") {
-                    let dir = expand(dir, properties);
-                    if !dir.contains("${") {
-                        push_unique(&mut build.outputs, resolve(root, &dir));
+                let destination = tag.attribute("destdir").and_then(|dir| known(dir, properties));
+                if let Some(destination) = &destination {
+                    push_unique(&mut build.outputs, destination.clone());
+                    let sources = compiled.entry(destination.clone()).or_default();
+                    for source in tag
+                        .attribute("srcdir")
+                        .into_iter()
+                        .flat_map(|dirs| dirs.split([':', ';']))
+                        .filter_map(|dir| known(dir, properties))
+                    {
+                        push_unique(sources, source);
+                    }
+                }
+                if !tag.empty {
+                    javac = destination;
+                }
+            }
+            "src" if javac.is_some() => {
+                if let (Some(destination), Some(path)) = (&javac, tag.attribute("path")) {
+                    if let Some(source) = known(path, properties) {
+                        push_unique(compiled.entry(destination.clone()).or_default(), source);
                     }
                 }
             }
-            "junit" => push_unique(&mut build.junit_files, file.clone()),
+            "junit" | "junitlauncher" => push_unique(&mut build.junit_files, file.clone()),
             _ => {}
         }
     }
@@ -420,6 +462,24 @@ mod tests {
         assert!(build.outputs.contains(&project.join("tmp/classes-test")), "the first tmp.dir wins: {:?}", build.outputs);
         assert_eq!(outside_anchor(&project, &build), Some(top.clone()));
         fs::remove_dir_all(top).unwrap();
+    }
+
+    #[test]
+    fn a_batch_of_compiled_classes_names_the_sources_compiled_into_them() {
+        let project = temporary("compiled");
+        fs::write(
+            project.join("build.xml"),
+            r#"<project><target name="t">
+    <javac srcdir="src/main" destdir="out/classes"/>
+    <javac destdir="out/test-classes"><src path="src/test"/></javac>
+    <junitlauncher><testclasses><fileset dir="out/test-classes" includes="**/*Test.class"/></testclasses></junitlauncher>
+</target></project>"#,
+        )
+        .unwrap();
+        let build = read_ant_build(&project, &BTreeMap::new());
+        assert_eq!(build.test_roots, [project.join("src/test")]);
+        assert_eq!(build.junit_files, [project.join("build.xml")]);
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
