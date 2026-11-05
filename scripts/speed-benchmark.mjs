@@ -181,6 +181,9 @@ function suiteRun(round, variant, suite, binary) {
 }
 
 for (let round = 1; round <= rounds; round += 1) {
+  // A run leaves its copy of the repository in .supercov, and the app's
+  // Vitest includes collect the copy's tests: plain starts from none.
+  rmSync(join(project, '.supercov'), { recursive: true, force: true });
   for (const suite of suites) suiteRun(round, 'plain', suite);
   const order = binaries.map((_, index) => binaries[(index + round) % binaries.length]);
   for (const { name, path } of order) {
