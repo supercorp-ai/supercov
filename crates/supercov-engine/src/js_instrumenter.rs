@@ -13148,7 +13148,6 @@ export function shapes(n: number): unknown {
             "(s1 = 0, _supercovMcdcFrame27 = 1, _supercovMcdcValue29 = 0, _supercovMcdcValue28 = total > 0) && (s1 = 1, _supercovMcdcFrame27 += 3, _supercovMcdcValue29 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
             "!!(+!!_supercovMcdcValue28 & +!!_supercovMcdcValue29)), _supercovMcdcResult30;",
             "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
-            "kind: \"value\"",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.
             "return END(2, (s3 = 0, a) ?? (s3 = 1, b) ?? (HIT(34), s3 = 2, c), s3);",

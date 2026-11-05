@@ -1165,7 +1165,15 @@ fn mounted_copy(binds: &[(PathBuf, PathBuf)], copy: &Path) -> Option<PathBuf> {
                 .into_iter()
                 .flatten()
                 .find_map(|copy| copy.strip_prefix(source).ok())
-                .map(|inside| (source.components().count(), target.join(inside)))
+                .map(|inside| {
+                    // `/workspace`, not `/workspace/`, for the copy itself.
+                    let seen_at = if inside.as_os_str().is_empty() {
+                        target.clone()
+                    } else {
+                        target.join(inside)
+                    };
+                    (source.components().count(), seen_at)
+                })
         })
         .max_by_key(|(depth, _)| *depth)
         .map(|(_, seen_at)| seen_at)

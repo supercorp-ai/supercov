@@ -1524,7 +1524,7 @@ fn write_playwright_config(
          const resolvedValue = typeof configExport === 'function' ? await configExport({{ command: 'test', mode: 'test' }}) : configExport;\n\
          const resolved = resolvedValue ?? {{}};\n\
          const runtimeProjectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');\n\
-         const originalDirectory = {};
+         const originalDirectory = resolve(runtimeProjectRoot, {});
          const sourceProjectRoot = process.env.SUPERCOV_SOURCE_PROJECT_ROOT;\n\
          const runtimePath = value => {{\n\
            if (!value) return value;\n\
@@ -1572,14 +1572,20 @@ fn write_playwright_config(
            : [['list']];\n\
          const coverageReporter = resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightReporter.mjs');\n\
          export default {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
+        // Relative to the copy, as it is seen from where the config runs: a
+        // test runner `docker exec` starts in a container the copy is mounted
+        // into sees it elsewhere, and found no tests in the host's path.
         serde_json::to_string(
             &original
                 .as_ref()
                 .and_then(|path| path.parent())
                 .unwrap_or(workspace)
-                .display()
-                .to_string()
-        ).expect("plain data serializes")
+                .strip_prefix(workspace)
+                .expect("a relocated file is in the workspace")
+                .to_string_lossy()
+                .replace('\\', "/")
+        )
+        .expect("plain data serializes")
     );
     atomic_write(&path, source.as_bytes())?;
     Ok(path)
@@ -1981,8 +1987,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:464",
-            "javascript-source-path#javascript_frontend.rs:1684",
-            "javascript-source-path#javascript_frontend.rs:1800",
+            "javascript-source-path#javascript_frontend.rs:1690",
+            "javascript-source-path#javascript_frontend.rs:1806",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));

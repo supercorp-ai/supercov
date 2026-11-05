@@ -4247,7 +4247,13 @@ mod tests {
             let mut attempt = raw("test", 0, "passed", &[]);
             attempt.server.push(record);
             match create_coverage_view(&manifest, &[attempt], "time") {
-                Ok(view) => format!("ok {}", view.summary.covered_conditions),
+                Ok(view) => format!(
+                    "ok {}",
+                    view.decisions
+                        .iter()
+                        .filter(|decision| decision.executed)
+                        .count()
+                ),
                 Err(ReportError::InvalidServerRecord(reason)) => reason,
                 Err(error) => format!("{error:?}"),
             }
