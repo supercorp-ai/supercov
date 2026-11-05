@@ -921,6 +921,7 @@ terminal or offline environment after the package has been downloaded.
 | Variable | Use |
 | --- | --- |
 | `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
+| `SUPERCOV_TEST_ROOTS` | For an Ant build whose `<batchtest>` directories cannot be read from its files: comma-separated directories that hold its tests |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
 | `SUPERCOV_SOURCE_TOOLS` | Comma-separated names of tools the test command runs that read source as text, such as a linter or a spell checker, besides Biome, oxlint, dprint, cspell and knip. Each is run on your source as you wrote it instead of on the instrumented copy |
 | `SUPERCOV_RUN_ID` | Set by Supercov, not by you: in every process a measured command starts, the run's id, so a test or harness can tell it is measured |
