@@ -3616,10 +3616,7 @@ pub fn archive_request(
         match known.get(&hash) {
             // The same hash is almost always the same record; when it is
             // not, every record the result holds is compared.
-            Some(&position)
-                if server[position] == record
-                    || server.iter().any(|existing| *existing == record) =>
-            {
+            Some(&position) if server[position] == record || server.contains(&record) => {
                 continue;
             }
             Some(_) => {}

@@ -1713,7 +1713,7 @@ fn track_assertions(
 /// What instrumenting one source gave: the file it wrote, or why it runs as
 /// written.
 enum InstrumentedSource {
-    Measured(crate::js_instrumenter::CandidateOutput),
+    Measured(Box<crate::js_instrumenter::CandidateOutput>),
     Unmeasured(CandidateLimitation),
 }
 
@@ -1815,7 +1815,7 @@ fn instrument_source(
         .then(|| runtime_specifier(relative, SHARED_BROWSER_RUNTIME));
     bootstrap_runtime(
         &mut output,
-        &standalone_runtime,
+        standalone_runtime,
         browser_suite,
         images,
         shared.as_deref(),
@@ -1846,7 +1846,7 @@ fn instrument_source(
     .expect("the instrumenter gives every file a whole source map");
     write_authored(workspace, file, &source)?;
     atomic_write(&path, code.as_bytes())?;
-    Ok(InstrumentedSource::Measured(output))
+    Ok(InstrumentedSource::Measured(Box::new(output)))
 }
 
 /// Prepare the complete JavaScript frontend inside an isolated workspace.
@@ -1931,7 +1931,7 @@ pub fn prepare_javascript_frontend(
     });
     for (file, instrumented) in project.source_files.iter().zip(instrumented) {
         let output = match instrumented? {
-            InstrumentedSource::Measured(output) => output,
+            InstrumentedSource::Measured(output) => *output,
             InstrumentedSource::Unmeasured(limitation) => {
                 limitations.insert(limitation.id.clone(), limitation);
                 continue;
@@ -2116,9 +2116,9 @@ mod tests {
             "fs.rename@34",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:459",
-            "javascript-source-path#javascript_frontend.rs:1743",
-            "javascript-source-path#javascript_frontend.rs:1670",
+            "javascript-source-path#javascript_frontend.rs:463",
+            "javascript-source-path#javascript_frontend.rs:1746",
+            "javascript-source-path#javascript_frontend.rs:1674",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
