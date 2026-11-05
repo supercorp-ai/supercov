@@ -65,6 +65,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "resolve-loader.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
+    "snapshots.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",

@@ -18,6 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
+import { mergeSnapshots } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
@@ -983,47 +984,6 @@ class CoveragePhaseController {
  * string), and doubled a 76-test suite's time.
  */
 const LEAVING_BINDING = "__supercovLeaving";
-/**
- * One snapshot holding everything in `snapshots`, each observation once: a
- * document that left gave its evidence, and the next one on its origin
- * restored the same evidence and added to it.
- */
-function mergeSnapshots(snapshots) {
-    const hits = new Set();
-    const events = new Map();
-    const decisions = new Map();
-    const logicals = new Map();
-    const vectorsOf = (map, key, initial) => {
-        let entry = map.get(key);
-        if (!entry) {
-            entry = { ...initial, seen: new Map() };
-            map.set(key, entry);
-        }
-        return entry;
-    };
-    for (const snapshot of snapshots) {
-        for (const id of snapshot?.hits ?? [])
-            hits.add(id);
-        for (const event of snapshot?.events ?? [])
-            events.set(JSON.stringify(event), event);
-        for (const decision of snapshot?.decisions ?? []) {
-            const entry = vectorsOf(decisions, decision.meta?.id, { meta: decision.meta });
-            for (const vector of decision.vectors ?? [])
-                entry.seen.set(JSON.stringify(vector), vector);
-        }
-        for (const logical of snapshot?.logicals ?? []) {
-            const entry = vectorsOf(logicals, logical.id, { id: logical.id });
-            for (const vector of logical.vectors ?? [])
-                entry.seen.set(JSON.stringify(vector), vector);
-        }
-    }
-    return {
-        decisions: [...decisions.values()].map(({ seen, meta }) => ({ meta, vectors: [...seen.values()] })),
-        hits: [...hits],
-        events: [...events.values()],
-        logicals: [...logicals.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
-    };
-}
 function readSnapshot(target) {
     // Temporary experiment (SUPERCOV_ABLATE=no-collect): time the collection.
     if ((process.env.SUPERCOV_ABLATE ?? "").includes("no-collect"))
