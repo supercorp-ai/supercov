@@ -677,6 +677,11 @@ class CoveragePhaseController {
         }
         this.contextListeners.clear();
         for (const [page, cdp] of this.cdpSessions) {
+            // A closed page took its session with it: detaching it failed for
+            // every page a test closed, each failure a Playwright error with a
+            // stack, and was the only collector call on a slice that failed.
+            if (page.isClosed?.())
+                continue;
             const identifier = this.newDocumentScriptIds.get(page);
             if (identifier)
                 await cdp
