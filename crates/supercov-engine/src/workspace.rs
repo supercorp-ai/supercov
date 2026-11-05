@@ -258,9 +258,7 @@ fn enclosing_repository(root: &Path) -> Option<(&Path, &Path)> {
 /// so that what its suite reaches as `../` is where it is in the checkout.
 fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
     match enclosing_tree(root) {
-        Some((tree, relative)) => {
-            Ok(Path::new(tree.file_name().expect(NAMED)).join(relative))
-        }
+        Some((tree, relative)) => Ok(Path::new(tree.file_name().expect(NAMED)).join(relative)),
         None => Ok(PathBuf::from(project_name(root)?)),
     }
 }
@@ -272,7 +270,8 @@ fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
 /// alone. Only the package is copied: what lies outside it is the checkout's,
 /// as when the suite runs there, and `.git` is never shared. Best effort.
 fn link_repository_around(root: &Path, workspace: &Path) {
-    let Some((_, relative)) = enclosing_tree(root).inspect(|_| relink_around(root, workspace)) else {
+    let Some((_, relative)) = enclosing_tree(root).inspect(|_| relink_around(root, workspace))
+    else {
         return;
     };
     // Each level from the package up to the repository, beside its copy.
@@ -2540,7 +2539,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn small_entries_above_a_repository_are_copied_and_large_ones_stay_linked() {
-        let top = std::env::temp_dir().join(format!("supercov-small-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let top = std::env::temp_dir().join(format!(
+            "supercov-small-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let real = top.join("real");
         fs::create_dir_all(real.join("scratch")).unwrap();
         fs::write(real.join("run.sh"), "echo").unwrap();
@@ -2556,12 +2562,31 @@ mod tests {
         }
         copy_small_links_around(&copy, &workspace, 1024).unwrap();
         let tree = copy.join("tree");
-        assert!(!fs::symlink_metadata(tree.join("scratch")).unwrap().file_type().is_symlink());
-        assert!(!fs::symlink_metadata(tree.join("run.sh")).unwrap().file_type().is_symlink());
-        assert!(fs::symlink_metadata(tree.join("harness")).unwrap().file_type().is_symlink(), "past the limit");
+        assert!(
+            !fs::symlink_metadata(tree.join("scratch"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            !fs::symlink_metadata(tree.join("run.sh"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            fs::symlink_metadata(tree.join("harness"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "past the limit"
+        );
         // A script writing beside itself now writes into the copy.
         fs::write(tree.join("scratch/forms.xml"), "patched").unwrap();
-        assert_eq!(fs::read_to_string(real.join("scratch/forms.xml")).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(real.join("scratch/forms.xml")).unwrap(),
+            "original"
+        );
         // The next copy starts from the checkout again.
         relink_around(&top, &workspace);
         assert!(fs::symlink_metadata(tree.join("scratch")).is_err());
@@ -2572,7 +2597,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_file_reached_through_links_is_made_the_copy_own() {
-        let top = std::env::temp_dir().join(format!("supercov-unfold-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let top = std::env::temp_dir().join(format!(
+            "supercov-unfold-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let real = top.join("real/tools/build");
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("common.xml"), "original").unwrap();
@@ -2580,23 +2612,44 @@ mod tests {
         let tree = top.join("project/.supercov/workspaces/workspace");
         fs::create_dir_all(&tree).unwrap();
         // Never outside one of Supercov's copies.
-        assert!(unfold_links_to(&top.join("real"), &top.join("real/tools/build/common.xml")).is_err());
-        assert_eq!(copy_directory_of(&tree.join("tree/project")), Some(tree.clone()));
+        assert!(
+            unfold_links_to(&top.join("real"), &top.join("real/tools/build/common.xml")).is_err()
+        );
+        assert_eq!(
+            copy_directory_of(&tree.join("tree/project")),
+            Some(tree.clone())
+        );
         std::os::unix::fs::symlink(top.join("real/tools"), tree.join("tools")).unwrap();
         let file = tree.join("tools/build/common.xml");
         unfold_links_to(&tree, &file).unwrap();
         fs::write(&file, "changed").unwrap();
-        assert_eq!(fs::read_to_string(real.join("common.xml")).unwrap(), "original", "the checkout is untouched");
-        assert_eq!(fs::read_to_string(tree.join("tools/build/other.xml")).unwrap(), "kept", "the rest is still reached");
+        assert_eq!(
+            fs::read_to_string(real.join("common.xml")).unwrap(),
+            "original",
+            "the checkout is untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(tree.join("tools/build/other.xml")).unwrap(),
+            "kept",
+            "the rest is still reached"
+        );
         assert!(fs::symlink_metadata(tree.join("tools")).unwrap().is_dir());
-        assert!(fs::symlink_metadata(tree.join("tools/build/other.xml")).unwrap().file_type().is_symlink());
+        assert!(
+            fs::symlink_metadata(tree.join("tools/build/other.xml"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         // Again, on the copy as it now is.
         unfold_links_to(&tree, &file).unwrap();
         assert!(unfold_links_to(&tree, &top.join("elsewhere.xml")).is_err());
         // Before the next run, what was unfolded is removed, for the links to
         // be made again from the checkout.
         relink_unfolded(&tree, &tree.join("project"));
-        assert!(fs::symlink_metadata(tree.join("tools")).is_err(), "removed to be linked again");
+        assert!(
+            fs::symlink_metadata(tree.join("tools")).is_err(),
+            "removed to be linked again"
+        );
         assert!(!tree.join(UNFOLDED_RECORD).exists());
         // A record a level below the copy's own directory is read as well.
         let below = tree.join("tree");
@@ -2604,8 +2657,14 @@ mod tests {
         fs::write(below.join("stale.xml"), "patched").unwrap();
         fs::write(below.join(UNFOLDED_RECORD), "stale.xml\n").unwrap();
         relink_around(&top, &below.join("project"));
-        assert!(!below.join("stale.xml").exists(), "removed to be linked again");
-        assert!(below.join("project").is_dir(), "never the copy's own directories");
+        assert!(
+            !below.join("stale.xml").exists(),
+            "removed to be linked again"
+        );
+        assert!(
+            below.join("project").is_dir(),
+            "never the copy's own directories"
+        );
         fs::remove_dir_all(top).unwrap();
     }
 

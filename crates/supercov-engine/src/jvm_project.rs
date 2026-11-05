@@ -559,7 +559,11 @@ mod tests {
             fs::write(root.join(relative), text).unwrap();
         }
         let files = discover_jvm_files(&root).unwrap();
-        let names = |list: &[(String, JvmLanguage)]| list.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+        let names = |list: &[(String, JvmLanguage)]| {
+            list.iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(names(&files.sources), ["java/app/Calc.java"]);
         assert_eq!(names(&files.tests), ["checks/app/CalcTest.java"]);
         fs::write(root.join("build.xml"), "<project/>").unwrap();

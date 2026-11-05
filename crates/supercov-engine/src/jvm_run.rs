@@ -1486,11 +1486,18 @@ fn instrument_workspace(
 /// `src/main/app/Calc.java` in `package app` is under `src/main`; Ametys's
 /// `main/plugin-forms/src/org/ametys/...` is under `main/plugin-forms/src`.
 fn ant_source_root(relative: &str, source: &str) -> Option<String> {
-    let directory = relative.rsplit_once('/').map_or("", |(directory, _)| directory);
+    let directory = relative
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
     let package = source.lines().find_map(|line| {
         let line = line.trim_start();
         let rest = line.strip_prefix("package ")?;
-        Some(rest.trim_end().trim_end_matches(';').trim().replace('.', "/"))
+        Some(
+            rest.trim_end()
+                .trim_end_matches(';')
+                .trim()
+                .replace('.', "/"),
+        )
     });
     match package {
         None => Some(directory.to_owned()),
@@ -1560,7 +1567,10 @@ fn with_ant_formatter(
             // (`<testng classpathref>`) and nested elements alike.
             let mut classpath = String::new();
             if let Some(reference) = tag.attribute("classpathref") {
-                classpath.push_str(&format!("<classpath refid=\"{}\"/>", xml_attribute(reference)));
+                classpath.push_str(&format!(
+                    "<classpath refid=\"{}\"/>",
+                    xml_attribute(reference)
+                ));
             }
             if let Some(path) = tag.attribute("classpath") {
                 classpath.push_str(&format!("<classpath path=\"{}\"/>", xml_attribute(path)));
@@ -1639,7 +1649,9 @@ fn with_ant_formatter(
                 )
             };
             if tag.empty {
-                let slash = text[..tag.end].rfind('/').expect("an empty tag ends with />");
+                let slash = text[..tag.end]
+                    .rfind('/')
+                    .expect("an empty tag ends with />");
                 edits.push((slash, format!(">{inside}</{}", tag.name), 1));
             } else {
                 edits.push((tag.end + 1, inside, 0));
@@ -1767,20 +1779,39 @@ fn instrument_ant(
     let classes = formatter.join("classes");
     let config = configuration(probe_count, &project.decision_widths, &module.evidence);
     write(
-        &sources.join(PACKAGE_DIRECTORY).join("SupercovAntFormatter.java"),
+        &sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovAntFormatter.java"),
         ANT_FORMATTER_SOURCE,
     )?;
-    write(&sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"), &config)?;
     write(
-        &listener_sources.join(PACKAGE_DIRECTORY).join("SupercovListener.java"),
+        &sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"),
+        &config,
+    )?;
+    write(
+        &listener_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovListener.java"),
         LISTENER_SOURCE,
     )?;
-    write(&listener_sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"), &config)?;
     write(
-        &testng_sources.join(PACKAGE_DIRECTORY).join("SupercovTestNGListener.java"),
+        &listener_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovConfig.java"),
+        &config,
+    )?;
+    write(
+        &testng_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovTestNGListener.java"),
         TESTNG_LISTENER_SOURCE,
     )?;
-    write(&testng_sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"), &config)?;
+    write(
+        &testng_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovConfig.java"),
+        &config,
+    )?;
 
     let build = crate::ant_build::read_ant_build(workspace, &BTreeMap::new());
     // Everything changed outside the project is changed within the copy's
@@ -1832,17 +1863,22 @@ fn instrument_ant(
                 file.display()
             ));
         }
-        let Some(updated) =
-            with_ant_formatter(&text, &sources, &listener_sources, &testng_sources, &classes)
-        else {
+        let Some(updated) = with_ant_formatter(
+            &text,
+            &sources,
+            &listener_sources,
+            &testng_sources,
+            &classes,
+        ) else {
             continue;
         };
         if !file.starts_with(workspace) {
             let Some(copy) = copy.as_ref().filter(|copy| file.starts_with(copy)) else {
                 continue;
             };
-            crate::workspace::unfold_links_to(copy, &file)
-                .map_err(|error| format!("could not prepare {} in the copy: {error}", file.display()))?;
+            crate::workspace::unfold_links_to(copy, &file).map_err(|error| {
+                format!("could not prepare {} in the copy: {error}", file.display())
+            })?;
         }
         write(&file, &updated)?;
         patched += 1;
@@ -2547,22 +2583,60 @@ mod tests {
     #[test]
     fn an_ant_command_naming_another_build_file_is_sent_to_its_directory() {
         let root = Path::new("/p");
-        let command = |words: &[&str]| words.iter().map(|word| word.to_string()).collect::<Vec<_>>();
-        assert_eq!(ant_build_file_elsewhere(root, &command(&["ant", "-f", "sub/build.xml", "test"])), Some(PathBuf::from("/p/sub")));
-        assert_eq!(ant_build_file_elsewhere(root, &command(&["/opt/ant/bin/ant", "-buildfile", "./build.xml"])), None);
-        assert_eq!(ant_build_file_elsewhere(root, &command(&["ant", "test"])), None);
-        assert_eq!(ant_build_file_elsewhere(root, &command(&["mvn", "-f", "x/pom.xml"])), None);
-        assert_eq!(ant_build_file_elsewhere(root, &command(&["ant", "-f"])), None);
+        let command = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| word.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["ant", "-f", "sub/build.xml", "test"])),
+            Some(PathBuf::from("/p/sub"))
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(
+                root,
+                &command(&["/opt/ant/bin/ant", "-buildfile", "./build.xml"])
+            ),
+            None
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["ant", "test"])),
+            None
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["mvn", "-f", "x/pom.xml"])),
+            None
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["ant", "-f"])),
+            None
+        );
     }
 
     #[test]
     fn an_ant_source_root_is_the_directory_less_the_package() {
-        let root = |relative: &str, package: &str| ant_source_root(relative, &format!("// header\npackage {package};\n"));
-        assert_eq!(root("main/plugin-forms/src/org/ametys/A.java", "org.ametys").as_deref(), Some("main/plugin-forms/src"));
-        assert_eq!(root("src/main/app/Calc.java", "app").as_deref(), Some("src/main"));
+        let root = |relative: &str, package: &str| {
+            ant_source_root(relative, &format!("// header\npackage {package};\n"))
+        };
+        assert_eq!(
+            root("main/plugin-forms/src/org/ametys/A.java", "org.ametys").as_deref(),
+            Some("main/plugin-forms/src")
+        );
+        assert_eq!(
+            root("src/main/app/Calc.java", "app").as_deref(),
+            Some("src/main")
+        );
         assert_eq!(root("app/Calc.java", "app").as_deref(), Some(""));
-        assert_eq!(ant_source_root("src/Loose.java", "class Loose {}").as_deref(), Some("src"));
-        assert_eq!(root("src/elsewhere/A.java", "org.acme"), None, "a package that does not match its directory says nothing");
+        assert_eq!(
+            ant_source_root("src/Loose.java", "class Loose {}").as_deref(),
+            Some("src")
+        );
+        assert_eq!(
+            root("src/elsewhere/A.java", "org.acme"),
+            None,
+            "a package that does not match its directory says nothing"
+        );
     }
 
     /// The Ametys harness: `<junit>` inside `<jacoco:coverage>`, after the
@@ -2585,19 +2659,38 @@ mod tests {
     </target>
     <target name="quick"><junit classpath="lib/junit.jar"/></target>
 </project>"#;
-        let patched = with_ant_formatter(build, Path::new("/w/src"), Path::new("/w/platform"), Path::new("/w/testng"), Path::new("/w/classes")).expect("changed");
+        let patched = with_ant_formatter(
+            build,
+            Path::new("/w/src"),
+            Path::new("/w/platform"),
+            Path::new("/w/testng"),
+            Path::new("/w/classes"),
+        )
+        .expect("changed");
         let compile = "<mkdir dir=\"/w/classes\"/><javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\"";
         // Compiled after the classpath exists and before the coverage wrapper.
         let resolved = patched.find("<ivy:cachepath").unwrap();
         let compiled = patched.find(compile).unwrap();
         let wrapper = patched.find("<jacoco:coverage>").unwrap();
         assert!(resolved < compiled && compiled < wrapper, "{patched}");
-        assert!(patched[compiled..wrapper].contains("<path refid=\"test.classpath\"/>"), "{patched}");
+        assert!(
+            patched[compiled..wrapper].contains("<path refid=\"test.classpath\"/>"),
+            "{patched}"
+        );
         assert!(patched.contains("<junit fork=\"true\" printsummary=\"yes\"><classpath><pathelement location=\"/w/classes\"/></classpath><formatter classname=\"com.supercorp.supercov.SupercovAntFormatter\" usefile=\"false\"/>"), "{patched}");
         // An empty task gets a body.
         assert!(patched.contains("<junit classpath=\"lib/junit.jar\"><classpath><pathelement location=\"/w/classes\"/></classpath><formatter classname=\"com.supercorp.supercov.SupercovAntFormatter\" usefile=\"false\"/></junit>"), "{patched}");
         assert_eq!(patched.matches("<javac ").count(), 2);
-        assert_eq!(with_ant_formatter("<project><target name=\"t\"><echo/></target></project>", Path::new("/s"), Path::new("/p"), Path::new("/n"), Path::new("/c")), None);
+        assert_eq!(
+            with_ant_formatter(
+                "<project><target name=\"t\"><echo/></target></project>",
+                Path::new("/s"),
+                Path::new("/p"),
+                Path::new("/n"),
+                Path::new("/c")
+            ),
+            None
+        );
         // A task on the JUnit Platform gets the platform listener, compiled
         // from its own sources.
         let launcher = with_ant_formatter(
@@ -2608,9 +2701,18 @@ mod tests {
             Path::new("/w/classes"),
         )
         .expect("changed");
-        assert!(launcher.contains("<javac srcdir=\"/w/platform\""), "{launcher}");
-        assert!(launcher.contains("<classpath refid=\"cp\"/></javac>"), "{launcher}");
-        assert!(launcher.contains("<listener classname=\"com.supercorp.supercov.SupercovListener\"/>"), "{launcher}");
+        assert!(
+            launcher.contains("<javac srcdir=\"/w/platform\""),
+            "{launcher}"
+        );
+        assert!(
+            launcher.contains("<classpath refid=\"cp\"/></javac>"),
+            "{launcher}"
+        );
+        assert!(
+            launcher.contains("<listener classname=\"com.supercorp.supercov.SupercovListener\"/>"),
+            "{launcher}"
+        );
         // Inside a container that runs its tasks in order the compilation
         // goes right before the task, after what defines its classpath; a
         // copied classpath keeps no id of its own.
@@ -2622,9 +2724,15 @@ mod tests {
             Path::new("/w/classes"),
         )
         .expect("changed");
-        assert!(ordered.find("<path id=\"cp\"/>").unwrap() < ordered.find("<mkdir").unwrap(), "{ordered}");
+        assert!(
+            ordered.find("<path id=\"cp\"/>").unwrap() < ordered.find("<mkdir").unwrap(),
+            "{ordered}"
+        );
         assert!(ordered.contains("<javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{ordered}");
-        assert_eq!(without_ids("<path id='a' refid=\"b\"/>"), "<path refid=\"b\"/>");
+        assert_eq!(
+            without_ids("<path id='a' refid=\"b\"/>"),
+            "<path refid=\"b\"/>"
+        );
         // TestNG takes the listener in its own attribute, kept beside the
         // project's own listeners, and its classpath attribute is copied.
         let testng = with_ant_formatter(
@@ -2635,7 +2743,10 @@ mod tests {
             Path::new("/w/classes"),
         )
         .expect("changed");
-        assert!(testng.contains("listeners=\"a.Mine,com.supercorp.supercov.SupercovTestNGListener\""), "{testng}");
+        assert!(
+            testng.contains("listeners=\"a.Mine,com.supercorp.supercov.SupercovTestNGListener\""),
+            "{testng}"
+        );
         assert!(testng.contains("<testng listeners=\"com.supercorp.supercov.SupercovTestNGListener\" classpathref=\"cp\">"), "{testng}");
         assert!(testng.contains("<javac srcdir=\"/w/testng\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{testng}");
     }

@@ -108,7 +108,9 @@ fn attributes(text: &str) -> Vec<(String, String)> {
         let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
             break;
         };
-        let Some(close) = after[1..].find(quote) else { break };
+        let Some(close) = after[1..].find(quote) else {
+            break;
+        };
         found.push((key, unescape(&after[1..1 + close])));
         rest = &after[close + 2..];
     }
@@ -193,11 +195,30 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
     // Properties a build sets at its top level hold before any target runs:
     // read first, they win over one a target that may never run would set.
     let mut ignored = AntBuild::default();
-    read_file(root, &start, &mut properties, &mut ignored, &mut BTreeMap::new(), Pass::TopLevel);
+    read_file(
+        root,
+        &start,
+        &mut properties,
+        &mut ignored,
+        &mut BTreeMap::new(),
+        Pass::TopLevel,
+    );
     let mut compiled = BTreeMap::new();
-    read_file(root, &start, &mut properties, &mut build, &mut compiled, Pass::All);
+    read_file(
+        root,
+        &start,
+        &mut properties,
+        &mut build,
+        &mut compiled,
+        Pass::All,
+    );
     for (destination, reference) in std::mem::take(&mut build.referenced_sources) {
-        for source in build.defined_paths.get(&reference).cloned().unwrap_or_default() {
+        for source in build
+            .defined_paths
+            .get(&reference)
+            .cloned()
+            .unwrap_or_default()
+        {
             push_unique(compiled.entry(destination.clone()).or_default(), source);
         }
     }
@@ -257,7 +278,14 @@ fn read_file(
     // older way of sharing build fragments, before `<import>`.
     for (name, system) in external_entities(&text) {
         if text.contains(&format!("&{name};")) {
-            read_file(root, &directory.join(system), properties, build, compiled, pass);
+            read_file(
+                root,
+                &directory.join(system),
+                properties,
+                build,
+                compiled,
+                pass,
+            );
         }
     }
     let all = tags(&text);
@@ -295,7 +323,11 @@ fn read_file(
         if tag.name == "target" && !tag.empty {
             in_target += 1;
         }
-        if pass == Pass::TopLevel && tag.name != "property" && tag.name != "import" && tag.name != "include" {
+        if pass == Pass::TopLevel
+            && tag.name != "property"
+            && tag.name != "import"
+            && tag.name != "include"
+        {
             continue;
         }
         match tag.name.as_str() {
@@ -305,7 +337,14 @@ fn read_file(
                 if let Some(imported) = tag.attribute("file") {
                     let imported = expand(imported, properties);
                     if !imported.contains("${") {
-                        read_file(root, &directory.join(imported), properties, build, compiled, pass);
+                        read_file(
+                            root,
+                            &directory.join(imported),
+                            properties,
+                            build,
+                            compiled,
+                            pass,
+                        );
                     }
                 }
             }
@@ -318,11 +357,20 @@ fn read_file(
                     .unwrap_or_else(|| root.to_path_buf());
                 let antfile = expand(tag.attribute("antfile").unwrap_or("build.xml"), properties);
                 if !antfile.contains("${") {
-                    read_sub_build(&directory, &resolve(&directory, &antfile), properties, build, compiled);
+                    read_sub_build(
+                        &directory,
+                        &resolve(&directory, &antfile),
+                        properties,
+                        build,
+                        compiled,
+                    );
                 }
             }
             "subant" if !tag.empty => {
-                subant = Some(expand(tag.attribute("antfile").unwrap_or("build.xml"), properties));
+                subant = Some(expand(
+                    tag.attribute("antfile").unwrap_or("build.xml"),
+                    properties,
+                ));
             }
             "fileset" | "dirset" | "filelist" if subant.is_some() => {
                 let antfile = subant.clone().unwrap_or_else(|| "build.xml".into());
@@ -331,7 +379,13 @@ fn read_file(
                 };
                 let listed = if tag.name == "filelist" {
                     tag.attribute("files")
-                        .map(|files| files.split([',', ' ']).filter(|f| !f.is_empty()).map(|f| dir.join(expand(f, properties))).collect())
+                        .map(|files| {
+                            files
+                                .split([',', ' '])
+                                .filter(|f| !f.is_empty())
+                                .map(|f| dir.join(expand(f, properties)))
+                                .collect()
+                        })
                         .unwrap_or_default()
                 } else {
                     matching(&dir, tag.attribute("includes").unwrap_or("**"))
@@ -362,7 +416,9 @@ fn read_file(
                 }
             }
             "javac" => {
-                let destination = tag.attribute("destdir").and_then(|dir| known(dir, properties));
+                let destination = tag
+                    .attribute("destdir")
+                    .and_then(|dir| known(dir, properties));
                 if let Some(destination) = &destination {
                     let sources = tag
                         .attribute("srcdir")
@@ -395,7 +451,9 @@ fn read_file(
                     }
                 }
                 if let Some(reference) = tag.attribute("refid") {
-                    build.referenced_sources.push((destination.clone(), reference.to_owned()));
+                    build
+                        .referenced_sources
+                        .push((destination.clone(), reference.to_owned()));
                 }
             }
             "path" if !tag.empty && tag.attribute("id").is_some() => {
@@ -404,9 +462,15 @@ fn read_file(
             "pathelement" if defining.is_some() => {
                 let listed = tag.attribute("location").or_else(|| tag.attribute("path"));
                 let id = defining.clone().unwrap_or_default();
-                for entry in listed.map(|value| path_list(&expand(value, properties))).unwrap_or_default() {
+                for entry in listed
+                    .map(|value| path_list(&expand(value, properties)))
+                    .unwrap_or_default()
+                {
                     if let Some(directory) = known(&entry, properties) {
-                        push_unique(build.defined_paths.entry(id.clone()).or_default(), directory);
+                        push_unique(
+                            build.defined_paths.entry(id.clone()).or_default(),
+                            directory,
+                        );
                     }
                 }
             }
@@ -421,7 +485,10 @@ fn read_file(
                         .into_iter()
                         .filter(|path| path.is_dir());
                     for directory in directories {
-                        push_unique(build.defined_paths.entry(id.clone()).or_default(), directory);
+                        push_unique(
+                            build.defined_paths.entry(id.clone()).or_default(),
+                            directory,
+                        );
                     }
                 }
             }
@@ -443,7 +510,14 @@ fn read_sub_build(
     let mut inherited = properties.clone();
     inherited.insert("basedir".into(), directory.to_string_lossy().into_owned());
     let mut ignored = AntBuild::default();
-    read_file(directory, file, &mut inherited, &mut ignored, &mut BTreeMap::new(), Pass::TopLevel);
+    read_file(
+        directory,
+        file,
+        &mut inherited,
+        &mut ignored,
+        &mut BTreeMap::new(),
+        Pass::TopLevel,
+    );
     read_file(directory, file, &mut inherited, build, compiled, Pass::All);
 }
 
@@ -495,12 +569,18 @@ fn matching(directory: &Path, patterns: &str) -> Vec<PathBuf> {
                 if depth < 8 {
                     pending.push((path.clone(), depth + 1));
                 }
-                if patterns.iter().any(|pattern| ant_pattern(pattern, &relative)) {
+                if patterns
+                    .iter()
+                    .any(|pattern| ant_pattern(pattern, &relative))
+                {
                     found.push(path);
                 }
                 continue;
             }
-            if patterns.iter().any(|pattern| ant_pattern(pattern, &relative)) {
+            if patterns
+                .iter()
+                .any(|pattern| ant_pattern(pattern, &relative))
+            {
                 found.push(path);
             }
         }
@@ -518,21 +598,29 @@ fn ant_pattern(pattern: &str, path: &str) -> bool {
             (Some(&"**"), _) => {
                 names(&pattern[1..], path) || (!path.is_empty() && names(pattern, &path[1..]))
             }
-            (Some(part), Some(name)) => one(part.as_bytes(), name.as_bytes()) && names(&pattern[1..], &path[1..]),
+            (Some(part), Some(name)) => {
+                one(part.as_bytes(), name.as_bytes()) && names(&pattern[1..], &path[1..])
+            }
             _ => false,
         }
     }
     fn one(pattern: &[u8], name: &[u8]) -> bool {
         match (pattern.first(), name.first()) {
             (None, None) => true,
-            (Some(b'*'), _) => one(&pattern[1..], name) || (!name.is_empty() && one(pattern, &name[1..])),
+            (Some(b'*'), _) => {
+                one(&pattern[1..], name) || (!name.is_empty() && one(pattern, &name[1..]))
+            }
             (Some(b'?'), Some(_)) => one(&pattern[1..], &name[1..]),
             (Some(expected), Some(actual)) => expected == actual && one(&pattern[1..], &name[1..]),
             _ => false,
         }
     }
     let pattern = pattern.trim_matches('/');
-    let pattern = if pattern.ends_with('/') || pattern.is_empty() { "**" } else { pattern };
+    let pattern = if pattern.ends_with('/') || pattern.is_empty() {
+        "**"
+    } else {
+        pattern
+    };
     names(
         &pattern.split('/').collect::<Vec<_>>(),
         &path.split('/').collect::<Vec<_>>(),
@@ -747,9 +835,21 @@ mod tests {
 
     #[test]
     fn tags_skip_comments_and_keep_quoted_angle_brackets() {
-        let found = tags(r#"<?xml version="1.0"?><!-- <junit> --><project a='x>y'><junit fork="true"/></project>"#);
-        let names: Vec<_> = found.iter().map(|tag| (tag.name.as_str(), tag.closing, tag.empty)).collect();
-        assert_eq!(names, [("project", false, false), ("junit", false, true), ("project", true, false)]);
+        let found = tags(
+            r#"<?xml version="1.0"?><!-- <junit> --><project a='x>y'><junit fork="true"/></project>"#,
+        );
+        let names: Vec<_> = found
+            .iter()
+            .map(|tag| (tag.name.as_str(), tag.closing, tag.empty))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("project", false, false),
+                ("junit", false, true),
+                ("project", true, false)
+            ]
+        );
         assert_eq!(found[0].attribute("a"), Some("x>y"));
     }
 
@@ -771,7 +871,11 @@ mod tests {
 </project>"#,
         )
         .unwrap();
-        fs::write(project.join("build.properties"), "# comment\nerrorOnUnusedKeys=false\n").unwrap();
+        fs::write(
+            project.join("build.properties"),
+            "# comment\nerrorOnUnusedKeys=false\n",
+        )
+        .unwrap();
         fs::write(
             common.join("common-build.xml"),
             r#"<project name="common">
@@ -793,11 +897,22 @@ mod tests {
         )
         .unwrap();
         let build = read_ant_build(&project, &BTreeMap::new());
-        assert_eq!(build.files, [project.join("build.xml"), common.join("common-build.xml")]);
+        assert_eq!(
+            build.files,
+            [project.join("build.xml"), common.join("common-build.xml")]
+        );
         assert_eq!(build.test_roots, [project.join("test/src")]);
         assert_eq!(build.junit_files, [common.join("common-build.xml")]);
-        assert!(build.outputs.contains(&project.join("tmp")), "{:?}", build.outputs);
-        assert!(build.outputs.contains(&project.join("tmp/classes-test")), "the first tmp.dir wins: {:?}", build.outputs);
+        assert!(
+            build.outputs.contains(&project.join("tmp")),
+            "{:?}",
+            build.outputs
+        );
+        assert!(
+            build.outputs.contains(&project.join("tmp/classes-test")),
+            "the first tmp.dir wins: {:?}",
+            build.outputs
+        );
         assert_eq!(outside_anchor(&project, &build), Some(top.clone()));
         fs::remove_dir_all(top).unwrap();
     }
@@ -835,8 +950,16 @@ mod tests {
         )
         .unwrap();
         let build = read_ant_build(&project, &BTreeMap::new());
-        assert_eq!(build.test_roots, [top.join("unit")], "the top-level definition, under basedir");
-        assert!(!build.outputs.contains(&top.join("src")), "an in-place compile is not output: {:?}", build.outputs);
+        assert_eq!(
+            build.test_roots,
+            [top.join("unit")],
+            "the top-level definition, under basedir"
+        );
+        assert!(
+            !build.outputs.contains(&top.join("src")),
+            "an in-place compile is not output: {:?}",
+            build.outputs
+        );
         assert_eq!(path_list("src:lib;C:\\other"), ["src", "lib", "C:\\other"]);
         fs::remove_dir_all(top).unwrap();
     }
@@ -864,19 +987,36 @@ mod tests {
     </target>
 </project>"#,
         );
-        write("shared.xml", r#"<target name="shared"><junit><batchtest><fileset dir="shared-tests"/></batchtest></junit></target>"#);
-        write("core/core.xml", r#"<project><target name="t"><junit><batchtest><fileset dir="test"/></batchtest></junit></target></project>"#);
-        write("modules/a/build.xml", r#"<project><target name="t"><junit><batchtest><fileset dir="tests"/></batchtest></junit></target></project>"#);
+        write(
+            "shared.xml",
+            r#"<target name="shared"><junit><batchtest><fileset dir="shared-tests"/></batchtest></junit></target>"#,
+        );
+        write(
+            "core/core.xml",
+            r#"<project><target name="t"><junit><batchtest><fileset dir="test"/></batchtest></junit></target></project>"#,
+        );
+        write(
+            "modules/a/build.xml",
+            r#"<project><target name="t"><junit><batchtest><fileset dir="tests"/></batchtest></junit></target></project>"#,
+        );
         write("modules/b/notes.xml", "<project/>");
         let build = read_ant_build(&project, &BTreeMap::new());
         assert_eq!(
             build.test_roots,
-            [project.join("shared-tests"), project.join("core/test"), project.join("modules/a/tests")],
+            [
+                project.join("shared-tests"),
+                project.join("core/test"),
+                project.join("modules/a/tests")
+            ],
             "{build:?}"
         );
         assert_eq!(
             build.junit_files,
-            [project.join("shared.xml"), project.join("core/core.xml"), project.join("modules/a/build.xml")]
+            [
+                project.join("shared.xml"),
+                project.join("core/core.xml"),
+                project.join("modules/a/build.xml")
+            ]
         );
         assert!(ant_pattern("**/build.xml", "a/b/build.xml"));
         assert!(ant_pattern("mod?/*.xml", "mod1/x.xml"));
@@ -945,7 +1085,10 @@ mod tests {
         let build = read_ant_build(&project, &defines);
         assert_eq!(build.test_roots, [project.join("it")]);
         assert_eq!(outside_anchor(&project, &build), None);
-        assert_eq!(read_ant_build(&project.join("missing"), &BTreeMap::new()), AntBuild::default());
+        assert_eq!(
+            read_ant_build(&project.join("missing"), &BTreeMap::new()),
+            AntBuild::default()
+        );
         fs::remove_dir_all(project).unwrap();
     }
 }

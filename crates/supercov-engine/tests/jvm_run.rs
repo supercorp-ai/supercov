@@ -1769,14 +1769,23 @@ fn a_kotlin_logical_value_is_a_decision_unless_it_smart_casts() {
 /// PATH is as likely another tool (Anthropic's CLI installs one).
 fn apache_ant() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("ANT_HOME")?);
-    let launcher = home.join("bin").join(if cfg!(windows) { "ant.bat" } else { "ant" });
+    let launcher = home
+        .join("bin")
+        .join(if cfg!(windows) { "ant.bat" } else { "ant" });
     launcher.is_file().then_some(launcher)
+}
+
+/// The local Maven repository: under the home directory, which Windows names
+/// `USERPROFILE` and sets no `HOME` for.
+fn maven_repository() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".m2").join("repository"))
 }
 
 /// JUnit 4 and Hamcrest from the local Maven repository, or from
 /// `JUNIT4_JAR` and `HAMCREST_JAR`.
 fn junit4_jars() -> Option<(PathBuf, PathBuf)> {
-    let m2 = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".m2/repository"));
+    let m2 = maven_repository();
     let pick = |variable: &str, relative: &str| {
         std::env::var_os(variable)
             .map(PathBuf::from)
@@ -1785,7 +1794,10 @@ fn junit4_jars() -> Option<(PathBuf, PathBuf)> {
     };
     Some((
         pick("JUNIT4_JAR", "junit/junit/4.13.2/junit-4.13.2.jar")?,
-        pick("HAMCREST_JAR", "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar")?,
+        pick(
+            "HAMCREST_JAR",
+            "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar",
+        )?,
     ))
 }
 
@@ -1914,22 +1926,49 @@ fn an_ant_build_with_its_harness_beside_the_project_is_measured_per_test() {
             .find(|test| test["test"]["name"] == name)
             .unwrap_or_else(|| panic!("{name}: {executions}"))
     };
-    assert_eq!(named("app.CalcTest#clampsHighValues")["test"]["file"], "test/src/app/CalcTest.java", "{executions}");
+    assert_eq!(
+        named("app.CalcTest#clampsHighValues")["test"]["file"],
+        "test/src/app/CalcTest.java",
+        "{executions}"
+    );
     // Each test has its own lines, and the ignored one none.
-    assert_eq!(named("app.CalcTest#clampsHighValues")["files"]["main/app/src/app/Calc.java"], serde_json::json!([2]), "{executions}");
-    assert_eq!(named("app.CalcTest#namesASign")["files"]["main/app/src/app/Calc.java"], serde_json::json!([3]), "{executions}");
-    assert_eq!(named("app.CalcTest#notYet")["passed"], false, "{executions}");
-    assert_eq!(named("app.CalcTest#notYet")["files"], serde_json::json!({}), "{executions}");
+    assert_eq!(
+        named("app.CalcTest#clampsHighValues")["files"]["main/app/src/app/Calc.java"],
+        serde_json::json!([2]),
+        "{executions}"
+    );
+    assert_eq!(
+        named("app.CalcTest#namesASign")["files"]["main/app/src/app/Calc.java"],
+        serde_json::json!([3]),
+        "{executions}"
+    );
+    assert_eq!(
+        named("app.CalcTest#notYet")["passed"],
+        false,
+        "{executions}"
+    );
+    assert_eq!(
+        named("app.CalcTest#notYet")["files"],
+        serde_json::json!({}),
+        "{executions}"
+    );
     let from_suite = named("app.AllCalcTest#app.CalcTest#clampsHighValues");
-    assert_eq!(from_suite["test"]["file"], "test/src/app/AllCalcTest.java", "{executions}");
-    assert_eq!(from_suite["files"]["main/app/src/app/Calc.java"], serde_json::json!([2]), "{executions}");
+    assert_eq!(
+        from_suite["test"]["file"], "test/src/app/AllCalcTest.java",
+        "{executions}"
+    );
+    assert_eq!(
+        from_suite["files"]["main/app/src/app/Calc.java"],
+        serde_json::json!([2]),
+        "{executions}"
+    );
     std::fs::remove_dir_all(top).ok();
 }
 
 /// JUnit 5 on the platform, from the local Maven repository: what
 /// `<junitlauncher>` needs on its classpath.
 fn jupiter_jars() -> Option<Vec<PathBuf>> {
-    let m2 = PathBuf::from(std::env::var_os("HOME")?).join(".m2/repository");
+    let m2 = maven_repository()?;
     [
         "org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar",
         "org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar",
@@ -2023,7 +2062,9 @@ fn an_ant_build_on_the_junit_platform_is_measured_through_the_platform_listener(
     let tests = executions["tests"].as_array().unwrap();
     assert!(
         tests.iter().all(|test| test["attribution"] == "exact"
-            && test["files"]["src/main/app/Calc.java"].as_array().is_some_and(|lines| !lines.is_empty())),
+            && test["files"]["src/main/app/Calc.java"]
+                .as_array()
+                .is_some_and(|lines| !lines.is_empty())),
         "{executions}"
     );
     std::fs::remove_dir_all(root).ok();
@@ -2102,10 +2143,14 @@ fn a_jvm_ant_stops_for_its_timeout_still_leaves_what_it_recorded() {
     let clamps = tests
         .iter()
         .find(|test| test["test"]["name"] == "app.SlowTest#a_clamps")
-        .unwrap_or_else(|| panic!("the test before the timeout is recorded: {executions}\n{diagnostics}"));
+        .unwrap_or_else(|| {
+            panic!("the test before the timeout is recorded: {executions}\n{diagnostics}")
+        });
     assert_eq!(clamps["passed"], true, "{executions}");
     assert!(
-        clamps["files"]["src/app/Calc.java"].as_array().is_some_and(|lines| !lines.is_empty()),
+        clamps["files"]["src/app/Calc.java"]
+            .as_array()
+            .is_some_and(|lines| !lines.is_empty()),
         "{executions}"
     );
     // The test the timeout stopped is recorded once, by the JVM that ran it,
@@ -2122,7 +2167,7 @@ fn a_jvm_ant_stops_for_its_timeout_still_leaves_what_it_recorded() {
 /// TestNG and what it needs to run, from the local Maven repository: 6.14.3,
 /// the last line that ships its Ant task in the jar itself.
 fn testng_jars() -> Option<Vec<PathBuf>> {
-    let m2 = PathBuf::from(std::env::var_os("HOME")?).join(".m2/repository");
+    let m2 = maven_repository()?;
     [
         "org/testng/testng/6.14.3/testng-6.14.3.jar",
         "com/beust/jcommander/1.72/jcommander-1.72.jar",
@@ -2204,8 +2249,12 @@ fn an_ant_build_running_testng_is_measured_through_the_testng_listener() {
     .unwrap();
     let tests = executions["tests"].as_array().unwrap();
     assert!(
-        tests.iter().all(|test| test["test"]["file"] == "test/app/CalcTest.java"
-            && test["files"]["src/app/Calc.java"].as_array().is_some_and(|lines| !lines.is_empty())),
+        tests
+            .iter()
+            .all(|test| test["test"]["file"] == "test/app/CalcTest.java"
+                && test["files"]["src/app/Calc.java"]
+                    .as_array()
+                    .is_some_and(|lines| !lines.is_empty())),
         "{executions}"
     );
     std::fs::remove_dir_all(root).ok();
