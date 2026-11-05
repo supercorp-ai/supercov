@@ -54,6 +54,15 @@ docker exec ${name} node_modules/.bin/playwright test || status=$?
 docker rm -f ${name} >/dev/null
 exit $status
 `,
+  // The project mounted read-only, as a sealed worker mounts it: the code
+  // runs and records into Supercov's own directory, which stays writable.
+  'run-read-only.sh': `set -e
+docker run -d --name ${name} --user ${user} -e HOME=/tmp -v "$PWD":/workspace:ro -w /workspace ${IMAGE} sleep infinity >/dev/null
+status=0
+docker exec ${name} node -e "import('./src/grade.js').then((m) => { if (m.grade(95) !== 'A') process.exit(3); })" || status=$?
+docker rm -f ${name} >/dev/null
+exit $status
+`,
   // The same container, given the settings, and a command in it that sends
   // nothing back: the run says so rather than reading as a run of nothing.
   'run-nothing.sh': `set -e
@@ -82,6 +91,11 @@ try {
   const low = lines('a low score fails');
   assert.ok(high.includes('src/grade.js:3') && !high.includes('src/grade.js:5'), `${high}\n${measured.stderr}`);
   assert.ok(low.includes('src/grade.js:5') && !low.includes('src/grade.js:3'), `${low}\n${measured.stderr}`);
+  const sealed = run(root, binary, ['--', 'sh', 'run-read-only.sh']);
+  assert.equal(sealed.status, 0, `${sealed.stdout}${sealed.stderr}`);
+  assert.doesNotMatch(`${sealed.stdout}${sealed.stderr}`, /EROFS|read-only file system/u);
+  const summary = run(root, binary, ['runs', 'latest']).stdout;
+  assert.match(summary, /Lines +[\d.]+% \([1-9]\d*\//u, `${summary}\n${sealed.stderr}`);
   const nothing = run(root, binary, ['--', 'sh', 'run-nothing.sh']);
   assert.equal(nothing.status, 0, `${nothing.stdout}${nothing.stderr}`);
   assert.match(nothing.stderr, /warning: no test and no coverage came back from `docker exec` in supercov-docker-exec-\d+; node:\d+-bookworm-slim/u, nothing.stderr);

@@ -1089,11 +1089,21 @@ fn add_settings(
     }
     let host = &mut config["HostConfig"];
     let mut binds = vec![json!(format!("{mount}:{mount}"))];
-    if mounted.is_some() {
+    if let Some(seen_at) = mounted {
         binds.extend(settings.links.iter().map(|link| {
             let link = link.display();
             json!(format!("{link}:{link}:ro"))
         }));
+        // What the run's processes write -- evidence, logs -- is under the
+        // copy's own `.supercov`, and its paths are moved to where the
+        // container sees the copy. A copy mounted read-only (`.:/workspace:ro`,
+        // a sealed worker) made the first probe fail with EROFS: Supercov's
+        // directory is writable there, whatever the rest of the mount is.
+        binds.push(json!(format!(
+            "{}:{}",
+            settings.copy.join(".supercov").display(),
+            seen_at.join(".supercov").display()
+        )));
     }
     match host.get_mut("Binds").and_then(Value::as_array_mut) {
         Some(existing) => existing.extend(binds),
@@ -1816,12 +1826,19 @@ mod tests {
         };
         let environment = |sent: &Value| string_array(sent.get("Env"));
 
-        // A pulled image runs the copy mounted over it.
+        let binds = |sent: &Value| string_array(sent["HostConfig"].get("Binds"));
+        let own = copy.join(".supercov").display().to_string();
+        // A pulled image runs the copy mounted over it, read-only as a sealed
+        // worker mounts it: Supercov's own directory is writable there.
         let sent = post(
             "/containers/create",
             json!({"Image": "pulled-playwright", "HostConfig": {"Mounts": [
-                {"Type": "bind", "Source": copy, "Target": "/workspace"},
+                {"Type": "bind", "Source": copy, "Target": "/workspace", "ReadOnly": true},
             ]}}),
+        );
+        assert!(
+            binds(&sent).contains(&format!("{own}:/workspace/.supercov")),
+            "{sent}"
         );
         assert!(
             environment(&sent).contains(&"SUPERCOV_PROJECT_ROOT=/workspace".to_owned()),
@@ -1845,6 +1862,10 @@ mod tests {
         );
         assert!(
             environment(&sent).contains(&"SUPERCOV_PROJECT_ROOT=/outer/copy".to_owned()),
+            "{sent}"
+        );
+        assert!(
+            binds(&sent).contains(&format!("{own}:/outer/copy/.supercov")),
             "{sent}"
         );
         // A directory of the copy is some of its code and none of its
