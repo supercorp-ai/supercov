@@ -453,14 +453,21 @@ fn node_options(preload: &Path) -> String {
     // this.
     [
         std::env::var("NODE_OPTIONS").ok(),
-        Some("--enable-source-maps".into()),
-        Some(format!("--import={}", crate::workspace::file_url(&preload))),
+        Some(own_node_options(&preload)),
     ]
     .into_iter()
     .flatten()
     .filter(|value| !value.is_empty())
     .collect::<Vec<_>>()
     .join(" ")
+}
+
+/// Supercov's part of `NODE_OPTIONS`, without the shell's.
+fn own_node_options(preload: &Path) -> String {
+    format!(
+        "--enable-source-maps --import={}",
+        crate::workspace::file_url(preload)
+    )
 }
 
 /// Fingerprint the current JavaScript project using the same discovery and
@@ -951,6 +958,7 @@ pub fn run_direct_javascript(
         &root,
         &workspace,
         &docker_state,
+        &frontend.preload_path,
         &servers,
         &environment,
         &mut overrides,
@@ -1078,6 +1086,12 @@ pub fn run_direct_javascript(
             let _ = writeln!(diagnostics, "[supercov] {note}");
         }
     }
+    // What the run's settings were given to in containers, to say so when
+    // nothing came back from there.
+    #[cfg(unix)]
+    let in_containers = crate::docker_proxy::measured(&docker_state.join("containers.jsonl"));
+    #[cfg(not(unix))]
+    let in_containers = Vec::<String>::new();
     let test_command_ms = execution
         .phases
         .iter()
@@ -1186,10 +1200,20 @@ pub fn run_direct_javascript(
             if left_out.len() > NAMED {
                 named.push_str(&format!(" and {} more", left_out.len() - NAMED));
             }
-            let _ = writeln!(
-                diagnostics,
-                "[supercov] warning: the tests could not load {named}, which the project has and its isolated copy does not. The copy leaves out build output (dist/, build/ and the like), and nothing built it there: build in the measured command, as `supercov -- sh -c \"npm run build && npm test\"`"
-            );
+            // A command that builds already was not short of a build: its
+            // build failed, or wrote elsewhere, and saying to add one sent
+            // its author after the wrong thing.
+            let _ = if command_builds(&request.command, &workspace) {
+                writeln!(
+                    diagnostics,
+                    "[supercov] warning: the tests could not load {named}, which the project has and its isolated copy does not. The command builds, and its build did not make them in the copy: if the build failed, its output above says why"
+                )
+            } else {
+                writeln!(
+                    diagnostics,
+                    "[supercov] warning: the tests could not load {named}, which the project has and its isolated copy does not. The copy leaves out build output (dist/, build/ and the like), and nothing built it there: build in the measured command, as `supercov -- sh -c \"npm run build && npm test\"`"
+                )
+            };
         }
         let _ = std::fs::remove_file(&missing_loads);
     }
@@ -1400,6 +1424,23 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
     let mut entries =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
+    // Containers that took the run's settings and sent nothing back: a
+    // boundary the run could not see past, not a suite that ran nothing.
+    // The run said "Complete" with no test in it, and no word why.
+    if !in_containers.is_empty()
+        && entries
+            .iter()
+            .any(|entry| entry.path == "results/command/mcdc.json")
+        && !entries
+            .iter()
+            .any(|entry| entry.path.starts_with("server/"))
+    {
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] warning: no test and no coverage came back from {}, which ran with the run's settings: what ran there is missing from this run, not zero. A container's evidence reaches the run through the copy Supercov ran the command in, mounted into it, or through the project's .supercov directory.",
+            crate::run_merge::listed(&in_containers)
+        );
+    }
     if let Some(support) = &support {
         entries.push(EvidenceArchiveEntry {
             path: crate::support_reach::ARCHIVE_PATH.into(),
@@ -1568,6 +1609,33 @@ fn left_out_loads(root: &Path, workspace: &Path, notes: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether the command builds: a word of it, or of a `package.json` script
+/// it runs, directly or through other scripts, is a build (`build`,
+/// `build:web`, `turbo run build`, `tsc --build`).
+fn command_builds(command: &[String], workspace: &Path) -> bool {
+    let scripts = std::fs::read_to_string(workspace.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|package| package.get("scripts").cloned())
+        .unwrap_or_default();
+    let mut texts = vec![command.join(" ")];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(text) = texts.pop() {
+        for word in text.split(|c: char| c.is_whitespace() || "&|;()\"'".contains(c)) {
+            let word = word.trim_start_matches('-');
+            if word == "build" || word.starts_with("build:") || word.ends_with(":build") {
+                return true;
+            }
+            if let Some(script) = scripts.get(word).and_then(serde_json::Value::as_str)
+                && seen.insert(word.to_owned())
+            {
+                texts.push(script.to_owned());
+            }
+        }
+    }
+    false
+}
+
 fn companion_run_id(run_id: &str, nth: usize) -> String {
     match run_id
         .strip_prefix("run_")
@@ -1585,10 +1653,12 @@ fn companion_run_id(run_id: &str, nth: usize) -> String {
 /// Go or Java server's windows and a Node server's evidence are written where
 /// the run reads them. None when the daemon is not a local socket.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn start_docker_relay(
     root: &Path,
     workspace: &Path,
     docker_state: &Path,
+    preload: &Path,
     servers: &[Server],
     environment: &BTreeMap<String, String>,
     overrides: &mut BTreeMap<String, String>,
@@ -1608,11 +1678,32 @@ fn start_docker_relay(
     let settings = crate::docker_proxy::ProxySettings {
         copy: workspace.to_owned(),
         mount: root.join(".supercov"),
+        // Each package in the copy's node_modules links to the project's.
+        links: crate::workspace::canonicalize_simplified(root.join("node_modules"))
+            .into_iter()
+            .filter(|modules| modules.is_dir())
+            .collect(),
         // Each server's settings went into the overrides as it was prepared.
         environment: overrides
             .iter()
             .filter(|(name, _)| names.contains(*name))
             .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        // A test runner `docker exec` starts where the copy is mounted runs
+        // as the command would: under the preload, with the generated
+        // configurations. The shell's own `PATH` and options are this
+        // machine's, not the container's.
+        exec_environment: overrides
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "PATH" | "BUN_OPTIONS"))
+            .map(|(name, value)| {
+                let value = if name == "NODE_OPTIONS" {
+                    own_node_options(preload)
+                } else {
+                    value.clone()
+                };
+                (name.clone(), value)
+            })
             .collect(),
         fingerprint: servers
             .iter()
@@ -1874,6 +1965,43 @@ mod tests {
 
     use super::*;
     use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
+
+    /// A command that builds, itself or through the scripts it runs, is not
+    /// told to build: its build is what to look at.
+    #[test]
+    fn a_command_builds_through_its_words_or_its_scripts() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-js-builds-{}-{}",
+            std::process::id(),
+            now_nonce()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts": {"ci": "npm run prepare && npm test", "prepare": "turbo run build:web", "test": "playwright test", "loop": "npm run loop"}}"#,
+        )
+        .unwrap();
+        let builds = |command: &[&str]| {
+            command_builds(
+                &command
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+                &root,
+            )
+        };
+        assert!(builds(&[
+            "sh",
+            "-c",
+            "npm run build && npx playwright test"
+        ]));
+        assert!(builds(&["npx", "tsc", "--build"]));
+        assert!(builds(&["npm", "run", "ci"]));
+        assert!(!builds(&["npm", "test"]));
+        assert!(!builds(&["npm", "run", "loop"]));
+        assert!(!builds(&["node", "--test", "test/build.test.js"]));
+    }
 
     /// A run that stops between writing its state and finishing is marked
     /// failed, in words about the run it was, and releases its lock.

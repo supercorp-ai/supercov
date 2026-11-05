@@ -18,6 +18,13 @@
 //! - an image an earlier run recorded as built from source identical to this
 //!   run's: a build that found everything cached returns it, unchanged.
 //!
+//! A container the copy is mounted into holds its code too, whatever its
+//! image: a `node` or Playwright image with `.:/workspace`. It is measured
+//! the same way, with each of the run's paths into the copy moved to where
+//! the container sees it. A command `docker exec` starts in such a container
+//! -- a test runner, most often -- is given the test command's own settings,
+//! moved the same way, so it runs as it would have run beside the run.
+//!
 //! An image built from an earlier copy is left alone, and the run says so: its
 //! probes were placed in other source. At the end the run stops the
 //! containers it measured, and the rest of their compose projects, so each
@@ -51,8 +58,15 @@ pub struct ProxySettings {
     pub copy: PathBuf,
     /// Mounted into each measured container at the same path.
     pub mount: PathBuf,
+    /// What the copy's links point into (the project's `node_modules`):
+    /// mounted, read-only and at the same path, into a container the copy
+    /// is mounted into, so the copy's dependencies resolve there.
+    pub links: Vec<PathBuf>,
     /// The run's variables each measured container is given.
     pub environment: Vec<(String, String)>,
+    /// The test command's own variables, which a command `docker exec`
+    /// starts in a container the copy is mounted into is given.
+    pub exec_environment: Vec<(String, String)>,
     /// The source the run's servers were instrumented from.
     pub fingerprint: String,
     /// Images earlier runs recorded, by id, with their source fingerprint.
@@ -576,8 +590,25 @@ fn relay_messages(
         };
         let (method, path) = endpoint(&request);
         let creating = method == "POST" && path == "/containers/create";
+        let exec = (method == "POST")
+            .then(|| exec_container(path))
+            .flatten()
+            .map(str::to_owned);
         let mut created_context = None;
-        if creating {
+        if let Some(container) = exec {
+            let body = read_body(&request, client_reader)?;
+            let body = match serde_json::from_slice::<Value>(&body) {
+                Ok(config) => {
+                    serde_json::to_vec(&shared.instrument_exec(&container, config)).unwrap_or(body)
+                }
+                Err(_) => body,
+            };
+            request.without("transfer-encoding");
+            request.set("Content-Length", body.len().to_string());
+            request.write(upstream_writer)?;
+            upstream_writer.write_all(&body)?;
+            upstream_writer.flush()?;
+        } else if creating {
             let body = read_body(&request, client_reader)?;
             let (body, context) = match serde_json::from_slice::<Value>(&body) {
                 Ok(config) => {
@@ -740,6 +771,7 @@ impl Shared {
         let project = label("com.docker.compose.project");
         let service = label("com.docker.compose.service");
         self.rewrite_socket_mounts(&mut config);
+        let mounted = mounted_copy(&create_binds(&config), &self.settings.copy);
         let mut context = CreateContext {
             measured: false,
             image: image.clone(),
@@ -794,8 +826,12 @@ impl Shared {
         } else {
             None
         };
-        if decision != Some(true) {
+        if decision != Some(true) && mounted.is_none() {
             return (config, context);
+        }
+        // What runs is the copy mounted over whatever the image holds.
+        if mounted.is_some() {
+            context.note = None;
         }
         let image_environment = inspected
             .get("Config")
@@ -810,9 +846,71 @@ impl Shared {
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
-        add_settings(&mut config, &self.settings, &image_environment);
+        add_settings(
+            &mut config,
+            &self.settings,
+            &image_environment,
+            mounted.as_deref(),
+        );
         context.measured = true;
         (config, context)
+    }
+
+    /// An exec's configuration, with the test command's settings when the
+    /// container it runs in has the copy mounted. Settings the exec names
+    /// itself are replaced; `NODE_OPTIONS` joins the container's own.
+    fn instrument_exec(&self, container: &str, mut config: Value) -> Value {
+        let Some(inspected) = daemon_request(
+            &self.upstream,
+            "GET",
+            &format!("/containers/{}/json", url_path_segment(container)),
+            None,
+        )
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok()) else {
+            return config;
+        };
+        let Some(seen_at) = mounted_copy(&inspected_binds(&inspected), &self.settings.copy) else {
+            return config;
+        };
+        let mut environment = string_array(config.get("Env"));
+        let own = |environment: &[String], name: &str| {
+            environment
+                .iter()
+                .chain(&string_array(inspected["Config"].get("Env")))
+                .find_map(|entry| {
+                    entry
+                        .split_once('=')
+                        .filter(|(key, _)| *key == name)
+                        .map(|(_, value)| value.to_owned())
+                })
+        };
+        for (name, value) in &self.settings.exec_environment {
+            let value = moved(value, &self.settings.copy, &seen_at);
+            let value = match (name.as_str(), own(&environment, name)) {
+                ("NODE_OPTIONS", Some(theirs)) if !theirs.is_empty() => {
+                    format!("{theirs} {value}")
+                }
+                _ => value,
+            };
+            environment.retain(|entry| entry.split_once('=').is_none_or(|(key, _)| key != name));
+            environment.push(format!("{name}={value}"));
+        }
+        config["Env"] = json!(environment);
+        let line = json!({
+            "exec": container,
+            "image": inspected["Config"]["Image"],
+            "measured": true,
+        });
+        // Under the lock the creations' lines are written under: execs run
+        // side by side, and so do creations.
+        let _created = self.created.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Ok(mut file) = fs::open_with(
+            fs::OpenOptions::new().create(true).append(true),
+            &self.settings.state,
+        ) {
+            let _ = writeln!(file, "{line}");
+        }
+        config
     }
 
     /// A bind of the relay's own socket is a bind of the daemon's: inside a
@@ -948,24 +1046,19 @@ fn add_settings(
     config: &mut Value,
     settings: &ProxySettings,
     image_environment: &BTreeMap<String, String>,
+    mounted: Option<&Path>,
 ) {
-    let mut environment = config
-        .get("Env")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut environment = string_array(config.get("Env"));
     let own = |environment: &Vec<String>, name: &str| {
         environment
             .iter()
             .any(|entry| entry.split_once('=').is_some_and(|(key, _)| key == name))
     };
     for (name, value) in &settings.environment {
+        let value = &mounted.map_or_else(
+            || value.clone(),
+            |seen_at| moved(value, &settings.copy, seen_at),
+        );
         let value = match name.as_str() {
             "PYTHONPATH" | "RUBYOPT" => {
                 joined_with_image(name, value, image_environment.get(name).map(String::as_str))
@@ -995,11 +1088,111 @@ fn add_settings(
         config["HostConfig"] = json!({});
     }
     let host = &mut config["HostConfig"];
-    let bind = json!(format!("{mount}:{mount}"));
-    match host.get_mut("Binds").and_then(Value::as_array_mut) {
-        Some(binds) => binds.push(bind),
-        None => host["Binds"] = json!([bind]),
+    let mut binds = vec![json!(format!("{mount}:{mount}"))];
+    if mounted.is_some() {
+        binds.extend(settings.links.iter().map(|link| {
+            let link = link.display();
+            json!(format!("{link}:{link}:ro"))
+        }));
     }
+    match host.get_mut("Binds").and_then(Value::as_array_mut) {
+        Some(existing) => existing.extend(binds),
+        None => host["Binds"] = json!(binds),
+    }
+}
+
+/// The container a `POST /containers/{id}/exec` creates an exec in.
+fn exec_container(path: &str) -> Option<&str> {
+    path.strip_prefix("/containers/")?
+        .strip_suffix("/exec")
+        .filter(|container| !container.is_empty() && !container.contains('/'))
+}
+
+/// A create request's bind mounts, as (host path, container path): the
+/// `Binds` the CLI sends and the `Mounts` compose and the SDKs send. A named
+/// volume is no host path, and is left out.
+fn create_binds(config: &Value) -> Vec<(PathBuf, PathBuf)> {
+    let host = &config["HostConfig"];
+    let binds = string_array(host.get("Binds"))
+        .into_iter()
+        .filter_map(|bind| {
+            let mut parts = bind.splitn(3, ':');
+            Some((parts.next()?.to_owned(), parts.next()?.to_owned()))
+        });
+    let mounts = host
+        .get("Mounts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|mount| mount.get("Type").and_then(Value::as_str) == Some("bind"))
+        .filter_map(|mount| {
+            Some((
+                mount.get("Source")?.as_str()?.to_owned(),
+                mount.get("Target")?.as_str()?.to_owned(),
+            ))
+        });
+    binds
+        .chain(mounts)
+        .filter(|(source, _)| source.starts_with('/'))
+        .map(|(source, target)| (PathBuf::from(source), PathBuf::from(target)))
+        .collect()
+}
+
+/// A container's bind mounts as the daemon reports them.
+fn inspected_binds(inspected: &Value) -> Vec<(PathBuf, PathBuf)> {
+    inspected
+        .get("Mounts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|mount| mount.get("Type").and_then(Value::as_str) == Some("bind"))
+        .filter_map(|mount| {
+            Some((
+                PathBuf::from(mount.get("Source")?.as_str()?),
+                PathBuf::from(mount.get("Destination")?.as_str()?),
+            ))
+        })
+        .collect()
+}
+
+/// Where a container with these binds sees the copy: under the deepest
+/// bind that holds it, the copy itself or a directory above it. A bind of
+/// one directory inside the copy holds part of its code and none of its
+/// `.supercov`, and is not the copy.
+fn mounted_copy(binds: &[(PathBuf, PathBuf)], copy: &Path) -> Option<PathBuf> {
+    // The daemon may name the copy by its resolved path (`/private/var` for
+    // macOS's `/var`).
+    let resolved = fs::canonicalize(copy).ok();
+    binds
+        .iter()
+        .filter_map(|(source, target)| {
+            [Some(copy), resolved.as_deref()]
+                .into_iter()
+                .flatten()
+                .find_map(|copy| copy.strip_prefix(source).ok())
+                .map(|inside| (source.components().count(), target.join(inside)))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, seen_at)| seen_at)
+}
+
+/// A setting's value with each path into the copy moved to where a
+/// container sees the copy.
+fn moved(value: &str, copy: &Path, seen_at: &Path) -> String {
+    value.replace(&copy.display().to_string(), &seen_at.display().to_string())
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What a variable a runtime needs is in a container whose image sets it
@@ -1095,6 +1288,29 @@ fn write_registry(path: &Path, registry: &BTreeMap<String, String>) {
     }
 }
 
+/// What the relay gave the run's settings: each container, by its compose
+/// service or image, and each command `docker exec` started in one.
+pub fn measured(state: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(state) else {
+        return Vec::new();
+    };
+    let mut measured = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line.get("measured").and_then(Value::as_bool) == Some(true))
+        .filter_map(|line| {
+            let text = |name: &str| line.get(name).and_then(Value::as_str).map(str::to_owned);
+            match text("exec") {
+                Some(container) => Some(format!("`docker exec` in {container}")),
+                None => text("service").or_else(|| text("image")),
+            }
+        })
+        .collect::<Vec<_>>();
+    measured.sort();
+    measured.dedup();
+    measured
+}
+
 /// The notes the relay recorded about containers it left alone.
 pub fn notes(state: &Path) -> Vec<String> {
     let Ok(text) = fs::read_to_string(state) else {
@@ -1137,11 +1353,13 @@ mod tests {
     /// container configuration it was asked to create.
     fn fake_daemon(socket: &Path) -> mpsc::Receiver<Value> {
         let listener = UnixListener::bind(socket).unwrap();
+        let socket_directory = socket.parent().unwrap().to_owned();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
                 let sender = sender.clone();
+                let socket_directory = socket_directory.clone();
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut writer = stream;
@@ -1201,6 +1419,31 @@ mod tests {
                                 "200 OK",
                                 &json!({"Id": id, "Created": created, "Config": {"Env": ["PYTHONPATH=/srv/app"]}}).to_string(),
                             );
+                        } else if method == "GET"
+                            && let Some(container) = path
+                                .strip_prefix("/containers/")
+                                .and_then(|rest| rest.strip_suffix("/json"))
+                        {
+                            // The suite's test container has the copy
+                            // mounted; any other has nothing mounted.
+                            let copy = socket_directory.join("copy");
+                            let mounts = if container == "tests" {
+                                json!([{"Type": "bind", "Source": copy, "Destination": "/workspace"}])
+                            } else {
+                                json!([])
+                            };
+                            respond(
+                                &mut writer,
+                                "200 OK",
+                                &json!({
+                                    "Mounts": mounts,
+                                    "Config": {"Image": "playwright", "Env": ["NODE_OPTIONS=--max-old-space-size=4096"]},
+                                })
+                                .to_string(),
+                            );
+                        } else if method == "POST" && path.ends_with("/exec") {
+                            sender.send(serde_json::from_slice(&body).unwrap()).unwrap();
+                            respond(&mut writer, "201 Created", r#"{"Id":"e1"}"#);
                         } else if method == "POST" && path == "/containers/create" {
                             let config: Value = serde_json::from_slice(&body).unwrap();
                             let image = config["Image"].as_str().unwrap_or("").to_owned();
@@ -1267,9 +1510,23 @@ mod tests {
         ProxySettings {
             copy: directory.join("copy"),
             mount: directory.join("mount"),
+            links: vec![directory.join("project/node_modules")],
             environment: vec![
                 ("SUPERCOV_RUN".into(), "run_1".into()),
                 ("PYTHONPATH".into(), "/runtime/python:/host/path".into()),
+            ],
+            exec_environment: vec![
+                (
+                    "NODE_OPTIONS".into(),
+                    format!(
+                        "--import=file://{}/.supercov/node_modules/register.mjs",
+                        directory.join("copy").display()
+                    ),
+                ),
+                (
+                    "SUPERCOV_PROJECT_ROOT".into(),
+                    directory.join("copy").display().to_string(),
+                ),
             ],
             fingerprint: "source-a".into(),
             registry: directory.join("registry.json"),
@@ -1501,6 +1758,99 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A Playwright image with the copy mounted at `/workspace`, and the
+    /// suite's tests started in it with `docker exec`: the container holds
+    /// the copy's code, and the tests run as the command would, each path
+    /// into the copy moved to where the container sees it.
+    #[test]
+    fn a_container_the_copy_is_mounted_into_is_measured_and_an_exec_in_it_runs_as_the_command() {
+        let directory = temporary("mounted");
+        let daemon = directory.join("d.sock");
+        let created = fake_daemon(&daemon);
+        let copy = directory.join("copy");
+        let settings = ProxySettings {
+            environment: vec![("SUPERCOV_PROJECT_ROOT".into(), copy.display().to_string())],
+            ..settings(&directory)
+        };
+        let proxy = DockerProxy::start(&directory.join("p.sock"), &daemon, settings).unwrap();
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut post = |path: &str, body: Value| {
+            let body = body.to_string();
+            exchange(
+                &mut stream,
+                &mut reader,
+                &format!(
+                    "POST {path} HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            );
+            created.recv_timeout(Duration::from_secs(5)).unwrap()
+        };
+        let environment = |sent: &Value| string_array(sent.get("Env"));
+
+        // A pulled image runs the copy mounted over it.
+        let sent = post(
+            "/containers/create",
+            json!({"Image": "pulled-playwright", "HostConfig": {"Mounts": [
+                {"Type": "bind", "Source": copy, "Target": "/workspace"},
+            ]}}),
+        );
+        assert!(
+            environment(&sent).contains(&"SUPERCOV_PROJECT_ROOT=/workspace".to_owned()),
+            "{sent}"
+        );
+        assert!(environment(&sent).contains(&format!("{CONTAINER_VARIABLE}=1")));
+        let project = directory.join("project/node_modules").display().to_string();
+        assert!(
+            sent["HostConfig"]["Binds"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(format!("{project}:{project}:ro"))),
+            "{sent}"
+        );
+        // A directory of the copy is some of its code and none of its
+        // runtime: not the copy.
+        let sent = post(
+            "/containers/create",
+            json!({"Image": "pulled-api", "HostConfig": {"Binds": [
+                format!("{}/src:/app/src:ro", copy.display()),
+                "data:/var/lib/data",
+            ]}}),
+        );
+        assert!(sent.get("Env").is_none(), "{sent}");
+
+        // The tests, started in the container: the command's settings join
+        // the exec's own, and the container's `NODE_OPTIONS`.
+        let sent = post(
+            "/v1.45/containers/tests/exec",
+            json!({"Cmd": ["npx", "playwright", "test"], "Env": ["CI=1"]}),
+        );
+        let exec = environment(&sent);
+        assert!(exec.contains(&"CI=1".to_owned()), "{sent}");
+        assert!(
+            exec.contains(&"SUPERCOV_PROJECT_ROOT=/workspace".to_owned()),
+            "{sent}"
+        );
+        assert!(
+            exec.contains(
+                &"NODE_OPTIONS=--max-old-space-size=4096 --import=file:///workspace/.supercov/node_modules/register.mjs"
+                    .to_owned()
+            ),
+            "{sent}"
+        );
+        // An exec where the copy is not mounted is passed on as it came.
+        let sent = post("/containers/db/exec", json!({"Cmd": ["psql"]}));
+        assert_eq!(sent, json!({"Cmd": ["psql"]}));
+        drop(stream);
+        proxy.finish();
+        assert_eq!(
+            measured(&directory.join("state/containers.jsonl")),
+            ["`docker exec` in tests", "pulled-playwright"]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn times_the_daemon_prints_are_read_to_the_millisecond() {
         assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
@@ -1609,7 +1959,7 @@ mod tests {
         };
         // No HostConfig at all, and a cache prefix of the container's own.
         let mut bare = json!({"Image": "app", "Env": ["PYTHONPYCACHEPREFIX=/mine", "KEEP=1", "SUPERCOV_CONTAINER=0"]});
-        add_settings(&mut bare, &settings(&directory), &BTreeMap::new());
+        add_settings(&mut bare, &settings(&directory), &BTreeMap::new(), None);
         let env = environment(&bare);
         assert!(
             env.contains(&"PYTHONPYCACHEPREFIX=/mine".to_owned()),
@@ -1626,10 +1976,10 @@ mod tests {
         assert_eq!(bare["HostConfig"]["Binds"], json!([mount]));
         // A HostConfig that is not an object, and one without Binds.
         let mut odd = json!({"HostConfig": null});
-        add_settings(&mut odd, &settings(&directory), &BTreeMap::new());
+        add_settings(&mut odd, &settings(&directory), &BTreeMap::new(), None);
         assert_eq!(odd["HostConfig"]["Binds"], json!([mount]));
         let mut unbound = json!({"HostConfig": {"Binds": "not a list", "Privileged": true}});
-        add_settings(&mut unbound, &settings(&directory), &BTreeMap::new());
+        add_settings(&mut unbound, &settings(&directory), &BTreeMap::new(), None);
         assert_eq!(unbound["HostConfig"]["Binds"], json!([mount]));
         assert_eq!(unbound["HostConfig"]["Privileged"], json!(true));
         // The image's own prefix stays too.
@@ -1638,6 +1988,7 @@ mod tests {
             &mut imaged,
             &settings(&directory),
             &BTreeMap::from([("PYTHONPYCACHEPREFIX".to_owned(), "/image".to_owned())]),
+            None,
         );
         assert!(
             !environment(&imaged)
@@ -2069,7 +2420,7 @@ mod tests {
             ..settings(&directory)
         };
         let mut config = json!({});
-        add_settings(&mut config, &bare, &BTreeMap::new());
+        add_settings(&mut config, &bare, &BTreeMap::new(), None);
         assert_eq!(
             config["Env"],
             json!([

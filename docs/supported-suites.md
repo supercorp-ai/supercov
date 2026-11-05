@@ -710,6 +710,37 @@ copy before its container starts, so an image left over from an earlier run
 is never used. An image built from an earlier copy, by a command outside the
 run, is left as it is, and the run says to build it in the test command.
 
+A container the project is mounted into runs the copy's code whatever its
+image, as `.:/workspace` in a compose file does: Supercov runs the command
+in the copy, so the mount is of the copy. It gets the run's settings with
+each path into the copy moved to where the container sees it, and the
+project's `node_modules`, which the copy's packages link to, mounted
+read-only at its own path. A mount of one directory of the project
+(`./src:/app/src`) is not the copy, and is left alone.
+
+The tests can run in such a container too. A command `docker exec` (or
+`docker compose exec`) starts in it, `npx playwright test` say, gets the
+test command's settings, moved the same way, with `NODE_OPTIONS` added to
+the container's own. Playwright then runs under Supercov's preload and
+generated configuration, as it does beside Supercov, and each test is
+credited with what it ran:
+
+```yaml
+services:
+  tests:
+    image: mcr.microsoft.com/playwright:v1.56.0-noble
+    volumes: [".:/workspace"]
+    working_dir: /workspace
+    command: sleep infinity
+```
+
+```sh
+npx supercov -- sh -c "docker compose up -d && docker compose exec tests npx playwright test"
+```
+
+When containers were given the run's settings and no test or coverage came
+back from them, the run says so: what ran there is missing, not zero.
+
 - Images pulled from a registry (`image:` with no `build:`, `postgres:16`)
   run code nobody instrumented, and are left as they are.
 - testcontainers' reaper, Ryuk, is pointed at the daemon's own socket
