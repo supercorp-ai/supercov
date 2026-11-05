@@ -14957,7 +14957,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2462 => main.rs:2462",
+            "fs.canonicalize#main.rs:2463 => main.rs:2463",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:1673 => javascript_frontend.rs:1673",
         ],
@@ -16990,18 +16990,18 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
         // The project's tree walked, then the copy's: the seventh listing.
-        ("fs.read_dir#jvm_project.rs:173", "jvm_project.rs:173"),
-        ("fs.read_dir#jvm_project.rs:173@7", "jvm_project.rs:173"),
+        ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
+        ("fs.read_dir#jvm_project.rs:281@7", "jvm_project.rs:281"),
         (
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2006", "jvm_run.rs:2006"),
-        ("fs.create_dir_all#jvm_run.rs:2022", "jvm_run.rs:2022"),
-        ("fs.create_dir_all#jvm_run.rs:2032", "jvm_run.rs:2032"),
-        ("fs.write#jvm_run.rs:2006", "jvm_run.rs:2006"),
-        ("fs.write#jvm_run.rs:2022", "jvm_run.rs:2022"),
+        ("fs.create_dir_all#jvm_run.rs:2487", "jvm_run.rs:2487"),
+        ("fs.create_dir_all#jvm_run.rs:2503", "jvm_run.rs:2503"),
+        ("fs.create_dir_all#jvm_run.rs:2513", "jvm_run.rs:2513"),
+        ("fs.write#jvm_run.rs:2487", "jvm_run.rs:2487"),
+        ("fs.write#jvm_run.rs:2503", "jvm_run.rs:2503"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18367,8 +18367,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:1509", "jvm_run.rs:1509"),
-                ("fs.read_dir#jvm_project.rs:173", "jvm_project.rs:173"),
+                ("fs.canonicalize#jvm_run.rs:1961", "jvm_run.rs:1961"),
+                ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
@@ -19712,5 +19712,128 @@ describe('group', () => { run('wrapped', wrapped); });
         adapted.status.success(),
         "adapted Bun: {}",
         String::from_utf8_lossy(&adapted.stderr)
+    );
+}
+
+/// An Ant build is read before it runs: what it compiles is its product code,
+/// what it writes into is not, and `SUPERCOV_TEST_ROOTS` says where its tests
+/// are when its own words cannot. A stand-in for Ant shows what Supercov
+/// decided without needing one: it runs no task, so it records nothing, and
+/// the run says what an Ant build has to reach.
+#[cfg(unix)]
+#[test]
+fn an_ant_build_is_read_before_it_runs() {
+    let project = Project::empty("ant-read");
+    project.write(
+        "build.xml",
+        r#"<project default="test"><target name="test"><javac srcdir="src" destdir="classes"/><junit><batchtest><fileset dir="checks"/></batchtest></junit></target></project>"#,
+    );
+    project.write(
+        "src/app/Calc.java",
+        "package app;\npublic class Calc { public static int twice(int x) { return 2 * x; } }\n",
+    );
+    project.write(
+        "checks/app/CalcTest.java",
+        "package app;\npublic class CalcTest {}\n",
+    );
+    // Java the build compiled into place earlier is output, not source.
+    project.write("classes/app/Stale.java", "package app;\nclass Stale {}\n");
+    // A file whose package is not where it sits says nothing of its root.
+    project.write(
+        "src/misplaced/Odd.java",
+        "package elsewhere;\nclass Odd {}\n",
+    );
+    project.write_script("ant", "#!/bin/sh\nexit 0\n");
+    project.write_script("ant.bat", "#!/bin/sh\nexit 0\n");
+
+    let ran = project.supercov(&["--", "./ant", "test"]);
+    let stderr = ran.stderr();
+    assert_ne!(ran.code(), 0, "{stderr}");
+    contains_all(
+        &stderr,
+        &[
+            "instrumenting 2 source file(s)",
+            "An Ant build reports through its <junit>, <junitlauncher> and <testng> tasks",
+        ],
+    );
+    // A blank override is no override.
+    let blank = project.supercov_with(&["--", "./ant", "test"], &[("SUPERCOV_TEST_ROOTS", " ")]);
+    assert!(
+        blank.stderr().contains("instrumenting 2 source file(s)"),
+        "{}",
+        blank.stderr()
+    );
+    // Named as tests, the product code leaves nothing to measure.
+    let named = project.supercov_with(&["--", "./ant", "test"], &[("SUPERCOV_TEST_ROOTS", "src")]);
+    assert!(
+        named
+            .stderr()
+            .contains("no source root of this Ant build holds product code"),
+        "{}",
+        named.stderr()
+    );
+
+    // A build that runs its tests through none of the tasks Supercov reads
+    // leaves them unattributed, and says so in Ant's terms.
+    project.write(
+        "build.xml",
+        r#"<project default="test"><target name="test"><javac srcdir="src" destdir="classes"/><java classname="Runner"/></target></project>"#,
+    );
+    let untasked = project.supercov_with(
+        &["--", "./ant", "test"],
+        &[("SUPERCOV_TEST_ROOTS", "checks")],
+    );
+    contains_all(
+        &untasked.stderr(),
+        &["through no <junit>, <junitlauncher> or <testng> task Supercov can find"],
+    );
+    assert!(
+        !untasked.stderr().contains("junit-vintage-engine"),
+        "{}",
+        untasked.stderr()
+    );
+    // Without tests to run there is nothing left unattributed to mention.
+    let testless = project.supercov_with(
+        &["--", "./ant", "test"],
+        &[("SUPERCOV_TEST_ROOTS", "nothing")],
+    );
+    let stderr = testless.stderr();
+    assert!(
+        stderr.contains("instrumenting 2 source file(s)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Supercov can find"), "{stderr}");
+
+    // A build file holding Supercov's own changes is one an earlier run left,
+    // and patching it again would run that run's compilation.
+    for leftover in [
+        r#"<formatter classname="com.supercorp.supercov.SupercovAntFormatter"/>"#,
+        r#"<listener classname="com.supercorp.supercov.SupercovListener"/>"#,
+        r#"<testng listeners="com.supercorp.supercov.SupercovTestNGListener"/>"#,
+    ] {
+        project.write(
+            "build.xml",
+            &format!(r#"<project default="test"><target name="test"><junit>{leftover}<batchtest><fileset dir="checks"/></batchtest></junit></target></project>"#),
+        );
+        let left = project.supercov(&["--", "./ant", "test"]);
+        assert!(
+            left.stderr()
+                .contains("still holds an earlier run's changes"),
+            "{leftover}: {}",
+            left.stderr()
+        );
+    }
+
+    // Ant run on another build file is refused: the build Supercov reads is
+    // the one where it runs.
+    project.write("sub/build.xml", "<project/>");
+    let elsewhere = project.supercov(&["--", "./ant.bat", "-f", "sub/build.xml"]);
+    assert_ne!(elsewhere.code(), 0, "{}", elsewhere.stderr());
+    assert!(
+        elsewhere
+            .stderr()
+            .contains("run Supercov from that file's directory"),
+        "{}",
+        elsewhere.stderr()
     );
 }

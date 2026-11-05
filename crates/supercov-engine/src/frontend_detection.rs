@@ -51,6 +51,7 @@ fn tokens(value: &str) -> Vec<String> {
                 .unwrap_or(value)
                 .trim_end_matches(".exe")
                 .trim_end_matches(".cmd")
+                .trim_end_matches(".bat")
                 .to_owned()
         })
         .collect()
@@ -70,7 +71,10 @@ fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'static str)> {
+fn supported_by_command(
+    root: &Path,
+    command_tokens: &[String],
+) -> Vec<(FrontendLanguage, &'static str)> {
     let mut launched = Vec::new();
     let rust_command = has_sequence(command_tokens, &["cargo", "test"])
         || has_sequence(command_tokens, &["cargo", "nextest"])
@@ -99,6 +103,28 @@ fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'s
     let jvm_command = command_tokens.iter().any(|token| {
         matches!(token.as_str(), "mvn" | "mvnw" | "maven" | "gradle") || token.ends_with("gradlew")
     });
+    // `ant` is also the name of other tools (Anthropic's CLI installs one), so
+    // the word picks Ant only beside an Ant build file. Its launcher class is
+    // unambiguous wherever it appears.
+    // `tokens` splits paths on `/`, so the file's name is somewhere after the flag.
+    let names_a_build_file = command_tokens
+        .iter()
+        .position(|token| matches!(token.as_str(), "-f" | "-file" | "-buildfile"))
+        .is_some_and(|flag| {
+            command_tokens[flag + 1..]
+                .iter()
+                .any(|token| token.ends_with(".xml"))
+        });
+    let ant_command = command_tokens.iter().any(|token| {
+        token == "org.apache.tools.ant.launch.launcher"
+            || (token == "ant" && (regular_file(&root.join("build.xml")) || names_a_build_file))
+    });
+    if ant_command {
+        launched.push((
+            FrontendLanguage::Jvm,
+            "the expanded test command launches Ant",
+        ));
+    }
     if jvm_command {
         launched.push((
             FrontendLanguage::Jvm,
@@ -162,7 +188,7 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
     let mut selected = BTreeSet::new();
     let mut evidence = Vec::new();
 
-    for (language, reason) in supported_by_command(&command_tokens) {
+    for (language, reason) in supported_by_command(root, &command_tokens) {
         selected.insert(language);
         evidence.push(FrontendEvidence {
             language,
@@ -183,10 +209,10 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
             ),
             (
                 FrontendLanguage::Jvm,
-                ["pom.xml", "build.gradle", "build.gradle.kts"]
+                ["pom.xml", "build.gradle", "build.gradle.kts", "build.xml"]
                     .iter()
                     .any(|name| regular_file(&root.join(name))),
-                "a Maven or Gradle build file exists and the test command is opaque",
+                "a Maven, Gradle or Ant build file exists and the test command is opaque",
             ),
             (
                 FrontendLanguage::Rust,
@@ -261,7 +287,7 @@ pub struct UnsupportedEcosystem {
 pub fn command_launches_supported_frontend(root: &Path, command: &[String]) -> bool {
     let expanded = expanded_command(root, command);
     let command_tokens = tokens(&expanded);
-    supported_by_command(&command_tokens)
+    supported_by_command(root, &command_tokens)
         .into_iter()
         .next()
         .is_some()
@@ -456,6 +482,64 @@ mod tests {
     }
 
     #[test]
+    fn an_ant_build_selects_the_jvm_frontend() {
+        let root = fixture("ant");
+        fs::write(root.join("build.xml"), "<project default=\"test\"/>\n").unwrap();
+        for command in [
+            vec!["ant".to_string(), "test".into()],
+            vec![
+                "java".into(),
+                "-cp".into(),
+                "ant-launcher.jar".into(),
+                "org.apache.tools.ant.launch.Launcher".into(),
+            ],
+            // A wrapper script around Ant reveals nothing; the build file decides.
+            vec![
+                "../../../run-single-test.sh".into(),
+                ".".into(),
+                "ALL".into(),
+            ],
+        ] {
+            let detected = detect_frontends(&root, &command);
+            assert_eq!(detected.frontends, [FrontendLanguage::Jvm], "{command:?}");
+        }
+        // A build file named on the command, with none where Supercov runs.
+        let elsewhere = fixture("ant-elsewhere");
+        for command in [
+            vec![
+                "ant".to_string(),
+                "-f".into(),
+                "sub/build.xml".into(),
+                "test".into(),
+            ],
+            vec!["ant".into(), "-buildfile".into(), "module.xml".into()],
+            vec![
+                r"C:\tools\apache-ant\bin\ant.bat".into(),
+                "-f".into(),
+                "sub/build.xml".into(),
+            ],
+        ] {
+            let detected = detect_frontends(&elsewhere, &command);
+            assert_eq!(detected.frontends, [FrontendLanguage::Jvm], "{command:?}");
+        }
+        fs::remove_dir_all(elsewhere).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        // Without a build file the word is another tool's, whatever it reads.
+        let other = fixture("not-ant");
+        for command in [
+            vec!["ant".to_string(), "messages".into()],
+            vec!["ant".into(), "-f".into(), "notes.txt".into()],
+        ] {
+            let detected = detect_frontends(&other, &command);
+            assert!(
+                !detected.frontends.contains(&FrontendLanguage::Jvm),
+                "{command:?}: {detected:?}"
+            );
+        }
+        fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
     fn go_runners_and_manifests_select_the_go_frontend() {
         let root = fixture("go");
         fs::write(root.join("go.mod"), "module example.com/app\n").unwrap();
@@ -556,7 +640,7 @@ mod tests {
     fn every_launcher_form_picks_its_frontend() {
         use FrontendLanguage::*;
         let picked = |command: &str| {
-            supported_by_command(&tokens(command))
+            supported_by_command(Path::new("/nonexistent"), &tokens(command))
                 .into_iter()
                 .map(|(language, _)| language)
                 .collect::<Vec<_>>()

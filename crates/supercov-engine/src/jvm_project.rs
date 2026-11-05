@@ -10,6 +10,7 @@
 //! project's tests were never pointed at would put obligations in the
 //! denominator nobody agreed to.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::coverage_report::CoverageManifest;
@@ -40,6 +41,10 @@ const DEPENDENCY_FILES: &[&str] = &[
     "settings.gradle",
     "settings.gradle.kts",
     "gradle-wrapper.properties",
+    "build.xml",
+    "build.properties",
+    "ivy.xml",
+    "ivysettings.xml",
 ];
 
 /// Configuration that decides what actually executes.
@@ -77,6 +82,9 @@ pub struct PreparedJvmProject {
 pub enum JvmBuild {
     Maven,
     Gradle,
+    /// `build.xml`: sources wherever its targets name them, tests wherever
+    /// its `<batchtest>` scans.
+    Ant,
     /// Sources laid out conventionally with no build file; still measurable.
     Plain,
 }
@@ -94,6 +102,9 @@ pub fn detect_build(root: &Path) -> JvmBuild {
         if root.join(name).is_file() {
             return JvmBuild::Gradle;
         }
+    }
+    if root.join("build.xml").is_file() {
+        return JvmBuild::Ant;
     }
     JvmBuild::Plain
 }
@@ -134,6 +145,98 @@ fn role(relative: &str) -> Option<&'static str> {
     })
 }
 
+/// Where an Ant build keeps its tests and writes its outputs, relative to
+/// the project. Ant has no convention: `<batchtest>` says which directories
+/// hold the tests, and every other `src` directory holds what they test.
+#[derive(Debug, Clone, Default)]
+struct AntLayout {
+    tests: Vec<String>,
+    outputs: Vec<String>,
+    /// What the build's `<javac>` tasks compile, where it can be read.
+    sources: Vec<String>,
+    /// Whether some of what they compile cannot be.
+    sources_unread: bool,
+}
+
+impl AntLayout {
+    fn of(root: &Path) -> AntLayout {
+        let build = crate::ant_build::read_ant_build(root, &BTreeMap::new());
+        let relative = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .filter_map(|path| path.strip_prefix(root).ok())
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>()
+        };
+        // A build that names its tests where this cannot see them (a path
+        // built at run time) says so in SUPERCOV_TEST_ROOTS instead.
+        let tests = match std::env::var("SUPERCOV_TEST_ROOTS") {
+            Ok(roots) if !roots.trim().is_empty() => roots
+                .split(',')
+                .map(|given| {
+                    let given = Path::new(given.trim());
+                    given
+                        .strip_prefix(root)
+                        .unwrap_or(given)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .trim_matches('/')
+                        .to_owned()
+                })
+                .filter(|root| !root.is_empty())
+                .collect(),
+            _ => relative(&build.test_roots),
+        };
+        AntLayout {
+            tests,
+            outputs: relative(&build.outputs),
+            sources: relative(&build.sources),
+            sources_unread: build.sources_unread,
+        }
+    }
+
+    fn under(paths: &[String], relative: &str) -> bool {
+        paths
+            .iter()
+            .any(|path| relative == path || relative.starts_with(&format!("{path}/")))
+    }
+
+    fn role(&self, relative: &str) -> Option<&'static str> {
+        // A build that names no tests where they can be read -- a plain tree
+        // that happens to have a build.xml, a test chosen by name -- keeps the
+        // `src/main` and `src/test` convention: counting tests as the code
+        // they test would be worse than measuring by convention.
+        if self.tests.is_empty() {
+            return role(relative);
+        }
+        if Self::under(&self.tests, relative) {
+            return Some("test");
+        }
+        // What the build compiles is product code wherever it is, and where
+        // the build says all it compiles, nothing else is: Apache Ant keeps
+        // Java its own tests compile as data in `src/etc/testcases`. A `src`
+        // directory is product code where the build names its product's
+        // sources only at run time, as Ametys's does.
+        if Self::under(&self.sources, relative) {
+            return Some("main");
+        }
+        let names_its_product = self
+            .sources
+            .iter()
+            .any(|source| !Self::under(&self.tests, source));
+        if names_its_product && !self.sources_unread {
+            return Some("unbuilt");
+        }
+        relative
+            .split('/')
+            .rev()
+            .skip(1)
+            .any(|part| part == "src")
+            .then_some("main")
+    }
+}
+
 /// Whether the JVM is the only target this build produces.
 ///
 /// A Kotlin Multiplatform build compiles `commonMain` for every target it
@@ -168,7 +271,12 @@ fn targets_only_the_jvm(root: &Path) -> bool {
     .any(|target| text.contains(target))
 }
 
-fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), String> {
+fn walk(
+    root: &Path,
+    directory: &Path,
+    ant: Option<&AntLayout>,
+    files: &mut JvmFiles,
+) -> Result<(), String> {
     let jvm_only = targets_only_the_jvm(root);
     let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
@@ -189,13 +297,16 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
         let file_type = crate::fault_fs::file_type(&entry)
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
-            if EXCLUDED_DIRECTORIES.contains(&name.as_str()) || name.starts_with('.') {
+            if EXCLUDED_DIRECTORIES.contains(&name.as_str())
+                || name.starts_with('.')
+                || ant.is_some_and(|ant| AntLayout::under(&ant.outputs, &relative))
+            {
                 files
                     .excluded
                     .push((relative, "build output or tooling directory"));
                 continue;
             }
-            walk(root, &path, files)?;
+            walk(root, &path, ant, files)?;
             continue;
         }
         if !file_type.is_file() {
@@ -212,7 +323,11 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
         let Some(language) = language_of(&name) else {
             continue;
         };
-        match role(&relative) {
+        let role = match ant {
+            Some(ant) => ant.role(&relative),
+            None => role(&relative),
+        };
+        match role {
             Some("main") => files.sources.push((relative, language)),
             Some("test") => files.tests.push((relative, language)),
             Some("common") if jvm_only => files.sources.push((relative, language)),
@@ -235,7 +350,8 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
 
 pub fn discover_jvm_files(root: &Path) -> Result<JvmFiles, String> {
     let mut files = JvmFiles::default();
-    walk(root, root, &mut files)?;
+    let ant = (detect_build(root) == JvmBuild::Ant).then(|| AntLayout::of(root));
+    walk(root, root, ant.as_ref(), &mut files)?;
     files.sources.sort();
     files.tests.sort();
     files.dependency_files.sort();
@@ -435,6 +551,72 @@ mod tests {
         assert_eq!(role("lib/A.java"), None);
     }
     use std::fs;
+
+    /// An Ant build whose `<javac>` compiles `java/`, not a `src` directory,
+    /// is measured there; its tests are what its batch scans; a build that
+    /// names no tests keeps the `src/test` convention.
+    #[test]
+    fn an_ant_build_classifies_by_what_it_compiles_and_runs() {
+        let root = fixture("ant-layout");
+        fs::write(
+            root.join("build.xml"),
+            r#"<project><target name="t"><javac srcdir="java" destdir="out/classes"/><javac srcdir="checks" destdir="out/tests"/><junit><batchtest><fileset dir="out/tests"/></batchtest></junit></target></project>"#,
+        )
+        .unwrap();
+        for (relative, text) in [
+            ("java/app/Calc.java", "package app; class Calc {}"),
+            ("checks/app/CalcTest.java", "package app; class CalcTest {}"),
+            ("out/classes/Stale.java", "class Stale {}"),
+            // Java a test compiles as its input, which no build task does.
+            ("src/etc/testcases/src1/Data.java", "class Data {}"),
+        ] {
+            fs::create_dir_all(root.join(relative).parent().unwrap()).unwrap();
+            fs::write(root.join(relative), text).unwrap();
+        }
+        let files = discover_jvm_files(&root).unwrap();
+        let names = |list: &[(String, JvmLanguage)]| {
+            list.iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&files.sources), ["java/app/Calc.java"]);
+        assert_eq!(names(&files.tests), ["checks/app/CalcTest.java"]);
+        assert!(
+            files.excluded.contains(&(
+                "src/etc/testcases/src1/Data.java".to_owned(),
+                "a source set that is neither main nor test"
+            )),
+            "{:?}",
+            files.excluded
+        );
+        // A build whose only readable <javac> compiles its tests builds its
+        // product somewhere it does not say, and a `src` directory is it.
+        fs::write(
+            root.join("build.xml"),
+            r#"<project><target name="t"><javac srcdir="checks" destdir="out/tests"/><junit><batchtest><fileset dir="out/tests"/></batchtest></junit></target></project>"#,
+        )
+        .unwrap();
+        let files = discover_jvm_files(&root).unwrap();
+        assert_eq!(names(&files.sources), ["src/etc/testcases/src1/Data.java"]);
+        assert_eq!(names(&files.tests), ["checks/app/CalcTest.java"]);
+        // Nor does one that also compiles from a path made at run time.
+        fs::write(
+            root.join("build.xml"),
+            r#"<project><target name="t"><javac srcdir="java" destdir="out/classes"><src refid="made.at.run.time"/></javac><javac srcdir="checks" destdir="out/tests"/><junit><batchtest><fileset dir="out/tests"/></batchtest></junit></target></project>"#,
+        )
+        .unwrap();
+        let files = discover_jvm_files(&root).unwrap();
+        assert_eq!(
+            names(&files.sources),
+            ["java/app/Calc.java", "src/etc/testcases/src1/Data.java"]
+        );
+        fs::write(root.join("build.xml"), "<project/>").unwrap();
+        fs::create_dir_all(root.join("src/test/java")).unwrap();
+        fs::write(root.join("src/test/java/T.java"), "class T {}").unwrap();
+        let files = discover_jvm_files(&root).unwrap();
+        assert_eq!(names(&files.tests), ["src/test/java/T.java"]);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn fixture(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

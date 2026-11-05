@@ -19,6 +19,7 @@ macro_rules! eprintln {
 }
 
 pub mod agent_json;
+pub mod ant_build;
 pub mod assertion_coverage;
 pub mod child_signal_guard;
 pub mod contained;

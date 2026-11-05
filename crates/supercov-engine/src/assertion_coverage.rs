@@ -111,6 +111,9 @@ fn runtime(runner: &str) -> &'static str {
         "junit-platform" => {
             "JUnit; a failed assertion or an uncaught exception fails the test (an expected one inside assertThrows aside); @BeforeEach runs before each test; there is no timeout unless one is set; a Mockito mock returns null, 0, false or an empty collection unless stubbed."
         }
+        "ant-junit" => {
+            "JUnit 4 run by Ant's <junit> task; a failed assertion or an uncaught exception fails the test; @Before runs before each test and @BeforeClass once per class, often in a JVM of its own per class; a test past the task's timeout kills its JVM; a Mockito mock returns null, 0, false or an empty collection unless stubbed."
+        }
         "testng" => {
             "TestNG; a failed assertion or an uncaught exception fails the test; @BeforeMethod runs before each test; there is no timeout unless one is set; a Mockito mock returns null, 0, false or an empty collection unless stubbed."
         }
@@ -222,7 +225,7 @@ fn separator(language: Language, runner: &str) -> &'static str {
         (Language::JavaScript, _) => " > ",
         (Language::Python, _) => "::",
         (_, "rspec") => ":",
-        (_, "minitest" | "test-unit" | "junit-platform" | "testng") => "#",
+        (_, "minitest" | "test-unit" | "junit-platform" | "ant-junit" | "testng") => "#",
         (_, "go-test") => "/",
         (_, "rustdoc") => " - ",
         _ => "::",
@@ -2841,6 +2844,7 @@ mod tests {
             ("rust-libtest", "Rust tests"),
             ("rustdoc", "Rust doctests"),
             ("junit-platform", "JUnit"),
+            ("ant-junit", "JUnit 4 run by Ant"),
             ("testng", "TestNG"),
             ("unittest", "unittest"),
         ] {

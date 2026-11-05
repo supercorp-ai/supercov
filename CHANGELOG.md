@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.23.0
+
+**Added**
+
+- Apache Ant builds, Ivy-resolved ones included, are measured. Supercov reads `build.xml` and what it imports, includes through entities or calls through `<ant>` and `<subant>`, and finds the tests from each `<batchtest>` and the product code from what each `<javac>` compiles. Tests run by `<junit>` are attributed one by one through a result formatter Supercov adds next to the project's own, and tests run by `<junitlauncher>` and `<testng>` through the JUnit Platform and TestNG listeners. A test that a suite runs again is named within that suite, and a test Ant stops at its timeout is recorded once, as not passing. A build whose harness sits outside the project is laid out in the copy as far as the build reaches. See [supported suites](https://github.com/supercorp-ai/supercov/blob/v4.23.0/docs/supported-suites.md).
+- An Ant build in which Supercov finds no `<junit>`, `<junitlauncher>` or `<testng>` task is told so, with what such a task needs, instead of being given JUnit Platform advice.
+
+**Fixed**
+
+- A Java condition that assigns a variable, such as `while (!stopped && (n = in.read(buf)) >= 0)`, failed to compile once instrumented, because javac no longer saw `n` as assigned. It compiles now.
+- An `else if` that narrows a type with an `instanceof` pattern and has no `else` failed to compile once instrumented.
+- Supercov's Java runtime carried a dangling doc comment, which JDK 23 and later warn about, so a project compiled with `-Werror` failed to build.
+
 ## 4.22.0
 
 **Added**

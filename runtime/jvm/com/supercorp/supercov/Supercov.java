@@ -175,6 +175,17 @@ public final class Supercov {
     current = records.size() - 1;
   }
 
+  /**
+   * Records how the running test stands so far, without ending it: a JVM that
+   * may be killed outright writes its evidence with the test as not passing,
+   * and the test's own end then records how it really ended.
+   */
+  public static synchronized void setTestStatus(String status) {
+    if (current >= 0 && current < records.size()) {
+      records.get(current).status = status;
+    }
+  }
+
   /** Ends the running test, harvesting what it reached. */
   public static synchronized void exitTest() {
     exitTest("passed");
@@ -196,6 +207,11 @@ public final class Supercov {
     current = -1;
   }
 
+  /// Which record belongs to the test this thread is running, once records
+  /// stopped being attributable. Tests that overlap do not end in the order
+  /// they began, so the outcome cannot be written to whichever was last.
+  private static final ThreadLocal<Integer> concurrentRecord = new ThreadLocal<>();
+
   /**
    * Gives up on per-test attribution, once, for the whole run.
    *
@@ -214,11 +230,6 @@ public final class Supercov {
    * <p>Supercov disables parallel execution in the workspace it generates, so
    * reaching this means something else turned it back on.
    */
-  /// Which record belongs to the test this thread is running, once records
-  /// stopped being attributable. Tests that overlap do not end in the order
-  /// they began, so the outcome cannot be written to whichever was last.
-  private static final ThreadLocal<Integer> concurrentRecord = new ThreadLocal<>();
-
   private static void overlap() {
     if (overlapped) {
       return;
@@ -401,12 +412,56 @@ public final class Supercov {
    */
   private static final String JVM = java.util.UUID.randomUUID().toString();
 
+  /**
+   * A test name with its control characters written out, so it reads back as
+   * one line. Shared by every listener and formatter that names a test.
+   */
+  public static String printable(String name) {
+    StringBuilder out = null;
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      if (!Character.isISOControl(c)) {
+        if (out != null) {
+          out.append(c);
+        }
+        continue;
+      }
+      if (out == null) {
+        out = new StringBuilder(name.length() + 8).append(name, 0, i);
+      }
+      switch (c) {
+        case '\n':
+          out.append("\\n");
+          break;
+        case '\t':
+          out.append("\\t");
+          break;
+        case '\r':
+          out.append("\\r");
+          break;
+        default:
+          out.append(String.format("\\u%04x", (int) c));
+      }
+    }
+    return out == null ? name : out.toString();
+  }
   public static synchronized void writeInto(String directory) throws IOException {
     java.io.File target = new java.io.File(directory);
     if (!target.isDirectory() && !target.mkdirs() && !target.isDirectory()) {
       throw new IOException("could not create " + directory);
     }
-    write(new java.io.File(target, JVM + ".bin").getPath());
+    // Written beside and moved into place: a JVM stopped while writing --
+    // a timeout ends a forked one, and each suite rewrites the whole file --
+    // leaves the evidence it had rather than a file cut short.
+    java.io.File finished = new java.io.File(target, JVM + ".bin");
+    java.io.File writing = new java.io.File(target, JVM + ".bin.partial");
+    write(writing.getPath());
+    if (!writing.renameTo(finished)) {
+      finished.delete();
+      if (!writing.renameTo(finished)) {
+        throw new IOException("could not move " + writing + " into place");
+      }
+    }
   }
 
   /** Writes the evidence transport the engine reads. */

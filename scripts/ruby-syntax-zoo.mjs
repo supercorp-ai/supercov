@@ -382,7 +382,9 @@ end
   // it is a limitation, said.
   'lib/ractor.rb': `module InRactor
   def self.doubled(n)
-    Ractor.new(n) { |value| value * 2 }.take
+    ractor = Ractor.new(n) { |value| value * 2 }
+    # Ruby 4 waits on a Ractor with \`value\`; before it, \`take\` did.
+    ractor.respond_to?(:value) ? ractor.value : ractor.take
   end
 end
 `,

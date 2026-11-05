@@ -156,6 +156,34 @@ jobs:
             ~/.gradle/wrapper
           key: jvm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/supercov-engine/tests/jvm_*.rs', 'scripts/*jvm*.mjs', 'scripts/java-*.mjs') }}
           restore-keys: jvm-${{ runner.os }}-${{ runner.arch }}-
+      # The Ant tests skip without it, and the Ant support then shows as
+      # gaps the local measurement does not have. After the cache: a key
+      # restored from before these jars still gets them.
+      - name: Install Apache Ant and the jars its tests use
+        shell: bash
+        run: |
+          version=1.10.15
+          # From the archive: the mirrors drop a release once the next is out.
+          # It is slow to answer, hence the patience.
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 60 -o "$RUNNER_TEMP/ant.zip" \
+            "https://archive.apache.org/dist/ant/binaries/apache-ant-$version-bin.zip"
+          unzip -q "$RUNNER_TEMP/ant.zip" -d "$RUNNER_TEMP"
+          echo "ANT_HOME=$RUNNER_TEMP/apache-ant-$version" >> "$GITHUB_ENV"
+          for jar in \
+            junit/junit/4.13.2/junit-4.13.2.jar \
+            org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar \
+            org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar \
+            org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar \
+            org/junit/platform/junit-platform-commons/1.10.2/junit-platform-commons-1.10.2.jar \
+            org/junit/platform/junit-platform-engine/1.10.2/junit-platform-engine-1.10.2.jar \
+            org/junit/platform/junit-platform-launcher/1.10.2/junit-platform-launcher-1.10.2.jar \
+            org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar \
+            org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar \
+            org/testng/testng/6.14.3/testng-6.14.3.jar \
+            com/beust/jcommander/1.72/jcommander-1.72.jar; do
+            curl -fsSL --retry 3 --create-dirs -o "$HOME/.m2/repository/$jar" \
+              "https://repo1.maven.org/maven2/$jar"
+          done
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"

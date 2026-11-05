@@ -60,6 +60,15 @@ const LISTENER_SOURCE: &str =
 const TESTNG_LISTENER_SOURCE: &str =
     include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovTestNGListener.java");
 
+const ANT_FORMATTER_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovAntFormatter.java");
+
+const ANT_FORMATTER_CLASS: &str = "com.supercorp.supercov.SupercovAntFormatter";
+
+/// What beside an Ant project is copied rather than linked: a wrapper's
+/// scripts and build files, not a shared harness.
+const SMALL_LINKED_ENTRY: u64 = 4 << 20;
+
 const PACKAGE_DIRECTORY: &str = "com/supercorp/supercov";
 
 /// Where the JUnit Platform looks for listeners to register.
@@ -264,7 +273,7 @@ fn named_modules(build: JvmBuild, command: &[String]) -> Option<BTreeSet<String>
                 .any(|m| m.starts_with(':') || m.starts_with('!')))
             .then_some(named)
         }
-        JvmBuild::Plain => None,
+        JvmBuild::Ant | JvmBuild::Plain => None,
     }
 }
 
@@ -1028,8 +1037,9 @@ fn command_with_fresh_results(
             )
         }
         // Maven's default lifecycle re-runs surefire every time, and Gradle's
-        // build cache has no Maven equivalent worth defeating here.
-        JvmBuild::Maven | JvmBuild::Plain => (updated, None),
+        // build cache has no Maven equivalent worth defeating here. Ant's
+        // `<junit>` runs whenever its target does.
+        JvmBuild::Maven | JvmBuild::Ant | JvmBuild::Plain => (updated, None),
     }
 }
 
@@ -1155,6 +1165,9 @@ fn instrument_workspace(
         .keys()
         .max()
         .map_or(0, |highest| *highest as usize + 1);
+    if build == JvmBuild::Ant {
+        return instrument_ant(workspace, evidence_directory, project, probe_count);
+    }
 
     // Which frameworks a module runs is a question about that module. A
     // repository can hold a JUnit 4 module beside a JUnit 5 one, and asking
@@ -1391,8 +1404,8 @@ fn instrument_workspace(
             }
         }
         // Nothing resolves dependencies for a plain tree; whoever compiles it
-        // supplies the classpath.
-        JvmBuild::Plain => {}
+        // supplies the classpath. An Ant build returned above.
+        JvmBuild::Ant | JvmBuild::Plain => {}
     }
 
     for module in modules.iter().filter(|module| {
@@ -1468,6 +1481,445 @@ fn instrument_workspace(
     })
 }
 
+/// The directory a source file's packages start in, the one a `<javac>`
+/// compiling it names: its directory less the path its `package` declares.
+/// `src/main/app/Calc.java` in `package app` is under `src/main`; Ametys's
+/// `main/plugin-forms/src/org/ametys/...` is under `main/plugin-forms/src`.
+fn ant_source_root(relative: &str, source: &str) -> Option<String> {
+    let directory = relative
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
+    let package = source.lines().find_map(|line| {
+        let line = line.trim_start();
+        let rest = line.strip_prefix("package ")?;
+        Some(
+            rest.trim_end()
+                .trim_end_matches(';')
+                .trim()
+                .replace('.', "/"),
+        )
+    });
+    match package {
+        None => Some(directory.to_owned()),
+        Some(package) if directory == package => Some(String::new()),
+        Some(package) => directory
+            .strip_suffix(&format!("/{package}"))
+            .map(str::to_owned),
+    }
+}
+
+fn xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// A build file with Supercov's formatter added to each `<junit>` task: on
+/// the task's classpath and among its formatters, and compiled just before
+/// the task, from `sources` into `classes`, against the task's own classpath
+/// (the formatter needs JUnit, which no other compilation is guaranteed to
+/// have) plus Ant's runtime (which holds the formatter interface). The
+/// compilation goes in front of whatever holds the task in its target -- a
+/// `<jacoco:coverage>` takes exactly one task -- after the target's earlier
+/// tasks, which set up the classpath. None when there is no task to change.
+///
+/// A `<junitlauncher>` runs on the JUnit Platform, and gets the platform
+/// listener instead, compiled from `listener_sources`: it needs the platform's
+/// launcher API, which only that task's classpath is sure to have.
+///
+/// A `<testng>` task gets the TestNG listener through its own `listeners`
+/// attribute, compiled from `testng_sources`.
+fn with_ant_formatter(
+    text: &str,
+    sources: &Path,
+    listener_sources: &Path,
+    testng_sources: &Path,
+    classes: &Path,
+) -> Option<String> {
+    let all = crate::ant_build::tags(text);
+    let classes = xml_attribute(&classes.to_string_lossy());
+    let formatter_sources = xml_attribute(&sources.to_string_lossy());
+    let listener_sources = xml_attribute(&listener_sources.to_string_lossy());
+    let testng_sources = xml_attribute(&testng_sources.to_string_lossy());
+    // (offset, text to insert, length to replace), applied from the end.
+    let mut edits: Vec<(usize, String, usize)> = Vec::new();
+    let mut stack: Vec<&crate::ant_build::Tag> = Vec::new();
+    for (index, tag) in all.iter().enumerate() {
+        if tag.closing {
+            if let Some(at) = stack.iter().rposition(|open| open.name == tag.name) {
+                stack.truncate(at);
+            }
+            continue;
+        }
+        if matches!(tag.name.as_str(), "junit" | "junitlauncher" | "testng") {
+            let launcher = tag.name == "junitlauncher";
+            let testng = tag.name == "testng";
+            let sources = if launcher {
+                &listener_sources
+            } else if testng {
+                &testng_sources
+            } else {
+                &formatter_sources
+            };
+            // The task's own classpath, copied as written: attributes
+            // (`<testng classpathref>`) and nested elements alike.
+            let mut classpath = String::new();
+            if let Some(reference) = tag.attribute("classpathref") {
+                classpath.push_str(&format!(
+                    "<classpath refid=\"{}\"/>",
+                    xml_attribute(reference)
+                ));
+            }
+            if let Some(path) = tag.attribute("classpath") {
+                classpath.push_str(&format!("<classpath path=\"{}\"/>", xml_attribute(path)));
+            }
+            if !tag.empty {
+                let mut depth = 0usize;
+                let mut open_at: Option<usize> = None;
+                for inner in &all[index + 1..] {
+                    // A task holds no task of its own name: its end is the
+                    // first closing tag that names it.
+                    if inner.closing && inner.name == tag.name {
+                        break;
+                    }
+                    if inner.closing {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0
+                            && inner.name == "classpath"
+                            && let Some(start) = open_at.take()
+                        {
+                            classpath.push_str(&text[start..=inner.end]);
+                        }
+                        continue;
+                    }
+                    if depth == 0 && inner.name == "classpath" {
+                        if inner.empty {
+                            classpath.push_str(&text[inner.start..=inner.end]);
+                            continue;
+                        }
+                        open_at = Some(inner.start);
+                    }
+                    if !inner.empty {
+                        depth += 1;
+                    }
+                }
+            }
+            // A copied classpath that defined an id would define it twice.
+            let classpath = without_ids(&classpath);
+            let compile = format!(
+                "<mkdir dir=\"{classes}\"/><javac srcdir=\"{sources}\" destdir=\"{classes}\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\">{classpath}</javac>"
+            );
+            // Just before the task, where everything it refers to is defined
+            // -- unless what holds it takes one task alone (`<jacoco:coverage>`)
+            // or runs its tasks at once (`<parallel>`): then before that.
+            let mut holder = tag;
+            for open in stack.iter().rev() {
+                if runs_its_tasks_in_order(&open.name) {
+                    break;
+                }
+                holder = open;
+            }
+            edits.push((holder.start, compile, 0));
+            if testng {
+                // TestNG takes its listeners by class name, comma-separated.
+                let listener = TESTNG_LISTENER_CLASS;
+                match tag.attribute_at("listeners") {
+                    Some(listeners) => {
+                        edits.push((listeners.value_end, format!(",{listener}"), 0));
+                    }
+                    None => {
+                        let name_end = tag.start + 1 + tag.name.len();
+                        edits.push((name_end, format!(" listeners=\"{listener}\""), 0));
+                    }
+                }
+            }
+            let inside = if testng {
+                format!("<classpath><pathelement location=\"{classes}\"/></classpath>")
+            } else if launcher {
+                format!(
+                    "<classpath><pathelement location=\"{classes}\"/></classpath><listener classname=\"{LISTENER_CLASS}\"/>"
+                )
+            } else {
+                format!(
+                    "<classpath><pathelement location=\"{classes}\"/></classpath><formatter classname=\"{ANT_FORMATTER_CLASS}\" usefile=\"false\"/>"
+                )
+            };
+            if tag.empty {
+                let slash = text[..tag.end]
+                    .rfind('/')
+                    .expect("an empty tag ends with />");
+                edits.push((slash, format!(">{inside}</{}", tag.name), 1));
+            } else {
+                edits.push((tag.end + 1, inside, 0));
+            }
+        }
+        if !tag.empty {
+            stack.push(tag);
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
+    let mut out = text.to_owned();
+    for (at, insert, replaced) in edits {
+        out.replace_range(at..at + replaced, &insert);
+    }
+    Some(out)
+}
+
+/// Elements that run the tasks they hold one after another, so a task may be
+/// put in front of another inside them.
+fn runs_its_tasks_in_order(element: &str) -> bool {
+    matches!(
+        element,
+        "target" | "sequential" | "then" | "else" | "try" | "catch" | "finally" | "project"
+    )
+}
+
+/// A classpath copied as written, with no `id` of its own.
+fn without_ids(classpath: &str) -> String {
+    let ids = crate::ant_build::tags(classpath)
+        .into_iter()
+        .flat_map(|tag| tag.attributes)
+        .filter(|attribute| attribute.name == "id")
+        .map(|id| (classpath[..id.name_at].trim_end().len(), id.value_end + 1))
+        .collect::<Vec<_>>();
+    let mut out = classpath.to_owned();
+    for (from, to) in ids.into_iter().rev() {
+        out.replace_range(from..to, "");
+    }
+    out
+}
+
+/// A test a second JVM ran under a name another already reported -- a class
+/// two `<junit>` tasks run, or two filesets both match -- is a run of its
+/// own, numbered: two runs cannot share a name.
+fn number_repeated_runs(forked: &mut [crate::owned_evidence::OwnedEvidence]) {
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for evidence in forked.iter_mut() {
+        for test in &mut evidence.tests {
+            let count = seen.entry(test.name.clone()).or_default();
+            *count += 1;
+            if *count > 1 {
+                test.name = format!("{} [{count}]", test.name);
+            }
+        }
+    }
+}
+
+/// An Ant build's copy: one module, the whole build, whose tests run in the
+/// JVMs its `<junit>` tasks fork.
+///
+/// The runtime goes in the first source root the build compiles, which every
+/// test classpath holds. The formatter that tells it about tests is compiled
+/// by the build itself, just before each task (see `with_ant_formatter`),
+/// because only there is a classpath with both Ant and JUnit. A task in a
+/// file the build imports from outside the project -- a shared harness -- is
+/// changed in the copy's own version of that file, which the links around the
+/// copy are turned into for it.
+fn instrument_ant(
+    workspace: &Path,
+    evidence_directory: &Path,
+    project: PreparedJvmProject,
+    probe_count: usize,
+) -> Result<InstrumentedWorkspace, String> {
+    // The root the build compiles most of the product from: a stray example
+    // tree sorting first is not where the runtime belongs.
+    let mut roots: BTreeMap<String, usize> = BTreeMap::new();
+    for (relative, _) in &project.files.sources {
+        let Ok(source) = fs::read_to_string(workspace.join(relative)) else {
+            continue;
+        };
+        if let Some(root) = ant_source_root(relative, &source) {
+            *roots.entry(root).or_default() += 1;
+        }
+    }
+    let Some(first) = roots
+        .iter()
+        .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+        .map(|(root, _)| root.clone())
+    else {
+        return Err(
+            "no source root of this Ant build holds product code under a src directory; set SUPERCOV_SOURCE_ROOTS to the directories its <javac> tasks compile and SUPERCOV_TEST_ROOTS to the ones its <batchtest> scans"
+                .into(),
+        );
+    };
+    write(
+        &workspace
+            .join(&first)
+            .join(PACKAGE_DIRECTORY)
+            .join("Supercov.java"),
+        &runtime_source(probe_count),
+    )?;
+    let module = JvmModule {
+        directory: ".".into(),
+        evidence: evidence_directory.join("ant"),
+        has_tests: !project.files.tests.is_empty(),
+    };
+    // The formatter's sources and classes live beside the evidence, in the
+    // run's own directory: nothing of the project's, copied or synced.
+    let formatter = evidence_directory.join("ant-formatter");
+    let sources = formatter.join("src");
+    let listener_sources = formatter.join("platform-src");
+    let testng_sources = formatter.join("testng-src");
+    let classes = formatter.join("classes");
+    let config = configuration(probe_count, &project.decision_widths, &module.evidence);
+    write(
+        &sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovAntFormatter.java"),
+        ANT_FORMATTER_SOURCE,
+    )?;
+    write(
+        &sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"),
+        &config,
+    )?;
+    write(
+        &listener_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovListener.java"),
+        LISTENER_SOURCE,
+    )?;
+    write(
+        &listener_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovConfig.java"),
+        &config,
+    )?;
+    write(
+        &testng_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovTestNGListener.java"),
+        TESTNG_LISTENER_SOURCE,
+    )?;
+    write(
+        &testng_sources
+            .join(PACKAGE_DIRECTORY)
+            .join("SupercovConfig.java"),
+        &config,
+    )?;
+
+    let build = crate::ant_build::read_ant_build(workspace, &BTreeMap::new());
+    // Everything changed outside the project is changed within the copy's
+    // own directory, and nowhere else: an import named by an absolute path
+    // leads out of the copy, and its file is left as it is.
+    let copy = crate::workspace::copy_directory_of(workspace);
+    let tree = crate::ant_build::outside_anchor(workspace, &build)
+        .filter(|tree| copy.as_ref().is_some_and(|copy| tree.starts_with(copy)));
+    let mut candidates = build.junit_files.clone();
+    // A file that runs the build from outside -- a wrapper script's own
+    // build file beside it, which imports the project's -- holds a task the
+    // import chain never reaches. Those sit at the top of the tree the copy
+    // is laid out within.
+    if let Some(directory) = &tree {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return Err(format!("could not read {}", directory.display()));
+        };
+        let mut found = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "xml"))
+            .collect::<Vec<_>>();
+        found.sort();
+        for path in found {
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        }
+    }
+    // Small entries above the repository are the copy's own, so a wrapper
+    // script writing beside itself writes into the copy.
+    if let Some(copy) = copy.as_ref().filter(|_| tree.is_some()) {
+        crate::workspace::copy_small_links_around(copy, workspace, SMALL_LINKED_ENTRY)
+            .map_err(|error| format!("could not prepare the copy's surroundings: {error}"))?;
+    }
+    let mut patched = 0usize;
+    for file in candidates {
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        // A file that holds the formatter already is one an earlier run left
+        // in the copy: patching it again would run that run's compilation.
+        if text.contains(ANT_FORMATTER_CLASS)
+            || text.contains(&format!("classname=\"{LISTENER_CLASS}\""))
+            || text.contains(TESTNG_LISTENER_CLASS)
+        {
+            return Err(format!(
+                "{} in the copy still holds an earlier run's changes; delete .supercov/workspaces and run again",
+                file.display()
+            ));
+        }
+        let Some(updated) = with_ant_formatter(
+            &text,
+            &sources,
+            &listener_sources,
+            &testng_sources,
+            &classes,
+        ) else {
+            continue;
+        };
+        if !file.starts_with(workspace) {
+            let Some(copy) = copy.as_ref().filter(|copy| file.starts_with(copy)) else {
+                continue;
+            };
+            crate::workspace::unfold_links_to(copy, &file).map_err(|error| {
+                format!("could not prepare {} in the copy: {error}", file.display())
+            })?;
+        }
+        write(&file, &updated)?;
+        patched += 1;
+    }
+
+    let mut declared_in = BTreeMap::new();
+    for (relative, _) in &project.files.tests {
+        let name = relative
+            .rsplit_once('/')
+            .map_or(relative.as_str(), |(_, name)| name);
+        let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+        declared_in.insert(stem.to_owned(), relative.clone());
+    }
+    let unmeasurable = if patched == 0 && module.has_tests {
+        vec![module.directory.clone()]
+    } else {
+        Vec::new()
+    };
+    Ok(InstrumentedWorkspace {
+        project,
+        build: JvmBuild::Ant,
+        modules: vec![module],
+        declared_in,
+        added_launcher: None,
+        serialised: BTreeSet::new(),
+        // `threads` on a `<junit>` forks a JVM per thread, each its own.
+        concurrent: BTreeSet::new(),
+        added_vintage: false,
+        relaxed: Vec::new(),
+        license_check: false,
+        unmeasurable,
+        modular: Vec::new(),
+    })
+}
+
+/// The build file an `ant -f <file>` command runs, when it is not the
+/// `build.xml` of the directory Supercov runs in.
+fn ant_build_file_elsewhere(root: &Path, command: &[String]) -> Option<PathBuf> {
+    let starts_ant = command
+        .first()
+        .and_then(|program| Path::new(program).file_name())
+        .is_some_and(|name| name == "ant" || name == "ant.bat");
+    if !starts_ant {
+        return None;
+    }
+    let at = command
+        .iter()
+        .position(|argument| matches!(argument.as_str(), "-f" | "-file" | "-buildfile"))?;
+    let named = crate::ant_build::normalized(&root.join(command.get(at + 1)?));
+    (named != root.join("build.xml")).then(|| named.parent().unwrap_or(root).to_path_buf())
+}
+
 /// How the copy's build skips Apache RAT's license check.
 #[derive(Debug, PartialEq)]
 enum RatSkip {
@@ -1528,6 +1980,12 @@ pub fn run_direct_jvm(
     let initialization_started = Instant::now();
     let root = canonicalize_simplified(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
+    if let Some(elsewhere) = ant_build_file_elsewhere(&root, &request.command) {
+        return Err(format!(
+            "this command runs the Ant build in {}, and Supercov reads an Ant build from the build.xml where it runs; run Supercov from that file's directory",
+            elsewhere.display()
+        ));
+    }
     let mut lock = ProjectLock::acquire(&root, &request.run_id, &request.started_at)
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
@@ -1591,6 +2049,7 @@ pub fn run_direct_jvm(
             match instrumented.build {
                 JvmBuild::Maven => "a Maven project",
                 JvmBuild::Gradle => "a Gradle project",
+                JvmBuild::Ant => "an Ant project",
                 JvmBuild::Plain => "Java/Kotlin sources",
             },
             instrumented.project.instrumented.len(),
@@ -1650,9 +2109,20 @@ pub fn run_direct_jvm(
             );
         }
         if !instrumented.unmeasurable.is_empty() {
+            let (why, remedy) = if instrumented.build == JvmBuild::Ant {
+                (
+                    "hold tests their build runs through no <junit>, <junitlauncher> or <testng> task Supercov can find, so they are not attributed",
+                    "Supercov listens through those tasks; tests the build runs another way, such as a <java> task starting a runner itself, run exactly as they did.",
+                )
+            } else {
+                (
+                    "run JUnit 4, which is not a JUnit Platform engine, so they are not attributed",
+                    "Supercov listens through the platform's own lifecycle, and putting the platform on a JUnit 4 classpath makes the build choose a provider that finds no engine -- so it leaves those modules alone rather than break them. Adding junit-vintage-engine runs the same tests on the platform, and Supercov measures them.",
+                )
+            };
             let _ = writeln!(
                 diagnostics,
-                "[supercov] {} module(s) run JUnit 4, which is not a JUnit Platform engine, so they are not attributed: {}. Supercov listens through the platform's own lifecycle, and putting the platform on a JUnit 4 classpath makes the build choose a provider that finds no engine -- so it leaves those modules alone rather than break them. Adding junit-vintage-engine runs the same tests on the platform, and Supercov measures them.",
+                "[supercov] {} module(s) {why}: {}. {remedy}",
                 instrumented.unmeasurable.len(),
                 instrumented.unmeasurable.join(", ")
             );
@@ -1793,6 +2263,10 @@ pub fn run_direct_jvm(
                     read_evidence(&bytes).map_err(|error| format!("{}: {error}", path.display()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut forked = forked;
+            if instrumented.build == JvmBuild::Ant {
+                number_repeated_runs(&mut forked);
+            }
             let evidence = merge_evidence(forked);
             outcomes.extend(evidence.tests.iter().map(|test| {
                 OwnedTestOutcome {
@@ -1824,8 +2298,15 @@ pub fn run_direct_jvm(
             );
         }
         if outcomes.is_empty() {
+            // An Ant build reports through its own tasks, and one that exits
+            // before them has usually failed to build: say which.
+            let lifecycle = if instrumented.build == JvmBuild::Ant {
+                "An Ant build reports through its <junit>, <junitlauncher> and <testng> tasks, so the build has to reach one: a build that fails before them (a dependency it cannot resolve, a compile error) records nothing"
+            } else {
+                "Supercov attributes through each framework's own lifecycle, so the suite has to run on the JUnit Platform or TestNG"
+            };
             return Err(format!(
-                "the test run wrote no coverage evidence (the command exited {exit_code}). Supercov attributes through each framework's own lifecycle, so the suite has to run on the JUnit Platform or TestNG."
+                "the test run wrote no coverage evidence (the command exited {exit_code}). {lifecycle}."
             ));
         }
         let evidence = merge_evidence(parts);
@@ -2099,6 +2580,233 @@ impl JvmServer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_ant_command_naming_another_build_file_is_sent_to_its_directory() {
+        let root = Path::new("/p");
+        let command = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| word.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["ant", "-f", "sub/build.xml", "test"])),
+            Some(PathBuf::from("/p/sub"))
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(
+                root,
+                &command(&["/opt/ant/bin/ant", "-buildfile", "./build.xml"])
+            ),
+            None
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["ant", "test"])),
+            None
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["mvn", "-f", "x/pom.xml"])),
+            None
+        );
+        assert_eq!(
+            ant_build_file_elsewhere(root, &command(&["ant", "-f"])),
+            None
+        );
+    }
+
+    #[test]
+    fn an_ant_source_root_is_the_directory_less_the_package() {
+        let root = |relative: &str, package: &str| {
+            ant_source_root(relative, &format!("// header\npackage {package};\n"))
+        };
+        assert_eq!(
+            root("main/plugin-forms/src/org/ametys/A.java", "org.ametys").as_deref(),
+            Some("main/plugin-forms/src")
+        );
+        assert_eq!(
+            root("src/main/app/Calc.java", "app").as_deref(),
+            Some("src/main")
+        );
+        assert_eq!(root("app/Calc.java", "app").as_deref(), Some(""));
+        assert_eq!(
+            ant_source_root("src/Loose.java", "class Loose {}").as_deref(),
+            Some("src")
+        );
+        assert_eq!(
+            root("src/elsewhere/A.java", "org.acme"),
+            None,
+            "a package that does not match its directory says nothing"
+        );
+    }
+
+    /// The Ametys harness: `<junit>` inside `<jacoco:coverage>`, after the
+    /// task that resolves its classpath.
+    #[test]
+    fn the_formatter_joins_each_junit_task_and_is_compiled_against_its_classpath() {
+        let build = r#"<project>
+    <target name="test" depends="jar">
+        <ivy:cachepath conf="test" pathid="test.classpath"/>
+        <jacoco:coverage>
+            <junit fork="true" printsummary="yes">
+                <classpath>
+                    <path refid="test.classpath"/>
+                    <pathelement location="${classes}"/>
+                </classpath>
+                <formatter type="xml"/>
+                <batchtest todir="x"><fileset dir="test/src"/></batchtest>
+            </junit>
+        </jacoco:coverage>
+    </target>
+    <target name="quick"><junit classpath="lib/junit.jar"/></target>
+</project>"#;
+        let patched = with_ant_formatter(
+            build,
+            Path::new("/w/src"),
+            Path::new("/w/platform"),
+            Path::new("/w/testng"),
+            Path::new("/w/classes"),
+        )
+        .expect("changed");
+        let compile = "<mkdir dir=\"/w/classes\"/><javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\"";
+        // Compiled after the classpath exists and before the coverage wrapper.
+        let resolved = patched.find("<ivy:cachepath").unwrap();
+        let compiled = patched.find(compile).unwrap();
+        let wrapper = patched.find("<jacoco:coverage>").unwrap();
+        assert!(resolved < compiled && compiled < wrapper, "{patched}");
+        assert!(
+            patched[compiled..wrapper].contains("<path refid=\"test.classpath\"/>"),
+            "{patched}"
+        );
+        assert!(patched.contains("<junit fork=\"true\" printsummary=\"yes\"><classpath><pathelement location=\"/w/classes\"/></classpath><formatter classname=\"com.supercorp.supercov.SupercovAntFormatter\" usefile=\"false\"/>"), "{patched}");
+        // An empty task gets a body.
+        assert!(patched.contains("<junit classpath=\"lib/junit.jar\"><classpath><pathelement location=\"/w/classes\"/></classpath><formatter classname=\"com.supercorp.supercov.SupercovAntFormatter\" usefile=\"false\"/></junit>"), "{patched}");
+        assert_eq!(patched.matches("<javac ").count(), 2);
+        assert_eq!(
+            with_ant_formatter(
+                "<project><target name=\"t\"><echo/></target></project>",
+                Path::new("/s"),
+                Path::new("/p"),
+                Path::new("/n"),
+                Path::new("/c")
+            ),
+            None
+        );
+        // A task on the JUnit Platform gets the platform listener, compiled
+        // from its own sources.
+        let launcher = with_ant_formatter(
+            "<project><target name=\"t\"><junitlauncher><classpath refid=\"cp\"/><testclasses><fileset dir=\"t\"/></testclasses></junitlauncher></target></project>",
+            Path::new("/w/src"),
+            Path::new("/w/platform"),
+            Path::new("/w/testng"),
+            Path::new("/w/classes"),
+        )
+        .expect("changed");
+        assert!(
+            launcher.contains("<javac srcdir=\"/w/platform\""),
+            "{launcher}"
+        );
+        assert!(
+            launcher.contains("<classpath refid=\"cp\"/></javac>"),
+            "{launcher}"
+        );
+        assert!(
+            launcher.contains("<listener classname=\"com.supercorp.supercov.SupercovListener\"/>"),
+            "{launcher}"
+        );
+        // Inside a container that runs its tasks in order the compilation
+        // goes right before the task, after what defines its classpath; a
+        // copied classpath keeps no id of its own.
+        let ordered = with_ant_formatter(
+            "<project><target name=\"t\"><sequential><path id=\"cp\"/><junit><classpath id=\"x\" refid=\"cp\"/></junit></sequential></target></project>",
+            Path::new("/w/src"),
+            Path::new("/w/platform"),
+            Path::new("/w/testng"),
+            Path::new("/w/classes"),
+        )
+        .expect("changed");
+        assert!(
+            ordered.find("<path id=\"cp\"/>").unwrap() < ordered.find("<mkdir").unwrap(),
+            "{ordered}"
+        );
+        assert!(ordered.contains("<javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{ordered}");
+        assert_eq!(
+            without_ids("<path id='a' refid=\"b\"/>"),
+            "<path refid=\"b\"/>"
+        );
+        // TestNG takes the listener in its own attribute, kept beside the
+        // project's own listeners, and its classpath attribute is copied.
+        let testng = with_ant_formatter(
+            "<project><target name=\"t\"><testng classpathref=\"cp\" listeners=\"a.Mine\"><classfileset dir=\"out\"/></testng><testng classpathref=\"cp\"/></target></project>",
+            Path::new("/w/src"),
+            Path::new("/w/platform"),
+            Path::new("/w/testng"),
+            Path::new("/w/classes"),
+        )
+        .expect("changed");
+        assert!(
+            testng.contains("listeners=\"a.Mine,com.supercorp.supercov.SupercovTestNGListener\""),
+            "{testng}"
+        );
+        assert!(testng.contains("<testng listeners=\"com.supercorp.supercov.SupercovTestNGListener\" classpathref=\"cp\">"), "{testng}");
+        assert!(testng.contains("<javac srcdir=\"/w/testng\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{testng}");
+    }
+
+    /// What a task holds is read as markup, not as text: a value that
+    /// mentions `listeners=` or ` id=` is a value, a stray closing tag closes
+    /// nothing, and only the task's own classpath is copied.
+    #[test]
+    fn a_task_is_patched_by_its_markup_not_its_text() {
+        let patch = |build: &str| {
+            with_ant_formatter(
+                build,
+                Path::new("/w/src"),
+                Path::new("/w/platform"),
+                Path::new("/w/testng"),
+                Path::new("/w/classes"),
+            )
+            .expect("changed")
+        };
+        let testng = patch(
+            "<project><target name=\"t\"><testng description=\"see listeners=x\" classpathref=\"cp\"/></target></project>",
+        );
+        assert!(
+            testng.contains("<testng listeners=\"com.supercorp.supercov.SupercovTestNGListener\" description=\"see listeners=x\""),
+            "{testng}"
+        );
+        let junit = patch(
+            "<project><target name=\"t\"></echo><junit></classpath><batchtest><fileset dir=\"t\"><include name=\"**\"/></fileset></batchtest><classpath id=\"own\"><pathelement path=\"a id='b'\"/></classpath></junit></target></project>",
+        );
+        assert!(
+            junit.contains("<javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath><pathelement path=\"a id='b'\"/></classpath></javac><junit>"),
+            "{junit}"
+        );
+    }
+
+    /// A test two batches both run is reported twice, the second numbered.
+    #[test]
+    fn a_test_run_again_is_numbered() {
+        let test = |name: &str| crate::owned_evidence::OwnedTestEvidence {
+            name: name.to_owned(),
+            ..Default::default()
+        };
+        let mut forked = [
+            crate::owned_evidence::OwnedEvidence {
+                tests: vec![test("A#one"), test("A#two")],
+                ..Default::default()
+            },
+            crate::owned_evidence::OwnedEvidence {
+                tests: vec![test("A#one")],
+                ..Default::default()
+            },
+        ];
+        number_repeated_runs(&mut forked);
+        let names = forked
+            .iter()
+            .flat_map(|evidence| evidence.tests.iter().map(|test| test.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["A#one", "A#two", "A#one [2]"]);
+    }
+
     use super::*;
 
     /// A catalog accessor counts only as itself, not as the start of a
@@ -3237,7 +3945,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1280, 1300, 1389, 1425, 1436] {
+        for line in [1293, 1313, 1402, 1438, 1449] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {

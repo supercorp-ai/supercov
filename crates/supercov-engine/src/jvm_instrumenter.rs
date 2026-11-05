@@ -368,7 +368,7 @@ impl Collector<'_> {
                     // one line produced, and it is not Kotlin.
                     None => self.edit(
                         node.end_byte(),
-                        70,
+                        closing_rank(node) - 5,
                         format!(" else {{ {HITS}[{probe}] = 2; }}"),
                     ),
                 }
@@ -386,14 +386,35 @@ impl Collector<'_> {
         if node.kind() == "block" {
             return;
         }
+        // An `if` braced here (an `else if`, or one nested unbraced in
+        // another) may add an `else` of its own at its end (`record_arms`), and
+        // so may the `if` around it. Each `else` belongs to its own `if`: the
+        // brace closing around this one goes after this one's `else` and
+        // before the enclosing one's, which `closing_rank` orders by depth.
+        // `else { if (b) {...} else {...} }`, not `else { if (b) {...} } else
+        // {...}`, which does not compile.
+        let closing = if matches!(node.kind(), "if_statement" | "if_expression") {
+            closing_rank(node)
+        } else {
+            60
+        };
         self.edit(node.start_byte(), 60, "{ ".to_owned());
-        self.edit(node.end_byte(), 60, " }".to_owned());
+        self.edit(node.end_byte(), closing, " }".to_owned());
         if is_statement(node, self.source, self.language) {
             // Ranked above the brace so that applying right to left leaves the
             // brace outermost and the probe within it.
             self.add_point(node, PointKind::Statement, None);
         }
     }
+}
+
+/// The rank of what closes at an `if`'s end: its added `else` just below it,
+/// the brace around it at it. Deeper nodes rank lower, and edits at one
+/// offset are applied highest rank first with each pushing the last right, so
+/// what a nested `if` closes ends up inside what the enclosing one closes.
+fn closing_rank(node: Node) -> i32 {
+    let depth = std::iter::successors(node.parent(), Node::parent).count() as i32;
+    100_000 - 10 * depth
 }
 
 /// The block a function's statements live in, if it has one.
@@ -692,9 +713,7 @@ fn walk(collector: &mut Collector, node: Node) {
                 let index = collector
                     .add_decision(node, "value")
                     .expect("a logical value has two conditions");
-                let wrapper = format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]);
-                collector.edit(node.start_byte(), 5, wrapper);
-                collector.edit(node.end_byte(), 5, ")".to_owned());
+                wrap_decision(collector, node, &probes, index);
             }
         }
         "if_statement" | "if_expression" => {
@@ -761,16 +780,10 @@ fn walk(collector: &mut Collector, node: Node) {
                         }));
                     } else {
                         let probes = collector.add_branch(node, "loop", &["true", "false"]);
-                        let decision = collector.add_decision(inner, "loop");
-                        let wrapper = match decision {
-                            Some(index) => format!(
-                                "{RUNTIME_CLASS}.bd({}, {}, {index}, ",
-                                probes[0], probes[1]
-                            ),
-                            None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-                        };
-                        collector.edit(inner.start_byte(), 5, wrapper);
-                        collector.edit(inner.end_byte(), 5, ")".to_owned());
+                        match collector.add_decision(inner, "loop") {
+                            Some(index) => wrap_decision(collector, inner, &probes, index),
+                            None => wrap_condition(collector, inner, &probes),
+                        }
                     }
                 }
                 // Kotlin's `while` and `do`/`while` always hold a condition,
@@ -856,15 +869,58 @@ fn if_node(collector: &mut Collector, node: Node) -> Option<()> {
                 "reason": "the compiler reads this condition to narrow a type in the branch below it, so observing its operands would stop the code compiling; the branch is recorded from its arms and carries no condition vectors",
             }));
     } else {
-        let decision = collector.add_decision(condition, "if");
-        let wrapper = match decision {
-            Some(index) => format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]),
-            None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-        };
-        collector.edit(condition.start_byte(), 5, wrapper);
-        collector.edit(condition.end_byte(), 5, ")".to_owned());
+        match collector.add_decision(condition, "if") {
+            Some(index) => wrap_decision(collector, condition, &probes, index),
+            None => wrap_condition(collector, condition, &probes),
+        }
     }
     Some(())
+}
+
+/// Wraps a branch's single condition in the call that records which way it
+/// went.
+fn wrap_condition(collector: &mut Collector, node: Node, probes: &[u64]) {
+    let wrapper = format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]);
+    collector.edit(node.start_byte(), 5, wrapper);
+    collector.edit(node.end_byte(), 5, ")".to_owned());
+}
+
+/// Wraps a decision of several conditions in the call that records its
+/// branch and closes its vector.
+///
+/// Java's compiler reads `&&`, `||`, `!` and `?:` to learn what a condition
+/// has assigned by the time it holds, or fails: `while (!stopped() && (n =
+/// in.read(buffer)) >= 0) out.write(buffer, 0, n);` compiles because `n` is
+/// assigned whenever the loop runs its body. A call's result tells it
+/// nothing of the kind, so a decision that assigns is recorded in the arms
+/// of a conditional on it instead: `(d ? bd(.., true) || true : bd(..,
+/// false) && false)` has assigned, when true and when false, exactly what
+/// `d` has.
+fn wrap_decision(collector: &mut Collector, node: Node, probes: &[u64], index: usize) {
+    let record = |outcome: bool| {
+        format!(
+            "{RUNTIME_CLASS}.bd({}, {}, {index}, {outcome})",
+            probes[0], probes[1]
+        )
+    };
+    if collector.language == JvmLanguage::Java && assigns(node) {
+        let arms = format!(" ? {} || true : {} && false)", record(true), record(false));
+        collector.edit(node.start_byte(), 5, "(".to_owned());
+        // After the last condition's own `)`, which ranks 20.
+        collector.edit(node.end_byte(), 21, arms);
+    } else {
+        let wrapper = format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1]);
+        collector.edit(node.start_byte(), 5, wrapper);
+        collector.edit(node.end_byte(), 5, ")".to_owned());
+    }
+}
+
+/// Whether an expression assigns a variable anywhere within it.
+fn assigns(node: Node) -> bool {
+    node.kind() == "assignment_expression" || {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).any(assigns)
+    }
 }
 
 fn is_statement(node: Node, source: &str, language: JvmLanguage) -> bool {
@@ -1820,6 +1876,32 @@ class Outer {
 
     /// The arms were left unwalked when the condition narrowed a type: the
     /// statements and decisions inside them were not measured at all.
+    #[test]
+    fn an_else_if_that_narrows_a_type_and_has_no_else_still_compiles() {
+        // Ametys: `if (n instanceof Form f) {...} else if (n instanceof Page p) {...}`
+        // and nothing after. The inner `if` adds an `else` to record being
+        // false, and it has to land inside the braces around the `else if`.
+        let (_, probed) = java_runs_alike(
+            "class X {\n  static String f(Object o) {\n    String out = \"none\";\n    if (o instanceof Integer i) {\n      out = \"int \" + i;\n    }\n    else if (o instanceof String s) \n    {\n      out = \"string \" + s;\n    }\n    return out;\n  }\n  public static void main(String[] args) {\n    System.out.println(f(1) + \" \" + f(\"a\") + \" \" + f(2.0));\n  }\n}\n",
+        );
+        assert!(!probed.contains("} } else"), "{probed}");
+    }
+
+    #[test]
+    fn nested_unbraced_ifs_that_narrow_a_type_still_compile() {
+        // Both ifs add an else to record being false, and the outer one also
+        // braces the inner, all at one offset: each else belongs to its own if.
+        let (_, probed) = java_runs_alike(
+            "class X {\n  static String f(Object o) {\n    String out = \"none\";\n    if (o instanceof CharSequence s) if (s.length() > 0 && o instanceof String t) out = \"string \" + t;\n    return out;\n  }\n  public static void main(String[] args) {\n    System.out.println(f(\"a\") + \" \" + f(\"\") + \" \" + f(new StringBuilder(\"b\")) + \" \" + f(1));\n  }\n}\n",
+        );
+        // The inner else closes inside the braces around the inner if, and
+        // the outer else follows them.
+        let inner_else = probed.find("} else {").expect("the inner if's else");
+        let outer_else = probed.rfind("} else {").expect("the outer if's else");
+        assert!(inner_else < outer_else, "{probed}");
+        assert!(probed[inner_else..=outer_else].contains("} }"), "{probed}");
+    }
+
     #[test]
     fn the_arms_of_a_condition_that_narrows_a_type_are_measured() {
         let (obligations, probed) = java_runs_alike(

@@ -1079,6 +1079,136 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A decision that assigns a variable keeps what the compiler knows of it.
+///
+/// Java's definite assignment reads `&&`, `||`, `!` and `?:`: the classic
+/// copy loop `while (!stopped() && (n = in.read(buffer)) >= 0)` uses `n` in
+/// its body because the condition assigned it whenever it held. Apache Ant's
+/// own `Get` task is written so, and wrapping the condition in one call made
+/// it stop compiling.
+#[test]
+fn a_decision_that_assigns_still_assigns_for_the_compiler() {
+    let _building = common::building();
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
+        return;
+    };
+    let root = temporary("assigning");
+    const ASSIGNING: &str = r#"public class Assigning {
+    static boolean stopped;
+
+    public static int copy(java.io.InputStream in) throws java.io.IOException {
+        byte[] buffer = new byte[4];
+        int total = 0;
+        int length;
+        while (!stopped && (length = in.read(buffer)) >= 0) {
+            total += length;
+        }
+        return total;
+    }
+
+    public static int first(String s) {
+        int n;
+        if (s != null && (n = s.length()) > 0) {
+            return n;
+        }
+        return -1;
+    }
+
+    public static int orZero(String s) {
+        int n;
+        if (s == null || (n = s.length()) == 0) {
+            return 0;
+        }
+        return n;
+    }
+
+    public static int value(String s) {
+        int n;
+        return s != null && (n = s.length()) > 1 ? n : -1;
+    }
+}
+"#;
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Assigning.java",
+        ASSIGNING,
+        JvmLanguage::Java,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    let instrumented = rewrite(ASSIGNING, &obligations.edits);
+    // Every one is still a decision whose conditions are observed.
+    assert_eq!(decisions, 4, "{instrumented}");
+    assert_eq!(
+        instrumented.matches(" || true : ").count(),
+        4,
+        "each outcome is recorded in the arms of a conditional:\n{instrumented}"
+    );
+
+    write(&root, "Assigning.java", &instrumented);
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("runtime-assets/jvm/com/supercorp/supercov/Supercov.java");
+    let probes = obligations.probes.len() + 1;
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime").replace(
+            "static final int PROBE_COUNT = 0; // supercov:probe-count",
+            &format!("static final int PROBE_COUNT = {probes}; // supercov:probe-count"),
+        ),
+    );
+    write(
+        &root,
+        "Main.java",
+        r#"public class Main {
+    public static void main(String[] args) throws Exception {
+        // Exactly what the uninstrumented program answers.
+        java.io.InputStream in = new java.io.ByteArrayInputStream(new byte[10]);
+        if (Assigning.copy(in) != 10) { throw new AssertionError("copy"); }
+        if (Assigning.first("abc") != 3 || Assigning.first("") != -1 || Assigning.first(null) != -1) { throw new AssertionError("first"); }
+        if (Assigning.orZero("ab") != 2 || Assigning.orZero("") != 0 || Assigning.orZero(null) != 0) { throw new AssertionError("orZero"); }
+        if (Assigning.value("ab") != 2 || Assigning.value("a") != -1 || Assigning.value(null) != -1) { throw new AssertionError("value"); }
+        System.out.println("ok");
+    }
+}
+"#,
+    );
+    let compile = Command::new(&javac)
+        .args([
+            "-Xlint:all",
+            "-Werror",
+            "-d",
+            ".",
+            "com/supercorp/supercov/Supercov.java",
+            "Assigning.java",
+            "Main.java",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "a decision that assigns must still compile:\n{}\n--- source ---\n{instrumented}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-cp", ".", "Main"])
+        .current_dir(&root)
+        .output()
+        .expect("java");
+    assert!(
+        run.status.success(),
+        "and still answer the same:\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Kotlin's version of the same, and the more pervasive one: `x != null` is
 /// how a great deal of Kotlin is written, and every one of those guards
 /// narrows the type below it.

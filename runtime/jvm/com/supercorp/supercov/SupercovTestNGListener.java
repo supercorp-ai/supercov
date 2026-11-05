@@ -108,6 +108,25 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
     Supercov.exitTest("failed");
   }
 
+  /**
+   * A test context starting and finishing says nothing a test does not.
+   * Written out rather than left to the interface: TestNG 6, which older Ant
+   * builds still run, declares these without a default.
+   */
+  @Override
+  public void onStart(org.testng.ITestContext context) {}
+
+  @Override
+  public void onFinish(org.testng.ITestContext context) {}
+
+  /**
+   * A test past its timeout, reported apart from other failures since TestNG
+   * 7; not marked as an override, since TestNG 6 has no such method.
+   */
+  public void onTestFailedWithTimeout(ITestResult result) {
+    onTestFailure(result);
+  }
+
   @Override
   public void onExecutionFinish() {
     try {
