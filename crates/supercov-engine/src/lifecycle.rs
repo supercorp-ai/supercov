@@ -635,8 +635,6 @@ pub struct ProjectLock {
     root: PathBuf,
     owner: LockOwner,
     copy: usize,
-    /// A run's copy is put away when it ends; cleaning's is not.
-    parks: bool,
     /// Dropped to release: the store, then the copy.
     held: Vec<Held>,
     released: bool,
@@ -808,14 +806,10 @@ impl ProjectLock {
             let mut payload = serde_json::to_vec_pretty(&owner).expect("plain data serializes");
             payload.push(b'\n');
             fs::write(&path, payload).map_err(|source| io_error(&path, source))?;
-            if !alone {
-                move_copy(root, copy, false);
-            }
             return Ok(Self {
                 root: root.to_owned(),
                 owner,
                 copy,
-                parks: !alone,
                 held: vec![store, lock],
                 released: false,
             });
@@ -844,10 +838,6 @@ impl ProjectLock {
         if read_owner(&path).is_some_and(|owner| owner == self.owner) {
             fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
         }
-        let keep = std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
-        if self.parks && !keep {
-            move_copy(&self.root, self.copy, true);
-        }
         // The copy was last used now, which is what keeps it a day.
         let _ = self
             .held
@@ -865,45 +855,6 @@ impl ProjectLock {
 impl Drop for ProjectLock {
     fn drop(&mut self) {
         let _ = self.release();
-    }
-}
-
-/// Puts a copy away when its run ends, or back when the next run takes it.
-///
-/// A copy left beside the project gave the next run without Supercov a
-/// second set of its tests: Vitest's includes found the copy's test files in
-/// `.supercov`. Between runs it waits under `.supercov/node_modules`, which
-/// test runners leave out; a run takes it back first, because its own tools
-/// do not compile or transform what is under `node_modules`. Each move is a
-/// rename, so the copy and the caches built in it are reused as before, at
-/// the path they were made at. A copy that cannot move stays where it is.
-fn move_copy(root: &Path, copy: usize, park: bool) {
-    let Some((used, waiting)) = crate::workspace::copy_places(root, copy) else {
-        return;
-    };
-    for (used, waiting) in used.iter().zip(&waiting) {
-        let (from, to) = if park {
-            (used, waiting)
-        } else {
-            (waiting, used)
-        };
-        if std::fs::symlink_metadata(from).is_err() {
-            continue;
-        }
-        if std::fs::symlink_metadata(to).is_ok() {
-            // A run that ended without putting its copy away left the newer
-            // one in use; the one waiting is older and goes when it is
-            // replaced.
-            if !park || remove_stored_tree_deferred(root, to).is_err() {
-                continue;
-            }
-        }
-        if to
-            .parent()
-            .is_some_and(|parent| std::fs::create_dir_all(parent).is_ok())
-        {
-            let _ = std::fs::rename(from, to);
-        }
     }
 }
 
@@ -1423,16 +1374,11 @@ fn remove_idle_copies(root: &Path, locks: &Path) -> Result<(), LifecycleError> {
         else {
             continue;
         };
-        // The copy and its source view, in use or waiting.
+        // The copy and its source view.
         crate::workspace::copy_directories(&container, copy)
-            .into_iter()
-            .chain(
-                crate::workspace::copy_places(root, copy)
-                    .into_iter()
-                    .flat_map(|(_, waiting)| waiting),
-            )
+            .iter()
             .filter(|directory| fs::symlink_metadata(directory).is_ok())
-            .try_for_each(|directory| remove_stored_tree_deferred(root, &directory).map(drop))?;
+            .try_for_each(|directory| remove_stored_tree_deferred(root, directory).map(drop))?;
     }
     Ok(())
 }
@@ -1545,14 +1491,9 @@ pub fn cleanup_storage_locked(
     let shared = root.join(".supercov/cache");
     let mut caches = Vec::new();
     if remove_build_cache && active.is_empty() {
-        // Copies waiting between runs are in a container of their own.
-        let waiting = crate::workspace::copy_places(root, 1)
-            .and_then(|(_, [copy, _])| copy.parent().map(Path::to_owned))
-            .filter(|directory| fs::symlink_metadata(directory).is_ok());
         if owned_workspace_container(root) {
             caches.push(container);
         }
-        caches.extend(waiting);
         if fs::symlink_metadata(&shared).is_ok() {
             caches.push(shared);
         }
@@ -1653,7 +1594,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1526", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1472", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1678,7 +1619,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1256", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1207", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1686,7 +1627,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1331", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1282", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()

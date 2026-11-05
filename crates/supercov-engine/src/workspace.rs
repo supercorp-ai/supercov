@@ -396,35 +396,6 @@ pub(crate) fn copy_directories(container: &Path, copy: usize) -> [PathBuf; 2] {
     ]
 }
 
-/// A copy's directories where a run uses them, and where they wait between
-/// runs: the same names under `.supercov/node_modules`, which every
-/// JavaScript test runner leaves out of the files it collects. Only for
-/// Supercov's own container, and `None` when either place is not a plain
-/// directory of the project's: a copy is never moved through a link.
-///
-/// Read with the file system's own calls: moving a copy is housekeeping
-/// around a run, and a test that fails a run's Nth call counts the run's.
-pub(crate) fn copy_places(root: &Path, copy: usize) -> Option<([PathBuf; 2], [PathBuf; 2])> {
-    let directory = |path: &Path| {
-        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
-    };
-    let container = root.join(".supercov/workspaces");
-    let marker = container.join(WORKSPACE_MARKER);
-    let owned = directory(&container)
-        && std::fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.file_type().is_file())
-        && std::fs::read(&marker).is_ok_and(|contents| contents == WORKSPACE_MARKER_CONTENTS);
-    let modules = root.join(".supercov/node_modules");
-    let parkable = directory(&modules)
-        || std::fs::symlink_metadata(&modules)
-            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
-    (owned && parkable).then(|| {
-        (
-            copy_directories(&container, copy),
-            copy_directories(&modules.join("workspaces"), copy),
-        )
-    })
-}
-
 /// Where the copy a run holds is.
 pub fn cached_workspace_path(root: &Path, lock: &ProjectLock) -> PathBuf {
     copy_path(root, lock.copy()).expect(NAMED)
@@ -2279,8 +2250,45 @@ pub fn prune_cached_workspace_sources(
             }
         }
     }
+    clear_around(&workspace);
     removed.sort();
     Ok(removed)
+}
+
+/// Removes what lies around a package's copy -- the rest of its repository,
+/// linked or copied beside it on the way up -- which the next run makes
+/// again. Left in the project's `.supercov`, it was the repository's other
+/// packages to a test runner started in the project: Vitest's includes
+/// followed the links and ran a monorepo's other apps' tests too. Best
+/// effort, as making it is.
+fn clear_around(workspace: &Path) {
+    let Some(copy) = copy_directory_of(workspace) else {
+        return;
+    };
+    let Ok(below) = workspace.strip_prefix(&copy) else {
+        return;
+    };
+    let path_down = below
+        .ancestors()
+        .map(|ancestor| copy.join(ancestor))
+        .collect::<Vec<_>>();
+    let between = path_down.len().saturating_sub(2);
+    for level in path_down.iter().skip(1).take(between) {
+        let Ok(entries) = fs::read_dir(level) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path_down.contains(&path) {
+                continue;
+            }
+            let _ = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(&path),
+                Ok(_) => fs::remove_file(&path).or_else(|_| fs::remove_dir(&path)),
+                Err(error) => Err(error),
+            };
+        }
+    }
 }
 
 /// The directory an Ant build reaches out to: the closest one holding the
@@ -5468,7 +5476,7 @@ mod tests {
             lock.release().unwrap();
             (root, prepared)
         };
-        let (root, prepared) = prepare("fs.read_dir entry#workspace.rs:690", true);
+        let (root, prepared) = prepare("fs.read_dir entry#workspace.rs:661", true);
         let copied = prepared.unwrap().join("packages/a/node_modules");
         assert_eq!(
             fs::read_link(copied.join("left-pad")).unwrap(),
@@ -5476,14 +5484,14 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
 
-        let (root, prepared) = prepare("fs.create_dir#workspace.rs:689", false);
+        let (root, prepared) = prepare("fs.create_dir#workspace.rs:660", false);
         let copied = prepared.unwrap().join("packages/a/node_modules");
         assert_eq!(fs::read_dir(copied).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
 
         for fault in [
             "fs.read_dir entry#source_tools.rs:186",
-            "fs.create_dir#workspace.rs:689,fs.write#workspace.rs:1030",
+            "fs.create_dir#workspace.rs:660,fs.write#workspace.rs:1001",
         ] {
             let (root, prepared) = prepare(fault, true);
             assert!(
@@ -5533,7 +5541,7 @@ mod tests {
                 .unwrap()
                 .is_relative()
         );
-        let failed = crate::fault::during("fs.symlink#workspace.rs:997", || {
+        let failed = crate::fault::during("fs.symlink#workspace.rs:968", || {
             prepare_isolated_workspace(&root, "run", &lock)
         });
         assert!(
@@ -5550,7 +5558,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         prepare_cached_workspace(&root, &lock, &[]).unwrap();
-        let recovered = crate::fault::during("fs.read_dir entry#workspace.rs:1185", || {
+        let recovered = crate::fault::during("fs.read_dir entry#workspace.rs:1156", || {
             recover_cached_workspace(&root, &lock)
         });
         assert!(
@@ -5569,7 +5577,7 @@ mod tests {
         for (reused, clear) in [
             ("out.js", ""),
             ("build", ""),
-            ("out.js", "fs.create_dir_all#workspace.rs:1353"),
+            ("out.js", "fs.create_dir_all#workspace.rs:1324"),
         ] {
             let root = project();
             let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
@@ -5613,11 +5621,11 @@ mod tests {
     #[test]
     fn writeback_stops_at_a_file_it_cannot_read() {
         for (kind, fault) in [
-            (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1407"),
-            (CommandOutputs::Go, "fs.metadata#workspace.rs:1672"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1676"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1778"),
-            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2226"),
+            (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1378"),
+            (CommandOutputs::Go, "fs.metadata#workspace.rs:1643"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1647"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1749"),
+            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2197"),
         ] {
             let (root, workspace) = writeback_fixture("unreadable");
             let baseline = workspace_output_baseline(&workspace).unwrap();
@@ -5665,7 +5673,7 @@ mod tests {
             hide_rewritten_files(&workspace, &["src/app.ts".to_owned()]);
         });
         fs::create_dir_all(root.join(".git")).unwrap();
-        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2078", || {
+        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2049", || {
             mirror_git_repository(&root, &workspace)
         });
         assert!(mirrored.is_err());
@@ -5678,7 +5686,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         prepare_cached_workspace(&root, &lock, &[]).unwrap();
-        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2249", || {
+        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2220", || {
             prune_cached_workspace_sources(&root, &lock)
         });
         assert!(

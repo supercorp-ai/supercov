@@ -492,6 +492,34 @@ fn a_patch_whose_git_cannot_run_is_refused() {
         .succeeds();
 }
 
+/// After a run, nothing of the rest of the repository stays in the
+/// project's `.supercov`. The copy is laid out within its repository, with
+/// the other packages linked around it; left there, a test runner started in
+/// the project followed the links and ran another package's tests too, as
+/// Vitest's includes did in a monorepo. The next run links them again.
+#[test]
+fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
+    let (repository, project) = Project::cart_below("around-copy", "web");
+    repository.write(
+        "admin/test/admin.test.js",
+        "import test from 'node:test';\ntest('admin', () => {});\n",
+    );
+    repository.commit("admin");
+    let name = repository.root.file_name().unwrap();
+    let around = project
+        .root
+        .join(".supercov/workspaces/workspace")
+        .join(name);
+    for _ in 0..2 {
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        assert!(around.join("web").is_dir(), "the package's copy is kept");
+        assert!(
+            std::fs::symlink_metadata(around.join("admin")).is_err(),
+            "another package stayed beside the copy"
+        );
+    }
+}
+
 #[test]
 fn patch_reads_a_project_kept_below_the_top_of_its_repository() {
     // Git names a file from the top (`web/src/cart.js`), the run from where
@@ -4835,46 +4863,6 @@ fn kept_workspace_source(project: &Project, relative: &str) -> String {
         .join(relative);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
-}
-
-/// A copy waits between runs where test runners do not look. Left beside
-/// the project, it gave the next run without Supercov a second set of tests:
-/// Vitest's includes collected the copy's test files from `.supercov`. The
-/// next measured run takes the same copy back, and one asked to keep its
-/// copy leaves it where it ran.
-#[cfg(unix)]
-#[test]
-fn a_copy_waits_between_runs_where_test_runners_do_not_look() {
-    use std::os::unix::fs::MetadataExt as _;
-    let project = Project::cart("parked-copy");
-    let name = project.root.file_name().unwrap();
-    let used = project
-        .root
-        .join(".supercov/workspaces/workspace")
-        .join(name);
-    let waiting = project
-        .root
-        .join(".supercov/node_modules/workspaces/workspace")
-        .join(name);
-    project.supercov(&["--", "node", "--test"]).succeeds();
-    assert!(!used.exists(), "the copy stayed beside the project");
-    assert!(waiting.join("test/cart.test.js").is_file());
-    let copy = std::fs::metadata(&waiting).unwrap().ino();
-    project.supercov(&["--", "node", "--test"]).succeeds();
-    assert!(!used.exists());
-    assert_eq!(
-        std::fs::metadata(&waiting).unwrap().ino(),
-        copy,
-        "the second run made a copy of its own"
-    );
-    project
-        .supercov_with(
-            &["--", "node", "--test"],
-            &[("SUPERCOV_KEEP_WORKSPACE", "1")],
-        )
-        .succeeds();
-    assert_eq!(std::fs::metadata(&used).unwrap().ino(), copy);
-    assert!(!waiting.exists());
 }
 
 /// A Playwright config is a file in the project, not a statement that the
@@ -15156,7 +15144,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "spawn#child_signal_guard.rs:231@2 => child_signal_guard.rs:231",
             "spawn",
             // The store of copies made.
-            "fs.create_dir_all#workspace.rs:474 => workspace.rs:474",
+            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
         ],
     );
     // A binary none of whose tests were asked for is listed again for how
@@ -15605,7 +15593,7 @@ fn a_maven_run_whose_own_step_fails_says_so() {
             "spawn",
             // The store of copies made, and the copy released after a run
             // that passed.
-            "fs.create_dir_all#workspace.rs:474 => workspace.rs:474",
+            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
             "copy-release",
         ],
     );
@@ -16429,108 +16417,108 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         (
             "fs.read_dir entry#7",
             "injected fault at fs",
-            "workspace.rs:735",
+            "workspace.rs:706",
         ),
         (
             "fs.read_dir entry#10",
             "injected fault at fs",
-            "workspace.rs:1082",
+            "workspace.rs:1053",
         ),
         (
             "fs.read_dir entry#11",
             "injected fault at fs",
-            "workspace.rs:1019",
+            "workspace.rs:990",
         ),
         (
             "fs.read_dir entry#12",
             "injected fault at fs",
-            "workspace.rs:966",
+            "workspace.rs:937",
         ),
         (
             "fs.read_dir entry#16",
             "injected fault at fs",
-            "workspace.rs:1385",
+            "workspace.rs:1356",
         ),
-        ("fs.read_dir@57", "injected fault at fs", "workspace.rs:735"),
+        ("fs.read_dir@57", "injected fault at fs", "workspace.rs:706"),
         (
             "fs.read_dir@66",
             "/node_modules: injected",
-            "workspace.rs:1082",
+            "workspace.rs:1053",
         ),
         (
             "fs.read_dir@67",
             "node_modules/.bin: injected",
-            "workspace.rs:1019",
+            "workspace.rs:990",
         ),
         (
             "fs.read_dir@68",
             "node_modules/@scope: injected",
-            "workspace.rs:966",
+            "workspace.rs:937",
         ),
-        ("fs.create_dir_all@4", "staging", "workspace.rs:734"),
+        ("fs.create_dir_all@4", "staging", "workspace.rs:705"),
         (
             "fs.create_dir_all@9",
             "/node_modules: injected",
-            "workspace.rs:1081",
+            "workspace.rs:1052",
         ),
         (
             "fs.create_dir_all@10",
             "node_modules/.bin: injected",
-            "workspace.rs:1016",
+            "workspace.rs:987",
         ),
         (
             "fs.create_dir_all@11",
             "node_modules/@scope: injected",
-            "workspace.rs:965",
+            "workspace.rs:936",
         ),
     ];
     let unlinkable = [
         (
             "fs.read_dir entry#9",
             "injected fault at fs",
-            "workspace.rs:798",
+            "workspace.rs:769",
         ),
         (
             "fs.read_dir@62",
             "packages/web/node_modules: injected",
-            "workspace.rs:798",
+            "workspace.rs:769",
         ),
         (
             "fs.read_dir@63",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:1019",
+            "workspace.rs:990",
         ),
         (
             "fs.create_dir_all@7",
             "packages/web/node_modules: injected",
-            "workspace.rs:797",
+            "workspace.rs:768",
         ),
         (
             "fs.create_dir_all@8",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:1016",
+            "workspace.rs:987",
         ),
         (
             "fs.symlink@1",
             "packages/web/node_modules/.bin/webtool",
-            "workspace.rs:1038",
+            "workspace.rs:1009",
         ),
         (
             "fs.symlink@2",
             "packages/web/node_modules/dep",
-            "workspace.rs:809",
+            "workspace.rs:780",
         ),
         (
             "fs.symlink@3",
             "node_modules/.bin/tool",
-            "workspace.rs:1038",
+            "workspace.rs:1009",
         ),
         (
             "fs.symlink@4",
             "node_modules/@scope/pkg",
-            "workspace.rs:1001",
+            "workspace.rs:972",
         ),
-        ("fs.symlink@5", "node_modules/plain", "workspace.rs:1001"),
+        ("fs.symlink@5", "node_modules/plain", "workspace.rs:972"),
     ];
     // A directory is never cloned, so every system links the same way:
     // hard links where it can, one link per package where it cannot.
@@ -16584,12 +16572,12 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
 #[test]
 fn a_run_that_cannot_reuse_the_last_copy_says_so() {
     for entry in [
-        "fs.canonicalize@10 => workspace.rs:1313",
-        "fs.create_dir_all@6 => workspace.rs:1328",
-        "fs.copy@1 => workspace.rs:580",
-        "fs.rename@1 => workspace.rs:591",
-        "fs.rename@3 => workspace.rs:1347",
-        "fs.create_dir_all@10 => workspace.rs:1347",
+        "fs.canonicalize@10 => workspace.rs:1284",
+        "fs.create_dir_all@6 => workspace.rs:1299",
+        "fs.copy@1 => workspace.rs:551",
+        "fs.rename@1 => workspace.rs:562",
+        "fs.rename@3 => workspace.rs:1318",
+        "fs.create_dir_all@10 => workspace.rs:1318",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::cart("reuse-copy");
@@ -16616,7 +16604,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1356",
+        "fs.create_dir_all#lifecycle.rs:1307",
         "fs.create_dir_all#javascript_run.rs:677",
         "fs.write#javascript_run.rs:978",
         "fs.canonicalize#process_supervision.rs:1719",
@@ -16626,7 +16614,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#evidence_archive.rs:445",
         "fs.create_dir_all#javascript_run.rs:1461",
         "fs.create_dir_all#javascript_run.rs:1463",
-        "fs.create_dir_all#lifecycle.rs:1067",
+        "fs.create_dir_all#lifecycle.rs:1018",
         "fs.create_dir_all#javascript_run.rs:1555",
         "fs.create_dir_all#javascript_run.rs:1557",
     ] {
@@ -17132,7 +17120,7 @@ fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
             "fs.read#javascript_frontend.rs:365",
             "javascript_frontend.rs:365",
         ),
-        ("fs.symlink_metadata#workspace.rs:1311", "workspace.rs:1311"),
+        ("fs.symlink_metadata#workspace.rs:1282", "workspace.rs:1282"),
     ] {
         let project = Project::cart("frontend-cache-unread");
         project.supercov(&["--", "node", "--test"]).succeeds();
