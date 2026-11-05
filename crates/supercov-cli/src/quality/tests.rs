@@ -791,6 +791,28 @@ fn windows_of_one_file_fold_back_by_taking_the_strongest_answer() {
     assert_eq!(folded[1].windows, 1);
 }
 
+/// A window whose request failed has no values: folded first or last, the
+/// file has the answered window's values, and its error is kept. Which
+/// window answers first depends on the requests' timing, so both orders are
+/// asked here.
+#[test]
+fn a_window_that_failed_folds_into_the_answered_one_in_either_order() {
+    let failed = || {
+        let mut failed = windowed("a.rs", &[]);
+        failed.values = None;
+        failed.error = Some("window 2 failed".into());
+        failed
+    };
+    for answered in [
+        vec![failed(), windowed("a.rs", &[("long_method", 0.7)])],
+        vec![windowed("a.rs", &[("long_method", 0.7)]), failed()],
+    ] {
+        let folded = combine_windows(answered);
+        assert_eq!(folded[0].values.as_ref().unwrap()["long_method"], 0.7);
+        assert_eq!(folded[0].error.as_deref(), Some("window 2 failed"));
+    }
+}
+
 #[test]
 fn folding_keeps_the_first_error_and_only_claims_cached_when_every_window_was() {
     let mut miss = windowed("a.rs", &[("long_method", 0.1)]);

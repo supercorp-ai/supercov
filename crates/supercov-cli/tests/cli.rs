@@ -5851,6 +5851,22 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         "{said}"
     );
 
+    // A command that fails after its tests passed: no test failed, and the
+    // build the copy starts without is named as what may be missing.
+    project.write(
+        "test/plain.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('plain orders pay', () => equal(fee(1), 5));\n",
+    );
+    let after = project.supercov(&["--", "sh", "-c", "node --test test/plain.test.js && exit 3"]);
+    assert_eq!(after.code(), 3, "{}", after.stdout());
+    assert!(
+        after
+            .stderr()
+            .contains("exited 3 and no test it reported failed. It ran in a copy of the project that starts without build output"),
+        "{}",
+        after.stderr()
+    );
+
     // A command that builds by another name, and whose build failed, is not
     // told to add one: its own build is what to look at.
     let elsewhere = project.supercov(&["--", "sh", "-c", "npm run build:ci; npm test"]);
