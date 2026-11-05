@@ -102,9 +102,14 @@ fn supported_by_command(root: &Path, command_tokens: &[String]) -> Vec<(Frontend
     // `ant` is also the name of other tools (Anthropic's CLI installs one), so
     // the word picks Ant only beside an Ant build file. Its launcher class is
     // unambiguous wherever it appears.
+    // `tokens` splits paths on `/`, so the file's name is somewhere after the flag.
+    let names_a_build_file = command_tokens
+        .iter()
+        .position(|token| matches!(token.as_str(), "-f" | "-file" | "-buildfile"))
+        .is_some_and(|flag| command_tokens[flag + 1..].iter().any(|token| token.ends_with(".xml")));
     let ant_command = command_tokens.iter().any(|token| {
         token == "org.apache.tools.ant.launch.launcher"
-            || (token == "ant" && regular_file(&root.join("build.xml")))
+            || (token == "ant" && (regular_file(&root.join("build.xml")) || names_a_build_file))
     });
     if ant_command {
         launched.push((
@@ -481,11 +486,26 @@ mod tests {
             let detected = detect_frontends(&root, &command);
             assert_eq!(detected.frontends, [FrontendLanguage::Jvm], "{command:?}");
         }
+        // A build file named on the command, with none where Supercov runs.
+        let elsewhere = fixture("ant-elsewhere");
+        for command in [
+            vec!["ant".to_string(), "-f".into(), "sub/build.xml".into(), "test".into()],
+            vec!["ant".into(), "-buildfile".into(), "module.xml".into()],
+        ] {
+            let detected = detect_frontends(&elsewhere, &command);
+            assert_eq!(detected.frontends, [FrontendLanguage::Jvm], "{command:?}");
+        }
+        fs::remove_dir_all(elsewhere).unwrap();
         fs::remove_dir_all(root).unwrap();
-        // Without a build file the word is another tool's.
+        // Without a build file the word is another tool's, whatever it reads.
         let other = fixture("not-ant");
-        let detected = detect_frontends(&other, &["ant".into(), "messages".into()]);
-        assert!(!detected.frontends.contains(&FrontendLanguage::Jvm), "{detected:?}");
+        for command in [
+            vec!["ant".to_string(), "messages".into()],
+            vec!["ant".into(), "-f".into(), "notes.txt".into()],
+        ] {
+            let detected = detect_frontends(&other, &command);
+            assert!(!detected.frontends.contains(&FrontendLanguage::Jvm), "{command:?}: {detected:?}");
+        }
         fs::remove_dir_all(other).unwrap();
     }
 

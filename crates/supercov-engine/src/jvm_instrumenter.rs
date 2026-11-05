@@ -368,7 +368,7 @@ impl Collector<'_> {
                     // one line produced, and it is not Kotlin.
                     None => self.edit(
                         node.end_byte(),
-                        70,
+                        closing_rank(node) - 5,
                         format!(" else {{ {HITS}[{probe}] = 2; }}"),
                     ),
                 }
@@ -386,13 +386,15 @@ impl Collector<'_> {
         if node.kind() == "block" {
             return;
         }
-        // An `else if` braced here is an `if` that may add an `else` of its
-        // own at its end (`record_arms`, rank 70). That `else` is the inner
-        // `if`'s, so the brace closing around the whole `if` goes after it:
+        // An `if` braced here (an `else if`, or one nested unbraced in
+        // another) may add an `else` of its own at its end (`record_arms`), and
+        // so may the `if` around it. Each `else` belongs to its own `if`: the
+        // brace closing around this one goes after this one's `else` and
+        // before the enclosing one's, which `closing_rank` orders by depth.
         // `else { if (b) {...} else {...} }`, not `else { if (b) {...} } else
         // {...}`, which does not compile.
         let closing = if matches!(node.kind(), "if_statement" | "if_expression") {
-            80
+            closing_rank(node)
         } else {
             60
         };
@@ -404,6 +406,15 @@ impl Collector<'_> {
             self.add_point(node, PointKind::Statement, None);
         }
     }
+}
+
+/// The rank of what closes at an `if`'s end: its added `else` just below it,
+/// the brace around it at it. Deeper nodes rank lower, and edits at one
+/// offset are applied highest rank first with each pushing the last right, so
+/// what a nested `if` closes ends up inside what the enclosing one closes.
+fn closing_rank(node: Node) -> i32 {
+    let depth = std::iter::successors(node.parent(), Node::parent).count() as i32;
+    100_000 - 10 * depth
 }
 
 /// The block a function's statements live in, if it has one.
@@ -1839,6 +1850,21 @@ class Outer {
             "class X {\n  static String f(Object o) {\n    String out = \"none\";\n    if (o instanceof Integer i) {\n      out = \"int \" + i;\n    }\n    else if (o instanceof String s) \n    {\n      out = \"string \" + s;\n    }\n    return out;\n  }\n  public static void main(String[] args) {\n    System.out.println(f(1) + \" \" + f(\"a\") + \" \" + f(2.0));\n  }\n}\n",
         );
         assert!(!probed.contains("} } else"), "{probed}");
+    }
+
+    #[test]
+    fn nested_unbraced_ifs_that_narrow_a_type_still_compile() {
+        // Both ifs add an else to record being false, and the outer one also
+        // braces the inner, all at one offset: each else belongs to its own if.
+        let (_, probed) = java_runs_alike(
+            "class X {\n  static String f(Object o) {\n    String out = \"none\";\n    if (o instanceof CharSequence s) if (s.length() > 0 && o instanceof String t) out = \"string \" + t;\n    return out;\n  }\n  public static void main(String[] args) {\n    System.out.println(f(\"a\") + \" \" + f(\"\") + \" \" + f(new StringBuilder(\"b\")) + \" \" + f(1));\n  }\n}\n",
+        );
+        // The inner else closes inside the braces around the inner if, and
+        // the outer else follows them.
+        let inner_else = probed.find("} else {").expect("the inner if's else");
+        let outer_else = probed.rfind("} else {").expect("the outer if's else");
+        assert!(inner_else < outer_else, "{probed}");
+        assert!(probed[inner_else..=outer_else].contains("} }"), "{probed}");
     }
 
     #[test]

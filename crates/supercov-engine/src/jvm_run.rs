@@ -1878,6 +1878,23 @@ fn instrument_ant(
     })
 }
 
+/// The build file an `ant -f <file>` command runs, when it is not the
+/// `build.xml` of the directory Supercov runs in.
+fn ant_build_file_elsewhere(root: &Path, command: &[String]) -> Option<PathBuf> {
+    let starts_ant = command
+        .first()
+        .and_then(|program| Path::new(program).file_name())
+        .is_some_and(|name| name == "ant" || name == "ant.bat");
+    if !starts_ant {
+        return None;
+    }
+    let at = command
+        .iter()
+        .position(|argument| matches!(argument.as_str(), "-f" | "-file" | "-buildfile"))?;
+    let named = crate::ant_build::normalized(&root.join(command.get(at + 1)?));
+    (named != root.join("build.xml")).then(|| named.parent().unwrap_or(root).to_path_buf())
+}
+
 /// How the copy's build skips Apache RAT's license check.
 #[derive(Debug, PartialEq)]
 enum RatSkip {
@@ -1938,6 +1955,12 @@ pub fn run_direct_jvm(
     let initialization_started = Instant::now();
     let root = canonicalize_simplified(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
+    if let Some(elsewhere) = ant_build_file_elsewhere(&root, &request.command) {
+        return Err(format!(
+            "this command runs the Ant build in {}, and Supercov reads an Ant build from the build.xml where it runs; run Supercov from that file's directory",
+            elsewhere.display()
+        ));
+    }
     let mut lock = ProjectLock::acquire(&root, &request.run_id, &request.started_at)
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
@@ -2521,6 +2544,17 @@ impl JvmServer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_ant_command_naming_another_build_file_is_sent_to_its_directory() {
+        let root = Path::new("/p");
+        let command = |words: &[&str]| words.iter().map(|word| word.to_string()).collect::<Vec<_>>();
+        assert_eq!(ant_build_file_elsewhere(root, &command(&["ant", "-f", "sub/build.xml", "test"])), Some(PathBuf::from("/p/sub")));
+        assert_eq!(ant_build_file_elsewhere(root, &command(&["/opt/ant/bin/ant", "-buildfile", "./build.xml"])), None);
+        assert_eq!(ant_build_file_elsewhere(root, &command(&["ant", "test"])), None);
+        assert_eq!(ant_build_file_elsewhere(root, &command(&["mvn", "-f", "x/pom.xml"])), None);
+        assert_eq!(ant_build_file_elsewhere(root, &command(&["ant", "-f"])), None);
+    }
+
     #[test]
     fn an_ant_source_root_is_the_directory_less_the_package() {
         let root = |relative: &str, package: &str| ant_source_root(relative, &format!("// header\npackage {package};\n"));

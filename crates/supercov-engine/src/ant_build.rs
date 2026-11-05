@@ -605,13 +605,53 @@ fn properties_file(text: &str) -> Vec<(String, String)> {
         .map(str::trim_start)
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'))
         .filter_map(|line| {
-            let split = line.find(['=', ':'])?;
+            // The separator is the first `=` or `:` that is not escaped.
+            let bytes = line.as_bytes();
+            let mut split = None;
+            let mut index = 0;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\\' => index += 1,
+                    b'=' | b':' => {
+                        split = Some(index);
+                        break;
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            let split = split?;
             Some((
-                line[..split].trim().to_owned(),
-                line[split + 1..].trim().to_owned(),
+                unescape_property(line[..split].trim()),
+                unescape_property(line[split + 1..].trim()),
             ))
         })
         .collect()
+}
+
+/// java.util.Properties escapes: `\:` `\=` `\\` and the like stand for
+/// the character, `\t` `\n` `\r` for theirs, `\uXXXX` for a code point.
+fn unescape_property(value: &str) -> String {
+    let mut out = String::new();
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            out.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('u') => {
+                let code = characters.by_ref().take(4).collect::<String>();
+                out.extend(u32::from_str_radix(&code, 16).ok().and_then(char::from_u32));
+            }
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
 }
 
 /// `${name}` replaced by each known property, unknown ones left as written.
@@ -619,6 +659,13 @@ pub fn expand(value: &str, properties: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     let mut rest = value;
     while let Some(open) = rest.find("${") {
+        // `$$` is Ant's escape for a literal `$`: `$${x}` is the text `${x}`.
+        if rest[..open].ends_with('$') {
+            out.push_str(&rest[..open - 1]);
+            out.push_str("${");
+            rest = &rest[open + 2..];
+            continue;
+        }
         out.push_str(&rest[..open]);
         let Some(close) = rest[open..].find('}') else {
             out.push_str(&rest[open..]);
@@ -870,6 +917,20 @@ mod tests {
             "{build:?}"
         );
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn properties_files_are_read_with_their_escapes() {
+        assert_eq!(
+            properties_file("a\\:b=c\\:\\\\d\nsrc.dir : C\\:\\\\src\n# skip\ntab=\\t\\u0041\n"),
+            [
+                ("a:b".to_owned(), "c:\\d".to_owned()),
+                ("src.dir".to_owned(), "C:\\src".to_owned()),
+                ("tab".to_owned(), "\tA".to_owned()),
+            ]
+        );
+        let known = BTreeMap::from([("x".to_owned(), "1".to_owned())]);
+        assert_eq!(expand("$${x} ${x} $${y}", &known), "${x} 1 ${y}");
     }
 
     #[test]
