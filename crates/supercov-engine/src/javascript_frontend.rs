@@ -712,6 +712,18 @@ fn generated_source_banner(code: &str) -> String {
     format!("#!{line}\n{GENERATED_SOURCE_BANNER}{remainder}")
 }
 
+/// A rewritten test file exempt from the host project's lint, on its first
+/// line: a test file keeps its lines, which its runner's locations and stack
+/// traces name, so nothing is put above them. `next build` lints test files
+/// under the app's source directory, and their phase calls failed it.
+fn lint_exempt_first_line(code: &str) -> String {
+    let Some(rest) = code.strip_prefix("#!") else {
+        return format!("/* eslint-disable */ {code}");
+    };
+    let (line, remainder) = rest.split_once('\n').unwrap_or((rest, ""));
+    format!("#!{line}\n/* eslint-disable */ {remainder}")
+}
+
 /// `source`, a runtime, with this run's collector in place of its instance
 /// marker; none for text with no marker.
 fn isolate_runtime(source: &str, collector_id: &str) -> Option<String> {
@@ -1749,7 +1761,7 @@ fn track_assertions(
     if !kept.contains(&entry.file) {
         write_authored(workspace, &entry.file, &source)?;
     }
-    atomic_write(&path, output.code.as_bytes())?;
+    atomic_write(&path, lint_exempt_first_line(&output.code).as_bytes())?;
     Ok(Some(output.assertions))
 }
 
@@ -2157,8 +2169,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1789",
-            "javascript-source-path#javascript_frontend.rs:1717",
+            "javascript-source-path#javascript_frontend.rs:1801",
+            "javascript-source-path#javascript_frontend.rs:1729",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -3318,6 +3330,19 @@ mod tests {
             "a();\n//# sourceMappingURL=a.js.map\nb();\n"
         );
         assert_eq!(strip("a();\n"), "a();\n");
+    }
+
+    /// A test file's exemption shares its first line, after a shebang.
+    #[test]
+    fn a_test_files_lint_exemption_keeps_its_lines() {
+        assert_eq!(
+            lint_exempt_first_line("a();\nb();\n"),
+            "/* eslint-disable */ a();\nb();\n"
+        );
+        assert_eq!(
+            lint_exempt_first_line("#!/usr/bin/env node\na();\n"),
+            "#!/usr/bin/env node\n/* eslint-disable */ a();\n"
+        );
     }
 
     /// The inlined map is shifted past banner lines, its first column mapped
