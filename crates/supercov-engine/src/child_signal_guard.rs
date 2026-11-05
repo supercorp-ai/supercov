@@ -405,10 +405,20 @@ mod tests {
 
     use super::*;
 
+    /// The deadline and the signal handlers are the process's, and a test that
+    /// starts a deadline kills whatever another test runs meanwhile: each test
+    /// here holds this while it runs.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// A streamed child is read whole, both streams, whatever is shown of
     /// its standard output on the way.
     #[test]
     fn a_streamed_child_is_recorded_whole() {
+        let _serial = serial();
         let output = output_streamed(
             Command::new("sh").args([
                 "-c",
@@ -435,6 +445,7 @@ mod tests {
     /// grace runs out, and no other command starts until the next deadline.
     #[test]
     fn a_deadline_kills_what_ignores_it_and_starts_nothing_after() {
+        let _serial = serial();
         let started = Instant::now();
         let deadline =
             Deadline::start(Some(Duration::from_millis(200)), Duration::from_millis(200));
@@ -490,6 +501,7 @@ mod tests {
 
     #[test]
     fn a_handler_that_cannot_be_installed_puts_back_those_that_were() {
+        let _serial = serial();
         // SIGKILL cannot be caught; SIGUSR2, installed before it, must be
         // left as it was found.
         let before = disposition(libc::SIGUSR2);
@@ -502,6 +514,7 @@ mod tests {
 
     #[test]
     fn only_the_outermost_guard_installs_and_restores_handlers() {
+        let _serial = serial();
         let outer = ChildSignalGuard::install();
         let inner = ChildSignalGuard::install();
         assert!(
@@ -514,6 +527,7 @@ mod tests {
 
     #[test]
     fn dropping_an_untracked_registration_frees_no_slot() {
+        let _serial = serial();
         let mut child = sleeper();
         let registration = register(&child);
         let slot = registration.slot.unwrap();
@@ -526,6 +540,7 @@ mod tests {
 
     #[test]
     fn a_registered_child_receives_the_signal_and_a_released_one_does_not() {
+        let _serial = serial();
         let _guard = ChildSignalGuard::install();
         let mut tracked = sleeper();
         let mut released = sleeper();
@@ -551,6 +566,7 @@ mod tests {
     /// before it kept.
     #[test]
     fn a_pipe_that_fails_ends_what_is_read_from_it() {
+        let _serial = serial();
         struct Failing(usize);
         impl std::io::Read for Failing {
             fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
