@@ -850,7 +850,7 @@ mod tests {
     }
 
     /// Builds read as far as they go: a file that imports itself is read
-    /// once, and what names nothing -- a `<subant>` fileset under a property
+    /// once, an import of no file reads nothing, and what names nothing -- a `<subant>` fileset under a property
     /// no one sets, an empty file list or `<src path>`, a bare
     /// `<pathelement>`, a dirset matching nothing or under no directory, a
     /// properties file of comments -- adds nothing.
@@ -863,6 +863,7 @@ mod tests {
             project.join("build.xml"),
             r#"<project name="odd">
     <import file="build.xml"/>
+    <import file="missing.xml"/>
     <property file="comments.properties"/>
     <path id="bare"><pathelement/></path>
     <dirset id="unmatched" dir="." includes="nowhere"/>

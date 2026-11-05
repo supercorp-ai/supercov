@@ -2620,6 +2620,9 @@ mod tests {
             link(Path::new("forms.xml"), &real.join("scratch/alias.xml"));
             fs::write(real.join("tools/build/common.xml"), "original").unwrap();
             fs::write(real.join("tools/build/other.xml"), "kept").unwrap();
+            // A file beside the directory unfolded first: copied when no link
+            // can be made.
+            fs::write(real.join("tools/top.xml"), "top").unwrap();
             let copy = top.join("project/.supercov/workspaces/workspace");
             let workspace = copy.join("tree/plugins/forms");
             fs::create_dir_all(&workspace).unwrap();
