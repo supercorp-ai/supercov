@@ -16522,7 +16522,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1278",
+        "fs.create_dir_all#lifecycle.rs:1284",
         "fs.create_dir_all#javascript_run.rs:670",
         "fs.write#javascript_run.rs:970",
         "fs.canonicalize#process_supervision.rs:1719",

@@ -1328,12 +1328,18 @@ pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -
     )
 }
 
+/// `evidence` is the run's evidence digest and length when the caller has
+/// just verified them, so the file is not read again to name the index.
 pub(crate) fn write_query_index_from(
     run: &StoredRun,
     report: &CoverageReport,
+    evidence_digest: Option<([u8; 32], u64)>,
 ) -> Result<(), RunIndexError> {
     let evidence = change_stamp(&run.evidence_path);
-    let identity = query_index_identity(run)?;
+    let identity = match evidence_digest {
+        Some(digest) => identity_with(run, digest, analysis_digest()),
+        None => query_index_identity(run)?,
+    };
     let sections = coverage_index_sections(report)?;
     write_query_index(&sections, &identity, &run.query_index_path)?;
     std::thread::spawn(move || drop(sections));

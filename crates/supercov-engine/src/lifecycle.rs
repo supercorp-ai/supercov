@@ -1063,7 +1063,13 @@ pub(crate) fn publish_run_with_fault(
             scope.spawn(|| {
                 // Disposable, like every query index: one that failed to
                 // write is rebuilt by the first query.
-                if crate::run_store::write_query_index_from(&derived, report).is_err() {
+                if crate::run_store::write_query_index_from(
+                    &derived,
+                    report,
+                    Some((evidence_sha256, copied)),
+                )
+                .is_err()
+                {
                     let _ = fs::remove_file(&derived.query_index_path);
                 }
                 // Also disposable: the report analyses the evidence when the
@@ -1630,7 +1636,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1443", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1449", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1655,7 +1661,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1178", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1184", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1663,7 +1669,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1253", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1259", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()
