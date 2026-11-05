@@ -104,6 +104,7 @@ package too, run Supercov from the repository root.
 | `.supercov/work/` | Temporary state while a run is being prepared |
 | `.supercov/locks/` | Prevents two operations from racing |
 | `.supercov/workspaces/` | Isolated source mirror and reusable instrumented build cache (safe to delete) |
+| `.supercov/node_modules/workspaces/` | The same copies between runs, where test runners do not collect their tests (safe to delete) |
 
 Managed directories include Git ignore rules so run evidence and instrumented
 builds do not become ordinary repository changes.
@@ -128,7 +129,10 @@ partial output.
 Runs of one project can be started at the same moment. Each takes a copy of
 the project to itself: a run alone always has the first,
 `.supercov/workspaces/workspace/<name>`, and one started while that is in use
-has `workspace-2`, the next `workspace-3`. None waits and none is refused:
+has `workspace-2`, the next `workspace-3`. None waits and none is refused.
+Between runs a copy waits under `.supercov/node_modules/workspaces/`, so a test
+run without Supercov does not collect the copy's test files; the next run moves
+it back and reuses it. `SUPERCOV_KEEP_WORKSPACE=1` leaves it where it ran:
 
 ```sh
 npx supercov -- npm run test:unit &
