@@ -19793,12 +19793,16 @@ fn an_ant_build_is_read_before_it_runs() {
         untasked.stderr()
     );
     // Without tests to run there is nothing left unattributed to mention.
-    let testless = project.supercov(&["--", "./ant", "test"]);
-    assert!(
-        !testless.stderr().contains("Supercov can find"),
-        "{}",
-        testless.stderr()
+    let testless = project.supercov_with(
+        &["--", "./ant", "test"],
+        &[("SUPERCOV_TEST_ROOTS", "nothing")],
     );
+    let stderr = testless.stderr();
+    assert!(
+        stderr.contains("instrumenting 2 source file(s)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Supercov can find"), "{stderr}");
 
     // A build file holding Supercov's own changes is one an earlier run left,
     // and patching it again would run that run's compilation.
