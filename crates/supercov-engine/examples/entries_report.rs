@@ -10,7 +10,7 @@ use supercov_engine::{
     coverage_report::{
         ArchiveReportRequest, ExitCodeInput, analyze_coverage_archive, analyze_coverage_entries,
     },
-    evidence_archive::read_archive,
+    evidence_archive::{read_archive, write_archive},
     run_store::RunMetadata,
 };
 
@@ -27,6 +27,38 @@ fn main() {
         test_exit_code: ExitCodeInput::Present(metadata.test_exit_code),
         test_filter: None,
     };
+    if std::env::args().nth(2).as_deref() == Some("beside") {
+        let entries = read_archive(&request.archive_path).expect("archive read");
+        let scratch = std::env::temp_dir().join(format!("entries-beside-{}.gz", std::process::id()));
+        let copy = entries.clone();
+        let started = Instant::now();
+        let (written, analysed) = std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let started = Instant::now();
+                write_archive(copy, &scratch).expect("archive written");
+                started.elapsed().as_secs_f64() * 1000.0
+            });
+            let started = Instant::now();
+            analyze_coverage_entries(&request, &entries).expect("entries analysed");
+            (writer.join().unwrap(), started.elapsed().as_secs_f64() * 1000.0)
+        });
+        let _ = std::fs::remove_file(&scratch);
+        println!("beside only: archive {written:.0} ms, analysis {analysed:.0} ms, both {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+        return;
+    }
+    if std::env::args().nth(2).as_deref() == Some("archive") {
+        let started = Instant::now();
+        analyze_coverage_archive(&request).expect("archive analysed");
+        println!("archive only: analysis {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+        return;
+    }
+    if std::env::args().nth(2).as_deref() == Some("alone") {
+        let entries = read_archive(&request.archive_path).expect("archive read");
+        let started = Instant::now();
+        analyze_coverage_entries(&request, &entries).expect("entries analysed");
+        println!("alone only: analysis {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+        return;
+    }
     let entries = read_archive(&request.archive_path).expect("archive read");
     let started = Instant::now();
     let from_entries = analyze_coverage_entries(&request, &entries).expect("entries analysed");
@@ -36,6 +68,25 @@ fn main() {
     let from_archive = analyze_coverage_archive(&request).expect("archive analysed");
     let archive_ms = started.elapsed().as_secs_f64() * 1000.0;
     let entries = read_archive(&request.archive_path).expect("archive read");
+    // The same analysis while an archive of the same entries is written beside
+    // it, as a run does now.
+    let scratch = std::env::temp_dir().join(format!("entries-report-{}.gz", std::process::id()));
+    let started = Instant::now();
+    let (written, beside) = std::thread::scope(|scope| {
+        let copy = entries.clone();
+        let writer = scope.spawn(|| {
+            let started = Instant::now();
+            write_archive(copy, &scratch).expect("archive written");
+            started.elapsed().as_secs_f64() * 1000.0
+        });
+        let started = Instant::now();
+        analyze_coverage_entries(&request, &entries).expect("entries analysed");
+        let beside = started.elapsed().as_secs_f64() * 1000.0;
+        (writer.join().unwrap(), beside)
+    });
+    let together_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let _ = std::fs::remove_file(&scratch);
+    println!("side by side: archive {written:.0} ms, analysis {beside:.0} ms, both {together_ms:.0} ms");
     let same = from_archive == from_entries;
     let same_json =
         serde_json::to_vec(&from_archive).unwrap() == serde_json::to_vec(&from_entries).unwrap();
