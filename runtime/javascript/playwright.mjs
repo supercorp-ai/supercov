@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
+import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -82,16 +82,6 @@ const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?
     .replace(/[^A-Za-z0-9_-]/g, "_");
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
-const FAST_PHASE_SCRIPT = process.env.SUPERCOV_FAST_PHASE_SCRIPT === "1";
-// Experiment (SUPERCOV_COOKIE_PHASE_SCRIPT=1): a new document learns its phase
-// from the phase cookie, in one script per context, instead of from a script
-// replaced on every page at every phase.
-const COOKIE_PHASE_SCRIPT = process.env.SUPERCOV_COOKIE_PHASE_SCRIPT === "1";
-// The phase a new document starts in: the last action's, since a document
-// loads because of one (a navigation, a click that navigates). An assertion
-// that starts while it loads does not change it.
-const DOCUMENT_PHASE_COOKIE = "__supercov_document_phase";
-const DOCUMENT_PHASE_SITE_COOKIE = "__supercov_document_phase_site";
 // Temporary experiment (SUPERCOV_ABLATE): parts of the collection turned off, to time them.
 const ABLATE = process.env.SUPERCOV_ABLATE ?? "";
 // Wall-clock accounting for every browser round-trip this shim performs,
@@ -500,10 +490,10 @@ class CoveragePhaseController {
             this.cdpSessions.set(page, cdp);
         }
         const phaseId = this.requestPhaseId();
-        if (phaseId && COOKIE_PHASE_SCRIPT)
-            await this.activateFrames(phaseId, [page]);
-        else if (phaseId)
+        if (phaseId && this.adoptedContexts.has(context))
             await this.activatePage(page, phaseId);
+        else if (phaseId)
+            await this.activateFrames(phaseId, [page]);
         page.on("worker", (worker) => {
             void this.registerWorker(worker);
         });
@@ -578,40 +568,14 @@ class CoveragePhaseController {
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
         }).catch(() => undefined);
-        // A document starts in the phase its cookie names: the last action's,
-        // given to the app's hosts. Only this attempt's phase is taken:
-        // a copy of this script a context kept from an earlier test leaves a
-        // later test's phase alone.
-        if (COOKIE_PHASE_SCRIPT)
-            await context.addInitScript(({ attemptId, phaseCookie, phaseSiteCookie }) => {
-                try {
-                    let phase;
-                    for (const part of document.cookie.split(";")) {
-                        const at = part.indexOf("=");
-                        const name = part.slice(0, at).trim();
-                        if (name !== phaseCookie && name !== phaseSiteCookie)
-                            continue;
-                        const value = decodeURIComponent(part.slice(at + 1));
-                        if (!value.startsWith(`${attemptId}:`))
-                            continue;
-                        phase = value;
-                        if (name === phaseCookie)
-                            break;
-                    }
-                    if (!phase)
-                        return;
-                    const coverageGlobal = globalThis;
-                    coverageGlobal.__SUPERCOV_PHASE_ID__ = phase;
-                    coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", phase);
-                }
-                catch {
-                    // A document that cannot read cookies keeps its stored phase.
-                }
-            }, {
-                attemptId: this.scope.attemptId,
-                phaseCookie: DOCUMENT_PHASE_COOKIE,
-                phaseSiteCookie: DOCUMENT_PHASE_SITE_COOKIE,
-            }).catch(() => undefined);
+        // A new document starts in the last action's phase, from the cookie
+        // each action sets: one script per context, where a script replaced on
+        // every page at every phase took two Playwright calls each time.
+        await context.addInitScript(startDocumentInPhase, {
+            attemptId: this.scope.attemptId,
+            phaseCookie: COVERAGE_DOCUMENT_PHASE_COOKIE,
+            phaseSiteCookie: COVERAGE_DOCUMENT_PHASE_SITE_COOKIE,
+        }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
             this.pendingRegistrations.add(pending);
@@ -875,7 +839,11 @@ class CoveragePhaseController {
                 .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
             this.activateFrames(phaseId),
             this.activateWorkers(phaseId),
-            timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId)))),
+            // A context whose headers are not known gets no cookies, so its
+            // pages' new documents learn the phase from a script replaced here.
+            timed("activate.pageScript", () => Promise.all([...this.pages]
+                .filter((page) => this.adoptedContexts.has(page.context()))
+                .map((page) => this.activatePage(page, phaseId)))),
         ]);
     }
     async activateFrames(phaseId, pages = this.pages) {
@@ -944,7 +912,7 @@ class CoveragePhaseController {
     async updateContextHeaders(context, phaseId, documentPhaseId) {
         const scope = encodeURIComponent(encodeCoverageScope(this.scope));
         const phase = phaseId ? encodeURIComponent(phaseId) : undefined;
-        const documentPhase = COOKIE_PHASE_SCRIPT && documentPhaseId ? encodeURIComponent(documentPhaseId) : undefined;
+        const documentPhase = documentPhaseId ? encodeURIComponent(documentPhaseId) : undefined;
         const pairs = (scopeName, phaseName, documentName) => [
             [scopeName, scope],
             ...(phase ? [[phaseName, phase]] : []),
@@ -957,13 +925,13 @@ class CoveragePhaseController {
             ...this.appHosts.map((url) => {
                 const host = new URL(url);
                 // For the app's own site: requests, navigations and sockets.
-                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
+                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
                 // For its frames on another of its hosts: a cookie that
                 // crosses sites must be Secure, which needs https or a local
                 // host. Chromium keeps such a cookie only when it is given by
                 // domain; given by an http URL it is dropped without a word.
                 if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
-                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
+                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
                 }
                 // One host refused leaves the others theirs.
                 return context.addCookies(cookies).catch(() => undefined);
@@ -972,53 +940,24 @@ class CoveragePhaseController {
     }
     async activatePage(page, phaseId) {
         const cdp = this.cdpSessions.get(page);
-        if (!cdp || COOKIE_PHASE_SCRIPT)
+        if (!cdp)
             return;
-        // Experiment (SUPERCOV_FAST_PHASE_SCRIPT=1).
-        if (FAST_PHASE_SCRIPT) {
-            // The new phase's script is added before the last one is removed, and
-            // the removal is not waited for: one round trip of the browser's,
-            // not two in turn, before every action. A session's commands run in
-            // order, so the removal lands before any later update; until it does,
-            // a new document runs both, in the order they were added, and is left
-            // in the new phase.
-            this.scriptUpdate = this.scriptUpdate.then(async () => {
-                const previous = this.newDocumentScriptIds.get(page);
-                const installed = (await cdp
-                    .send("Page.addScriptToEvaluateOnNewDocument", {
-                    source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
-                    runImmediately: true,
-                })
-                    .catch(() => undefined));
-                if (installed?.identifier)
-                    this.newDocumentScriptIds.set(page, installed.identifier);
-                else
-                    this.newDocumentScriptIds.delete(page);
-                if (previous) {
-                    void cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
-                        identifier: previous,
-                    }).catch(() => undefined);
-                }
-            });
-        }
-        else {
-            this.scriptUpdate = this.scriptUpdate.then(async () => {
-                const previous = this.newDocumentScriptIds.get(page);
-                if (previous) {
-                    await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
-                        identifier: previous,
-                    }).catch(() => undefined);
-                }
-                const installed = (await cdp
-                    .send("Page.addScriptToEvaluateOnNewDocument", {
-                    source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
-                    runImmediately: true,
-                })
-                    .catch(() => undefined));
-                if (installed?.identifier)
-                    this.newDocumentScriptIds.set(page, installed.identifier);
-            });
-        }
+        this.scriptUpdate = this.scriptUpdate.then(async () => {
+            const previous = this.newDocumentScriptIds.get(page);
+            if (previous) {
+                await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+                    identifier: previous,
+                }).catch(() => undefined);
+            }
+            const installed = (await cdp
+                .send("Page.addScriptToEvaluateOnNewDocument", {
+                source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
+                runImmediately: true,
+            })
+                .catch(() => undefined));
+            if (installed?.identifier)
+                this.newDocumentScriptIds.set(page, installed.identifier);
+        });
         await this.scriptUpdate.catch(() => undefined);
     }
 }
