@@ -6798,6 +6798,36 @@ fn merge_with_no_run_named_adds_up_the_runs_on_the_source_as_it_is() {
 }
 
 #[test]
+fn merge_with_no_run_named_takes_each_machine_s_run_of_one_command() {
+    // Four machines ran one command, each its share of the suite, and a job
+    // copied their runs into one store. Each was the newest run of the
+    // command, and the merge took one of the four.
+    let project = Project::cart("merge-machines");
+    slow_suite(&project, "unit", "total", "total([], null)");
+    project.commit("one suite");
+    let measure = || {
+        project
+            .supercov(&["--", "node", "--test", "test/unit.test.js"])
+            .succeeds();
+        project.latest()
+    };
+    let first = measure();
+    // Another machine's store, which never held the first run.
+    let runs = project.root.join(".supercov/runs");
+    let away = project.root.join(".supercov/elsewhere");
+    std::fs::rename(runs.join(&first), &away).unwrap();
+    let second = measure();
+    std::fs::rename(&away, runs.join(&first)).unwrap();
+    let merged = project.supercov(&["merge"]).succeeds();
+    contains_all(&merged, &["merging 2 runs", &first, &second]);
+
+    // Measured again here, the command's earlier runs make way for it.
+    measure();
+    let alone = project.supercov(&["merge"]).succeeds();
+    assert!(alone.contains("nothing to merge it with"), "{alone}");
+}
+
+#[test]
 fn a_run_of_another_release_is_named_for_what_it_is() {
     // Merging a run recorded before an upgrade answered "differing domains:
     // instrumenter, tests, configuration", which names nothing to do.

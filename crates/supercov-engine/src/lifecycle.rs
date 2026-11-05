@@ -970,6 +970,26 @@ pub(crate) fn publish_run_with_fault(
     metadata
         .recorded_by
         .get_or_insert_with(|| env!("CARGO_PKG_VERSION").to_owned());
+    // And which runs of its measurement it was measured after, here: a merge
+    // made with no run named takes it in their place. Taking the newest run
+    // of each command instead dropped all but one of four machines' shards,
+    // each run with the same command and copied into one store.
+    if metadata.merged != Some(true) {
+        let earlier = crate::run_store::discover_runs(root)
+            .map(|inventory| inventory.runs)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|run| {
+                run.metadata.merged != Some(true)
+                    && run.metadata.command == metadata.command
+                    && run.metadata.source_roots == metadata.source_roots
+                    && run.metadata.integrity.instrumenter_version
+                        == metadata.integrity.instrumenter_version
+            })
+            .map(|run| run.id)
+            .collect::<Vec<_>>();
+        metadata.supersedes = (!earlier.is_empty()).then_some(earlier);
+    }
     let metadata = &metadata;
     checked_id(&metadata.id)?;
     let destination = root.join(".supercov/runs").join(&metadata.id);
@@ -1539,6 +1559,7 @@ pub(crate) fn test_run_metadata(id: &str, bytes: u64) -> RunMetadata {
         merged_across: None,
         recorded_by: None,
         companions: None,
+        supersedes: None,
     }
 }
 

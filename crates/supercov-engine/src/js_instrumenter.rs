@@ -10638,7 +10638,12 @@ export const r = v && w && q;
         );
         let output = instrument_candidate(&source, "app/routes/jobs.tsx").unwrap();
         for text in ["process.env.QSTASH_RETRIES", "process.env.WIDE_32"] {
-            assert_eq!(output.code.matches(text).count(), 1, "{text}\n{}", output.code);
+            assert_eq!(
+                output.code.matches(text).count(),
+                1,
+                "{text}\n{}",
+                output.code
+            );
         }
         assert!(output.code.contains("decisionWidths"), "{}", output.code);
     }

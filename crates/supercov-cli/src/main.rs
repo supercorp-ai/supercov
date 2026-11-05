@@ -793,17 +793,18 @@ fn explain_failed_command(
 /// Names the file a run writes its id to.
 const RUN_ID_FILE: &str = "SUPERCOV_RUN_ID_FILE";
 
-const MERGE_USAGE: &str = "Usage: supercov merge [--allow-changed] [<run-id> <run-id> ...]\n\nWith no run named, merges the runs recorded on the source as it is now: the newest of each\ncommand, leaving out runs that are themselves a merge.\n\n--allow-changed  also merge runs recorded before files the tests load (helpers, fixtures)\n                 or the test configuration changed. The product code and what is measured\n                 must still be the same; the merged run names what differed.";
+const MERGE_USAGE: &str = "Usage: supercov merge [--allow-changed] [<run-id> <run-id> ...]\n\nWith no run named, merges the runs recorded on the source as it is now, leaving out runs that\nare themselves a merge and runs whose command was measured again in the same project. Runs\nof one command measured on several machines and copied into .supercov/runs are all merged.\n\n--allow-changed  also merge runs recorded before files the tests load (helpers, fixtures)\n                 or the test configuration changed. The product code and what is measured\n                 must still be the same; the merged run names what differed.";
 
 /// The runs to merge when none is named, newest first, one list for each
 /// set that can be one run.
 ///
 /// A run counts when the checkout has not moved on from it, which is the
-/// condition merging puts on its inputs anyway. Of a command run more than
-/// once only the newest is taken: a test that failed and then passed is
-/// reported failed by a merge of both, so a suite run again must replace its
-/// first attempt. Newest first, because where two runs hold one test the
-/// first named decides its kind.
+/// condition merging puts on its inputs anyway. A run that a later run of
+/// its command here supersedes is not taken: a test that failed and then
+/// passed is reported failed by a merge of both, so a suite run again must
+/// replace its first attempt. Runs of one command measured on several
+/// machines supersede none of each other, and are all taken. Newest first,
+/// because where two runs hold one test the first named decides its kind.
 fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<String>>, String> {
     let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
     // A run of this source whose tests have changed since, with the first
@@ -1006,25 +1007,25 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
             .cmp(&left.metadata.started_at)
             .then_with(|| right.id.cmp(&left.id))
     });
-    // One command can make two runs: a browser suite's, and the Python
-    // server's its tests drove.
-    let measurement = |run: &StoredRun| {
-        (
-            run.metadata.command.clone(),
-            frontend_of(&run.metadata.integrity.instrumenter_version),
-        )
+    // Each run names the runs of its measurement it was measured after (one
+    // command can make two: a browser suite's, and the Python server's its
+    // tests drove).
+    let superseded = |runs: &mut dyn Iterator<Item = &StoredRun>| {
+        runs.flat_map(|run| run.metadata.supersedes.iter().flatten().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
     };
-    let mut commands = std::collections::BTreeSet::new();
-    current.retain(|run| commands.insert((measurement(run), &run.metadata.source_roots)));
-    // Not one whose command has been measured again since.
-    outdated.retain(|(run, _, _)| {
-        !current
+    let replaced = superseded(&mut current.iter().copied());
+    current.retain(|run| !replaced.contains(&run.id));
+    // Not one whose command has been measured again since, here or in a
+    // run left out beside it.
+    let replaced = superseded(
+        &mut current
             .iter()
-            .any(|kept| measurement(kept) == measurement(run))
-    });
+            .copied()
+            .chain(outdated.iter().map(|(run, _, _)| *run)),
+    );
+    outdated.retain(|(run, _, _)| !replaced.contains(&run.id));
     outdated.sort_by(|left, right| right.0.metadata.started_at.cmp(&left.0.metadata.started_at));
-    let mut said = std::collections::BTreeSet::new();
-    outdated.retain(|(run, _, _)| said.insert(measurement(run)));
     for (run, why, settled) in outdated.iter().take(5) {
         println!(
             "[supercov] left out {} ({}): {why}. Measure it again to count it{}.",

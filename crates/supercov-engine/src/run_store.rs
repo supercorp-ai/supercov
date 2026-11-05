@@ -157,6 +157,14 @@ pub struct RunMetadata {
     /// tests from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companions: Option<Vec<CompanionRun>>,
+    /// The runs of the same measurement -- command, source roots and
+    /// frontend -- that this project's store held when the run was
+    /// published. The command was measured again, and in a merge this run
+    /// replaces them. Runs measured on other machines and copied in were
+    /// never beside each other, name none of each other, and merge as
+    /// shards of one suite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<Vec<String>>,
 }
 
 /// A run published from the same command as another.
@@ -465,6 +473,7 @@ fn create_analyzable_run(
         merged_across: None,
         recorded_by: None,
         companions: None,
+        supersedes: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -1768,6 +1777,7 @@ mod tests {
             merged_across: None,
             recorded_by: None,
             companions: None,
+            supersedes: None,
         };
         fs::write(
             directory.join("run.json"),

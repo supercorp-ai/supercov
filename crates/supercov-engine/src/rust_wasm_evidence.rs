@@ -570,6 +570,7 @@ mod tests {
             merged_across: None,
             recorded_by: None,
             companions: None,
+            supersedes: None,
         }
     }
 
