@@ -99,20 +99,6 @@ function timingCount(bucket, milliseconds = 0) {
     entry.ms += milliseconds;
     timingBuckets.set(bucket, entry);
 }
-// Temporary experiment: with SUPERCOV_PHASE_TIMING, each swallowed failure is
-// counted by its source line, with its first message.
-const swallowed = () => undefined;
-function failedAt(line) {
-    if (!timingBuckets)
-        return swallowed;
-    return (error) => {
-        const message = String(error?.message ?? error).split("\n")[0].slice(0, 90);
-        timingCount(`failed.${line}`);
-        if (!timingBuckets.has(`failed.${line}.first ${message}`))
-            timingCount(`failed.${line}.first ${message}`);
-        return undefined;
-    };
-}
 async function timed(bucket, work) {
     if (!timingBuckets)
         return work();
@@ -284,7 +270,7 @@ class CoveragePhaseController {
         // Contexts the suite created without going through any fixture the
         // collector wraps (a raw `browser.newContext()` mid-test) are found
         // through their browser now, so their still-open pages are read too.
-        await this.adoptTrackedContexts().catch(failedAt(272));
+        await this.adoptTrackedContexts().catch(() => undefined);
         const snapshots = [...this.earlySnapshots];
         for (const page of this.allPages()) {
             if (this.snapshottedPages.has(page))
@@ -312,7 +298,7 @@ class CoveragePhaseController {
         if (this.workersWithoutRuntime.has(worker)) {
             // Asked once more, without waiting: it may have loaded an
             // instrumented script since it was registered.
-            const answer = await bounded(readSnapshot(worker).catch(failedAt(300)), WORKER_ACTIVATION_WAIT_MS);
+            const answer = await bounded(readSnapshot(worker).catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
             if (answer && answer !== WORKER_TIMED_OUT) {
                 this.snapshottedWorkers.add(worker);
                 return answer;
@@ -321,7 +307,7 @@ class CoveragePhaseController {
         }
         const answer = await bounded(readSnapshot(worker)
             .then((snapshot) => snapshot ?? { decisions: [], hits: [], events: [] })
-            .catch(failedAt(309)), WORKER_SNAPSHOT_WAIT_MS);
+            .catch(() => undefined), WORKER_SNAPSHOT_WAIT_MS);
         if (answer === WORKER_TIMED_OUT) {
             this.unresponsiveWorkers.add(worker);
             // Blocked in Atomics.wait, it pushed what it recorded before it
@@ -356,7 +342,7 @@ class CoveragePhaseController {
                 return found ? JSON.stringify(found) : undefined;
             }, { token, url })
                 .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined))
-                .catch(failedAt(344)), WORKER_ACTIVATION_WAIT_MS);
+                .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
             if (pushed && pushed !== WORKER_TIMED_OUT)
                 return pushed;
         }
@@ -410,7 +396,7 @@ class CoveragePhaseController {
         for (const context of liveTrackedContexts()) {
             if (!this.contexts.has(context)) {
                 const headersKnown = trackedContextConfiguredHeaders.has(context);
-                await this.registerContext(context, { adopted: !headersKnown }).catch(failedAt(398));
+                await this.registerContext(context, { adopted: !headersKnown }).catch(() => undefined);
             }
         }
     }
@@ -441,7 +427,7 @@ class CoveragePhaseController {
             return snapshot;
         }, prefix)
             .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined))
-            .catch(failedAt(429)), WORKER_ACTIVATION_WAIT_MS);
+            .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
         const taken = await Promise.all(this.allPages().flatMap((page) => [
             ...page.frames().map(take),
             ...page.workers().map(take),
@@ -480,14 +466,14 @@ class CoveragePhaseController {
         await this.registerContext(context, {
             adopted: !this.contexts.has(context) && tracked && !headersKnown,
         });
-        const cdp = await page.context().newCDPSession(page).catch(failedAt(468));
+        const cdp = await page.context().newCDPSession(page).catch(() => undefined);
         if (cdp) {
             // Chromium runs a session's new-document scripts only once the
             // session has enabled the Page domain. Without it the script that
             // tells a document its phase was accepted and never ran: a page
             // learned its phase only from the next action, after it had
             // loaded, and everything it ran while loading was placed by time.
-            await cdp.send("Page.enable").catch(failedAt(475));
+            await cdp.send("Page.enable").catch(() => undefined);
             // A document that leaves hands its evidence over here: the
             // next one reads what it stored only on the same origin.
             cdp.on("Runtime.bindingCalled", ({ name, payload }) => {
@@ -500,8 +486,8 @@ class CoveragePhaseController {
                     // Not evidence.
                 }
             });
-            await cdp.send("Runtime.enable").catch(failedAt(488));
-            await cdp.send("Runtime.addBinding", { name: LEAVING_BINDING }).catch(failedAt(489));
+            await cdp.send("Runtime.enable").catch(() => undefined);
+            await cdp.send("Runtime.addBinding", { name: LEAVING_BINDING }).catch(() => undefined);
             this.cdpSessions.set(page, cdp);
         }
         const phaseId = this.requestPhaseId();
@@ -525,8 +511,8 @@ class CoveragePhaseController {
         // A Rust crate compiled to wasm the run measures: pages remember
         // their wasm instances, so each test's work can be taken from them.
         if (process.env.SUPERCOV_WASM_REGIONS === "1")
-            await context.addInitScript({ content: "globalThis.__SUPERCOV_WASM_REGIONS__ = true;" }).catch(failedAt(513));
-        await context.addInitScript({ content: browserRuntimePrelude }).catch(failedAt(514));
+            await context.addInitScript({ content: "globalThis.__SUPERCOV_WASM_REGIONS__ = true;" }).catch(() => undefined);
+        await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
         // A context that outlives its test (a worker-scoped browser fixture)
         // is registered again by every later test, so this script accumulates
         // on it and each new document runs every copy in registration order.
@@ -582,7 +568,7 @@ class CoveragePhaseController {
             scopeValue: encodeCoverageScope(this.scope),
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
-        }).catch(failedAt(570));
+        }).catch(() => undefined);
         // A new document starts in the last action's phase, from the cookie
         // each action sets: one script per context, where a script replaced on
         // every page at every phase took two Playwright calls each time.
@@ -590,7 +576,7 @@ class CoveragePhaseController {
             attemptId: this.scope.attemptId,
             phaseCookie: COVERAGE_DOCUMENT_PHASE_COOKIE,
             phaseSiteCookie: COVERAGE_DOCUMENT_PHASE_SITE_COOKIE,
-        }).catch(failedAt(578));
+        }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
             this.pendingRegistrations.add(pending);
@@ -652,7 +638,7 @@ class CoveragePhaseController {
             phaseHeader: COVERAGE_PHASE_HEADER,
             phase: phaseId,
         })
-            .catch(failedAt(640));
+            .catch(() => undefined);
         if (typeof registration?.token === "string")
             this.workerTokens.set(worker, registration.token);
         if (registration?.runtime === false)
@@ -697,8 +683,8 @@ class CoveragePhaseController {
                     .send("Page.removeScriptToEvaluateOnNewDocument", {
                     identifier,
                 })
-                    .catch(failedAt(685));
-            await cdp.detach().catch(failedAt(686));
+                    .catch(() => undefined);
+            await cdp.detach().catch(() => undefined);
         }
     }
     finish(phase, error) {
@@ -893,7 +879,7 @@ class CoveragePhaseController {
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
             phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
         })
-            .catch(failedAt(881)))));
+            .catch(() => undefined))));
     }
     async activateWorkers(phaseId) {
         await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map(async (worker) => {
@@ -904,7 +890,7 @@ class CoveragePhaseController {
                 coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", id);
             }, phaseId)
                 .then(() => this.unresponsiveWorkers.delete(worker))
-                .catch(failedAt(892));
+                .catch(() => undefined);
             // Evaluations run in order, so one left queued still applies this
             // phase before any later one; it is only not waited for. One with
             // no runtime has nothing to apply unless it loads some later.
@@ -949,7 +935,7 @@ class CoveragePhaseController {
                     cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
                 }
                 // One host refused leaves the others theirs.
-                return context.addCookies(cookies).catch(failedAt(937));
+                return context.addCookies(cookies).catch(() => undefined);
             }),
         ]);
     }
@@ -962,18 +948,18 @@ class CoveragePhaseController {
             if (previous) {
                 await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
                     identifier: previous,
-                }).catch(failedAt(950));
+                }).catch(() => undefined);
             }
             const installed = (await cdp
                 .send("Page.addScriptToEvaluateOnNewDocument", {
                 source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
                 runImmediately: true,
             })
-                .catch(failedAt(957)));
+                .catch(() => undefined));
             if (installed?.identifier)
                 this.newDocumentScriptIds.set(page, installed.identifier);
         });
-        await this.scriptUpdate.catch(failedAt(961));
+        await this.scriptUpdate.catch(() => undefined);
     }
 }
 /**
@@ -1076,7 +1062,7 @@ function patchBrowserPrototype(browser) {
         trackContext(context, configuredHeaders);
         const controller = activeController;
         if (controller && !controller.contexts.has(context))
-            await controller.registerContext(context).catch(failedAt(1105));
+            await controller.registerContext(context).catch(() => undefined);
         return context;
     });
 }
@@ -1111,7 +1097,7 @@ function patchContextPrototype(context) {
     });
     patchOnce(context, "close", (original) => async function (...args) {
         for (const page of this.pages()) {
-            await controllerOwning(page)?.snapshotBeforeClose(page).catch(failedAt(1140));
+            await controllerOwning(page)?.snapshotBeforeClose(page).catch(() => undefined);
         }
         return original.apply(this, args);
     });
@@ -1121,7 +1107,7 @@ function patchContextPrototype(context) {
 }
 function patchPagePrototype(page) {
     patchOnce(page, "close", (original) => async function (...args) {
-        await controllerOwning(this)?.snapshotBeforeClose(this).catch(failedAt(1150));
+        await controllerOwning(this)?.snapshotBeforeClose(this).catch(() => undefined);
         return original.apply(this, args);
     });
 }
@@ -1148,7 +1134,7 @@ function installBrowserLaunchTracking() {
         trackContext(context, configuredHeaders);
         const controller = activeController;
         if (controller)
-            await controller.registerContext(context).catch(failedAt(1177));
+            await controller.registerContext(context).catch(() => undefined);
         return context;
     });
 }
@@ -1629,8 +1615,8 @@ const instrumentedFixtures = {
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
-            await controller.adoptTrackedContexts().catch(failedAt(1658));
-            const carried = await controller.takeCarriedEvidence().catch(failedAt(1659));
+            await controller.adoptTrackedContexts().catch(() => undefined);
+            const carried = await controller.takeCarriedEvidence().catch(() => undefined);
             if (carried) {
                 appendEvidenceLine(`${JSON.stringify({
                     testId: `__supercov_background__:playwright:${scope.attemptId}`,
