@@ -306,11 +306,12 @@ pub fn go_coverage_model() -> CoverageModelDeclaration {
 /// The JVM's, where each framework reports a test's start and finish and
 /// attribution follows the lifecycle the framework itself defines.
 ///
-/// Two runners, because there are two lifecycles. The JUnit Platform covers
-/// every engine built on it — Jupiter, Vintage, Kotest, Spock — and TestNG,
-/// which is not one, reports through its own listener interface. They measure
-/// the same way and say so with the same precision; what differs is who does
-/// the announcing.
+/// Three runners, because there are three lifecycles. The JUnit Platform
+/// covers every engine built on it — Jupiter, Vintage, Kotest, Spock — and
+/// TestNG, which is not one, reports through its own listener interface. Ant's
+/// `<junit>` task runs JUnit 4 itself, off the platform, and reports through
+/// its result formatters. They measure the same way and say so with the same
+/// precision; what differs is who does the announcing.
 pub fn jvm_declaration() -> FrontendRunDeclaration {
     let runner = |name: &str, concurrency: &str| FrontendRunnerDeclaration {
         runner: name.into(),
@@ -336,6 +337,7 @@ pub fn jvm_declaration() -> FrontendRunDeclaration {
         structural_source: supercov_contracts::StructuralSource::OwnedProbes,
         runners: vec![
             runner("junit-platform", "JUnit parallel execution enabled"),
+            runner("ant-junit", "Ant's <junit> running test classes in threads"),
             runner("testng", "TestNG's parallel suites or methods"),
         ],
         structural_limitations: Vec::new(),
@@ -1106,7 +1108,7 @@ mod tests {
             .iter()
             .map(|runner| runner.runner.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(named, ["junit-platform", "testng"]);
+        assert_eq!(named, ["junit-platform", "ant-junit", "testng"]);
     }
 
     #[test]

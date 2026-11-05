@@ -401,6 +401,39 @@ public final class Supercov {
    */
   private static final String JVM = java.util.UUID.randomUUID().toString();
 
+  /**
+   * A test name with its control characters written out, so it reads back as
+   * one line. Shared by every listener and formatter that names a test.
+   */
+  public static String printable(String name) {
+    StringBuilder out = null;
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      if (!Character.isISOControl(c)) {
+        if (out != null) {
+          out.append(c);
+        }
+        continue;
+      }
+      if (out == null) {
+        out = new StringBuilder(name.length() + 8).append(name, 0, i);
+      }
+      switch (c) {
+        case '\n':
+          out.append("\\n");
+          break;
+        case '\t':
+          out.append("\\t");
+          break;
+        case '\r':
+          out.append("\\r");
+          break;
+        default:
+          out.append(String.format("\\u%04x", (int) c));
+      }
+    }
+    return out == null ? name : out.toString();
+  }
   public static synchronized void writeInto(String directory) throws IOException {
     java.io.File target = new java.io.File(directory);
     if (!target.isDirectory() && !target.mkdirs() && !target.isDirectory()) {

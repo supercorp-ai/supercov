@@ -253,14 +253,55 @@ fn enclosing_repository(root: &Path) -> Option<(&Path, &Path)> {
     Some((repository, relative))
 }
 
+/// The directory an Ant build reaches out to: the closest one holding the
+/// project and every file its build imports. Ametys keeps a thin `build.xml`
+/// in each component that imports a shared harness from
+/// `../../../tools/master`, beside the component's own repository rather
+/// than in it, so the repository alone does not hold what the build reads.
+fn ant_anchor(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    if crate::jvm_project::detect_build(root) != crate::jvm_project::JvmBuild::Ant {
+        return None;
+    }
+    let build = crate::ant_build::read_ant_build(root, &std::collections::BTreeMap::new());
+    let anchor = crate::ant_build::outside_anchor(root, &build)?;
+    let relative = crate::ant_build::normalized(root)
+        .strip_prefix(&anchor)
+        .ok()?
+        .to_path_buf();
+    if anchor.file_name().is_none()
+        || relative
+            .components()
+            .any(|component| component.as_os_str() == ".supercov")
+    {
+        return None;
+    }
+    Some((anchor, relative))
+}
+
+/// What a project's copy is laid out within: its repository, or the
+/// directory its Ant build reaches out to, whichever lies higher.
+fn enclosing_tree(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    let repository = enclosing_repository(root)
+        .map(|(repository, relative)| (repository.to_path_buf(), relative.to_path_buf()));
+    match (repository, ant_anchor(root)) {
+        (Some(repository), Some(anchor)) => Some(
+            if anchor.1.components().count() > repository.1.components().count() {
+                anchor
+            } else {
+                repository
+            },
+        ),
+        (repository, anchor) => repository.or(anchor),
+    }
+}
+
 /// Where in a copy directory the project's copy sits: under its own name, or,
-/// for a package of a repository, at its path in the repository, so that
-/// what its suite reaches as `../` is where it is in the checkout.
+/// for a package of a repository (or a project whose Ant build imports from
+/// beside it), at its path in that tree, so that what its suite reaches as
+/// `../` is where it is in the checkout.
 fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
-    match enclosing_repository(root) {
-        Some((repository, relative)) => {
-            Ok(Path::new(repository.file_name().expect(NAMED)).join(relative))
-        }
+    match enclosing_tree(root) {
+        Some((tree, relative)) => Ok(Path::new(tree.file_name().expect(NAMED)).join(relative)),
         None => Ok(PathBuf::from(project_name(root)?)),
     }
 }
@@ -272,7 +313,7 @@ fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
 /// alone. Only the package is copied: what lies outside it is the checkout's,
 /// as when the suite runs there, and `.git` is never shared. Best effort.
 fn link_repository_around(root: &Path, workspace: &Path) {
-    let Some((_, relative)) = enclosing_repository(root) else {
+    let Some((_, relative)) = enclosing_tree(root) else {
         return;
     };
     // Each level from the package up to the repository, beside its copy.
@@ -322,6 +363,55 @@ fn link_repository_around(root: &Path, workspace: &Path) {
                     }
                 });
         });
+}
+
+/// Makes `file`, which a copy reaches through the links around it, a file of
+/// the copy's own: every linked directory on the way from `tree` down to it
+/// becomes a real one, holding links to what the linked one held, and a link
+/// at `file` itself is removed. What is written there afterwards changes the
+/// copy and nothing it links to. A build that runs a task from a file outside
+/// the project -- Ant's `<junit>` in a shared harness -- is changed this way
+/// without copying the rest of that harness.
+pub fn unfold_links_to(tree: &Path, file: &Path) -> io::Result<()> {
+    let Ok(relative) = file.strip_prefix(tree) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not under {}", file.display(), tree.display()),
+        ));
+    };
+    let mut directory = tree.to_path_buf();
+    let components = relative.components().collect::<Vec<_>>();
+    for component in &components[..components.len().saturating_sub(1)] {
+        directory.push(component);
+        let metadata = fs::symlink_metadata(&directory)?;
+        if !metadata.file_type().is_symlink() {
+            continue;
+        }
+        let target = fs::canonicalize(&directory)?;
+        fs::remove_file(&directory).or_else(|_| fs::remove_dir(&directory))?;
+        fs::create_dir(&directory)?;
+        for entry in fs::read_dir(&target)? {
+            let entry = entry?;
+            let linked = entry.path();
+            let is_directory = fs::metadata(&linked).is_ok_and(|metadata| metadata.is_dir());
+            create_link(&linked, &directory.join(entry.file_name()), is_directory)?;
+        }
+    }
+    if fs::symlink_metadata(file).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        fs::remove_file(file)?;
+    }
+    Ok(())
+}
+
+/// The directory in a project's copy that corresponds to the tree it is laid
+/// out within: the repository or the directory its Ant build reaches out to.
+pub fn copied_tree(root: &Path, workspace: &Path) -> Option<PathBuf> {
+    let (_, relative) = enclosing_tree(root)?;
+    let mut tree = workspace.to_path_buf();
+    for _ in relative.components() {
+        tree.pop();
+    }
+    Some(tree)
 }
 
 pub fn workspace_container(root: &Path) -> PathBuf {
@@ -2256,6 +2346,30 @@ pub fn prune_cached_workspace_sources(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_file_reached_through_links_is_made_the_copy_own() {
+        let top = std::env::temp_dir().join(format!("supercov-unfold-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let real = top.join("real/tools/build");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("common.xml"), "original").unwrap();
+        fs::write(real.join("other.xml"), "kept").unwrap();
+        let tree = top.join("copy");
+        fs::create_dir_all(&tree).unwrap();
+        std::os::unix::fs::symlink(top.join("real/tools"), tree.join("tools")).unwrap();
+        let file = tree.join("tools/build/common.xml");
+        unfold_links_to(&tree, &file).unwrap();
+        fs::write(&file, "changed").unwrap();
+        assert_eq!(fs::read_to_string(real.join("common.xml")).unwrap(), "original", "the checkout is untouched");
+        assert_eq!(fs::read_to_string(tree.join("tools/build/other.xml")).unwrap(), "kept", "the rest is still reached");
+        assert!(fs::symlink_metadata(tree.join("tools")).unwrap().is_dir());
+        assert!(fs::symlink_metadata(tree.join("tools/build/other.xml")).unwrap().file_type().is_symlink());
+        // Again, on the copy as it now is.
+        unfold_links_to(&tree, &file).unwrap();
+        assert!(unfold_links_to(&tree, &top.join("elsewhere.xml")).is_err());
+        fs::remove_dir_all(top).unwrap();
+    }
+
     /// A file at the project's root is in no directory that could be built
     /// output, and neither is no file at all.
     #[test]

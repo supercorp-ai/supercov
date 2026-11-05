@@ -10,6 +10,7 @@
 //! project's tests were never pointed at would put obligations in the
 //! denominator nobody agreed to.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::coverage_report::CoverageManifest;
@@ -40,6 +41,10 @@ const DEPENDENCY_FILES: &[&str] = &[
     "settings.gradle",
     "settings.gradle.kts",
     "gradle-wrapper.properties",
+    "build.xml",
+    "build.properties",
+    "ivy.xml",
+    "ivysettings.xml",
 ];
 
 /// Configuration that decides what actually executes.
@@ -77,6 +82,9 @@ pub struct PreparedJvmProject {
 pub enum JvmBuild {
     Maven,
     Gradle,
+    /// `build.xml`: sources wherever its targets name them, tests wherever
+    /// its `<batchtest>` scans.
+    Ant,
     /// Sources laid out conventionally with no build file; still measurable.
     Plain,
 }
@@ -94,6 +102,9 @@ pub fn detect_build(root: &Path) -> JvmBuild {
         if root.join(name).is_file() {
             return JvmBuild::Gradle;
         }
+    }
+    if root.join("build.xml").is_file() {
+        return JvmBuild::Ant;
     }
     JvmBuild::Plain
 }
@@ -134,6 +145,61 @@ fn role(relative: &str) -> Option<&'static str> {
     })
 }
 
+/// Where an Ant build keeps its tests and writes its outputs, relative to
+/// the project. Ant has no convention: `<batchtest>` says which directories
+/// hold the tests, and every other `src` directory holds what they test.
+#[derive(Debug, Clone, Default)]
+struct AntLayout {
+    tests: Vec<String>,
+    outputs: Vec<String>,
+}
+
+impl AntLayout {
+    fn of(root: &Path) -> AntLayout {
+        let build = crate::ant_build::read_ant_build(root, &BTreeMap::new());
+        let relative = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .filter_map(|path| path.strip_prefix(root).ok())
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>()
+        };
+        // A build that names its tests where this cannot see them (a path
+        // built at run time) says so in SUPERCOV_TEST_ROOTS instead.
+        let tests = match std::env::var("SUPERCOV_TEST_ROOTS") {
+            Ok(roots) if !roots.trim().is_empty() => roots
+                .split(',')
+                .map(|root| root.trim().trim_matches('/').to_owned())
+                .filter(|root| !root.is_empty())
+                .collect(),
+            _ => relative(&build.test_roots),
+        };
+        AntLayout {
+            tests,
+            outputs: relative(&build.outputs),
+        }
+    }
+
+    fn under(paths: &[String], relative: &str) -> bool {
+        paths
+            .iter()
+            .any(|path| relative == path || relative.starts_with(&format!("{path}/")))
+    }
+
+    fn role(&self, relative: &str) -> Option<&'static str> {
+        if Self::under(&self.tests, relative) {
+            return Some("test");
+        }
+        relative
+            .split('/')
+            .rev()
+            .skip(1)
+            .any(|part| part == "src")
+            .then_some("main")
+    }
+}
+
 /// Whether the JVM is the only target this build produces.
 ///
 /// A Kotlin Multiplatform build compiles `commonMain` for every target it
@@ -168,7 +234,12 @@ fn targets_only_the_jvm(root: &Path) -> bool {
     .any(|target| text.contains(target))
 }
 
-fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), String> {
+fn walk(
+    root: &Path,
+    directory: &Path,
+    ant: Option<&AntLayout>,
+    files: &mut JvmFiles,
+) -> Result<(), String> {
     let jvm_only = targets_only_the_jvm(root);
     let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
@@ -189,13 +260,16 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
         let file_type = crate::fault_fs::file_type(&entry)
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
-            if EXCLUDED_DIRECTORIES.contains(&name.as_str()) || name.starts_with('.') {
+            if EXCLUDED_DIRECTORIES.contains(&name.as_str())
+                || name.starts_with('.')
+                || ant.is_some_and(|ant| AntLayout::under(&ant.outputs, &relative))
+            {
                 files
                     .excluded
                     .push((relative, "build output or tooling directory"));
                 continue;
             }
-            walk(root, &path, files)?;
+            walk(root, &path, ant, files)?;
             continue;
         }
         if !file_type.is_file() {
@@ -212,7 +286,11 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
         let Some(language) = language_of(&name) else {
             continue;
         };
-        match role(&relative) {
+        let role = match ant {
+            Some(ant) => ant.role(&relative),
+            None => role(&relative),
+        };
+        match role {
             Some("main") => files.sources.push((relative, language)),
             Some("test") => files.tests.push((relative, language)),
             Some("common") if jvm_only => files.sources.push((relative, language)),
@@ -235,7 +313,8 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
 
 pub fn discover_jvm_files(root: &Path) -> Result<JvmFiles, String> {
     let mut files = JvmFiles::default();
-    walk(root, root, &mut files)?;
+    let ant = (detect_build(root) == JvmBuild::Ant).then(|| AntLayout::of(root));
+    walk(root, root, ant.as_ref(), &mut files)?;
     files.sources.sort();
     files.tests.sort();
     files.dependency_files.sort();

@@ -141,34 +141,9 @@ public final class SupercovListener implements TestExecutionListener {
    * and {@code \\uXXXX} say the same thing in text that can be.
    */
   static String printable(String name) {
-    StringBuilder out = null;
-    for (int i = 0; i < name.length(); i++) {
-      char c = name.charAt(i);
-      if (!Character.isISOControl(c)) {
-        if (out != null) {
-          out.append(c);
-        }
-        continue;
-      }
-      if (out == null) {
-        out = new StringBuilder(name.length() + 8).append(name, 0, i);
-      }
-      switch (c) {
-        case '\n':
-          out.append("\\n");
-          break;
-        case '\t':
-          out.append("\\t");
-          break;
-        case '\r':
-          out.append("\\r");
-          break;
-        default:
-          out.append(String.format("\\u%04x", (int) c));
-      }
-    }
-    return out == null ? name : out.toString();
+    return Supercov.printable(name);
   }
+
 
   /**
    * A display name that tells one invocation from another.
