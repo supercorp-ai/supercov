@@ -152,6 +152,8 @@ fn role(relative: &str) -> Option<&'static str> {
 struct AntLayout {
     tests: Vec<String>,
     outputs: Vec<String>,
+    /// What the build's `<javac>` tasks compile, where it can be read.
+    sources: Vec<String>,
 }
 
 impl AntLayout {
@@ -187,6 +189,7 @@ impl AntLayout {
         AntLayout {
             tests,
             outputs: relative(&build.outputs),
+            sources: relative(&build.sources),
         }
     }
 
@@ -206,6 +209,11 @@ impl AntLayout {
         }
         if Self::under(&self.tests, relative) {
             return Some("test");
+        }
+        // What the build compiles is product code wherever it is; a `src`
+        // directory is, too, where the build names its sources at run time.
+        if Self::under(&self.sources, relative) {
+            return Some("main");
         }
         relative
             .split('/')
@@ -530,6 +538,37 @@ mod tests {
         assert_eq!(role("lib/A.java"), None);
     }
     use std::fs;
+
+    /// An Ant build whose `<javac>` compiles `java/`, not a `src` directory,
+    /// is measured there; its tests are what its batch scans; a build that
+    /// names no tests keeps the `src/test` convention.
+    #[test]
+    fn an_ant_build_classifies_by_what_it_compiles_and_runs() {
+        let root = fixture("ant-layout");
+        fs::write(
+            root.join("build.xml"),
+            r#"<project><target name="t"><javac srcdir="java" destdir="out/classes"/><javac srcdir="checks" destdir="out/tests"/><junit><batchtest><fileset dir="out/tests"/></batchtest></junit></target></project>"#,
+        )
+        .unwrap();
+        for (relative, text) in [
+            ("java/app/Calc.java", "package app; class Calc {}"),
+            ("checks/app/CalcTest.java", "package app; class CalcTest {}"),
+            ("out/classes/Stale.java", "class Stale {}"),
+        ] {
+            fs::create_dir_all(root.join(relative).parent().unwrap()).unwrap();
+            fs::write(root.join(relative), text).unwrap();
+        }
+        let files = discover_jvm_files(&root).unwrap();
+        let names = |list: &[(String, JvmLanguage)]| list.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&files.sources), ["java/app/Calc.java"]);
+        assert_eq!(names(&files.tests), ["checks/app/CalcTest.java"]);
+        fs::write(root.join("build.xml"), "<project/>").unwrap();
+        fs::create_dir_all(root.join("src/test/java")).unwrap();
+        fs::write(root.join("src/test/java/T.java"), "class T {}").unwrap();
+        let files = discover_jvm_files(&root).unwrap();
+        assert_eq!(names(&files.tests), ["src/test/java/T.java"]);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn fixture(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

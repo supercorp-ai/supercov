@@ -138,6 +138,15 @@ pub struct AntBuild {
     pub outputs: Vec<PathBuf>,
     /// The files that hold a `<junit>` or `<junitlauncher>` task.
     pub junit_files: Vec<PathBuf>,
+    /// Every directory a `<javac>` compiles that can be read without running
+    /// the build: `srcdir`, nested `<src path>`, and `<src refid>` naming a
+    /// `<path>` or `<dirset>` the build defines. Tests among them included.
+    pub sources: Vec<PathBuf>,
+    /// `<path id>` and `<dirset id>` definitions, for `<src refid>`.
+    defined_paths: BTreeMap<String, Vec<PathBuf>>,
+    /// `<src refid>` uses, by the output directory they compile into, resolved
+    /// once every definition is read.
+    referenced_sources: Vec<(PathBuf, String)>,
 }
 
 /// Properties Ant builds conventionally write their outputs under.
@@ -187,6 +196,16 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
     read_file(root, &start, &mut properties, &mut ignored, &mut BTreeMap::new(), Pass::TopLevel);
     let mut compiled = BTreeMap::new();
     read_file(root, &start, &mut properties, &mut build, &mut compiled, Pass::All);
+    for (destination, reference) in std::mem::take(&mut build.referenced_sources) {
+        for source in build.defined_paths.get(&reference).cloned().unwrap_or_default() {
+            push_unique(compiled.entry(destination.clone()).or_default(), source);
+        }
+    }
+    for sources in compiled.values() {
+        for source in sources {
+            push_unique(&mut build.sources, source.clone());
+        }
+    }
     // A batch that scans compiled classes -- `<junitlauncher>`'s
     // `<testclasses>` always does -- names the directory a `<javac>` wrote
     // them into: its tests are that compilation's sources.
@@ -246,6 +265,8 @@ fn read_file(
     let mut in_target = 0usize;
     // The `<subant>` being read: its build file name and where it runs them.
     let mut subant: Option<String> = None;
+    // The `<path id>` being read, for the directories it lists.
+    let mut defining: Option<String> = None;
     // The output directory of the `<javac>` being read, for its nested `<src>`.
     let mut javac: Option<PathBuf> = None;
     let known = |value: &str, properties: &BTreeMap<String, String>| {
@@ -265,6 +286,9 @@ fn read_file(
             }
             if tag.name == "subant" {
                 subant = None;
+            }
+            if tag.name == "path" {
+                defining = None;
             }
             continue;
         }
@@ -356,9 +380,42 @@ fn read_file(
                 }
             }
             "src" if javac.is_some() => {
-                if let (Some(destination), Some(path)) = (&javac, tag.attribute("path")) {
-                    if let Some(source) = known(path, properties) {
-                        push_unique(compiled.entry(destination.clone()).or_default(), source);
+                let Some(destination) = &javac else { continue };
+                if let Some(path) = tag.attribute("path") {
+                    for source in path_list(&expand(path, properties)) {
+                        if let Some(source) = known(&source, properties) {
+                            push_unique(compiled.entry(destination.clone()).or_default(), source);
+                        }
+                    }
+                }
+                if let Some(reference) = tag.attribute("refid") {
+                    build.referenced_sources.push((destination.clone(), reference.to_owned()));
+                }
+            }
+            "path" if !tag.empty && tag.attribute("id").is_some() => {
+                defining = tag.attribute("id").map(str::to_owned);
+            }
+            "pathelement" if defining.is_some() => {
+                let listed = tag.attribute("location").or_else(|| tag.attribute("path"));
+                let id = defining.clone().unwrap_or_default();
+                for entry in listed.map(|value| path_list(&expand(value, properties))).unwrap_or_default() {
+                    if let Some(directory) = known(&entry, properties) {
+                        push_unique(build.defined_paths.entry(id.clone()).or_default(), directory);
+                    }
+                }
+            }
+            "dirset" if tag.attribute("id").is_some() || defining.is_some() => {
+                let id = tag
+                    .attribute("id")
+                    .map(str::to_owned)
+                    .or_else(|| defining.clone())
+                    .unwrap_or_default();
+                if let Some(dir) = tag.attribute("dir").and_then(|dir| known(dir, properties)) {
+                    let directories = matching(&dir, tag.attribute("includes").unwrap_or("*"))
+                        .into_iter()
+                        .filter(|path| path.is_dir());
+                    for directory in directories {
+                        push_unique(build.defined_paths.entry(id.clone()).or_default(), directory);
                     }
                 }
             }
@@ -771,6 +828,41 @@ mod tests {
         assert!(ant_pattern("**/build.xml", "a/b/build.xml"));
         assert!(ant_pattern("mod?/*.xml", "mod1/x.xml"));
         assert!(!ant_pattern("*/build.xml", "a/b/build.xml"));
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    /// Every `<javac>` source that can be read: an attribute, nested
+    /// `<src path>`, and `<src refid>` naming a path or dirset the build
+    /// defines, even after the compilation that refers to it.
+    #[test]
+    fn javac_sources_are_read_through_paths_and_dirsets() {
+        let project = temporary("javac-sources");
+        fs::create_dir_all(project.join("modules/billing/java")).unwrap();
+        fs::create_dir_all(project.join("modules/orders/java")).unwrap();
+        fs::write(
+            project.join("build.xml"),
+            r#"<project>
+    <target name="compile">
+        <javac srcdir="java" destdir="out/a"/>
+        <javac destdir="out/b"><src path="generated:extra"/><src refid="modules"/></javac>
+    </target>
+    <path id="modules"><pathelement location="shared/java"/><dirset dir="modules" includes="*/java"/></path>
+</project>"#,
+        )
+        .unwrap();
+        let build = read_ant_build(&project, &BTreeMap::new());
+        assert_eq!(
+            build.sources,
+            [
+                project.join("java"),
+                project.join("generated"),
+                project.join("extra"),
+                project.join("shared/java"),
+                project.join("modules/billing/java"),
+                project.join("modules/orders/java"),
+            ],
+            "{build:?}"
+        );
         fs::remove_dir_all(project).unwrap();
     }
 
