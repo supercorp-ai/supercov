@@ -71,10 +71,21 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
     // A JVM the task kills for running past its timeout never reaches the
     // end of its suite, but it is stopped, not destroyed: what it recorded up
     // to then is still written.
-    if (!hooked && evidenceDirectory != null) {
+    if (!hooked && evidenceDirectory != null && forkedByAnt()) {
       hooked = true;
       Runtime.getRuntime().addShutdownHook(new Thread(SupercovAntFormatter::writeEvidenceOnExit));
     }
+  }
+
+  /**
+   * Whether this JVM is one Ant forked to run tests, the only kind a timeout
+   * stops. With {@code fork="false"} the tests run in Ant's own JVM, each
+   * class in a class loader of its own that Ant discards: a hook per loader
+   * would outlive it, and its evidence is written at the end of its suite.
+   */
+  private static boolean forkedByAnt() {
+    return System.getProperty("sun.java.command", "")
+        .startsWith("org.apache.tools.ant.taskdefs.optional.junit.JUnitTestRunner");
   }
 
   /** On shutdown: a test still open there was stopped, and did not pass. */

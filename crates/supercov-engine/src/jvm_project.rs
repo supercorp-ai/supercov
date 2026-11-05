@@ -170,7 +170,16 @@ impl AntLayout {
         let tests = match std::env::var("SUPERCOV_TEST_ROOTS") {
             Ok(roots) if !roots.trim().is_empty() => roots
                 .split(',')
-                .map(|root| root.trim().trim_matches('/').to_owned())
+                .map(|given| {
+                    let given = Path::new(given.trim());
+                    given
+                        .strip_prefix(root)
+                        .unwrap_or(given)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .trim_matches('/')
+                        .to_owned()
+                })
                 .filter(|root| !root.is_empty())
                 .collect(),
             _ => relative(&build.test_roots),
@@ -188,6 +197,13 @@ impl AntLayout {
     }
 
     fn role(&self, relative: &str) -> Option<&'static str> {
+        // A build that names no tests where they can be read -- a plain tree
+        // that happens to have a build.xml, a test chosen by name -- keeps the
+        // `src/main` and `src/test` convention: counting tests as the code
+        // they test would be worse than measuring by convention.
+        if self.tests.is_empty() {
+            return role(relative);
+        }
         if Self::under(&self.tests, relative) {
             return Some("test");
         }

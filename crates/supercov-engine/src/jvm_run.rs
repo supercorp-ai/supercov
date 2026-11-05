@@ -1570,14 +1570,21 @@ fn with_ant_formatter(
                     }
                 }
             }
+            // A copied classpath that defined an id would define it twice.
+            let classpath = without_ids(&classpath);
             let compile = format!(
                 "<mkdir dir=\"{classes}\"/><javac srcdir=\"{sources}\" destdir=\"{classes}\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\">{classpath}</javac>"
             );
-            let holder = stack
-                .iter()
-                .rposition(|open| open.name == "target")
-                .and_then(|at| stack.get(at + 1).copied())
-                .unwrap_or(tag);
+            // Just before the task, where everything it refers to is defined
+            // -- unless what holds it takes one task alone (`<jacoco:coverage>`)
+            // or runs its tasks at once (`<parallel>`): then before that.
+            let mut holder = tag;
+            for open in stack.iter().rev() {
+                if runs_its_tasks_in_order(&open.name) {
+                    break;
+                }
+                holder = open;
+            }
             edits.push((holder.start, compile, 0));
             let inside = if launcher {
                 format!(
@@ -1610,17 +1617,53 @@ fn with_ant_formatter(
     Some(out)
 }
 
-/// Whether a `<junit>` task runs its test classes in threads of one JVM,
-/// where what overlaps cannot be credited to either test.
-fn ant_runs_threads(text: &str) -> bool {
-    crate::ant_build::tags(text).iter().any(|tag| {
-        tag.name == "junit"
-            && !tag.closing
-            && tag
-                .attribute("threads")
-                .and_then(|threads| threads.trim().parse::<u32>().ok())
-                .is_some_and(|threads| threads > 1)
-    })
+/// Elements that run the tasks they hold one after another, so a task may be
+/// put in front of another inside them.
+fn runs_its_tasks_in_order(element: &str) -> bool {
+    matches!(
+        element,
+        "target" | "sequential" | "then" | "else" | "try" | "catch" | "finally" | "project"
+    )
+}
+
+/// A classpath copied as written, with no `id` of its own.
+fn without_ids(classpath: &str) -> String {
+    let mut out = String::new();
+    let mut rest = classpath;
+    while let Some(at) = rest.find(" id=") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 4..];
+        let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            out.push_str(" id=");
+            rest = after;
+            continue;
+        };
+        match after[1..].find(quote) {
+            Some(close) => rest = &after[close + 2..],
+            None => {
+                out.push_str(&rest[at..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A test a second JVM ran under a name another already reported -- a class
+/// two `<junit>` tasks run, or two filesets both match -- is a run of its
+/// own, numbered: two runs cannot share a name.
+fn number_repeated_runs(forked: &mut [crate::owned_evidence::OwnedEvidence]) {
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for evidence in forked.iter_mut() {
+        for test in &mut evidence.tests {
+            let count = seen.entry(test.name.clone()).or_default();
+            *count += 1;
+            if *count > 1 {
+                test.name = format!("{} [{count}]", test.name);
+            }
+        }
+    }
 }
 
 /// An Ant build's copy: one module, the whole build, whose tests run in the
@@ -1639,10 +1682,22 @@ fn instrument_ant(
     project: PreparedJvmProject,
     probe_count: usize,
 ) -> Result<InstrumentedWorkspace, String> {
-    let Some(first) = project.files.sources.iter().find_map(|(relative, _)| {
-        let source = fs::read_to_string(workspace.join(relative)).ok()?;
-        ant_source_root(relative, &source)
-    }) else {
+    // The root the build compiles most of the product from: a stray example
+    // tree sorting first is not where the runtime belongs.
+    let mut roots: BTreeMap<String, usize> = BTreeMap::new();
+    for (relative, _) in &project.files.sources {
+        let Ok(source) = fs::read_to_string(workspace.join(relative)) else {
+            continue;
+        };
+        if let Some(root) = ant_source_root(relative, &source) {
+            *roots.entry(root).or_default() += 1;
+        }
+    }
+    let Some(first) = roots
+        .iter()
+        .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+        .map(|(root, _)| root.clone())
+    else {
         return Err(
             "no source root of this Ant build holds product code under a src directory; set SUPERCOV_SOURCE_ROOTS to the directories its <javac> tasks compile and SUPERCOV_TEST_ROOTS to the ones its <batchtest> scans"
                 .into(),
@@ -1679,15 +1734,20 @@ fn instrument_ant(
     write(&listener_sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"), &config)?;
 
     let build = crate::ant_build::read_ant_build(workspace, &BTreeMap::new());
-    let tree = crate::ant_build::outside_anchor(workspace, &build);
+    // Everything changed outside the project is changed within the copy's
+    // own directory, and nowhere else: an import named by an absolute path
+    // leads out of the copy, and its file is left as it is.
+    let copy = crate::workspace::copy_directory_of(workspace);
+    let tree = crate::ant_build::outside_anchor(workspace, &build)
+        .filter(|tree| copy.as_ref().is_some_and(|copy| tree.starts_with(copy)));
     let mut candidates = build.junit_files.clone();
     // A file that runs the build from outside -- a wrapper script's own
     // build file beside it, which imports the project's -- holds a task the
     // import chain never reaches. Those sit at the top of the tree the copy
-    // is laid out within, and in the project itself.
-    for directory in tree.iter().chain(std::iter::once(&workspace.to_path_buf())) {
+    // is laid out within.
+    if let Some(directory) = &tree {
         let Ok(entries) = fs::read_dir(directory) else {
-            continue;
+            return Err(format!("could not read {}", directory.display()));
         };
         let mut found = entries
             .filter_map(Result::ok)
@@ -1702,7 +1762,6 @@ fn instrument_ant(
         }
     }
     let mut patched = 0usize;
-    let mut concurrent = BTreeSet::new();
     for file in candidates {
         let Ok(text) = fs::read_to_string(&file) else {
             continue;
@@ -1710,14 +1769,11 @@ fn instrument_ant(
         let Some(updated) = with_ant_formatter(&text, &sources, &listener_sources, &classes) else {
             continue;
         };
-        if ant_runs_threads(&text) {
-            concurrent.insert(module.directory.clone());
-        }
         if !file.starts_with(workspace) {
-            let Some(tree) = tree.as_ref().filter(|tree| file.starts_with(tree)) else {
+            let Some(copy) = copy.as_ref().filter(|copy| file.starts_with(copy)) else {
                 continue;
             };
-            crate::workspace::unfold_links_to(tree, &file)
+            crate::workspace::unfold_links_to(copy, &file)
                 .map_err(|error| format!("could not prepare {} in the copy: {error}", file.display()))?;
         }
         write(&file, &updated)?;
@@ -1744,7 +1800,8 @@ fn instrument_ant(
         declared_in,
         added_launcher: None,
         serialised: BTreeSet::new(),
-        concurrent,
+        // `threads` on a `<junit>` forks a JVM per thread, each its own.
+        concurrent: BTreeSet::new(),
         added_vintage: false,
         relaxed: Vec::new(),
         license_check: false,
@@ -2079,6 +2136,10 @@ pub fn run_direct_jvm(
                     read_evidence(&bytes).map_err(|error| format!("{}: {error}", path.display()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut forked = forked;
+            if instrumented.build == JvmBuild::Ant {
+                number_repeated_runs(&mut forked);
+            }
             let evidence = merge_evidence(forked);
             outcomes.extend(evidence.tests.iter().map(|test| {
                 OwnedTestOutcome {
@@ -2447,8 +2508,19 @@ mod tests {
         assert!(launcher.contains("<javac srcdir=\"/w/platform\""), "{launcher}");
         assert!(launcher.contains("<classpath refid=\"cp\"/></javac>"), "{launcher}");
         assert!(launcher.contains("<listener classname=\"com.supercorp.supercov.SupercovListener\"/>"), "{launcher}");
-        assert!(ant_runs_threads("<junit threads=\"4\">"));
-        assert!(!ant_runs_threads("<junit fork=\"true\">"));
+        // Inside a container that runs its tasks in order the compilation
+        // goes right before the task, after what defines its classpath; a
+        // copied classpath keeps no id of its own.
+        let ordered = with_ant_formatter(
+            "<project><target name=\"t\"><sequential><path id=\"cp\"/><junit><classpath id=\"x\" refid=\"cp\"/></junit></sequential></target></project>",
+            Path::new("/w/src"),
+            Path::new("/w/platform"),
+            Path::new("/w/classes"),
+        )
+        .expect("changed");
+        assert!(ordered.find("<path id=\"cp\"/>").unwrap() < ordered.find("<mkdir").unwrap(), "{ordered}");
+        assert!(ordered.contains("<javac srcdir=\"/w/src\" destdir=\"/w/classes\" includeantruntime=\"true\" debug=\"true\" encoding=\"UTF-8\"><classpath refid=\"cp\"/></javac>"), "{ordered}");
+        assert_eq!(without_ids("<path id='a' refid=\"b\"/>"), "<path refid=\"b\"/>");
     }
 
     use super::*;

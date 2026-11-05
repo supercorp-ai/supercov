@@ -439,7 +439,18 @@ public final class Supercov {
     if (!target.isDirectory() && !target.mkdirs() && !target.isDirectory()) {
       throw new IOException("could not create " + directory);
     }
-    write(new java.io.File(target, JVM + ".bin").getPath());
+    // Written beside and moved into place: a JVM stopped while writing --
+    // a timeout ends a forked one, and each suite rewrites the whole file --
+    // leaves the evidence it had rather than a file cut short.
+    java.io.File finished = new java.io.File(target, JVM + ".bin");
+    java.io.File writing = new java.io.File(target, JVM + ".bin.partial");
+    write(writing.getPath());
+    if (!writing.renameTo(finished)) {
+      finished.delete();
+      if (!writing.renameTo(finished)) {
+        throw new IOException("could not move " + writing + " into place");
+      }
+    }
   }
 
   /** Writes the evidence transport the engine reads. */

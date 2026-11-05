@@ -827,9 +827,12 @@ writes its evidence at the end of its suite and on shutdown, so a JVM the
 task stops for running past its timeout still leaves what it recorded, and
 the run merges every one. The formatter is compiled by the copy's build just
 before the task, against the task's own classpath and Ant's runtime. Tests
-keep the names Ant's XML reports give them, `Class#method`. A `<junit>` that
-runs classes in threads (`threads` above 1) is reported as concurrent, as a
-parallel JUnit Platform suite is.
+keep the names Ant's XML reports give them, `Class#method`; a test a suite
+runs is named within it, `Suite#Class#method`, and a test two tasks or
+filesets both run is numbered in the second (`[2]`). A test the task stops
+for its timeout is recorded as failed, with what it ran until then. A build
+that names no tests where they can be read keeps the `src/main` and
+`src/test` convention.
 
 Ant's `<junitlauncher>` runs tests on the JUnit Platform, so it gets the same
 platform listener Maven and Gradle builds get, as a `<listener>` of the task,

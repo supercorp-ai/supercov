@@ -163,12 +163,30 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
     if !start.is_file() {
         return build;
     }
+    // Ant resolves every relative path against the project's base directory,
+    // which `<project basedir>` may move from the build file's own.
+    let based = crate::fault_fs::read_to_string(&start)
+        .ok()
+        .and_then(|text| {
+            tags(&text)
+                .into_iter()
+                .find(|tag| tag.name == "project" && !tag.closing)
+                .and_then(|tag| tag.attribute("basedir").map(str::to_owned))
+        })
+        .filter(|basedir| !basedir.contains("${"))
+        .map(|basedir| resolve(root, &basedir));
+    let base = based.unwrap_or_else(|| normalized(root));
+    let root = base.as_path();
     let mut properties = defines.clone();
     properties
         .entry("basedir".into())
         .or_insert_with(|| root.to_string_lossy().into_owned());
+    // Properties a build sets at its top level hold before any target runs:
+    // read first, they win over one a target that may never run would set.
+    let mut ignored = AntBuild::default();
+    read_file(root, &start, &mut properties, &mut ignored, &mut BTreeMap::new(), Pass::TopLevel);
     let mut compiled = BTreeMap::new();
-    read_file(root, &start, &mut properties, &mut build, &mut compiled);
+    read_file(root, &start, &mut properties, &mut build, &mut compiled, Pass::All);
     // A batch that scans compiled classes -- `<junitlauncher>`'s
     // `<testclasses>` always does -- names the directory a `<javac>` wrote
     // them into: its tests are that compilation's sources.
@@ -189,6 +207,14 @@ pub fn read_ant_build(root: &Path, defines: &BTreeMap<String, String>) -> AntBui
     build
 }
 
+/// Which properties a reading defines: the top-level ones alone, or every
+/// one, together with what the build says about its tests.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    TopLevel,
+    All,
+}
+
 /// `compiled` maps each `<javac>` output directory to its sources.
 fn read_file(
     root: &Path,
@@ -196,6 +222,7 @@ fn read_file(
     properties: &mut BTreeMap<String, String>,
     build: &mut AntBuild,
     compiled: &mut BTreeMap<PathBuf, Vec<PathBuf>>,
+    pass: Pass,
 ) {
     let file = normalized(file);
     if build.files.contains(&file) || build.files.len() > 64 {
@@ -208,6 +235,7 @@ fn read_file(
     let directory = file.parent().unwrap_or(root).to_path_buf();
     let all = tags(&text);
     let mut in_batchtest = 0usize;
+    let mut in_target = 0usize;
     // The output directory of the `<javac>` being read, for its nested `<src>`.
     let mut javac: Option<PathBuf> = None;
     let known = |value: &str, properties: &BTreeMap<String, String>| {
@@ -222,15 +250,25 @@ fn read_file(
             if tag.name == "javac" {
                 javac = None;
             }
+            if tag.name == "target" {
+                in_target = in_target.saturating_sub(1);
+            }
+            continue;
+        }
+        if tag.name == "target" && !tag.empty {
+            in_target += 1;
+        }
+        if pass == Pass::TopLevel && tag.name != "property" && tag.name != "import" && tag.name != "include" {
             continue;
         }
         match tag.name.as_str() {
-            "property" => define(root, tag, properties),
+            "property" if pass == Pass::All || in_target == 0 => define(root, tag, properties),
+            "property" => {}
             "import" | "include" => {
                 if let Some(imported) = tag.attribute("file") {
                     let imported = expand(imported, properties);
                     if !imported.contains("${") {
-                        read_file(root, &directory.join(imported), properties, build, compiled);
+                        read_file(root, &directory.join(imported), properties, build, compiled, pass);
                     }
                 }
             }
@@ -246,15 +284,21 @@ fn read_file(
             "javac" => {
                 let destination = tag.attribute("destdir").and_then(|dir| known(dir, properties));
                 if let Some(destination) = &destination {
-                    push_unique(&mut build.outputs, destination.clone());
-                    let sources = compiled.entry(destination.clone()).or_default();
-                    for source in tag
+                    let sources = tag
                         .attribute("srcdir")
+                        .map(path_list)
+                        .unwrap_or_default()
                         .into_iter()
-                        .flat_map(|dirs| dirs.split([':', ';']))
-                        .filter_map(|dir| known(dir, properties))
-                    {
-                        push_unique(sources, source);
+                        .filter_map(|dir| known(&dir, properties))
+                        .collect::<Vec<_>>();
+                    // A build that compiles in place writes its classes beside
+                    // its sources: that directory is not only output.
+                    if !sources.contains(destination) {
+                        push_unique(&mut build.outputs, destination.clone());
+                    }
+                    let compiled_from = compiled.entry(destination.clone()).or_default();
+                    for source in sources {
+                        push_unique(compiled_from, source);
                     }
                 }
                 if !tag.empty {
@@ -304,6 +348,32 @@ fn define(root: &Path, tag: &Tag, properties: &mut BTreeMap<String, String>) {
             }
         }
     }
+}
+
+/// An Ant path-like attribute's entries: `:` or `;` between them, except the
+/// colon of a Windows drive (`C:\src`).
+fn path_list(value: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    let characters = value.chars().collect::<Vec<_>>();
+    for (index, &character) in characters.iter().enumerate() {
+        let drive = character == ':'
+            && current.len() == 1
+            && current.chars().all(|c| c.is_ascii_alphabetic())
+            && matches!(characters.get(index + 1), Some('\\' | '/'));
+        if (character == ':' && !drive) || character == ';' {
+            if !current.trim().is_empty() {
+                entries.push(current.trim().to_owned());
+            }
+            current.clear();
+        } else {
+            current.push(character);
+        }
+    }
+    if !current.trim().is_empty() {
+        entries.push(current.trim().to_owned());
+    }
+    entries
 }
 
 /// `key=value` and `key: value` lines, as java.util.Properties reads the
@@ -480,6 +550,27 @@ mod tests {
         assert_eq!(build.test_roots, [project.join("src/test")]);
         assert_eq!(build.junit_files, [project.join("build.xml")]);
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn top_level_properties_win_over_a_target_and_basedir_moves_paths() {
+        let top = temporary("basedir");
+        let project = top.join("build");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("build.xml"),
+            r#"<project basedir="..">
+    <target name="it"><property name="test.dir" value="it"/></target>
+    <property name="test.dir" value="unit"/>
+    <target name="t"><javac srcdir="src" destdir="src"/><junit><batchtest><fileset dir="${test.dir}"/></batchtest></junit></target>
+</project>"#,
+        )
+        .unwrap();
+        let build = read_ant_build(&project, &BTreeMap::new());
+        assert_eq!(build.test_roots, [top.join("unit")], "the top-level definition, under basedir");
+        assert!(!build.outputs.contains(&top.join("src")), "an in-place compile is not output: {:?}", build.outputs);
+        assert_eq!(path_list("src:lib;C:\\other"), ["src", "lib", "C:\\other"]);
+        fs::remove_dir_all(top).unwrap();
     }
 
     #[test]

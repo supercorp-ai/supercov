@@ -2304,9 +2304,17 @@ fn enclosing_tree(root: &Path) -> Option<(PathBuf, PathBuf)> {
 /// the project -- Ant's `<junit>` in a shared harness -- is changed this way
 /// without copying the rest of that harness.
 pub fn unfold_links_to(tree: &Path, file: &Path) -> io::Result<()> {
-    // Written down, so the next copy turns them back into links before the
-    // next run changes the originals again (`relink_unfolded`).
-    let mut unfolded = Vec::new();
+    // Only ever inside one of Supercov's own copies: what is unfolded here is
+    // replaced, and nothing of the checkout may be.
+    if !tree
+        .components()
+        .any(|component| component.as_os_str() == ".supercov")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not inside a Supercov copy", tree.display()),
+        ));
+    }
     let Ok(relative) = file.strip_prefix(tree) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -2324,25 +2332,52 @@ pub fn unfold_links_to(tree: &Path, file: &Path) -> io::Result<()> {
         let target = fs::canonicalize(&directory)?;
         fs::remove_file(&directory).or_else(|_| fs::remove_dir(&directory))?;
         fs::create_dir(&directory)?;
-        unfolded.push(directory.strip_prefix(tree).unwrap_or(&directory).to_path_buf());
+        // Written down as soon as it is real, so a failure part way still
+        // leaves it to be made a link again (`relink_unfolded`).
+        record_unfolded(tree, directory.strip_prefix(tree).unwrap_or(&directory))?;
         for entry in fs::read_dir(&target)? {
             let entry = entry?;
+            let name = entry.file_name();
+            // As `link_repository_around`: never a repository's own.
+            if matches!(name.to_str(), Some(".git" | ".supercov")) {
+                continue;
+            }
             let linked = entry.path();
             let is_directory = fs::metadata(&linked).is_ok_and(|metadata| metadata.is_dir());
-            create_link(&linked, &directory.join(entry.file_name()), is_directory)?;
+            let destination = directory.join(&name);
+            if create_link(&linked, &destination, is_directory).is_err() && !is_directory {
+                fs::copy(&linked, &destination)?;
+            }
         }
     }
     if fs::symlink_metadata(file).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         fs::remove_file(file)?;
     }
-    unfolded.push(relative.to_path_buf());
+    record_unfolded(tree, relative)
+}
+
+fn record_unfolded(tree: &Path, relative: &Path) -> io::Result<()> {
     let record = tree.join(UNFOLDED_RECORD);
     let mut listed = fs::read_to_string(&record).unwrap_or_default();
-    for path in unfolded {
-        listed.push_str(&path.to_string_lossy());
-        listed.push('\n');
-    }
+    listed.push_str(&relative.to_string_lossy());
+    listed.push('\n');
     fs::write(record, listed)
+}
+
+/// The directory of a copy directly under `.supercov`'s own container
+/// (`.supercov/workspaces/workspace`, `.supercov/work/<run>`): everything a
+/// run may unfold and patch lies under it.
+pub fn copy_directory_of(workspace: &Path) -> Option<PathBuf> {
+    workspace
+        .ancestors()
+        .find(|directory| {
+            directory
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".supercov")
+        })
+        .map(Path::to_path_buf)
 }
 
 /// What `unfold_links_to` made of the copy's own, in the tree around it.
@@ -2398,9 +2433,9 @@ pub fn copied_tree(root: &Path, workspace: &Path) -> Option<PathBuf> {
 
 /// Before linking around a fresh copy, what an earlier run unfolded is made
 /// links again (`relink_unfolded`).
-fn relink_around(root: &Path, workspace: &Path) {
-    if let Some(tree) = copied_tree(root, workspace) {
-        relink_unfolded(&tree, workspace);
+fn relink_around(_root: &Path, workspace: &Path) {
+    if let Some(copy) = copy_directory_of(workspace) {
+        relink_unfolded(&copy, workspace);
     }
 }
 
@@ -2414,8 +2449,11 @@ mod tests {
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("common.xml"), "original").unwrap();
         fs::write(real.join("other.xml"), "kept").unwrap();
-        let tree = top.join("copy");
+        let tree = top.join("project/.supercov/workspaces/workspace");
         fs::create_dir_all(&tree).unwrap();
+        // Never outside one of Supercov's copies.
+        assert!(unfold_links_to(&top.join("real"), &top.join("real/tools/build/common.xml")).is_err());
+        assert_eq!(copy_directory_of(&tree.join("tree/project")), Some(tree.clone()));
         std::os::unix::fs::symlink(top.join("real/tools"), tree.join("tools")).unwrap();
         let file = tree.join("tools/build/common.xml");
         unfold_links_to(&tree, &file).unwrap();
