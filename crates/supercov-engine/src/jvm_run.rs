@@ -65,6 +65,10 @@ const ANT_FORMATTER_SOURCE: &str =
 
 const ANT_FORMATTER_CLASS: &str = "com.supercorp.supercov.SupercovAntFormatter";
 
+/// What beside an Ant project is copied rather than linked: a wrapper's
+/// scripts and build files, not a shared harness.
+const SMALL_LINKED_ENTRY: u64 = 4 << 20;
+
 const PACKAGE_DIRECTORY: &str = "com/supercorp/supercov";
 
 /// Where the JUnit Platform looks for listeners to register.
@@ -1760,6 +1764,12 @@ fn instrument_ant(
                 candidates.push(path);
             }
         }
+    }
+    // Small entries above the repository are the copy's own, so a wrapper
+    // script writing beside itself writes into the copy.
+    if let Some(copy) = copy.as_ref().filter(|_| tree.is_some()) {
+        crate::workspace::copy_small_links_around(copy, workspace, SMALL_LINKED_ENTRY)
+            .map_err(|error| format!("could not prepare the copy's surroundings: {error}"))?;
     }
     let mut patched = 0usize;
     for file in candidates {

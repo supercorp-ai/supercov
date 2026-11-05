@@ -846,8 +846,9 @@ with links standing for the rest, so `../` reaches what it reaches in the
 checkout. A file outside the project that holds a `<junit>` task — the
 harness, or a wrapper script's own build file beside it — is changed in the
 copy's own version of that file; the original and the rest of the harness
-are only read. A script outside the project that writes beside itself still
-writes into the checkout, as it does without Supercov.
+are only read. Small files and directories beside the project are copied
+rather than linked, so a wrapper script that writes beside itself writes into
+the copy; anything larger than 4 MB stays a link.
 
 Only the project's own sources are measured: modules resolved as jars, Ivy's
 included, are not instrumented. Code that is not Java or Kotlin — XSLT,

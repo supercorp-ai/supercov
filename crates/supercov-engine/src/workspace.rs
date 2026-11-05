@@ -2431,6 +2431,93 @@ pub fn copied_tree(root: &Path, workspace: &Path) -> Option<PathBuf> {
     Some(tree)
 }
 
+/// Small entries a copy reaches through links above its repository, copied
+/// in. A script there that writes beside itself -- Ametys's
+/// `run-single-test.sh` writes the build file it runs into `.single-test/`
+/// -- otherwise writes through the link into the checkout. What is larger
+/// than `limit` bytes (a shared harness of hundreds of megabytes) stays a
+/// link: it is read, and copying it would cost every run. Recorded like an
+/// unfolded file, so the next copy starts from the checkout again.
+pub fn copy_small_links_around(copy: &Path, workspace: &Path, limit: u64) -> io::Result<()> {
+    let Ok(below) = workspace.strip_prefix(copy) else {
+        return Ok(());
+    };
+    let path_down = below
+        .ancestors()
+        .map(|ancestor| copy.join(ancestor))
+        .collect::<Vec<_>>();
+    for level in workspace.ancestors().skip(1) {
+        if level == copy || !level.starts_with(copy) {
+            break;
+        }
+        for entry in fs::read_dir(level)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path_down.contains(&path) || entry.file_name() == UNFOLDED_RECORD {
+                continue;
+            }
+            if !fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                continue;
+            }
+            let target = fs::canonicalize(&path)?;
+            if !fits_within(&target, limit) {
+                continue;
+            }
+            fs::remove_file(&path).or_else(|_| fs::remove_dir(&path))?;
+            record_unfolded(copy, path.strip_prefix(copy).unwrap_or(&path))?;
+            copy_plain_tree(&target, &path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a file or directory holds no more than `limit` bytes, counting
+/// files reached through no link; stops counting once past it.
+fn fits_within(path: &Path, limit: u64) -> bool {
+    let mut total = 0u64;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&next) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let Ok(entries) = fs::read_dir(&next) else {
+                return false;
+            };
+            pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+            continue;
+        }
+        total += metadata.len();
+        if total > limit {
+            return false;
+        }
+    }
+    true
+}
+
+/// A directory or file copied as it is, links inside it kept as links.
+fn copy_plain_tree(from: &Path, to: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(from)?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(from)?;
+        let directory = fs::metadata(from).is_ok_and(|metadata| metadata.is_dir());
+        return create_link(&target, to, directory);
+    }
+    if !metadata.is_dir() {
+        fs::copy(from, to)?;
+        return Ok(());
+    }
+    fs::create_dir(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        copy_plain_tree(&entry.path(), &to.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
 /// Before linking around a fresh copy, what an earlier run unfolded is made
 /// links again (`relink_unfolded`).
 /// Every level from the copy's own directory down to the project is read for
@@ -2450,6 +2537,38 @@ fn relink_around(_root: &Path, workspace: &Path) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn small_entries_above_a_repository_are_copied_and_large_ones_stay_linked() {
+        let top = std::env::temp_dir().join(format!("supercov-small-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let real = top.join("real");
+        fs::create_dir_all(real.join("scratch")).unwrap();
+        fs::write(real.join("run.sh"), "echo").unwrap();
+        fs::write(real.join("scratch/forms.xml"), "original").unwrap();
+        fs::create_dir_all(real.join("harness")).unwrap();
+        fs::write(real.join("harness/big.jar"), vec![0u8; 2048]).unwrap();
+        let copy = top.join("project/.supercov/workspaces/workspace");
+        let workspace = copy.join("tree/plugins/forms");
+        fs::create_dir_all(&workspace).unwrap();
+        for name in ["run.sh", "scratch", "harness"] {
+            let directory = real.join(name).is_dir();
+            create_link(&real.join(name), &copy.join("tree").join(name), directory).unwrap();
+        }
+        copy_small_links_around(&copy, &workspace, 1024).unwrap();
+        let tree = copy.join("tree");
+        assert!(!fs::symlink_metadata(tree.join("scratch")).unwrap().file_type().is_symlink());
+        assert!(!fs::symlink_metadata(tree.join("run.sh")).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(tree.join("harness")).unwrap().file_type().is_symlink(), "past the limit");
+        // A script writing beside itself now writes into the copy.
+        fs::write(tree.join("scratch/forms.xml"), "patched").unwrap();
+        assert_eq!(fs::read_to_string(real.join("scratch/forms.xml")).unwrap(), "original");
+        // The next copy starts from the checkout again.
+        relink_around(&top, &workspace);
+        assert!(fs::symlink_metadata(tree.join("scratch")).is_err());
+        assert!(workspace.is_dir());
+        fs::remove_dir_all(top).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_file_reached_through_links_is_made_the_copy_own() {
