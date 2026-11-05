@@ -48,6 +48,7 @@ pub mod javascript_frontend;
 pub mod javascript_run;
 pub mod js_instrumenter;
 pub mod jvm_instrumenter;
+pub mod ant_build;
 pub mod jvm_project;
 pub mod jvm_run;
 mod kotlin_grammar;
