@@ -2433,9 +2433,18 @@ pub fn copied_tree(root: &Path, workspace: &Path) -> Option<PathBuf> {
 
 /// Before linking around a fresh copy, what an earlier run unfolded is made
 /// links again (`relink_unfolded`).
+/// Every level from the copy's own directory down to the project is read for
+/// a record: one written at another level (by an earlier version, or for a
+/// copy laid out in another tree) is honoured too.
 fn relink_around(_root: &Path, workspace: &Path) {
-    if let Some(copy) = copy_directory_of(workspace) {
-        relink_unfolded(&copy, workspace);
+    let Some(copy) = copy_directory_of(workspace) else {
+        return;
+    };
+    for level in workspace.ancestors().skip(1) {
+        relink_unfolded(level, workspace);
+        if level == copy {
+            break;
+        }
     }
 }
 
@@ -2470,6 +2479,14 @@ mod tests {
         relink_unfolded(&tree, &tree.join("project"));
         assert!(fs::symlink_metadata(tree.join("tools")).is_err(), "removed to be linked again");
         assert!(!tree.join(UNFOLDED_RECORD).exists());
+        // A record a level below the copy's own directory is read as well.
+        let below = tree.join("tree");
+        fs::create_dir_all(below.join("project")).unwrap();
+        fs::write(below.join("stale.xml"), "patched").unwrap();
+        fs::write(below.join(UNFOLDED_RECORD), "stale.xml\n").unwrap();
+        relink_around(&top, &below.join("project"));
+        assert!(!below.join("stale.xml").exists(), "removed to be linked again");
+        assert!(below.join("project").is_dir(), "never the copy's own directories");
         fs::remove_dir_all(top).unwrap();
     }
 

@@ -1766,6 +1766,14 @@ fn instrument_ant(
         let Ok(text) = fs::read_to_string(&file) else {
             continue;
         };
+        // A file that holds the formatter already is one an earlier run left
+        // in the copy: patching it again would run that run's compilation.
+        if text.contains(ANT_FORMATTER_CLASS) || text.contains(&format!("classname=\"{LISTENER_CLASS}\"")) {
+            return Err(format!(
+                "{} in the copy still holds an earlier run's changes; delete .supercov/workspaces and run again",
+                file.display()
+            ));
+        }
         let Some(updated) = with_ant_formatter(&text, &sources, &listener_sources, &classes) else {
             continue;
         };
