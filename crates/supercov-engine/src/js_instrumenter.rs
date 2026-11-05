@@ -1056,6 +1056,12 @@ pub struct CandidateRuntime {
     pub mcdc_end_v2: String,
     pub coverage_hit_v2: String,
     pub probe_file_v2: String,
+    /// The file's clock and hit epochs, bound once beside it so each statement
+    /// probe reads them from a local.
+    #[serde(default)]
+    pub probe_clock_v2: String,
+    #[serde(default)]
+    pub probe_hits_v2: String,
     pub parenthesized_assignment_value: String,
     pub with_request_phase: String,
     pub optional_select_v2: String,
@@ -4145,8 +4151,8 @@ fn instrument_candidate_with_binding(
     let mcdc_end_v2 = names.allocate("__supercovMcdcEndV2");
     let coverage_hit_v2 = names.allocate("__supercovCoverageHitV2");
     let probe_file_v2 = names.allocate("__supercovProbeFileV2");
-    let _probe_clock_v2 = names.allocate("__supercovProbeClockV2");
-    let _probe_hits_v2 = names.allocate("__supercovProbeHitsV2");
+    let probe_clock_v2 = names.allocate("__supercovProbeClockV2");
+    let probe_hits_v2 = names.allocate("__supercovProbeHitsV2");
     let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
     let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
@@ -4282,6 +4288,8 @@ fn instrument_candidate_with_binding(
         ast,
         coverage_hit_v2: coverage_hit_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
+        probe_clock_v2: probe_clock_v2.clone(),
+        probe_hits_v2: probe_hits_v2.clone(),
         targets: statement_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
@@ -4290,6 +4298,8 @@ fn instrument_candidate_with_binding(
         ast,
         coverage_hit_v2: coverage_hit_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
+        probe_clock_v2: probe_clock_v2.clone(),
+        probe_hits_v2: probe_hits_v2.clone(),
         targets: function_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
@@ -4355,6 +4365,8 @@ fn instrument_candidate_with_binding(
         ast,
         coverage_hit_v2: coverage_hit_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
+        probe_clock_v2: probe_clock_v2.clone(),
+        probe_hits_v2: probe_hits_v2.clone(),
         typescript,
         try_targets,
         loop_targets,
@@ -4447,19 +4459,44 @@ fn instrument_candidate_with_binding(
         ast.vec1(Argument::from(json_expression(ast, &registration))),
         false,
     );
+    // The file, then its clock and hit epochs read from it once: every
+    // statement probe reads these two, and each read through the file was
+    // two loads more.
+    let probe_part = |name: &str, part: &str| {
+        ast.variable_declarator(
+            Span::default(),
+            runtime_declaration_kind,
+            ast.binding_pattern_binding_identifier(Span::default(), ast.ident(name)),
+            NONE,
+            Some(Expression::from(ast.member_expression_static(
+                Span::default(),
+                ast.expression_identifier(Span::default(), ast.ident(&probe_file_v2)),
+                ast.identifier_name(Span::default(), ast.ident(part)),
+                false,
+            ))),
+            false,
+        )
+    };
     parsed.program.body.insert(
         0,
         Statement::VariableDeclaration(ast.alloc_variable_declaration(
             Span::default(),
             runtime_declaration_kind,
-            ast.vec1(ast.variable_declarator(
-                Span::default(),
-                runtime_declaration_kind,
-                ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&probe_file_v2)),
-                NONE,
-                Some(registration_call),
-                false,
-            )),
+            ast.vec_from_array([
+                ast.variable_declarator(
+                    Span::default(),
+                    runtime_declaration_kind,
+                    ast.binding_pattern_binding_identifier(
+                        Span::default(),
+                        ast.ident(&probe_file_v2),
+                    ),
+                    NONE,
+                    Some(registration_call),
+                    false,
+                ),
+                probe_part(&probe_clock_v2, "clock"),
+                probe_part(&probe_hits_v2, "hitEpochs"),
+            ]),
             false,
         )),
     );
@@ -4597,6 +4634,8 @@ fn instrument_candidate_with_binding(
             mcdc_end_v2,
             coverage_hit_v2,
             probe_file_v2,
+            probe_clock_v2,
+            probe_hits_v2,
             parenthesized_assignment_value,
             with_request_phase,
             optional_select_v2,
@@ -4624,17 +4663,26 @@ fn instrument_candidate_with_binding(
     })
 }
 
-/// `file.clock.fast && file.hitEpochs[index] === file.clock.epoch || hit(file, index);`
+/// `clock.fast && hits[index] === clock.epoch || hit(file, index);`, where
+/// `clock` and `hits` are the file's clock and hit epochs, bound once beside it.
 ///
 /// A statement probe that already fired in this context costs three loads and
-/// a comparison, not a call: in minimatch's backtracking matcher the call per
+/// a comparison, not a call (six, before the two were bound: each read them
+/// through the file, in every probe of every render of a page): in minimatch's backtracking matcher the call per
 /// statement was most of a tenfold slowdown, and its guard test failed. The
 /// clock is `fast` only while an async hook keeps its epoch current; without
 /// one the call decides, as before.
-fn probe_v2_hit<'a>(ast: AstBuilder<'a>, hit: &str, file: &str, index: usize) -> Statement<'a> {
+fn probe_v2_hit<'a>(
+    ast: AstBuilder<'a>,
+    hit: &str,
+    file: &str,
+    clock: &str,
+    hits: &str,
+    index: usize,
+) -> Statement<'a> {
     ast.statement_expression(
         Span::default(),
-        probe_v2_hit_expression(ast, hit, file, index),
+        probe_v2_hit_expression(ast, hit, file, clock, hits, index),
     )
 }
 
@@ -4644,10 +4692,13 @@ fn probe_v2_hit_expression<'a>(
     ast: AstBuilder<'a>,
     hit: &str,
     file: &str,
+    clock: &str,
+    hits: &str,
     index: usize,
 ) -> Expression<'a> {
     let span = Span::default();
     let file_expression = || ast.expression_identifier(span, ast.ident(file));
+    let clock_expression = || ast.expression_identifier(span, ast.ident(clock));
     let member = |object: Expression<'a>, name: &str| -> Expression<'a> {
         Expression::from(ast.member_expression_static(
             span,
@@ -4658,17 +4709,17 @@ fn probe_v2_hit_expression<'a>(
     };
     let index_literal =
         || ast.expression_numeric_literal(span, index as f64, None, NumberBase::Decimal);
-    let fast = member(member(file_expression(), "clock"), "fast");
+    let fast = member(clock_expression(), "fast");
     let seen = ast.expression_binary(
         span,
         Expression::from(ast.member_expression_computed(
             span,
-            member(file_expression(), "hitEpochs"),
+            ast.expression_identifier(span, ast.ident(hits)),
             index_literal(),
             false,
         )),
         BinaryOperator::StrictEquality,
-        member(member(file_expression(), "clock"), "epoch"),
+        member(clock_expression(), "epoch"),
     );
     let call = ast.expression_call(
         span,
@@ -4770,6 +4821,8 @@ struct StatementProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
     probe_file_v2: String,
+    probe_clock_v2: String,
+    probe_hits_v2: String,
     targets: HashMap<SpanKey, Vec<PointTarget>>,
     source_sensitive_functions: HashSet<SpanKey>,
 }
@@ -4780,6 +4833,8 @@ impl<'a> StatementProbeTransformer<'a> {
             self.ast,
             &self.coverage_hit_v2,
             &self.probe_file_v2,
+            &self.probe_clock_v2,
+            &self.probe_hits_v2,
             target.index,
         )
     }
@@ -4966,6 +5021,8 @@ struct FunctionProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
     probe_file_v2: String,
+    probe_clock_v2: String,
+    probe_hits_v2: String,
     targets: HashMap<SpanKey, PointTarget>,
     source_sensitive_functions: HashSet<SpanKey>,
 }
@@ -4976,6 +5033,8 @@ impl<'a> FunctionProbeTransformer<'a> {
             self.ast,
             &self.coverage_hit_v2,
             &self.probe_file_v2,
+            &self.probe_clock_v2,
+            &self.probe_hits_v2,
             target.index,
         )
     }
@@ -5838,6 +5897,8 @@ struct ExtendedTransformer<'a, 's> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
     probe_file_v2: String,
+    probe_clock_v2: String,
+    probe_hits_v2: String,
     typescript: bool,
     try_targets: HashMap<SpanKey, usize>,
     loop_targets: HashMap<SpanKey, usize>,
@@ -5887,7 +5948,14 @@ impl<'a> ExtendedTransformer<'a, '_> {
     }
 
     fn hit(&self, index: usize) -> Expression<'a> {
-        probe_v2_hit_expression(self.ast, &self.coverage_hit_v2, &self.probe_file_v2, index)
+        probe_v2_hit_expression(
+            self.ast,
+            &self.coverage_hit_v2,
+            &self.probe_file_v2,
+            &self.probe_clock_v2,
+            &self.probe_hits_v2,
+            index,
+        )
     }
 
     /// `T = 0;`
@@ -12824,7 +12892,7 @@ export function shapes(n: number): unknown {
         for (text, first) in &lines {
             // A probe maps to nothing: a coverage tool reading the copy
             // through its map counts no branch of the user's for its `||`.
-            if text.contains(&format!("{}.clock.fast", runtime.probe_file_v2))
+            if text.contains(&format!("{}.fast", runtime.probe_clock_v2))
                 && let Some(first) = first
             {
                 assert_eq!(*first, None, "{text}");
