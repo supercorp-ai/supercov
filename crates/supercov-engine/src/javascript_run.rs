@@ -1650,7 +1650,7 @@ struct CrashedChild {
 fn crashed(entries: &[EvidenceArchiveEntry]) -> Vec<String> {
     entries
         .iter()
-        .filter(|entry| entry.path.starts_with("execution.") && entry.path.ends_with(".jsonl"))
+        .filter(|entry| entry.path.starts_with("execution."))
         .flat_map(|entry| entry.contents.split(|byte| *byte == b'\n'))
         .filter_map(|line| serde_json::from_slice::<CrashedChild>(line).ok())
         .map(|child| {
