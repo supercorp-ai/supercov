@@ -313,7 +313,7 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       mkdirSync(directory, { recursive: true });
       const options = `${process.env.NODE_OPTIONS ?? ''} --require=${exitOnSignal} --cpu-prof --cpu-prof-dir=${directory}`.trim();
       const [command, ...args] = binary ? [binary, '--', ...suite.command] : suite.command;
-      run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options }, true);
+      run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options, SUPERCOV_KEEP_WORKSPACE: '1' }, true);
       const { totals, functions } = profileSelfTime(directory);
       profiled[`${variant} ${suite.name}`] = totals;
       const heaviest = Object.entries(functions)
