@@ -5963,6 +5963,26 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         "{said}"
     );
     assert!(!said.contains("starts without build output"), "{said}");
+
+    // A build the command starts from its own code, as essential-upsell's
+    // test harness does, failed: the build is named, not taken for one the
+    // command never ran.
+    project.write(
+        "package.json",
+        r#"{ "name": "built", "scripts": { "build": "node build.js && exit 2", "test": "node harness.mjs" } }"#,
+    );
+    project.write(
+        "harness.mjs",
+        "import { execSync } from 'node:child_process';\nexecSync('npm run build', { stdio: 'inherit' });\n",
+    );
+    let harness = project.supercov(&["--", "npm", "test"]);
+    assert_ne!(harness.code(), 0, "{}", harness.stdout());
+    let said = format!("{}{}", harness.stdout(), harness.stderr());
+    assert!(
+        said.contains("the build the command started, `npm run build`, exited 2"),
+        "{said}"
+    );
+    assert!(!said.contains("starts without build output"), "{said}");
 }
 
 #[cfg(unix)]
@@ -16718,11 +16738,11 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:1214",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:445",
-        "fs.create_dir_all#javascript_run.rs:1458",
-        "fs.create_dir_all#javascript_run.rs:1460",
+        "fs.create_dir_all#javascript_run.rs:1462",
+        "fs.create_dir_all#javascript_run.rs:1464",
         "fs.create_dir_all#lifecycle.rs:1018",
-        "fs.create_dir_all#javascript_run.rs:1552",
-        "fs.create_dir_all#javascript_run.rs:1554",
+        "fs.create_dir_all#javascript_run.rs:1556",
+        "fs.create_dir_all#javascript_run.rs:1558",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
