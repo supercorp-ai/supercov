@@ -1669,6 +1669,10 @@ const instrumentedFixtures = {
 };
 const instrumentedTest = base.extend(instrumentedFixtures);
 export const test = instrumentedTest;
+// `export *` passes no default on, and `import test from "@playwright/test"`
+// is Playwright's own default export: such a spec found none and failed with
+// `(0 , _test.default) is not a function`.
+export default instrumentedTest;
 /**
  * A Playwright `test` object: callable, and carrying the API a spec drives.
  * Facades export several -- one per fixture set -- and every one of them must

@@ -136,6 +136,29 @@ try {
       phase => phase.operation === 'expect.toBe' && phase.lines > 0,
     ),
   );
+  // Playwright's default export, which the wrapper passes on as well: a spec
+  // importing it failed with `(0 , _test.default) is not a function`.
+  writeFileSync(
+    resolve(project, 'tests/default-import.spec.js'),
+    [
+      "import test, { expect } from '@playwright/test';",
+      "import { permission } from '../src/permission.js';",
+      "test('default import', () => expect(permission(true, false)).toBe('allowed'));",
+      '',
+    ].join('\n'),
+  );
+  const defaultImport = rust('__run-js-direct', {
+    root: project,
+    command: ['npm', 'test'],
+    runId: 'rust-direct-playwright-default',
+    startedAt: '2026-08-25T00:00:04.000Z',
+  });
+  assert.equal(defaultImport.exitCode, 0, defaultImport.diagnosticOutput);
+  const withDefault = rust('__query-stored-run', {
+    root: project,
+    query: { runId: defaultImport.runId, filter: 'passed', command: 'summary' },
+  });
+  assert.equal(withDefault.data.tests, 5);
   console.log(
     '[rust-direct-playwright] Rust-owned npm test run preserves multi-worker Playwright attribution',
   );
