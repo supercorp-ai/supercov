@@ -1,5 +1,6 @@
-//! Conservative import-elision policy for the supported tsc/tsx/ts-node path.
-//! Unknown loaders, config resolution and emit overrides retain runtime obligations.
+//! Which imports that only types use TypeScript erases, read from the
+//! project's tsconfig. A config that keeps them, or that cannot be read,
+//! keeps them as runtime obligations.
 use crate::fault_fs as fs;
 use crate::source_discovery::{strip_jsonc_comments, strip_trailing_commas};
 use serde_json::{Map, Value};
@@ -53,26 +54,6 @@ fn options(root: &Path, path: &Path, seen: &mut BTreeSet<PathBuf>) -> Option<Map
     Some(result)
 }
 
-fn expanded_command(root: &Path, command: &[String]) -> String {
-    let mut result = command.join(" ");
-    // Expand only scripts actually named by the command. Other build tools in
-    // package.json are not evidence about the compiler used by this run.
-    if matches!(
-        command.first().map(String::as_str),
-        Some("npm" | "pnpm" | "yarn")
-    ) && let Some(scripts) =
-        json(&root.join("package.json")).and_then(|v| v.get("scripts").cloned())
-    {
-        for arg in command.iter().skip(1) {
-            if let Some(script) = scripts.get(arg).and_then(Value::as_str) {
-                result.push('\n');
-                result.push_str(script);
-            }
-        }
-    }
-    result
-}
-
 /// Include relative base configs in the normal run fingerprint, even when a
 /// base is named `base.json` rather than `tsconfig.*.json`.
 pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
@@ -108,16 +89,9 @@ pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
             .skip(1)
             .take_while(|p| p.starts_with(&root))
         {
-            // Named root build configs can be selected with `tsc -p`. Include
-            // their local bases too, even when those bases have arbitrary names.
-            if let Ok(entries) = fs::read_dir(parent) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("tsconfig") && name.ends_with(".json") {
-                        add(&root, entry.path(), &mut paths);
-                    }
-                }
+            let config = parent.join("tsconfig.json");
+            if config.exists() {
+                add(&root, config, &mut paths);
             }
         }
     }
@@ -131,149 +105,42 @@ pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
         .collect()
 }
 
-pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -> bool {
-    elides_type_imports_in(root, file, command, |name| std::env::var_os(name))
-}
-
-/// `elides_type_imports` with the environment passed in, so a test can name
-/// a loader override without changing the process's own.
-fn elides_type_imports_in(
-    root: &Path,
-    file: &str,
-    command: &[String],
-    environment: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> bool {
+/// Whether `file`'s imports that only types use are erased: by its nearest
+/// tsconfig alone. tsc, esbuild (tsx, Vite, Vitest), swc, Babel's TypeScript
+/// preset and ts-node all erase them unless that config keeps them, so the
+/// command that runs the file does not decide: on 2026-11-06 a unit run and
+/// an end-to-end run of one commit counted `import { type Funnel }`
+/// differently, and their runs could not be merged. Node's own type
+/// stripping keeps an inline-type import; a project that runs on it sets
+/// `verbatimModuleSyntax`, and one that does not counts one import less.
+/// A config that cannot be read, or that reaches outside the project, keeps
+/// them.
+pub(crate) fn elides_type_imports(root: &Path, file: &str) -> bool {
     let root_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     let root = root_path.as_path();
-    let text = expanded_command(root, command);
-    let tokens = text
-        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
-        .collect::<Vec<_>>();
-    // A compiler name in an arbitrary argument is not evidence of execution.
-    // Recognize direct invocations and Node's explicit TS loader options.
-    let recognized = text.split(['\n', ';', '&', '|']).any(|part| {
-        let words = part.split_whitespace().collect::<Vec<_>>();
-        let executable = words
-            .first()
-            .and_then(|s| Path::new(s).file_name())
-            .and_then(|s| s.to_str());
-        matches!(executable, Some("tsc" | "tsx" | "ts-node"))
-            || (executable == Some("node")
-                && words.iter().enumerate().any(|(i, word)| {
-                    matches!(
-                        *word,
-                        "--import=tsx"
-                            | "--loader=ts-node/esm"
-                            | "--experimental-loader=ts-node/esm"
-                    ) || (matches!(*word, "--import" | "--loader" | "--experimental-loader")
-                        && words
-                            .get(i + 1)
-                            .is_some_and(|s| matches!(*s, "tsx" | "ts-node/esm")))
-                }))
-    });
-    if !recognized {
-        return false;
-    }
-    let mut explicit_configs = Vec::new();
-    // A recognized command has its executable's word at least.
-    let words = text.split_whitespace().collect::<Vec<_>>();
-    let readable = words.iter().enumerate().all(|(index, word)| {
-        let value = if matches!(*word, "-p" | "--project" | "--tsconfig") {
-            let Some(value) = words.get(index + 1) else {
-                return false;
-            };
-            Some(*value)
-        } else {
-            word.strip_prefix("--project=")
-                .or_else(|| word.strip_prefix("--tsconfig="))
-                .or_else(|| word.strip_prefix("-p="))
-        };
-        if let Some(value) = value {
-            let path = root.join(value);
-            let Ok(path) = fs::canonicalize(path) else {
-                return false;
-            };
-            // Root-local named tsconfigs are included in the input fingerprint.
-            // Other explicit config layouts remain conservative for now.
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if path.parent() != Some(root)
-                || !name.starts_with("tsconfig")
-                || !name.ends_with(".json")
-            {
-                return false;
-            }
-            explicit_configs.push(path);
-            true
-        } else {
-            // `-pconfig.json`, a form not read. (No word starting `-p`
-            // starts `--`, so `--project` never reaches here.)
-            !word.starts_with("-p")
-        }
-    });
-    if !readable {
-        return false;
-    }
-    // CLI/environment overrides may select a different config or import policy.
-    if [
-        "--verbatimModuleSyntax",
-        "--preserveValueImports",
-        "--importsNotUsedAsValues",
-        "--emitDecoratorMetadata",
-        "--compilerOptions",
-        "--compiler-options",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-        || [
-            "TS_NODE_COMPILER_OPTIONS",
-            "TS_NODE_PROJECT",
-            "TSX_TSCONFIG_PATH",
-        ]
-        .iter()
-        .any(|s| environment(s).is_some())
-    {
-        return false;
-    }
-    // A recognized transpiler is not sufficient if the same command also
-    // invokes a custom bundler/loader with independently controlled emit.
-    if tokens.iter().any(|s| {
-        matches!(
-            *s,
-            "swc" | "babel" | "webpack" | "vite" | "vitest" | "esbuild"
-        )
-    }) {
-        return false;
-    }
-    let permits_elision = |path: &Path| {
-        let Some(opts) = options(root, path, &mut BTreeSet::new()) else {
-            return false;
-        };
-        [
-            "verbatimModuleSyntax",
-            "preserveValueImports",
-            "emitDecoratorMetadata",
-        ]
-        .iter()
-        .all(|key| opts.get(*key).is_none_or(|v| v == &Value::Bool(false)))
-            && opts
-                .get("importsNotUsedAsValues")
-                .is_none_or(|v| v == "remove")
-    };
-    if !explicit_configs.iter().all(|path| permits_elision(path)) {
-        return false;
-    }
     let target = root.join(file);
-    for dir in target
+    let Some(config) = target
         .ancestors()
         .skip(1)
         .take_while(|dir| dir.starts_with(root))
-    {
-        let config = dir.join("tsconfig.json");
-        if config.exists() {
-            return permits_elision(&config);
-        }
-    }
-    false
+        .map(|dir| dir.join("tsconfig.json"))
+        .find(|config| config.exists())
+    else {
+        return false;
+    };
+    let Some(opts) = options(root, &config, &mut BTreeSet::new()) else {
+        return false;
+    };
+    [
+        "verbatimModuleSyntax",
+        "preserveValueImports",
+        "emitDecoratorMetadata",
+    ]
+    .iter()
+    .all(|key| opts.get(*key).is_none_or(|v| v == &Value::Bool(false)))
+        && opts
+            .get("importsNotUsedAsValues")
+            .is_none_or(|v| v == "remove")
 }
 
 #[cfg(test)]
@@ -283,7 +150,6 @@ mod tests {
     fn config_chain_preservation_overrides_and_unknowns_fail_closed() {
         let root = std::env::temp_dir().join(format!("supercov-imports-{}", std::process::id()));
         fs::create_dir_all(root.join("src")).unwrap();
-        let command = vec!["node".into(), "--import".into(), "tsx".into()];
         fs::write(
             root.join("base.json"),
             r#"{"compilerOptions":{"verbatimModuleSyntax":true}}"#,
@@ -304,6 +170,14 @@ mod tests {
                 r#"{"compilerOptions":{"emitDecoratorMetadata":true}}"#,
                 false,
             ),
+            (
+                r#"{"compilerOptions":{"importsNotUsedAsValues":"preserve"}}"#,
+                false,
+            ),
+            (
+                r#"{"compilerOptions":{"importsNotUsedAsValues":"remove"}}"#,
+                true,
+            ),
             (r#"{"extends":"./tsconfig.json"}"#, false),
             // An array of parents, one of them no name; options that are no
             // object.
@@ -313,7 +187,7 @@ mod tests {
         ] {
             fs::write(root.join("tsconfig.json"), config).unwrap();
             assert_eq!(
-                elides_type_imports(&root, "src/main.ts", &command),
+                elides_type_imports(&root, "src/main.ts"),
                 expected,
                 "{config}"
             );
@@ -321,43 +195,13 @@ mod tests {
         fs::write(root.join("tsconfig.json"), "{}").unwrap();
         // A configuration that cannot be read keeps imports.
         assert!(!crate::fault::during("fs.read_to_string", || {
-            elides_type_imports(&root, "src/main.ts", &command)
+            elides_type_imports(&root, "src/main.ts")
         }));
-        assert!(!elides_type_imports(
-            &root,
-            "src/main.ts",
-            &["node".into(), "--experimental-strip-types".into()]
-        ));
-        assert!(!elides_type_imports(
-            &root,
-            "src/main.ts",
-            &["tsx".into(), "--tsconfig".into(), "other.json".into()]
-        ));
-        fs::write(
-            root.join("tsconfig.build.json"),
-            r#"{"extends":"./tsconfig.json"}"#,
-        )
-        .unwrap();
-        let build = vec!["tsc".into(), "-p".into(), "tsconfig.build.json".into()];
-        assert!(elides_type_imports(&root, "src/main.ts", &build));
-        fs::write(
-            root.join("tsconfig.build.json"),
-            r#"{"extends":"./base.json"}"#,
-        )
-        .unwrap();
-        assert!(!elides_type_imports(&root, "src/main.ts", &build));
+        // The fingerprint follows a base named in either form.
+        fs::write(root.join("tsconfig.json"), r#"{"extends":"./base.json"}"#).unwrap();
         assert!(config_paths(&root, &["src/main.ts".into()]).contains(&root.join("base.json")));
-        fs::write(
-            root.join("tsconfig.build.json"),
-            r#"{"extends":["./base.json"]}"#,
-        )
-        .unwrap();
+        fs::write(root.join("tsconfig.json"), r#"{"extends":["./base.json"]}"#).unwrap();
         assert!(config_paths(&root, &["src/main.ts".into()]).contains(&root.join("base.json")));
-        assert!(!elides_type_imports(
-            &root,
-            "src/main.ts",
-            &["node".into(), "script.js".into(), "tsx".into()]
-        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -377,8 +221,7 @@ mod tests {
         let root = base.join("project");
         fs::create_dir_all(root.join("src")).unwrap();
         let write = |name: &str, text: &str| fs::write(root.join(name), text).unwrap();
-        let tsx = vec!["tsx".to_owned(), "src/main.ts".to_owned()];
-        let elides = || elides_type_imports(&root, "src/main.ts", &tsx);
+        let elides = || elides_type_imports(&root, "src/main.ts");
         let configs = || config_paths(&root, &["src/main.ts".to_owned()]);
         // No tsconfig up to the project's root.
         assert!(!elides());
@@ -417,10 +260,13 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
+    /// The nearest tsconfig decides, and only it: a chain without an
+    /// extension, as a list, or leaving the project; a nested config for
+    /// the files below it; a file outside the project, which has none.
     #[test]
-    fn each_loader_form_config_name_and_override_is_read() {
+    fn the_nearest_tsconfig_decides() {
         let root = std::env::temp_dir().join(format!(
-            "supercov-imports-forms-{}-{}",
+            "supercov-imports-nearest-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -428,93 +274,47 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(root.join("src/nested")).unwrap();
-        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
-        let elides = |file: &str, command: &str| elides_type_imports(&root, file, &words(command));
+        let elides = |file: &str| elides_type_imports(&root, file);
         let write = |name: &str, text: &str| fs::write(root.join(name), text).unwrap();
-        write("tsconfig.json", "{}");
         write("base.json", r#"{"compilerOptions":{"strict":true}}"#);
-        write(
-            "preserve.json",
-            r#"{"compilerOptions":{"importsNotUsedAsValues":"preserve"}}"#,
-        );
-        // Each way Node is told to load a TypeScript loader.
-        assert!(elides("src/main.ts", "node --import=tsx src/main.ts"));
-        assert!(elides(
-            "src/main.ts",
-            "node --loader ts-node/esm src/main.ts"
-        ));
-        assert!(elides(
-            "src/main.ts",
-            "node --experimental-loader=ts-node/esm src/main.ts"
-        ));
-        assert!(!elides("src/main.ts", "node --loader other src/main.ts"));
-        // An extends chain without an extension, as a list, or leaving the project.
         write("tsconfig.json", r#"{"extends":"./base"}"#);
-        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        assert!(elides("src/main.ts"));
         write("tsconfig.json", r#"{"extends":["./base.json","./base"]}"#);
-        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        assert!(elides("src/main.ts"));
         write("tsconfig.json", r#"{"extends":"../outside.json"}"#);
-        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        assert!(!elides("src/main.ts"));
         write("tsconfig.json", r#"{"extends":7}"#);
-        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        assert!(!elides("src/main.ts"));
         write("tsconfig.json", "{}");
-        // Explicit configs: named in every form, and refused where not a root tsconfig.
+        // A config another command might name is not read.
         write(
             "tsconfig.build.json",
-            r#"{"compilerOptions":{"importsNotUsedAsValues":"remove"}}"#,
+            r#"{"compilerOptions":{"verbatimModuleSyntax":true}}"#,
         );
-        assert!(elides("src/main.ts", "tsc --project=tsconfig.build.json"));
-        assert!(elides(
-            "src/main.ts",
-            "tsx --tsconfig=tsconfig.build.json src/main.ts"
-        ));
-        assert!(!elides("src/main.ts", "tsc -p"));
-        assert!(!elides("src/main.ts", "tsc -ptsconfig.build.json"));
-        assert!(!elides("src/main.ts", "tsc -p preserve.json"));
-        write(
-            "tsconfig.preserve.json",
-            r#"{"compilerOptions":{"importsNotUsedAsValues":"preserve"}}"#,
+        assert!(elides("src/main.ts"));
+        assert!(
+            !config_paths(&root, &["src/main.ts".to_owned()])
+                .contains(&root.join("tsconfig.build.json"))
         );
-        assert!(!elides("src/main.ts", "tsc -p tsconfig.preserve.json"));
-        write("tsconfig.txt", "{}");
-        assert!(!elides("src/main.ts", "tsc -p tsconfig.txt"));
-        assert!(!elides("src/main.ts", "tsc -p missing.json"));
-        // An override on the command line, or a bundler beside the compiler.
-        assert!(!elides("src/main.ts", "tsc --verbatimModuleSyntax"));
-        assert!(!elides("src/main.ts", "tsc && vite build"));
-        // Or an override in the environment a loader reads.
-        let overridden = |name: &str| (name == "TS_NODE_PROJECT").then(|| "other.json".into());
-        assert!(!elides_type_imports_in(
-            &root,
-            "src/main.ts",
-            &words("tsx src/main.ts"),
-            overridden
-        ));
-        // The nearest tsconfig decides for a file below it.
         write(
             "src/nested/tsconfig.json",
             r#"{"compilerOptions":{"verbatimModuleSyntax":true}}"#,
         );
-        assert!(!elides("src/nested/deep.ts", "tsx src/nested/deep.ts"));
-        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        assert!(!elides("src/nested/deep.ts"));
+        assert!(elides("src/main.ts"));
         fs::remove_file(root.join("src/nested/tsconfig.json")).unwrap();
         // An empty extends list adds nothing; a missing base is no path.
         write("tsconfig.json", r#"{"extends":[]}"#);
-        assert!(elides("src/main.ts", "tsx src/main.ts"));
+        assert!(elides("src/main.ts"));
         write("tsconfig.json", r#"{"extends":"./missing"}"#);
-        assert!(!elides("src/main.ts", "tsx src/main.ts"));
+        assert!(!elides("src/main.ts"));
         assert!(
             !config_paths(&root, &["src/main.ts".to_owned()])
                 .iter()
                 .any(|path| path.ends_with("missing.json"))
         );
         write("tsconfig.json", "{}");
-        // A package script the command names, and a package manager alone.
-        write("package.json", r#"{"scripts":{"start":"tsx src/main.ts"}}"#);
-        assert!(elides("src/main.ts", "npm start"));
-        assert!(!elides("src/main.ts", "npm"));
-        // A file outside the project has no tsconfig of it.
-        assert!(!elides("/elsewhere/main.ts", "tsx /elsewhere/main.ts"));
+        assert!(!elides("/elsewhere/main.ts"));
         assert!(config_paths(&root, &["/elsewhere/main.ts".to_owned()]).is_empty());
         fs::remove_dir_all(root).unwrap();
     }

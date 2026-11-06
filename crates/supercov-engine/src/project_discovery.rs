@@ -278,11 +278,30 @@ struct PlaywrightAdapter {
     exports: Vec<String>,
 }
 
+/// Other runners' own test APIs, never a Playwright fixture: a suite's unit
+/// tests import `test` and `expect` from them beside its specs. On
+/// 2026-11-06 essential-upsell's 390 Vitest files outscored its fixture
+/// module 6,210 to 2,470, and every Playwright test crashed loading
+/// Vitest's `expect` beside Playwright's.
+const OTHER_RUNNER_APIS: &[&str] = &[
+    "vitest",
+    "@jest/globals",
+    "jest",
+    "bun:test",
+    "node:test",
+    "test",
+    "mocha",
+    "ava",
+    "tap",
+    "uvu",
+];
+
 fn discover_playwright_adapter(root: &Path) -> PlaywrightAdapter {
     let mut candidates = Vec::new();
     for directory in TEST_DIRECTORIES {
         test_api_candidates(&root.join(directory), &mut candidates);
     }
+    candidates.retain(|candidate| !OTHER_RUNNER_APIS.contains(&candidate.module.as_str()));
     let mut scores = HashMap::<String, usize>::new();
     for candidate in &candidates {
         *scores.entry(candidate.module.clone()).or_default() += candidate.score;

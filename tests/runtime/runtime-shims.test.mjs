@@ -453,7 +453,7 @@ test("an execution-trace writer that meets a clone of itself rotates its log", {
   }
 });
 
-test("a child a crash signal ends is noted, and one a teardown stops is not", {
+test("a child a crash signal ends or that fails is noted, and one a teardown stops is not", {
   skip: process.platform === "win32",
 }, () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-execution-crash-"));
@@ -477,6 +477,10 @@ test("a child a crash signal ends is noted, and one a teardown stops is not", {
          const stopped = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"]);
          stopped.kill("SIGKILL");
          await ended(stopped);
+         spawnSync(process.execPath, ["-e", "process.exit(3)"]);
+         try { execFileSync(process.execPath, ["-e", "process.exit(4)"]); } catch {}
+         await ended(spawn(process.execPath, ["-e", "process.exit(5)"]));
+         await ended(spawn(process.execPath, ["-e", "0"]));
          process.stdout.write(String(process.pid));`,
       ],
       {
@@ -491,13 +495,18 @@ test("a child a crash signal ends is noted, and one a teardown stops is not", {
       .filter((name) => name.startsWith(`execution.host.${parentPid}-`))
       .flatMap((log) => readFileSync(resolve(root, log), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
       .filter((event) => event.event === "child-exit");
-    assert.deepEqual(exits.map((event) => event.signal), ["SIGSEGV", "SIGABRT", "SIGBUS"]);
+    assert.deepEqual(
+      exits.map((event) => event.signal ?? event.code),
+      ["SIGSEGV", "SIGABRT", "SIGBUS", 3, 4, 5],
+    );
     for (const exit of exits) {
       assert.equal(typeof exit.child, "number");
       assert.ok(exit.ranMs >= 0);
+      assert.equal("signal" in exit && "code" in exit, false);
     }
-    assert.equal(exits[0].command, process.execPath);
-    assert.equal(exits[1].command, process.execPath);
+    // The command with its arguments.
+    assert.equal(exits[0].command, `${process.execPath} -e process.kill(process.pid, 'SIGSEGV')`);
+    assert.equal(exits[3].command, `${process.execPath} -e process.exit(3)`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
