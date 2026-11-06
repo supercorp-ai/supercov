@@ -10,7 +10,7 @@ Cargo reports the function as passing, not ignored. A normal `npm run check`
 therefore does not prove the external frozen comparisons ran.
 
 Rechecked with actual fixture paths during review: all 661 Supergateway and
-1,813 Essential SEO sites compare successfully. These are join comparisons on
+1,813 field-project sites compare successfully. These are join comparisons on
 frozen facts, not proof of the source analyzer or all possible mutations.
 
 Future improvement: a distinctly named required parity gate, with data supplied
