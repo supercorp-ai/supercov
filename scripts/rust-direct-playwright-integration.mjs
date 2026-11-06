@@ -16,11 +16,12 @@ const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-rust-playwright-'));
 const project = resolve(temporary, 'project');
 
-function rust(command, request) {
+function rust(command, request, environment = {}) {
   const result = spawnSync(binary, [command], {
     cwd: repository,
     encoding: 'utf8',
     input: JSON.stringify(request),
+    env: { ...process.env, ...environment },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const lines = result.stdout.trim().split('\n');
@@ -229,16 +230,18 @@ try {
       '',
     ].join('\n'),
   );
+  // Diagnostic, temporary: the facade case once more with the hooks off the
+  // loading thread, as before 4.25.
   const outcomes = [
     [mixed, 'rust-direct-playwright-mixed', 2],
     [project, 'rust-direct-playwright-mixed-facade', 2],
-  ].map(([root, runId, tests]) => {
-    const run = rust('__run-js-direct', {
-      root,
-      command: ['npm', 'test'],
-      runId,
-      startedAt: '2026-08-25T00:00:05.000Z',
-    });
+    [project, 'rust-direct-playwright-mixed-facade-off-thread', 2, { SUPERCOV_DIAGNOSE_OFF_THREAD_HOOKS: '1' }],
+  ].map(([root, runId, tests, environment]) => {
+    const run = rust(
+      '__run-js-direct',
+      { root, command: ['npm', 'test'], runId, startedAt: '2026-08-25T00:00:05.000Z' },
+      environment,
+    );
     const passed =
       run.exitCode === 0 &&
       rust('__query-stored-run', { root, query: { runId: run.runId, filter: 'passed', command: 'summary' } })
@@ -246,7 +249,7 @@ try {
     console.log(`[rust-direct-playwright] ${runId}: ${passed ? 'passed' : `failed\n${run.diagnosticOutput}`}`);
     return passed;
   });
-  assert.deepEqual(outcomes, [true, true]);
+  assert.deepEqual(outcomes, [true, true, true]);
   console.log(
     '[rust-direct-playwright] Rust-owned npm test run preserves multi-worker Playwright attribution',
   );

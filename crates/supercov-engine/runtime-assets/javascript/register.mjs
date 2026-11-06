@@ -1000,7 +1000,7 @@ const loaderData = {
 // Node process started a thread of its own and compiled a module loader
 // there, and each import and require waited on a message to it: on Bulletproof
 // React's Vitest suite on one worker, a third of the time a measured run added.
-if (typeof Module.registerHooks === "function") {
+if (typeof Module.registerHooks === "function" && process.env.SUPERCOV_DIAGNOSE_OFF_THREAD_HOOKS !== "1") {
     const hooks = await import("./resolve-loader.mjs");
     hooks.initialize(loaderData);
     Module.registerHooks({ resolve: hooks.resolveSync, load: hooks.loadSync });
