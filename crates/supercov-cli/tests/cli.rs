@@ -16607,11 +16607,11 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:1220",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:445",
-        "fs.create_dir_all#javascript_run.rs:1461",
-        "fs.create_dir_all#javascript_run.rs:1463",
+        "fs.create_dir_all#javascript_run.rs:1464",
+        "fs.create_dir_all#javascript_run.rs:1466",
         "fs.create_dir_all#lifecycle.rs:1018",
-        "fs.create_dir_all#javascript_run.rs:1555",
-        "fs.create_dir_all#javascript_run.rs:1557",
+        "fs.create_dir_all#javascript_run.rs:1558",
+        "fs.create_dir_all#javascript_run.rs:1560",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19913,4 +19913,47 @@ fn an_ant_build_is_read_before_it_runs() {
         "{}",
         elsewhere.stderr()
     );
+}
+
+/// A process the suite starts that a crash signal ends says nothing of it:
+/// on 2026-11-06 a backend that died so right after it listened read as one
+/// that never became ready. The run names it, and a child its test stops
+/// with SIGTERM is not named.
+#[cfg(unix)]
+#[test]
+fn a_child_a_crash_signal_ends_is_named() {
+    let project = Project::cart("crashed-child");
+    project.write(
+        "test/server.test.js",
+        r#"import { test } from "node:test";
+import { spawn, spawnSync } from "node:child_process";
+
+test("the helper server crashes, the test does not", () => {
+  spawnSync(process.execPath, ["-e", "process.kill(process.pid, 'SIGSEGV')"]);
+});
+
+test("a server the test stops is not a crash", async () => {
+  const server = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+  server.kill("SIGTERM");
+  await new Promise((done) => server.once("exit", done));
+});
+"#,
+    );
+    project.commit("a crashing helper");
+    let measured = project.supercov(&["--", "node", "--test"]);
+    let output = measured.exits(0);
+    let named: Vec<&str> = output
+        .lines()
+        .filter(|line| line.contains("crashed with"))
+        .collect();
+    assert_eq!(named.len(), 1, "{output}");
+    contains_all(
+        named[0],
+        &[
+            "[supercov] warning:",
+            "crashed with SIGSEGV",
+            "s after it started",
+        ],
+    );
+    assert!(!output.contains("SIGTERM"), "{output}");
 }

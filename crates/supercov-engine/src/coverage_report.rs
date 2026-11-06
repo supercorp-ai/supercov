@@ -855,6 +855,17 @@ enum ExecutionTraceEvent {
         method: String,
         command: ExecutionSafeArgument,
     },
+    /// A child a crash signal ended; the JavaScript run names it.
+    ChildExit {
+        at: String,
+        pid: u32,
+        ppid: u32,
+        #[serde(default)]
+        child: Option<u32>,
+        signal: String,
+        command: ExecutionSafeArgument,
+        ran_ms: u64,
+    },
     RemoteLaunch {
         at: String,
         pid: u32,
@@ -883,6 +894,7 @@ impl ExecutionTraceEvent {
         match self {
             Self::Process { .. } => "process",
             Self::ChildLaunch { .. } => "child-launch",
+            Self::ChildExit { .. } => "child-exit",
             Self::RemoteLaunch { .. } => "remote-launch",
             Self::WorkspaceCapability { .. } => "workspace-capability",
             Self::GuestProcess { .. } => "guest-process",

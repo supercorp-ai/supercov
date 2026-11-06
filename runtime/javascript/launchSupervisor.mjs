@@ -729,6 +729,39 @@ function injectChildEnvironment(method, args) {
     });
     return next;
 }
+// A signal a crash raises, never the SIGTERM or SIGKILL a suite's teardown
+// sends. A child it ends says nothing: on 2026-11-06 a backend that died so
+// right after it listened read as one that never became ready, and a
+// Playwright worker as one that "exited unexpectedly".
+const CRASH_SIGNALS = new Set(["SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGABRT", "SIGTRAP", "SIGSYS"]);
+function noteCrash(signal, child, command, started) {
+    if (!CRASH_SIGNALS.has(signal))
+        return;
+    record({
+        event: "child-exit",
+        ...(typeof child === "number" ? { child } : {}),
+        signal,
+        command: safeArgument(String(command ?? "")),
+        ranMs: Date.now() - started,
+    });
+}
+function watchChild(method, args, run) {
+    const started = Date.now();
+    let launched;
+    try {
+        launched = run();
+    }
+    catch (error) {
+        // execSync and execFileSync throw for a child a signal ended.
+        noteCrash(error?.signal, error?.pid, args[0], started);
+        throw error;
+    }
+    if (method === "spawnSync")
+        noteCrash(launched?.signal, launched?.pid, args[0], started);
+    else if (typeof launched?.once === "function")
+        launched.once("exit", (_code, signal) => noteCrash(signal, launched.pid, args[0], started));
+    return launched;
+}
 function patchChildProcesses() {
     const methods = [
         "spawn",
@@ -745,7 +778,7 @@ function patchChildProcesses() {
             configurable: true,
             enumerable: true,
             writable: true,
-            value: keepPromisifiedShape(original, (...args) => Reflect.apply(original, childProcess, injectChildEnvironment(method, args))),
+            value: keepPromisifiedShape(original, (...args) => watchChild(method, args, () => Reflect.apply(original, childProcess, injectChildEnvironment(method, args)))),
         });
     }
     syncBuiltinESMExports();
