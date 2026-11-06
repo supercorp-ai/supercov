@@ -74,5 +74,7 @@ jobs:
           path: |
             ${{ runner.temp }}/speed/samples.jsonl
             ${{ runner.temp }}/speed/summary.md
+            ${{ runner.temp }}/speed/profile.md
+            ${{ runner.temp }}/speed/profile-top-*.txt
             ${{ runner.temp }}/speed/logs/
           retention-days: 7

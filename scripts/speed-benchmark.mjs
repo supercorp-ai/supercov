@@ -14,6 +14,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -214,6 +215,67 @@ if (process.env.SPEED_DIAGNOSE === '1') {
   rmSync(join(project, '.supercov'), { recursive: true, force: true });
   for (const suite of suites)
     run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
+  // Then every Node process of one plain and one measured run of each suite,
+  // CPU-profiled: where the time Supercov adds is spent, by whose code.
+  const profiled = {};
+  for (const [variant, binary] of [['plain'], [name, path]]) {
+    rmSync(join(project, '.supercov'), { recursive: true, force: true });
+    for (const suite of suites) {
+      const directory = join(output, 'profiles', `${variant}-${suite.name}`);
+      mkdirSync(directory, { recursive: true });
+      const options = `${process.env.NODE_OPTIONS ?? ''} --cpu-prof --cpu-prof-dir=${directory}`.trim();
+      const [command, ...args] = binary ? [binary, '--', ...suite.command] : suite.command;
+      run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options }, true);
+      const { totals, functions } = profileSelfTime(directory);
+      profiled[`${variant} ${suite.name}`] = totals;
+      const heaviest = Object.entries(functions)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 25)
+        .map(([what, seconds]) => `${seconds.toFixed(3)}s  ${what}`);
+      writeFileSync(join(output, `profile-top-${variant}-${suite.name}.txt`), `${heaviest.join('\n')}\n`);
+    }
+  }
+  const kinds = [...new Set(Object.values(profiled).flatMap((totals) => Object.keys(totals)))].sort();
+  const table = [
+    `| CPU self-time, s | ${Object.keys(profiled).join(' | ')} |`,
+    `|---|${Object.keys(profiled).map(() => '---').join('|')}|`,
+    ...kinds.map((kind) => `| ${kind} | ${Object.values(profiled).map((totals) => (totals[kind] ?? 0).toFixed(2)).join(' | ')} |`),
+  ].join('\n');
+  writeFileSync(join(output, 'profile.md'), `${table}\n`);
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${table}\n`);
+  console.log(table);
+}
+
+// A directory of `.cpuprofile` files as seconds of self-time by whose code
+// ran: Supercov's runtime, the app, a package, Node itself, or the engine's
+// own work (garbage collection, the idle and program nodes).
+function profileSelfTime(directory) {
+  const totals = {};
+  const functions = {};
+  const kindOf = (url, functionName) => {
+    if (!url) return functionName.startsWith('(') ? functionName : '(native)';
+    if (url.includes('/.supercov/node_modules/') || url.includes('/supercov/runtime/')) return 'supercov runtime';
+    if (url.startsWith('node:')) return /source_map|sourcemap|prepareStackTrace/i.test(url + functionName) ? 'node source maps' : 'node';
+    const module = /node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(url);
+    if (module) return `pkg ${module[1]}`;
+    return 'app';
+  };
+  for (const file of readdirSync(directory).filter((name) => name.endsWith('.cpuprofile'))) {
+    const profile = JSON.parse(readFileSync(join(directory, file), 'utf8'));
+    const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
+    const self = new Map();
+    profile.samples.forEach((id, index) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[index] ?? 0)));
+    for (const [id, micros] of self) {
+      const { url, functionName, lineNumber } = nodes.get(id).callFrame;
+      const kind = kindOf(url, functionName);
+      totals[kind] = (totals[kind] ?? 0) + micros / 1e6;
+      if (!functionName.startsWith('(')) {
+        const what = `${kind}: ${functionName || '(anonymous)'} ${url.split('/').slice(-2).join('/')}:${lineNumber + 1}`;
+        functions[what] = (functions[what] ?? 0) + micros / 1e6;
+      }
+    }
+  }
+  return { totals, functions };
 }
 
 const median = (values) => {
