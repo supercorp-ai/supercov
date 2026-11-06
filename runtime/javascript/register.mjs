@@ -1155,6 +1155,8 @@ if (generatedPlaywrightConfig &&
 // it was started from Playwright's own files: a worker Playwright starts some
 // other way than its worker entry still has the wrapper, only later.
 const isPlaywrightProcess = /\/node_modules\/(?:@playwright\/test|playwright)\//.test(entrypoint);
+if (process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE)
+    fs.appendFileSync(process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE, JSON.stringify({ how: "preload", pid: process.pid, entry: process.argv[1], inside: process.env.SUPERCOV_INSIDE_PLAYWRIGHT, worker: process.env.SUPERCOV_PLAYWRIGHT_WORKER, cjs: process.env.SUPERCOV_CJS_INTERCEPT, isPlaywrightEntrypoint, isPlaywrightProcess, syncHooks: typeof Module.registerHooks === "function" }) + "\n");
 const mayBePlaywrightWorker = process.env.SUPERCOV_PLAYWRIGHT_WORKER !== "0" || isPlaywrightProcess;
 if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
@@ -1193,6 +1195,8 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
             (normalizedRoot
                 ? parentFile.startsWith(`${normalizedRoot}/`)
                 : parentFile.includes("/tests/"));
+        if (request === target && process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE)
+            fs.appendFileSync(process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE, JSON.stringify({ how: "cjs", pid: process.pid, entry: process.argv[1], parent: parentFile, belongsToProject }) + "\n");
         if (request === target && belongsToProject)
             return commonjsWrapper;
         return originalLoad.call(this, request, parent, isMain);

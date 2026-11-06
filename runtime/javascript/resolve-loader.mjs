@@ -183,7 +183,12 @@ export async function resolve(specifier, context, nextResolve) {
 // the hooks off the thread never did, and the CommonJS loader routes itself:
 // a TypeScript file it was given back as CommonJS was compiled as JavaScript,
 // past the handler ts-node/register installed for it.
+function traceTarget(how, specifier, context, outcome) {
+    if (process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE && specifier === TARGET)
+        appendFileSync(process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE, JSON.stringify({ how, pid: process.pid, entry: process.argv[1], inside: process.env.SUPERCOV_INSIDE_PLAYWRIGHT, parent: context.parentURL, conditions: context.conditions, outcome }) + "\n");
+}
 export function resolveSync(specifier, context, nextResolve) {
+    traceTarget("sync", specifier, context, context.conditions?.includes("require") ? "require-skip" : redirected(specifier, context)?.url ?? "no-redirect");
     if (context.conditions?.includes("require"))
         return nextResolve(specifier, context);
     const redirect = redirected(specifier, context);
