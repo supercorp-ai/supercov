@@ -1429,6 +1429,9 @@ pub fn run_direct_javascript(
     for warning in nothing_came_back(&in_containers, !servers.is_empty(), &entries) {
         let _ = writeln!(diagnostics, "{warning}");
     }
+    for warning in crashed(&entries) {
+        let _ = writeln!(diagnostics, "{warning}");
+    }
     if let Some(support) = &support {
         entries.push(EvidenceArchiveEntry {
             path: crate::support_reach::ARCHIVE_PATH.into(),
@@ -1629,6 +1632,36 @@ fn nothing_came_back(
         ));
     }
     warnings
+}
+
+/// What the launch observer noted of a child a crash signal ended.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashedChild {
+    signal: String,
+    command: serde_json::Value,
+    ran_ms: u64,
+}
+
+/// Processes a crash signal ended. Such a process says nothing itself: on
+/// 2026-11-06 a backend that died right after it listened read as one that
+/// never became ready, and a Playwright worker as one that "exited
+/// unexpectedly".
+fn crashed(entries: &[EvidenceArchiveEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.path.starts_with("execution."))
+        .flat_map(|entry| entry.contents.split(|byte| *byte == b'\n'))
+        .filter_map(|line| serde_json::from_slice::<CrashedChild>(line).ok())
+        .map(|child| {
+            format!(
+                "[supercov] warning: {} crashed with {} {:.1} s after it started: a crash in Node or native code. A server that dies so reads as one that never answered.",
+                child.command.as_str().unwrap_or("a process the run started"),
+                child.signal,
+                child.ran_ms as f64 / 1000.0
+            )
+        })
+        .collect()
 }
 
 /// Whether the command builds: a word of it, or of a `package.json` script
