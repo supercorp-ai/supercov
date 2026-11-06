@@ -144,6 +144,8 @@ export default defineConfig({
 
 export default {
   ...base,
+  // Outside the project: a failed test's trace outlives Supercov's copy.
+  outputDir: process.env.SPEED_TEST_RESULTS ?? base.outputDir,
   workers: 1,
   retries: 0,
   reporter: [['list'], ['json']],
@@ -221,7 +223,10 @@ function sample(round, variant, suite, seconds, extra = {}) {
 function suiteRun(round, variant, suite, binary) {
   reset(`${round}-${variant}-${suite.name}`);
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
-  const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report };
+  const env = {
+    PLAYWRIGHT_JSON_OUTPUT_NAME: report,
+    SPEED_TEST_RESULTS: join(output, 'results', `${round}-${variant}-${suite.name}`),
+  };
   const [command, ...args] = binary
     ? [binary, '--', ...suite.command]
     : suite.command;

@@ -115,4 +115,5 @@ jobs:
             ${{ runner.temp }}/speed/profile.md
             ${{ runner.temp }}/speed/profile-top-*.txt
             ${{ runner.temp }}/speed/logs/
+            ${{ runner.temp }}/speed/results/**/trace.zip
           retention-days: 7
