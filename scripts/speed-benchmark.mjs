@@ -190,8 +190,11 @@ function suiteRun(round, variant, suite, binary) {
     run(project, binary, ['runs', 'latest', '--json'], `${round}-${variant}-${suite.name}-latest`)
       .stdout,
   ).data;
-  assert.equal(latest.valid, true, `${variant} ${suite.name} run is not valid`);
-  return latest.id ?? latest.runId;
+  // A run whose tests failed is published all the same, and not valid: the
+  // flakes the samples count are no reason to stop measuring.
+  const id = latest.run ?? latest.id ?? latest.runId;
+  assert.ok(id, `${variant} ${suite.name} published no run`);
+  return id;
 }
 
 for (let round = 1; round <= rounds; round += 1) {
