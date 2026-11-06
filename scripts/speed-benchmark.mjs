@@ -144,8 +144,6 @@ export default defineConfig({
 
 export default {
   ...base,
-  // Outside the project: a failed test's trace outlives Supercov's copy.
-  outputDir: process.env.SPEED_TEST_RESULTS ?? base.outputDir,
   workers: 1,
   retries: 0,
   reporter: [['list'], ['json']],
@@ -220,13 +218,33 @@ function sample(round, variant, suite, seconds, extra = {}) {
   );
 }
 
+// Each failed test's Playwright trace, from the project or Supercov's copy of
+// it, kept under results/ for the workflow to upload.
+function keepTraces(label) {
+  const found = [];
+  const walk = (directory, depth) => {
+    if (depth > 12) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory() && entry.name !== 'node_modules') walk(path, depth + 1);
+      else if (entry.isFile() && entry.name === 'trace.zip') found.push(path);
+    }
+  };
+  for (const root of [join(project, 'test-results'), join(project, '.supercov/workspaces')])
+    if (existsSync(root)) walk(root, 0);
+  found.forEach((trace, index) => {
+    const destination = join(output, 'results', label, `${index}-${trace.split('/').at(-2)}`);
+    mkdirSync(destination, { recursive: true });
+    copyFileSync(trace, join(destination, 'trace.zip'));
+  });
+  rmSync(join(project, 'test-results'), { recursive: true, force: true });
+}
+
 function suiteRun(round, variant, suite, binary) {
   reset(`${round}-${variant}-${suite.name}`);
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
-  const env = {
-    PLAYWRIGHT_JSON_OUTPUT_NAME: report,
-    SPEED_TEST_RESULTS: join(output, 'results', `${round}-${variant}-${suite.name}`),
-  };
+  // Supercov's copy is kept, for the traces of the tests that failed in it.
+  const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1' };
   const [command, ...args] = binary
     ? [binary, '--', ...suite.command]
     : suite.command;
@@ -240,6 +258,7 @@ function suiteRun(round, variant, suite, binary) {
   );
   const extra = existsSync(report) ? flowTimes(report) : {};
   sample(round, variant, suite.name, seconds, extra);
+  keepTraces(`${round}-${variant}-${suite.name}`);
   if (!binary) return;
   const latest = JSON.parse(
     run(project, binary, ['runs', 'latest', '--json'], `${round}-${variant}-${suite.name}-latest`)
