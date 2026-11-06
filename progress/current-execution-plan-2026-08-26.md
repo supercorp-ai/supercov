@@ -1698,7 +1698,7 @@ matrices remain open.
 
 ### Public JavaScript field-hardening checkpoint — 2026-08-27
 
-Real agent work in Essential SEO found public-frontend defects that would also
+Real agent work in a field project found public-frontend defects that would also
 invalidate later language frontends if left in the shared engine. They are now
 release-blocking regression invariants, traced in
 `progress/javascript-field-hardening-2026-08-27.md`.
@@ -1729,7 +1729,7 @@ The checkpoint is closed by local evidence, without hosted workflow use:
   matrix and macOS crash/isolation gates pass;
 - Test262 selected 41,593 files and preserved all 65,051 baseline-passing
   scenarios with zero transform and zero semantic-equivalence failures;
-- the real combined Essential SEO command passed 436 unit and 80 E2E tests in
+- the real combined field-project command passed 436 unit and 80 E2E tests in
   one run, reported complete measurement, and attributed 99.96% lines, 99.62%
   branches and 98.86% MC/DC;
 - the release transformer measured a 25.66ms median for 500 files (2.566s

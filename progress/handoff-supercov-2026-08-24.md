@@ -30,7 +30,7 @@ small bounded pieces. It must not require application imports, runner config
 changes, provider names, a resident service, or mutation of the user's ordinary
 build. Specific adapters are acceptable for runner-level test attribution;
 remote/container discovery must remain capability-based rather than contain
-hardcoded knowledge of Supermachine or Essential Apps.
+hardcoded knowledge of Supermachine or other client apps.
 
 ## What v0.0.9 completed
 
