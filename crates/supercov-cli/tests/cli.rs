@@ -1256,9 +1256,14 @@ fn runs_of_two_commands_count_a_type_only_import_alike_and_merge() {
         "package.json",
         r#"{ "name": "rates", "private": true, "type": "module" }"#,
     );
+    // Read as JSON with comments: a quote in a comment, an escape in a string.
     project.write(
         "tsconfig.json",
-        r#"{ "compilerOptions": { "strict": true } }"#,
+        r#"{
+  // keeps "strict" on
+  "compilerOptions": { "strict": true, "rootDir": ".\\" }
+}
+"#,
     );
     project.write(
         "src/rate.ts",
@@ -1298,7 +1303,9 @@ test("discount", () => assert.equal(price({ cents: 5 }, true), 4));
         project.supercov(&["runs", run, "--json"]).json()["data"]["coverage"]["lines"]["total"]
             .clone()
     };
-    assert_eq!(lines(&unit), lines(&e2e));
+    // The import is no line to run under either command.
+    assert_eq!(lines(&unit), 3);
+    assert_eq!(lines(&e2e), 3);
     let merged = project.supercov(&["merge", &unit, &e2e]).exits(0);
     assert!(merged.contains("merged run"), "{merged}");
 }
