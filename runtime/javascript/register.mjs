@@ -1167,14 +1167,16 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     const originalPlaywrightConfig = process.env.SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG
         ?.replaceAll("\\", "/");
     const wrapper = await import(__rewriteRelativeImportExtension(new URL("./playwright.mjs", import.meta.url)));
-    // What @playwright/test's own index gives a CommonJS caller, made the way
-    // it makes it: `test` itself, every export assigned onto it. A spec
-    // transpiled from `import test from "@playwright/test"` calls the module
-    // itself as its default, and the wrapper's namespace was no function:
-    // rallly's i18n spec failed with `(0 , _test.default) is not a function`.
-    // Not a function that calls `test`: Playwright names a test by the place
-    // it was declared, read from the stack, and the extra frame moved it.
-    const commonjsWrapper = Object.assign(wrapper.test, wrapper);
+    // A spec transpiled from `import test from "@playwright/test"` reads the
+    // module's `default` when it says it is an ES module, and the module
+    // itself otherwise: the wrapper's namespace says nothing and is no
+    // function, and rallly's i18n spec failed with `(0 , _test.default) is not
+    // a function`. Its exports, marked as an ES module's, with `test` itself
+    // as the default. Not a function that calls `test` (Playwright names a
+    // test by where it was declared, read from the stack, and an extra frame
+    // moved it), nor the exports assigned onto the wrapper's `test` (its
+    // fixtures then differed between the runner and a worker).
+    const commonjsWrapper = { ...wrapper, __esModule: true, default: wrapper.test };
     const originalLoad = Module._load;
     Module._load = function supercovLoad(request, parent, isMain) {
         const parentFile = parent?.filename?.replaceAll("\\", "/");
