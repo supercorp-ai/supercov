@@ -612,7 +612,13 @@ fn relay_messages(
         let (method, path) = endpoint(&request);
         let creating = method == "POST" && path == "/containers/create";
         let exec = (method == "POST")
-            .then(|| exec_container(path))
+            .then(|| on_container(path, "exec"))
+            .flatten()
+            .map(str::to_owned);
+        // A client that waits on a container -- `docker run` in the
+        // foreground, `docker compose run` -- hears how it ended.
+        let waited = (method == "POST")
+            .then(|| on_container(path, "wait"))
             .flatten()
             .map(str::to_owned);
         let mut created_context = None;
@@ -687,15 +693,17 @@ fn relay_messages(
             {
                 shared.record(id, context);
             }
-            // Sent as it came: chunked re-framed as one chunk.
-            if response.chunked() {
-                write!(client_writer, "{:x}\r\n", body.len())?;
-                client_writer.write_all(&body)?;
-                client_writer.write_all(b"\r\n0\r\n\r\n")?;
-            } else {
-                client_writer.write_all(&body)?;
+            send_body(&response, &body, client_writer)?;
+            continue;
+        }
+        if let Some(container) = waited {
+            let body = read_body(&response, upstream_reader)?;
+            if let Ok(ended) = serde_json::from_slice::<Value>(&body)
+                && let Some(status) = ended.get("StatusCode").and_then(Value::as_i64)
+            {
+                shared.record_exit(&container, status);
             }
-            client_writer.flush()?;
+            send_body(&response, &body, client_writer)?;
             continue;
         }
         if !response.chunked() && response.content_length().is_none() {
@@ -705,6 +713,18 @@ fn relay_messages(
         }
         relay_body(&response, upstream_reader, client_writer)?;
     }
+}
+
+/// A body read whole, sent as it came: chunked re-framed as one chunk.
+fn send_body(response: &Head, body: &[u8], out: &mut impl Write) -> io::Result<()> {
+    if response.chunked() {
+        write!(out, "{:x}\r\n", body.len())?;
+        out.write_all(body)?;
+        out.write_all(b"\r\n0\r\n\r\n")?;
+    } else {
+        out.write_all(body)?;
+    }
+    out.flush()
 }
 
 /// Raw bytes both ways until either side closes: what was already read into
@@ -1056,6 +1076,21 @@ impl Shared {
         Some(built)
     }
 
+    /// How a container a client waited on ended.
+    fn record_exit(&self, id: &str, status: i64) {
+        let _created = self.created.lock().unwrap_or_else(PoisonError::into_inner);
+        self.append(&json!({"id": id, "exited": status}));
+    }
+
+    fn append(&self, line: &Value) {
+        if let Ok(mut file) = fs::open_with(
+            fs::OpenOptions::new().create(true).append(true),
+            &self.settings.state,
+        ) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
     fn record(&self, id: &str, context: CreateContext) {
         // Keep the journal append under the same lock as the insertion.
         // JSON Display writes several fragments, which concurrent container
@@ -1075,12 +1110,7 @@ impl Shared {
             "note": context.note,
             "mark": context.mark,
         });
-        if let Ok(mut file) = fs::open_with(
-            fs::OpenOptions::new().create(true).append(true),
-            &self.settings.state,
-        ) {
-            let _ = writeln!(file, "{line}");
-        }
+        self.append(&line);
     }
 }
 
@@ -1247,10 +1277,12 @@ fn another_owns_something(path: &Path, owner: u32) -> bool {
             }))
 }
 
-/// The container a `POST /containers/{id}/exec` creates an exec in.
-fn exec_container(path: &str) -> Option<&str> {
+/// The container a `POST /containers/{id}/<action>` acts on: an exec is
+/// created in it, or it is waited on.
+fn on_container<'p>(path: &'p str, action: &str) -> Option<&'p str> {
     path.strip_prefix("/containers/")?
-        .strip_suffix("/exec")
+        .strip_suffix(action)?
+        .strip_suffix('/')
         .filter(|container| !container.is_empty() && !container.contains('/'))
 }
 
@@ -1448,7 +1480,8 @@ pub struct Journal {
     /// Each container given the run's settings that nothing was `docker
     /// exec`ed in -- a server, whose coverage the run reads -- and whose
     /// runtime never marked that it could write, by its compose service or
-    /// image.
+    /// image. One that ran to its own end, as an install or a migration
+    /// does, and exited 0 had nothing to send.
     pub silent: Vec<String>,
 }
 
@@ -1456,12 +1489,21 @@ pub fn journal(state: &Path) -> Journal {
     let Ok(text) = fs::read_to_string(state) else {
         return Journal::default();
     };
-    let lines = text
+    let (lines, exits) = text
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .partition::<Vec<_>, _>(|line| line.get("exited").is_none());
+    let lines = lines
+        .into_iter()
         .filter(|line| line.get("measured").and_then(Value::as_bool).is_some())
         .collect::<Vec<_>>();
     let text = |line: &Value, name: &str| line.get(name).and_then(Value::as_str).map(str::to_owned);
+    // Each container a client waited on that exited 0: it ran to its end.
+    let finished = exits
+        .iter()
+        .filter(|line| line["exited"] == 0)
+        .filter_map(|line| text(line, "id"))
+        .collect::<BTreeSet<_>>();
     let sorted = |mut items: Vec<String>| {
         items.sort();
         items.dedup();
@@ -1489,6 +1531,7 @@ pub fn journal(state: &Path) -> Journal {
                 .filter(measured)
                 .filter(|line| text(line, "exec").is_none())
                 .filter(|line| text(line, "id").is_none_or(|id| !exec_targets.contains(&id)))
+                .filter(|line| text(line, "id").is_none_or(|id| !finished.contains(&id)))
                 .filter(|line| text(line, "mark").is_none_or(|mark| !Path::new(&mark).exists()))
                 .filter_map(|line| text(line, "service").or_else(|| text(line, "image")))
                 .collect(),
@@ -1630,6 +1673,21 @@ mod tests {
                                     })
                                     .to_string(),
                                 );
+                            }
+                        } else if method == "POST" && path.ends_with("/wait") {
+                            // Ended, gone, or answered with no status.
+                            match path.as_str() {
+                                "/containers/gone/wait" => respond(
+                                    &mut writer,
+                                    "404 Not Found",
+                                    r#"{"message":"no such container"}"#,
+                                ),
+                                "/containers/odd/wait" => respond(&mut writer, "200 OK", "odd"),
+                                _ => respond(
+                                    &mut writer,
+                                    "200 OK",
+                                    r#"{"StatusCode":0,"Error":null}"#,
+                                ),
                             }
                         } else if method == "POST" && path.ends_with("/exec") {
                             sender
@@ -2133,7 +2191,8 @@ mod tests {
 
     /// A container the run's settings were given to serves, unless a
     /// command was `docker exec`ed in it: that one ran the tests. One whose
-    /// runtime marked that it could write sent something back.
+    /// runtime marked that it could write sent something back, and one that
+    /// ran to its end and exited 0 -- an install -- had nothing to.
     #[test]
     fn a_container_tests_were_run_in_is_not_a_server() {
         let directory = temporary("journal");
@@ -2146,6 +2205,10 @@ mod tests {
             [
                 json!({"id": "a1", "image": "app-api", "service": "api", "measured": true, "mark": directory.join("marks/0")}),
                 json!({"id": "d4", "image": "app-web", "service": "web", "measured": true, "mark": marked}),
+                json!({"id": "e5", "image": "app-web", "measured": true, "mark": directory.join("marks/2")}),
+                json!({"id": "e5", "exited": 0}),
+                json!({"id": "f6", "image": "app-worker", "measured": true, "mark": directory.join("marks/3")}),
+                json!({"id": "f6", "exited": 137}),
                 json!({"id": "b2", "image": "playwright", "measured": true}),
                 json!({"id": "c3", "image": "postgres:16", "measured": false, "note": "left alone"}),
                 json!({"exec": "tests", "id": "b2", "image": "playwright", "measured": true}),
@@ -2157,7 +2220,87 @@ mod tests {
         let journal = journal(&state);
         assert_eq!(journal.notes, ["left alone"]);
         assert_eq!(journal.execs, ["`docker exec` in tests"]);
-        assert_eq!(journal.silent, ["api"]);
+        assert_eq!(journal.silent, ["api", "app-worker"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Nothing is opened when no measured container ran, and an image whose
+    /// container the daemon refuses is passed over for the next.
+    #[test]
+    fn what_another_owns_is_opened_only_by_a_container_the_daemon_makes() {
+        let directory = temporary("opened");
+        let daemon = directory.join("d.sock");
+        let created = fake_daemon(&daemon);
+        let settings = settings(&directory);
+        fs::create_dir_all(&settings.copy).unwrap();
+        fs::create_dir_all(settings.state.parent().unwrap()).unwrap();
+        let theirs = std::fs::metadata(&directory).unwrap().uid() + 1;
+        fs::write(&settings.state, "").unwrap();
+        open_what_containers_wrote(&daemon, &settings, theirs);
+        fs::write(
+            &settings.state,
+            [
+                json!({"id": "a1", "image": "refused-api", "measured": true}),
+                json!({"id": "b2", "image": "worker", "measured": true}),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        open_what_containers_wrote(&daemon, &settings, theirs);
+        let sent = std::iter::from_fn(|| created.recv_timeout(Duration::from_secs(2)).ok())
+            .map(|sent| sent["Image"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(sent, ["refused-api", "worker"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A container a client waited on and that exited 0 ran to its end -- an
+    /// install, a migration -- and had nothing to send back; a wait the
+    /// daemon answered with no status records nothing.
+    #[test]
+    fn a_container_that_ran_to_its_end_is_not_said_to_have_sent_nothing() {
+        let directory = temporary("waited");
+        let daemon = directory.join("d.sock");
+        let _created = fake_daemon(&daemon);
+        let proxy =
+            DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)).unwrap();
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut post = |path: &str, body: &str| {
+            exchange(
+                &mut stream,
+                &mut reader,
+                &format!(
+                    "POST {path} HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        let mounted = format!(
+            r#"{{"Image": "install", "HostConfig": {{"Binds": ["{}:/workspace"]}}}}"#,
+            directory.join("copy").display()
+        );
+        let (head, _) = post("/v1.47/containers/create", &mounted);
+        assert!(head.start.contains(" 201"), "{head:?}");
+        let (head, body) = post("/v1.47/containers/c0ffee/wait?condition=next-exit", "");
+        assert!(head.start.contains(" 200"), "{head:?}");
+        assert_eq!(body, br#"{"StatusCode":0,"Error":null}"#);
+        for container in ["gone", "odd"] {
+            post(&format!("/containers/{container}/wait"), "");
+        }
+        drop(stream);
+        proxy.finish();
+        let state = directory.join("state/containers.jsonl");
+        let journal = journal(&state);
+        assert!(journal.silent.is_empty(), "{journal:?}");
+        let exits = fs::read_to_string(&state)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("exited"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(exits, [r#"{"id":"c0ffee","exited":0}"#]);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2165,14 +2308,21 @@ mod tests {
     /// and a create's binds, of any shape a client sends.
     #[test]
     fn an_exec_names_its_container_and_a_create_its_host_binds() {
-        assert_eq!(exec_container("/containers/tests/exec"), Some("tests"));
+        assert_eq!(
+            on_container("/containers/tests/exec", "exec"),
+            Some("tests")
+        );
+        assert_eq!(
+            on_container("/containers/c0ffee/wait", "wait"),
+            Some("c0ffee")
+        );
         for path in [
             "/containers//exec",
             "/containers/a/b/exec",
             "/containers/create",
             "/images/x/exec",
         ] {
-            assert_eq!(exec_container(path), None, "{path}");
+            assert_eq!(on_container(path, "exec"), None, "{path}");
         }
         let binds = create_binds(&json!({"HostConfig": {
             "Binds": ["/host/app:/app:ro", "/host/data:/data", "cache:/cache", "/anonymous"],
@@ -3133,6 +3283,7 @@ mod tests {
             .as_bytes(),
             exec,
             b"POST /containers/create HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
+            b"POST /containers/one/wait HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
             b"GET /logs HTTP/1.1\r\n\r\n",
         ]
         .concat();
@@ -3143,6 +3294,7 @@ mod tests {
             b"HTTP/1.1 201 Created\r\nContent-Length: 12\r\n\r\n{\"Id\":\"two\"}",
             b"HTTP/1.1 201 Created\r\nContent-Length: 11\r\n\r\n{\"Id\":\"e1\"}",
             b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\nno",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"StatusCode\":0}",
             b"HTTP/1.1 200 OK\r\n\r\nall of it",
         ]
         .concat();
@@ -3157,6 +3309,7 @@ mod tests {
                     answered.contains("c\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n"),
                     "{answered}"
                 );
+                assert!(answered.contains("{\"StatusCode\":0}"), "{answered}");
                 break;
             }
             assert!(relayed.is_err(), "{nth}");

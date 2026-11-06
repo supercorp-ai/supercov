@@ -13,6 +13,27 @@ import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
 installLaunchSupervisor();
+// Playwright 1.59 writes each file it compiles into its cache in place and
+// reads it back unchecked: a process that read one while another wrote it
+// ran an empty module, and a config of no `default` failed at "Cannot add
+// property metadata, object is not extensible". The cache a run gives it
+// starts empty, so every run compiled; there each file is written whole, or
+// is not there yet and is compiled again. A file written beside the cache's
+// folders, not in one, is never taken for an old entry and removed.
+const transformCache = process.env.PWTEST_CACHE_DIR;
+if (transformCache) {
+    const cacheFolder = resolve(transformCache) + sep;
+    const writeFileSync = fs.writeFileSync;
+    let written = 0;
+    fs.writeFileSync = function (file, ...rest) {
+        if (typeof file !== "string" || !resolve(file).startsWith(cacheFolder))
+            return writeFileSync.call(this, file, ...rest);
+        const partial = resolve(transformCache, `.writing-${process.pid}-${written++}`);
+        writeFileSync.call(this, partial, ...rest);
+        fs.renameSync(partial, file);
+    };
+    syncBuiltinESMExports();
+}
 // Instrumented sources import the browser-safe capability seam; bind the
 // real supervisor implementation before any user module evaluates.
 __supercovBindCapabilityWrapper(wrapImportedCapability);
