@@ -136,41 +136,50 @@ try {
       phase => phase.operation === 'expect.toBe' && phase.lines > 0,
     ),
   );
-  // Playwright's default export, which the wrapper passes on as well, to an
-  // ES module and to a spec Playwright compiles to CommonJS (`.cts`), which
-  // calls the module itself as its default: each failed with
-  // `(0 , _test.default) is not a function`.
-  writeFileSync(
-    resolve(project, 'tests/default-import.spec.js'),
+  // Playwright's default export, which the wrapper passes on as well: a spec
+  // importing it failed with `(0 , _test.default) is not a function`. Once
+  // as an ES module, and once as a spec Playwright compiles to CommonJS
+  // (`.cts`), which reads the module's default when it says it is an ES
+  // module, on its own: CommonJS and ES module specs in one worker are not
+  // what this checks.
+  const defaultRun = (file, lines, runId, tests) => {
+    writeFileSync(resolve(project, 'tests', file), [...lines, ''].join('\n'));
+    const run = rust('__run-js-direct', {
+      root: project,
+      command: ['npm', 'test'],
+      runId,
+      startedAt: '2026-08-25T00:00:04.000Z',
+    });
+    assert.equal(run.exitCode, 0, run.diagnosticOutput);
+    const summary = rust('__query-stored-run', {
+      root: project,
+      query: { runId: run.runId, filter: 'passed', command: 'summary' },
+    });
+    assert.equal(summary.data.tests, tests);
+  };
+  defaultRun(
+    'default-import.spec.js',
     [
       "import test, { expect } from '@playwright/test';",
       "import { permission } from '../src/permission.js';",
       "test('default import', () => expect(permission(true, false)).toBe('allowed'));",
-      '',
-    ].join('\n'),
+    ],
+    'rust-direct-playwright-default',
+    5,
   );
-  writeFileSync(
-    resolve(project, 'tests/default-require.spec.cts'),
+  for (const file of ['permission.spec.js', 'default-import.spec.js'])
+    rmSync(resolve(project, 'tests', file));
+  defaultRun(
+    'default-require.spec.cts',
     [
       "import test, { expect } from '@playwright/test';",
       "test.describe('commonjs', () => {",
       "  test('default require', () => expect(typeof test.extend).toBe('function'));",
       '});',
-      '',
-    ].join('\n'),
+    ],
+    'rust-direct-playwright-default-require',
+    1,
   );
-  const defaultImport = rust('__run-js-direct', {
-    root: project,
-    command: ['npm', 'test'],
-    runId: 'rust-direct-playwright-default',
-    startedAt: '2026-08-25T00:00:04.000Z',
-  });
-  assert.equal(defaultImport.exitCode, 0, defaultImport.diagnosticOutput);
-  const withDefault = rust('__query-stored-run', {
-    root: project,
-    query: { runId: defaultImport.runId, filter: 'passed', command: 'summary' },
-  });
-  assert.equal(withDefault.data.tests, 6);
   console.log(
     '[rust-direct-playwright] Rust-owned npm test run preserves multi-worker Playwright attribution',
   );
