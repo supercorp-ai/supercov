@@ -1698,7 +1698,7 @@ struct LaunchedChild {
 }
 
 /// The builds the command started itself, which its words need not name:
-/// essential-upsell's test harness runs `npm run build` from its own code,
+/// a test harness can run `npm run build` from its own code,
 /// and a run whose build failed was told to put `npm run build` in the
 /// command. Whether one started, and each that exited non-zero.
 fn started_builds(entries: &[EvidenceArchiveEntry], workspace: &Path) -> (bool, Vec<String>) {

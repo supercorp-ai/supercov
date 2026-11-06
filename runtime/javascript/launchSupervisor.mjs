@@ -314,7 +314,7 @@ function wrapResult(value, mapping) {
 // non-writable own data property (and `undefined` for a non-configurable
 // accessor without a getter). Constructors commonly expose `prototype` this
 // way. Returning another capability proxy is a TypeError before user code can
-// run, as seen with PrismaSessionStorage during an Essential Apps VM bake.
+// run, as seen with PrismaSessionStorage during a VM bake.
 function fixedProxyValue(target, property) {
     const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
     if (!descriptor || descriptor.configurable)
